@@ -1,6 +1,5 @@
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
 import { execSync, execFileSync } from 'node:child_process'
 import { OLLAMA_URL } from '../config.js'
 import { resolveFromPath } from '../platform.js'
@@ -11,6 +10,7 @@ import {
   shouldClearTruncatedPreamble,
 } from '../pane-state.js'
 import { agentDir, readAgentModel, readAgentSecurityProfile, readAgentClaudeConfigDir, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName } from './agent-config.js'
+import { ensureAgentConfigDir } from './agent-config-dir.js'
 import { parseTelegramToken } from './telegram.js'
 import { getProvider, getProviderType, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import { CHANNEL_PROVIDER } from '../config.js'
@@ -21,6 +21,29 @@ import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller
 
 const TMUX = resolveFromPath('tmux')
 const CLAUDE = resolveFromPath('claude')
+
+// How many times startAgentProcess will (re)spawn the tmux session when the
+// inner claude dies inside the liveness window. Two total attempts: the
+// isolated config dir removes the lock-contention root cause, the single
+// retry absorbs the residual node-spawn flake.
+const LAUNCH_MAX_ATTEMPTS = 2
+// Settle window after `tmux new-session` before probing liveness. The silent
+// exit-1 was observed within ~1s; 2s clears it with margin while staying
+// inside the dashboard Start button's acceptable latency.
+const LAUNCH_LIVENESS_DELAY_S = 2
+
+// Pure launch-retry decision so the spawn loop is unit-testable without tmux.
+// `running` is the post-settle liveness probe; `attempt` is 0-based; `maxAttempt`
+// is the highest attempt index allowed (LAUNCH_MAX_ATTEMPTS - 1).
+export function decideLaunchRetry(
+  running: boolean,
+  attempt: number,
+  maxAttempt: number,
+): 'ok' | 'retry' | 'give-up' {
+  if (running) return 'ok'
+  if (attempt < maxAttempt) return 'retry'
+  return 'give-up'
+}
 
 function resolveAgentProvider(name: string): ChannelProviderType {
   const perAgent = readAgentChannelProvider(name)
@@ -162,21 +185,36 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
       }
     }
     const skipFlag = profile.permissionMode === 'strict' ? '' : '--dangerously-skip-permissions '
-    // Optional per-agent CLAUDE_CONFIG_DIR (alternate Claude Code config dir,
-    // e.g. for routing this agent to a separate Anthropic login). When the
-    // agent-config field is missing or blank, claudeConfigDir is null and we
-    // emit no export, preserving the default Claude Code behavior.
-    const claudeConfigDir = readAgentClaudeConfigDir(name)
-    const claudeConfigEnv = claudeConfigDir ? `export CLAUDE_CONFIG_DIR="${claudeConfigDir}" && ` : ''
+    // Per-agent CLAUDE_CONFIG_DIR. Every sub-agent gets an ISOLATED config dir
+    // so it reads/writes its OWN .claude.json instead of contending on the
+    // single shared ~/.claude.json file lock -- the WSL launch bug where the
+    // freshly spawned claude lost the lock race and exited 1 silently within
+    // ~1s. See agent-config-dir.ts.
+    //
+    // Resolution: if the operator pinned a CUSTOM config dir in agent-config
+    // (i.e. one that is NOT the canonical .claude-config path -- used to route
+    // an agent to a separate Anthropic login), respect it verbatim and do not
+    // build over the operator's tree. Otherwise (field unset, or set to the
+    // canonical path as for dave) auto-build the isolated dir.
+    const explicitConfigDir = readAgentClaudeConfigDir(name)
+    const canonicalConfigDir = join(agentDir(name), '.claude-config')
+    let claudeConfigDir: string
+    if (explicitConfigDir && explicitConfigDir !== canonicalConfigDir) {
+      claudeConfigDir = explicitConfigDir
+    } else {
+      claudeConfigDir = ensureAgentConfigDir(name)
+    }
+    const claudeConfigEnv = `export CLAUDE_CONFIG_DIR="${claudeConfigDir}" && `
     // `--continue` requires an existing session; on a brand-new agent the
     // Claude Code projects directory does not yet exist and `claude` exits
     // immediately with an obscure "No deferred tool marker found" error
     // that is silent inside tmux. Detect first launch by probing for the
     // encoded project dir and skip `--continue` only then. The encoding
     // mirrors Claude Code's own scheme: replace every `/` with `-`.
-    const projectsRoot = claudeConfigDir
-      ? join(claudeConfigDir, 'projects')
-      : join(homedir(), '.claude', 'projects')
+    // projects/ inside the isolated config dir is a symlink back to
+    // ~/.claude/projects, so the encoded-cwd lookup still resolves to the
+    // shared transcript store and --continue keeps working across restarts.
+    const projectsRoot = join(claudeConfigDir, 'projects')
     const encodedProject = dir.replace(/\//g, '-')
     const hasPriorSession = existsSync(join(projectsRoot, encodedProject))
     // opts.fresh forces a brand-new conversation (auto-restart 'fresh' mode):
@@ -195,10 +233,30 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     // Single-quote `${model}` so values like `claude-opus-4-8[1m]` (1M-context
     // suffix) are not glob-expanded by the shell that tmux spawns the command in.
     const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${channelSetup}${apiKeyEnv}${claudeConfigEnv}${ollamaEnv}${deepseekEnv}cd "${dir}" && ${CLAUDE} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
-    execSync(
-      `${TMUX} new-session -d -s ${session} "${cmd}"`,
-      { timeout: 10000 }
-    )
+
+    // `tmux new-session -d "cmd"` returns as soon as the SESSION exists, not
+    // when the inner claude is up: if claude exits within ~1s (the silent
+    // exit-1 on ~/.claude.json lock contention, now mitigated by the isolated
+    // config dir above) the session is already gone by the time we return ok.
+    // Probe liveness after a settle window and retry once so a one-off flake
+    // -- which the node-spawned launch path showed but a direct shell did not
+    // -- does not leave the dashboard reporting a started agent that died.
+    let launched = false
+    for (let attempt = 0; attempt < LAUNCH_MAX_ATTEMPTS; attempt++) {
+      execSync(`${TMUX} new-session -d -s ${session} "${cmd}"`, { timeout: 10000 })
+      try { execSync(`sleep ${LAUNCH_LIVENESS_DELAY_S}`, { timeout: 5000 }) } catch { /* best effort */ }
+      const decision = decideLaunchRetry(isAgentRunning(name), attempt, LAUNCH_MAX_ATTEMPTS - 1)
+      if (decision === 'ok') { launched = true; break }
+      if (decision === 'give-up') {
+        logger.error({ name, session, attempts: attempt + 1 }, 'Agent session exited immediately after launch (gave up after retries)')
+        return { ok: false, error: 'Agent process exited immediately after launch' }
+      }
+      // decision === 'retry': tear down the dead husk (in case a non-default
+      // tmux remain-on-exit left a lingering shell) before the next attempt.
+      logger.warn({ name, session, attempt }, 'Agent session died within liveness window, retrying launch')
+      try { execSync(`${TMUX} kill-session -t ${session} 2>/dev/null`, { timeout: 3000 }) } catch { /* ok */ }
+    }
+    if (!launched) return { ok: false, error: 'Agent process exited immediately after launch' }
 
     logger.info({ name, session, channelDir: agentChannelDir }, 'Agent tmux session started')
 
