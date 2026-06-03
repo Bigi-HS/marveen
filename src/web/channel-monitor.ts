@@ -12,6 +12,7 @@ import {
   capturePane,
   dismissResumeSummaryModalIfPresent,
   isAgentRunning,
+  isAgentChannelIntentionallyEnabled,
   sendPromptToSession,
   startAgentProcess,
   stopAgentProcess,
@@ -674,7 +675,13 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     type Target = { session: string; isMarveen: boolean; agentName?: string; provider: ChannelProviderType }
     const targets: Target[] = [{ session: MAIN_CHANNELS_SESSION, isMarveen: true, provider: mainProvider }]
     for (const a of listAgentNames()) {
-      if (isAgentRunning(a) && agentHasChannel(a)) {
+      // isAgentChannelIntentionallyEnabled guards against restart-looping a
+      // channel-less agent (e.g. an inter-agent-only sub-agent) that merely has
+      // a stale token file in its state dir but no live channel plugin. The
+      // config-dir settings.json written by ensureAgentConfigDir is channel-
+      // neutral (plugin keys stripped), so a channel-less agent returns false
+      // here and is never added to the plugin-health watch list.
+      if (isAgentRunning(a) && agentHasChannel(a) && isAgentChannelIntentionallyEnabled(a)) {
         targets.push({
           session: agentSessionName(a),
           isMarveen: false,

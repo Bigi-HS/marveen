@@ -89,6 +89,35 @@ export function agentHasChannel(name: string): boolean {
   return false
 }
 
+/**
+ * Returns true only when the agent's channel plugin is INTENTIONALLY enabled
+ * in its settings.json -- not merely because a token file happens to exist.
+ *
+ * The config-dir settings.json written by ensureAgentConfigDir is channel-
+ * neutral: channel plugin keys are stripped at build time. An agent running
+ * without a Telegram/Slack channel (channel-less, inter-agent only) will have
+ * no matching key in enabledPlugins, so this returns false and the channel
+ * monitor will NOT treat a missing plugin process as a failure requiring restart.
+ *
+ * Falls back to agentHasChannel() for agents that predate the config-dir build
+ * (no .claude-config/settings.json yet) to stay backward compatible.
+ */
+export function isAgentChannelIntentionallyEnabled(name: string): boolean {
+  const provider = resolveAgentProvider(name)
+  const dir = agentDir(name)
+  const configDirSettings = join(dir, '.claude-config', 'settings.json')
+  if (existsSync(configDirSettings)) {
+    try {
+      const parsed = JSON.parse(readFileSync(configDirSettings, 'utf-8'))
+      const ep = parsed?.enabledPlugins as Record<string, unknown> | undefined
+      if (ep == null) return false
+      return Object.entries(ep).some(([k, v]) => k.startsWith(provider) && v === true)
+    } catch { /* fall through */ }
+  }
+  // No config-dir settings.json: pre-config-dir agent; fall back to token presence.
+  return agentHasChannel(name)
+}
+
 export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}): { ok: boolean; pid?: number; error?: string } {
   if (isAgentRunning(name)) return { ok: false, error: 'Agent is already running' }
 
