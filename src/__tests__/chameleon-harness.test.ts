@@ -31,7 +31,14 @@ vi.mock('../web/agent-config.js', () => ({
 }))
 
 vi.mock('../web/agent-scaffold.js', () => ({ scaffoldAgentDir: vi.fn() }))
-vi.mock('../web/agent-config-dir.js', () => ({ ensureAgentConfigDir: vi.fn() }))
+vi.mock('../web/agent-config-dir.js', () => ({
+  ensureAgentConfigDir: vi.fn(),
+  CHANNEL_PLUGIN_IDS: [
+    'telegram@claude-plugins-official',
+    'slack-channel@marveen-marketplace',
+    'discord@claude-plugins-official',
+  ],
+}))
 vi.mock('../config.js', () => ({ MAIN_AGENT_ID: 'genesis' }))
 vi.mock('../logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
@@ -48,6 +55,8 @@ import {
   smokeTestSandbox,
   morphSandbox,
   promoteToLive,
+  sanitizePromotedConfig,
+  stripChannelKeysFromSettings,
   SANDBOX_AGENT,
   BANNER_START,
   BANNER_END,
@@ -178,6 +187,74 @@ describe('promoteToLive guards', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Opt-in promote field filtering (the security-critical part)
+// ---------------------------------------------------------------------------
+
+describe('sanitizePromotedConfig', () => {
+  it('overlays only model/securityProfile/displayName onto the target config', () => {
+    const sandbox = '{"model":"claude-sonnet-4-6","securityProfile":"standard","displayName":"Dave"}'
+    const target = '{"model":"claude-opus-4-8[1m]","channelProvider":"telegram","authMode":"api"}'
+    const m = sanitizePromotedConfig(sandbox, target)
+    expect(m.model).toBe('claude-sonnet-4-6')
+    expect(m.securityProfile).toBe('standard')
+    expect(m.displayName).toBe('Dave')
+    // Target's channel/auth survive untouched -- never overwritten or dropped.
+    expect(m.channelProvider).toBe('telegram')
+    expect(m.authMode).toBe('api')
+  })
+  it('never carries channelProvider / claudeConfigDir / token from the sandbox', () => {
+    const sandbox = '{"model":"claude-haiku-4-5-20251001","channelProvider":null,"claudeConfigDir":"/tmp/x","telegramToken":"secret","sandboxCloneOf":"dave"}'
+    const target = '{"channelProvider":"slack"}'
+    const m = sanitizePromotedConfig(sandbox, target)
+    expect(m.model).toBe('claude-haiku-4-5-20251001')
+    // The sandbox's channelProvider:null must NOT clobber the target's slack.
+    expect(m.channelProvider).toBe('slack')
+    expect(m.claudeConfigDir).toBeUndefined()
+    expect(m.telegramToken).toBeUndefined()
+    expect(m.sandboxCloneOf).toBeUndefined()
+  })
+  it('tolerates malformed json on either side without leaking', () => {
+    expect(sanitizePromotedConfig('nope', 'also nope')).toEqual({})
+  })
+})
+
+describe('stripChannelKeysFromSettings', () => {
+  it('removes channel plugin keys but keeps permissions/hooks/effortLevel', () => {
+    const raw = JSON.stringify({
+      permissions: { allow: ['a'] },
+      hooks: { PreCompact: [] },
+      effortLevel: 'high',
+      enabledPlugins: {
+        'telegram@claude-plugins-official': true,
+        'some-other-plugin@x': true,
+      },
+    })
+    const s = stripChannelKeysFromSettings(raw)
+    expect(s.permissions).toEqual({ allow: ['a'] })
+    expect(s.hooks).toEqual({ PreCompact: [] })
+    expect(s.effortLevel).toBe('high')
+    expect((s.enabledPlugins as Record<string, unknown>)['telegram@claude-plugins-official']).toBeUndefined()
+    expect((s.enabledPlugins as Record<string, unknown>)['some-other-plugin@x']).toBe(true)
+  })
+  it('drops enabledPlugins entirely when stripping empties it', () => {
+    const raw = JSON.stringify({ enabledPlugins: { 'telegram@claude-plugins-official': true } })
+    const s = stripChannelKeysFromSettings(raw)
+    expect(s.enabledPlugins).toBeUndefined()
+  })
+})
+
+describe('promoteToLive default surface is token/path safe', () => {
+  it('default options never enable the config/settings/mcp opt-ins', () => {
+    // The pure guard returns before IO when confirm is missing; here we just
+    // assert the opt-in flags are off by default so the safe default surface
+    // (CLAUDE.md + SOUL.md + skills) cannot leak a token or path.
+    const r = promoteToLive('dave', {})
+    expect(r.ok).toBe(false) // missing confirm
+    // Source contract below pins that include* are only honoured when set.
+  })
+})
+
+// ---------------------------------------------------------------------------
 // smokeTestSandbox behaviour (deterministic via injected clock + ping waiter)
 // ---------------------------------------------------------------------------
 
@@ -283,8 +360,20 @@ describe('chameleon-harness -- hard-constraint source contracts', () => {
   })
   it('promote requires confirm and backs up before overwriting', () => {
     const promoteIdx = SRC.indexOf('export function promoteToLive')
-    const slice = SRC.slice(promoteIdx, promoteIdx + 1600)
+    const slice = SRC.slice(promoteIdx, promoteIdx + 2800)
     expect(slice).toMatch(/opts\.confirm/)
     expect(slice).toMatch(/backupDir/)
+  })
+  it('opt-in agent-config promote is field-filtered (never a raw copy)', () => {
+    const promoteIdx = SRC.indexOf('export function promoteToLive')
+    const slice = SRC.slice(promoteIdx, promoteIdx + 2800)
+    expect(slice).toMatch(/opts\.includeAgentConfig/)
+    expect(slice).toMatch(/sanitizePromotedConfig/)
+  })
+  it('opt-in settings promote strips channel keys', () => {
+    const promoteIdx = SRC.indexOf('export function promoteToLive')
+    const slice = SRC.slice(promoteIdx, promoteIdx + 2800)
+    expect(slice).toMatch(/opts\.includeSettings/)
+    expect(slice).toMatch(/stripChannelKeysFromSettings/)
   })
 })

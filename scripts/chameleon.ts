@@ -33,7 +33,9 @@ function usage(): never {
       '',
       `  morph <target>            rebuild the sandbox ("${SANDBOX_AGENT}") as a clone of <target>`,
       '  smoke [--keep]            launch + survive + answer-ping on the sandbox',
-      '  promote <target> --confirm  copy validated files from the sandbox to the live target',
+      '  promote <target> --confirm [--with-config] [--with-settings] [--with-mcp]',
+      '                            copy validated files from the sandbox to the live target',
+      '                            (default: CLAUDE.md + SOUL.md + skills; opt-ins are field-filtered)',
       '  revert                    clean rebuild of the sandbox to baseline',
     ].join('\n'),
   )
@@ -62,7 +64,12 @@ async function main(): Promise<void> {
       if (!target) usage()
       const confirm = rest.includes('--confirm')
       if (!confirm) { warn('promotion writes to a LIVE agent; re-run with --confirm'); process.exit(2) }
-      const r = promoteToLive(target, { confirm: true })
+      const r = promoteToLive(target, {
+        confirm: true,
+        includeAgentConfig: rest.includes('--with-config'),
+        includeSettings: rest.includes('--with-settings'),
+        includeMcp: rest.includes('--with-mcp'),
+      })
       if (r.ok) { ok(`promoted ${r.promoted.join(', ')} to "${target}" (backup: ${r.backupDir})`); return }
       fail(r.error ?? 'promote failed'); process.exit(1); break
     }

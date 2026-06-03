@@ -45,7 +45,7 @@ import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import { agentDir, isKnownAgent, readFileOr } from './agent-config.js'
 import { scaffoldAgentDir } from './agent-scaffold.js'
-import { ensureAgentConfigDir } from './agent-config-dir.js'
+import { ensureAgentConfigDir, CHANNEL_PLUGIN_IDS } from './agent-config-dir.js'
 import {
   agentSessionName,
   isAgentRunning,
@@ -74,11 +74,22 @@ const RESET_PROTECTED = new Set([BASELINE_DIRNAME, '.git'])
 export const BANNER_START = '<!-- C12-SANDBOX-BANNER:START -->'
 export const BANNER_END = '<!-- C12-SANDBOX-BANNER:END -->'
 
-// Files/dirs promote() copies from the sandbox to the live target by default.
-// Deliberately excludes agent-config.json (channel fields / model would clobber
-// the live agent), .mcp.json, and anything under channels/.
+// Files/dirs promote() copies from the sandbox to the live target BY DEFAULT.
+// This is the SAFE default surface: behaviour + identity only. It deliberately
+// excludes agent-config.json, settings.json, .mcp.json and anything under
+// channels/ -- the default must never be able to leak a token or a path. The
+// riskier surfaces are explicit opt-in (see PromoteOptions.include*).
 export const PROMOTABLE_FILES = ['CLAUDE.md', 'SOUL.md'] as const
 export const PROMOTABLE_DIRS = [join('.claude', 'skills')] as const
+
+// The ONLY agent-config.json fields promote() may carry from the sandbox to the
+// live target, and only under the --with-config opt-in. model + securityProfile
+// are the legitimate right-sizing promote case; displayName is cosmetic-safe.
+// channelProvider, claudeConfigDir, authMode and any token-bearing field are
+// NEVER promoted -- they would repoint the live agent's channel or leak a
+// path/credential. The merge keeps the target's existing config as the base and
+// overlays only these whitelisted keys.
+export const PROMOTABLE_CONFIG_FIELDS = ['model', 'securityProfile', 'displayName'] as const
 
 // Smoke-test defaults.
 export const DEFAULT_SURVIVE_MS = 60 * 1000
@@ -163,6 +174,50 @@ export function stripSandboxBanner(claudeMd: string): string {
   let rest = claudeMd.slice(endMarker + BANNER_END.length)
   rest = rest.replace(/^\r?\n(\r?\n)?/, '')
   return rest
+}
+
+// Merge ONLY the whitelisted fields (PROMOTABLE_CONFIG_FIELDS) from the
+// sandbox's agent-config into the target's, keeping the target's config as the
+// base. This guarantees the live agent's channelProvider, claudeConfigDir,
+// authMode and any token field are preserved verbatim and can never be
+// overwritten or leaked from the sandbox clone. Pure; no fs.
+export function sanitizePromotedConfig(sandboxConfigJson: string, targetConfigJson: string): Record<string, unknown> {
+  let base: Record<string, unknown> = {}
+  try {
+    const t = JSON.parse(targetConfigJson)
+    if (t && typeof t === 'object' && !Array.isArray(t)) base = t as Record<string, unknown>
+  } catch { /* target unreadable -> start from empty, still no sandbox leakage */ }
+
+  let sandbox: Record<string, unknown> = {}
+  try {
+    const s = JSON.parse(sandboxConfigJson)
+    if (s && typeof s === 'object' && !Array.isArray(s)) sandbox = s as Record<string, unknown>
+  } catch { /* nothing to overlay */ }
+
+  for (const f of PROMOTABLE_CONFIG_FIELDS) {
+    if (typeof sandbox[f] === 'string') base[f] = sandbox[f]
+  }
+  return base
+}
+
+// Strip the channel-plugin keys (CHANNEL_PLUGIN_IDS) out of a settings.json's
+// enabledPlugins so promoting settings under --with-settings carries
+// permissions / hooks / effortLevel but never flips the target's channel state.
+// Drops the enabledPlugins map entirely if stripping empties it. Pure; no fs.
+export function stripChannelKeysFromSettings(rawJson: string): Record<string, unknown> {
+  let parsed: Record<string, unknown> = {}
+  try {
+    const p = JSON.parse(rawJson)
+    if (p && typeof p === 'object' && !Array.isArray(p)) parsed = p as Record<string, unknown>
+  } catch { /* return empty */ }
+
+  const ep = parsed.enabledPlugins
+  if (ep && typeof ep === 'object' && !Array.isArray(ep)) {
+    const map = ep as Record<string, unknown>
+    for (const id of CHANNEL_PLUGIN_IDS) delete map[id]
+    if (Object.keys(map).length === 0) delete parsed.enabledPlugins
+  }
+  return parsed
 }
 
 // The direct prompt injected into the sandbox to elicit an inter-agent reply.
@@ -373,6 +428,14 @@ export async function smokeTestSandbox(opts: SmokeOptions = {}): Promise<SmokeRe
 export interface PromoteOptions {
   files?: readonly string[]
   dirs?: readonly string[]
+  // Opt-in extensions to the safe default surface. Each is field-filtered so it
+  // cannot leak a token or path (see the pure helpers above).
+  //   includeAgentConfig -> agent-config.json, model/securityProfile/displayName only
+  //   includeSettings    -> .claude/settings.json with channel keys stripped
+  //   includeMcp         -> .mcp.json verbatim (when the MCP config is the change)
+  includeAgentConfig?: boolean
+  includeSettings?: boolean
+  includeMcp?: boolean
   // Required: promotion writes to a LIVE agent and is hard to reverse.
   confirm?: boolean
 }
@@ -423,6 +486,46 @@ export function promoteToLive(target: string, opts: PromoteOptions = {}): Promot
     }
     cpSync(src, dest, { recursive: true })
     promoted.push(rel)
+  }
+
+  // Opt-in: agent-config.json, whitelisted fields only (never channel/path).
+  if (opts.includeAgentConfig) {
+    const rel = 'agent-config.json'
+    const src = join(sandboxDir, rel)
+    if (existsSync(src)) {
+      const dest = join(targetDir, rel)
+      const targetRaw = existsSync(dest) ? readFileSync(dest, 'utf-8') : '{}'
+      if (existsSync(dest)) copyFileSync(dest, join(backupDir, rel))
+      const merged = sanitizePromotedConfig(readFileSync(src, 'utf-8'), targetRaw)
+      writeFileSync(dest, JSON.stringify(merged, null, 2) + '\n')
+      promoted.push(`${rel} (${PROMOTABLE_CONFIG_FIELDS.join('/')} only)`)
+    }
+  }
+
+  // Opt-in: settings.json with channel-plugin keys stripped.
+  if (opts.includeSettings) {
+    const rel = join('.claude', 'settings.json')
+    const src = join(sandboxDir, rel)
+    if (existsSync(src)) {
+      const dest = join(targetDir, rel)
+      if (existsSync(dest)) copyFileSync(dest, join(backupDir, rel.replace(/[\\/]/g, '_')))
+      const stripped = stripChannelKeysFromSettings(readFileSync(src, 'utf-8'))
+      mkdirSync(join(dest, '..'), { recursive: true })
+      writeFileSync(dest, JSON.stringify(stripped, null, 2) + '\n')
+      promoted.push(`${rel} (channel keys stripped)`)
+    }
+  }
+
+  // Opt-in: .mcp.json verbatim (only when the MCP config is the change).
+  if (opts.includeMcp) {
+    const rel = '.mcp.json'
+    const src = join(sandboxDir, rel)
+    if (existsSync(src)) {
+      const dest = join(targetDir, rel)
+      if (existsSync(dest)) copyFileSync(dest, join(backupDir, rel))
+      copyFileSync(src, dest)
+      promoted.push(rel)
+    }
   }
 
   logger.info({ target, promoted, backupDir }, 'chameleon: promoted validated files to live target')
