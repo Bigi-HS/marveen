@@ -18,6 +18,7 @@ import { loadProfileTemplate } from './profiles.js'
 import { writeAgentSettingsFromProfile } from './agent-scaffold.js'
 import { getSecret } from './vault.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
+import { runPreflight, logPreflightFindings, summarizePreflightErrors } from './agent-preflight.js'
 
 const TMUX = resolveFromPath('tmux')
 const CLAUDE = resolveFromPath('claude')
@@ -147,6 +148,16 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
 
   const dir = agentDir(name)
   if (!existsSync(dir)) return { ok: false, error: 'Agent not found' }
+
+  // A2 preflight: fail fast with a clear message on the known launch footguns
+  // (missing binary, bad model id, symlinked config-dir .claude.json) instead
+  // of a silent death seconds later. Warn-level findings (ambiguous channel
+  // state, missing-but-auto-seeded .claude.json) are logged but do not block.
+  const preflight = runPreflight(name)
+  logPreflightFindings(name, preflight)
+  if (!preflight.ok) {
+    return { ok: false, error: `preflight failed: ${summarizePreflightErrors(preflight)}` }
+  }
 
   const agentProvider = resolveAgentProvider(name)
   const provider = getProvider(agentProvider)
