@@ -19,6 +19,7 @@ import { startStuckInputWatcher } from './web/stuck-input-watcher.js'
 import { startStuckToolCallWatcher } from './web/stuck-tool-call-watcher.js'
 import { startReauthHealer } from './web/reauth-healer.js'
 import { startAutoRestartRunner } from './web/auto-restart-runner.js'
+import { startSessionSizeWatcher } from './web/session-size-watcher.js'
 import { logger } from './logger.js'
 import { tryHandleProfiles } from './web/routes/profiles.js'
 import { tryHandleMessages } from './web/routes/messages.js'
@@ -259,6 +260,9 @@ export function startWebServer(port = 3420): http.Server {
   const autoRestartInterval = startAutoRestartRunner()
   logger.info('Auto-restart runner started (60s poll, 40s offset)')
 
+  const sessionSizeInterval = startSessionSizeWatcher()
+  logger.info('Session-size watcher started (10min poll, 5min offset)')
+
   const updateCheckerInterval = startUpdateChecker()
   logger.info('Update checker started (15min poll)')
 
@@ -316,6 +320,7 @@ export function startWebServer(port = 3420): http.Server {
     clearInterval(stuckToolCallInterval)
     if (reauthHealerInterval) clearInterval(reauthHealerInterval)
     clearInterval(autoRestartInterval)
+    clearInterval(sessionSizeInterval)
     clearInterval(updateCheckerInterval)
     return origClose(cb)
   }
