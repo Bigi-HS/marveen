@@ -57,6 +57,7 @@ import {
   promoteToLive,
   sanitizePromotedConfig,
   stripChannelKeysFromSettings,
+  mcpJsonReferencesSandbox,
   SANDBOX_AGENT,
   BANNER_START,
   BANNER_END,
@@ -243,6 +244,18 @@ describe('stripChannelKeysFromSettings', () => {
   })
 })
 
+describe('mcpJsonReferencesSandbox', () => {
+  it('flags a .mcp.json carrying a path into the sandbox agent dir', () => {
+    expect(mcpJsonReferencesSandbox('{"mcpServers":{"x":{"args":["/home/u/marveen/agents/buster/x"]}}}')).toBe(true)
+    expect(mcpJsonReferencesSandbox('{"a":"/buster/.claude/foo"}')).toBe(true)
+    expect(mcpJsonReferencesSandbox('{"sandboxCloneOf":"dave"}')).toBe(true)
+  })
+  it('passes a clean target .mcp.json (no sandbox reference)', () => {
+    expect(mcpJsonReferencesSandbox('{"mcpServers":{"aiam-blog":{"url":"https://x"}}}')).toBe(false)
+    expect(mcpJsonReferencesSandbox('{"mcpServers":{}}')).toBe(false)
+  })
+})
+
 describe('promoteToLive default surface is token/path safe', () => {
   it('default options never enable the config/settings/mcp opt-ins', () => {
     // The pure guard returns before IO when confirm is missing; here we just
@@ -360,20 +373,30 @@ describe('chameleon-harness -- hard-constraint source contracts', () => {
   })
   it('promote requires confirm and backs up before overwriting', () => {
     const promoteIdx = SRC.indexOf('export function promoteToLive')
-    const slice = SRC.slice(promoteIdx, promoteIdx + 2800)
+    const slice = SRC.slice(promoteIdx, promoteIdx + 4200)
     expect(slice).toMatch(/opts\.confirm/)
     expect(slice).toMatch(/backupDir/)
   })
   it('opt-in agent-config promote is field-filtered (never a raw copy)', () => {
     const promoteIdx = SRC.indexOf('export function promoteToLive')
-    const slice = SRC.slice(promoteIdx, promoteIdx + 2800)
+    const slice = SRC.slice(promoteIdx, promoteIdx + 4200)
     expect(slice).toMatch(/opts\.includeAgentConfig/)
     expect(slice).toMatch(/sanitizePromotedConfig/)
   })
   it('opt-in settings promote strips channel keys', () => {
     const promoteIdx = SRC.indexOf('export function promoteToLive')
-    const slice = SRC.slice(promoteIdx, promoteIdx + 2800)
+    const slice = SRC.slice(promoteIdx, promoteIdx + 4200)
     expect(slice).toMatch(/opts\.includeSettings/)
     expect(slice).toMatch(/stripChannelKeysFromSettings/)
+  })
+  it('--with-mcp promotion fails fast on a sandbox-referencing .mcp.json before any write', () => {
+    const promoteIdx = SRC.indexOf('export function promoteToLive')
+    const slice = SRC.slice(promoteIdx, promoteIdx + 4200)
+    // The guard must sit before the backup/write block (mkdirSync backupDir).
+    const guardIdx = slice.indexOf('mcpJsonReferencesSandbox')
+    const firstWriteIdx = slice.indexOf('mkdirSync(backupDir')
+    expect(guardIdx).toBeGreaterThan(-1)
+    expect(firstWriteIdx).toBeGreaterThan(-1)
+    expect(guardIdx).toBeLessThan(firstWriteIdx)
   })
 })

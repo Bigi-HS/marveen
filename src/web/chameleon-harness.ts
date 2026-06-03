@@ -220,6 +220,21 @@ export function stripChannelKeysFromSettings(rawJson: string): Record<string, un
   return parsed
 }
 
+// Guard for --with-mcp promotion. morph copies the TARGET's .mcp.json into the
+// sandbox, so promoting it back verbatim is normally an identity round-trip --
+// BUT if the file was edited during testing (or ever carried an absolute path
+// into the sandbox dir), a Buster-only path/entry must never bleed back into
+// the live agent. Returns true if the raw JSON text references the sandbox
+// agent dir in any form. Pure; text-level so it catches paths regardless of
+// where in the structure they sit.
+export function mcpJsonReferencesSandbox(rawJson: string): boolean {
+  return (
+    rawJson.includes(`agents/${SANDBOX_AGENT}`) ||
+    rawJson.includes(`/${SANDBOX_AGENT}/.claude`) ||
+    rawJson.includes('sandboxCloneOf')
+  )
+}
+
 // The direct prompt injected into the sandbox to elicit an inter-agent reply.
 // Sent straight to the pane (not via the untrusted router), so the clone sees
 // it as a normal operator prompt and is free to act on it.
@@ -459,6 +474,17 @@ export function promoteToLive(target: string, opts: PromoteOptions = {}): Promot
   const targetDir = agentDir(target)
   const files = opts.files ?? PROMOTABLE_FILES
   const dirs = opts.dirs ?? PROMOTABLE_DIRS
+
+  // Fail-fast BEFORE any write: refuse a --with-mcp promotion whose .mcp.json
+  // carries a sandbox-specific path / Buster-only entry, so no Buster byproduct
+  // can bleed back into the live agent. Checked up front so a leak aborts the
+  // whole promote without having partially written other files.
+  if (opts.includeMcp) {
+    const mcpSrc = join(sandboxDir, '.mcp.json')
+    if (existsSync(mcpSrc) && mcpJsonReferencesSandbox(readFileSync(mcpSrc, 'utf-8'))) {
+      return { ok: false, error: 'refusing to promote: .mcp.json references the sandbox (would leak a Buster-only path/entry)', promoted: [] }
+    }
+  }
 
   const backupDir = join(targetDir, `.c12-backup-${Date.now()}`)
   mkdirSync(backupDir, { recursive: true })
