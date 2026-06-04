@@ -12,7 +12,7 @@ import {
 import { agentDir, readAgentModel, readAgentSecurityProfile, readAgentClaudeConfigDir, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName } from './agent-config.js'
 import { ensureAgentConfigDir } from './agent-config-dir.js'
 import { parseTelegramToken } from './telegram.js'
-import { getProvider, getProviderType, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
+import { getProvider, getProviderType, channelStateDir, readChannelToken, channelIntentFromEnabledPlugins, type ChannelProviderType } from '../channel-provider.js'
 import { CHANNEL_PROVIDER } from '../config.js'
 import { loadProfileTemplate } from './profiles.js'
 import { writeAgentSettingsFromProfile } from './agent-scaffold.js'
@@ -116,30 +116,35 @@ export function agentHasChannel(name: string): boolean {
 
 /**
  * Returns true only when the agent's channel plugin is INTENTIONALLY enabled
- * in its settings.json -- not merely because a token file happens to exist.
+ * -- not merely because a token file happens to exist.
  *
- * The config-dir settings.json written by ensureAgentConfigDir is channel-
- * neutral: channel plugin keys are stripped at build time. An agent running
- * without a Telegram/Slack channel (channel-less, inter-agent only) will have
- * no matching key in enabledPlugins, so this returns false and the channel
- * monitor will NOT treat a missing plugin process as a failure requiring restart.
+ * Source of truth is the agent's LAUNCH settings, <dir>/.claude/settings.json,
+ * because that is the file the launcher actually writes and respects:
+ *  - a channel-less launch force-disables telegram/slack/discord there
+ *    (see startAgentProcess), so an inter-agent-only sub-agent reads false here
+ *    and the channel monitor will NOT restart-loop it on a missing plugin;
+ *  - a channel-enabled agent keeps its provisioned `<provider>@...: true`, so
+ *    its dead poller IS eligible for auto-recovery.
  *
- * Falls back to agentHasChannel() for agents that predate the config-dir build
- * (no .claude-config/settings.json yet) to stay backward compatible.
+ * NOTE: we deliberately do NOT read <dir>/.claude-config/settings.json -- that
+ * config-dir copy is channel-neutral (plugin keys stripped at build time), so
+ * it reported `false` for EVERY config-dir agent and silently disabled channel
+ * recovery fleet-wide (the ed2525f1 gap). The launch settings carry the intent.
+ *
+ * Falls back to agentHasChannel() (token presence) only when no launch
+ * settings.json exists yet (never-launched / pre-config agent).
  */
 export function isAgentChannelIntentionallyEnabled(name: string): boolean {
   const provider = resolveAgentProvider(name)
   const dir = agentDir(name)
-  const configDirSettings = join(dir, '.claude-config', 'settings.json')
-  if (existsSync(configDirSettings)) {
+  const launchSettings = join(dir, '.claude', 'settings.json')
+  if (existsSync(launchSettings)) {
     try {
-      const parsed = JSON.parse(readFileSync(configDirSettings, 'utf-8'))
-      const ep = parsed?.enabledPlugins as Record<string, unknown> | undefined
-      if (ep == null) return false
-      return Object.entries(ep).some(([k, v]) => k.startsWith(provider) && v === true)
+      const parsed = JSON.parse(readFileSync(launchSettings, 'utf-8'))
+      return channelIntentFromEnabledPlugins(parsed?.enabledPlugins as Record<string, unknown> | undefined, provider)
     } catch { /* fall through */ }
   }
-  // No config-dir settings.json: pre-config-dir agent; fall back to token presence.
+  // No launch settings.json yet: fall back to token presence.
   return agentHasChannel(name)
 }
 
