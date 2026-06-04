@@ -119,3 +119,49 @@ export function readContextTokensFromProjectDir(workingDir: string, configDir?: 
   ctxCache.set(cacheKey, { value, expiresAt: now + TTL_MS })
   return value
 }
+
+const lastTurnCache = new Map<string, { value: number | null; expiresAt: number }>()
+
+// Wall-clock time (ms since epoch) of the newest assistant turn in the live
+// transcript -- i.e. when the agent last *produced output*. This is the
+// "last progress" signal the health dashboard surfaces: distinct from the last
+// inbound (a message arriving), it tells whether the agent is actually
+// advancing. An agent whose last inbound is newer than its last turn, with the
+// gap widening, is stuck -- the same signal the main-session stall watchdog
+// keys off, surfaced per-agent. We scan the newest transcript from the end for
+// the last line that is an assistant turn carrying a usage object. Returns null
+// when there is no transcript / no turn yet (fresh session).
+export function readLastTurnTsFromProjectDir(workingDir: string, configDir?: string): number | null {
+  const now = Date.now()
+  const cacheKey = `${workingDir}:${configDir ?? ''}`
+  const cached = lastTurnCache.get(cacheKey)
+  if (cached && cached.expiresAt > now) return cached.value
+  let value: number | null = null
+  try {
+    const dir = projectsDirFor(workingDir, configDir)
+    if (existsSync(dir)) {
+      const jsonls = readdirSync(dir)
+        .filter(f => f.endsWith('.jsonl'))
+        .map(f => ({ f, mtime: statSync(join(dir, f)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime)
+      if (jsonls.length > 0) {
+        const content = readFileSync(join(dir, jsonls[0].f), 'utf-8')
+        const lines = content.split('\n')
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const line = lines[i].trim()
+          if (!line) continue
+          try {
+            const entry = JSON.parse(line)
+            if (entry?.type !== 'assistant' || !entry?.message?.usage) continue
+            const ts = entry?.timestamp
+            if (typeof ts !== 'string') continue
+            const ms = new Date(ts).getTime()
+            if (Number.isFinite(ms)) { value = ms; break }
+          } catch { /* skip malformed JSON line */ }
+        }
+      }
+    }
+  } catch { /* fall through */ }
+  lastTurnCache.set(cacheKey, { value, expiresAt: now + TTL_MS })
+  return value
+}
