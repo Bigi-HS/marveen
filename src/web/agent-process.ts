@@ -17,6 +17,7 @@ import { CHANNEL_PROVIDER } from '../config.js'
 import { loadProfileTemplate } from './profiles.js'
 import { writeAgentSettingsFromProfile } from './agent-scaffold.js'
 import { getSecret } from './vault.js'
+import { backupChannelEnv, restoreChannelEnv } from './channel-token-durability.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { runPreflight, logPreflightFindings, summarizePreflightErrors } from './agent-preflight.js'
 
@@ -167,7 +168,18 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
   const agentProvider = resolveAgentProvider(name)
   const provider = getProvider(agentProvider)
   const agentChannelDir = channelStateDir(agentProvider, dir)
-  const token = readChannelToken(agentProvider, join(agentChannelDir, '.env'))
+  const envPath = join(agentChannelDir, '.env')
+  // Channel-token durability: the .env lives inside the scaffold tree, so a
+  // re-scaffold can wipe it. If it is gone, re-materialise it from the durable
+  // vault mirror (store/vault.json, outside the agent dirs); if it is present,
+  // refresh the mirror so a later rebuild can restore it. Both are best-effort
+  // and never block the launch.
+  if (existsSync(envPath)) {
+    backupChannelEnv(name, agentProvider, envPath)
+  } else {
+    restoreChannelEnv(name, agentProvider, envPath)
+  }
+  const token = readChannelToken(agentProvider, envPath)
   // Backward compat: try legacy Telegram token if provider-aware lookup misses
   let hasChannel = !!token
   if (!token && agentProvider === 'telegram') {
