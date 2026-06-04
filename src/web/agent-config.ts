@@ -17,6 +17,49 @@ export const MODEL_ALIASES: Record<string, string> = {
   'inherit': DEFAULT_MODEL,
 }
 
+// Archetype -> default model policy (token/cost right-sizing). The idea: an
+// agent's WORKLOAD class picks a sensibly-sized model so the fleet does not run
+// everything on opus (the main cost driver). Values are MODEL_ALIASES keys,
+// resolved to full ids by modelForArchetype.
+//   - light background work (heartbeat / monitor / canary) -> haiku
+//   - conversational / orchestration -> sonnet
+//   - engineering / architecture / debugging (deep reasoning) -> opus
+// This is a DEFAULT only: an explicit `model` field in agent-config always wins
+// (see resolveAgentModelFromConfig), so adding the field changes no existing
+// agent until its `model` override is removed in favour of an `archetype`.
+export const ARCHETYPE_MODEL: Record<string, string> = {
+  heartbeat: 'haiku',
+  monitor: 'haiku',
+  canary: 'haiku',
+  chat: 'sonnet',
+  assistant: 'sonnet',
+  orchestrator: 'sonnet',
+  engineer: 'opus',
+  architect: 'opus',
+  debug: 'opus',
+}
+
+// Resolve an archetype to its policy model id, or null when the archetype is
+// missing/unknown (caller falls back to the explicit model or DEFAULT_MODEL).
+export function modelForArchetype(archetype: string | null | undefined): string | null {
+  if (!archetype || typeof archetype !== 'string') return null
+  const alias = ARCHETYPE_MODEL[archetype.trim().toLowerCase()]
+  return alias ? resolveModelId(alias) : null
+}
+
+// Pure model-resolution precedence, unit-testable without the filesystem:
+//   1. explicit `model` (alias-resolved) -- backward compatible, always wins
+//   2. `archetype` policy default
+//   3. DEFAULT_MODEL
+export function resolveAgentModelFromConfig(config: { model?: unknown; archetype?: unknown }): string {
+  const explicit = typeof config.model === 'string' && config.model.trim()
+    ? resolveModelId(config.model)
+    : null
+  if (explicit) return explicit
+  const fromArchetype = modelForArchetype(typeof config.archetype === 'string' ? config.archetype : null)
+  return fromArchetype || DEFAULT_MODEL
+}
+
 export function agentDir(name: string): string {
   // safeJoin rejects path-traversal components. The first line of defense is
   // still sanitizeAgentName() at the create-endpoint, but going through
@@ -58,9 +101,22 @@ export function readAgentModel(name: string): string {
   const configPath = join(agentDir(name), 'agent-config.json')
   try {
     const config = JSON.parse(readFileOr(configPath, '{}'))
-    return resolveModelId(config.model || DEFAULT_MODEL)
+    return resolveAgentModelFromConfig(config)
   } catch {
     return DEFAULT_MODEL
+  }
+}
+
+// The agent's archetype (workload class), or null when unset. Drives the model
+// right-sizing default (ARCHETYPE_MODEL) and can be surfaced on the dashboard.
+export function readAgentArchetype(name: string): string | null {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  try {
+    const config = JSON.parse(readFileOr(configPath, '{}'))
+    const a = config.archetype
+    return typeof a === 'string' && a.trim() ? a.trim().toLowerCase() : null
+  } catch {
+    return null
   }
 }
 
