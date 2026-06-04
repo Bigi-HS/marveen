@@ -106,34 +106,45 @@ describe('isProtectedFromReset', () => {
 
 describe('sanitizeMorphedConfig', () => {
   it('keeps model and securityProfile from the target', () => {
-    const cfg = sanitizeMorphedConfig('{"model":"claude-opus-4-8[1m]","securityProfile":"standard"}', 'dave')
+    const cfg = sanitizeMorphedConfig('{"model":"claude-opus-4-8[1m]","securityProfile":"standard"}', 'dave', 'telegram')
     expect(cfg.model).toBe('claude-opus-4-8[1m]')
     expect(cfg.securityProfile).toBe('standard')
   })
-  it('forces channel-less, shared auth, and records the clone source', () => {
-    const cfg = sanitizeMorphedConfig('{"channelProvider":"telegram","authMode":"api"}', 'dave')
-    expect(cfg.channelProvider).toBeNull()
+  it('pins the SANDBOX own channel provider, ignoring the target, with shared auth and clone source', () => {
+    // Target says telegram+api; the clone must take BUSTER's own provider, never
+    // the target's, and never the target's auth mode.
+    const cfg = sanitizeMorphedConfig('{"channelProvider":"slack","authMode":"api"}', 'dave', 'telegram')
+    expect(cfg.channelProvider).toBe('telegram')
     expect(cfg.authMode).toBe('shared')
     expect(cfg.sandboxCloneOf).toBe('dave')
   })
+  it('omits channelProvider (falls back to host default) when the sandbox has none', () => {
+    const cfg = sanitizeMorphedConfig('{"channelProvider":"telegram"}', 'dave', null)
+    expect('channelProvider' in cfg).toBe(false)
+    expect(cfg.authMode).toBe('shared')
+  })
   it('never carries arbitrary target fields (e.g. a token reference)', () => {
-    const cfg = sanitizeMorphedConfig('{"telegramToken":"secret","displayName":"Dave"}', 'dave')
+    const cfg = sanitizeMorphedConfig('{"telegramToken":"secret","displayName":"Dave"}', 'dave', 'telegram')
     expect(cfg.telegramToken).toBeUndefined()
     expect(cfg.displayName).toBeUndefined()
   })
   it('tolerates malformed JSON', () => {
-    const cfg = sanitizeMorphedConfig('not json', 'dave')
-    expect(cfg.channelProvider).toBeNull()
+    const cfg = sanitizeMorphedConfig('not json', 'dave', 'telegram')
+    expect(cfg.channelProvider).toBe('telegram')
     expect(cfg.authMode).toBe('shared')
     expect(cfg.sandboxCloneOf).toBe('dave')
   })
 })
 
 describe('sandboxBannerFor / stripSandboxBanner', () => {
-  it('banner names the target and pins attribution to buster', () => {
+  it('banner lets the clone answer in the target persona but pins transport+attribution to buster', () => {
     const b = sandboxBannerFor('dave')
-    expect(b).toContain('clone of "dave"')
-    expect(b).toContain('identify yourself as "buster"')
+    expect(b).toContain('preview of "dave"')
+    expect(b).toContain('persona/voice of "dave"')
+    expect(b).toContain("Buster's OWN channel bot")
+    expect(b).toContain('send as')
+    // The safety line: never the target's real credentials.
+    expect(b).toContain('NEVER use "dave"\'s real channel token')
     expect(b.startsWith(BANNER_START)).toBe(true)
     expect(b).toContain(BANNER_END)
   })

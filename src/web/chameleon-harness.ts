@@ -17,11 +17,15 @@
 //   - PID-only kills (never `pkill -f`): we reuse stopAgentProcess, which kills
 //     the named tmux session and reaps orphans by explicit PID (see
 //     channel-poller-reap.ts). No process is matched by command-line substring.
-//   - NEVER the real channel token: morph copies config but no channels/ token,
-//     and forces channel-less + shared auth so the clone cannot 409 against the
-//     original or spend on its API key.
-//   - Clean attribution: the morphed CLAUDE.md carries a banner telling the
-//     clone to identify itself as "buster" in all mail/cost, never as `target`.
+//   - NEVER the target's channel token: morph copies config but no channels/
+//     token, pins the clone to BUSTER'S OWN provider, and stays on shared auth,
+//     so the clone can only talk on its own bot -- it can never 409 against the
+//     target's getUpdates slot or spend on the target's API key. Buster's own
+//     token is snapshotted+restored across the rebuild so the sandbox keeps its
+//     own channel (e3e75a12: live-test a future agent on Telegram first).
+//   - Clean attribution: the morphed CLAUDE.md banner lets the clone answer IN
+//     the target's persona (the point of the live test) but ONLY on Buster's own
+//     bot; inter-agent/cost/mail attribution stays "buster", never the target.
 //   - "revert to baseline" is a CLEAN REBUILD (destroy + recreate from the
 //     baseline snapshot), NOT an in-place undo, so residue from a previous
 //     morph (memory, sessions, .claude.json projects, tokens) cannot bleed into
@@ -35,14 +39,16 @@ import {
   readFileSync,
   writeFileSync,
   mkdirSync,
+  mkdtempSync,
   rmSync,
   cpSync,
   copyFileSync,
   readdirSync,
 } from 'node:fs'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { logger } from '../logger.js'
-import { MAIN_AGENT_ID } from '../config.js'
+import { MAIN_AGENT_ID, CHANNEL_PROVIDER } from '../config.js'
 import { agentDir, isKnownAgent, readFileOr } from './agent-config.js'
 import { scaffoldAgentDir } from './agent-scaffold.js'
 import { ensureAgentConfigDir, CHANNEL_PLUGIN_IDS } from './agent-config-dir.js'
@@ -123,10 +129,22 @@ export function isProtectedFromReset(entry: string): boolean {
 }
 
 // Transform the target's agent-config.json into the sandbox's config. Keeps
-// only the launch-relevant fields (model, securityProfile); forces the clone
-// channel-less and onto shared auth so it can never hold the target's real
-// channel token or API key; records what it is a clone of for attribution.
-export function sanitizeMorphedConfig(rawConfigJson: string, target: string): Record<string, unknown> {
+// only the launch-relevant fields (model, securityProfile) from the target, and
+// pins the channel to the SANDBOX's OWN provider so the clone stays reachable on
+// Buster's own bot (e3e75a12: live-Telegram test of a future agent before it is
+// built for real).
+//
+// SAFETY INVARIANT (impersonation / 409): the target's channelProvider is
+// IGNORED outright -- we set `ownChannelProvider` (Buster's own, e.g. telegram),
+// never the target's. The target's token is never copied (morph copies no
+// channels/ dir) and authMode stays 'shared' (never the target's metered API
+// key). So the clone can only ever talk on Buster's OWN bot/token; it can never
+// contend for the target's getUpdates slot or spend on the target's key.
+export function sanitizeMorphedConfig(
+  rawConfigJson: string,
+  target: string,
+  ownChannelProvider: string | null,
+): Record<string, unknown> {
   let parsed: Record<string, unknown> = {}
   try {
     const p = JSON.parse(rawConfigJson)
@@ -136,27 +154,34 @@ export function sanitizeMorphedConfig(rawConfigJson: string, target: string): Re
   const out: Record<string, unknown> = {}
   if (typeof parsed.model === 'string') out.model = parsed.model
   if (typeof parsed.securityProfile === 'string') out.securityProfile = parsed.securityProfile
-  // Channel-less + shared auth are non-negotiable for the sandbox: never the
-  // real token (409 hazard), never the target's metered API key.
-  out.channelProvider = null
+  // Buster's OWN channel (never the target's). null/empty -> omit the field so
+  // the launcher falls back to the host default CHANNEL_PROVIDER, which is still
+  // Buster's own bot. Either way the target's provider never reaches the clone.
+  if (ownChannelProvider) out.channelProvider = ownChannelProvider
+  // Shared auth is non-negotiable: never the target's metered API key.
   out.authMode = 'shared'
   out.sandboxCloneOf = target
   return out
 }
 
-// Banner prepended to the cloned CLAUDE.md so the running clone knows it is a
-// throwaway and attributes itself as "buster", never as the target.
+// Banner prepended to the cloned CLAUDE.md. The clone is a DISPOSABLE preview of
+// `target`: it answers IN the target's persona (so we can live-test a future
+// agent on Telegram before building it for real, e3e75a12), but ALWAYS over
+// Buster's OWN bot/token -- never the target's credentials. That split is the
+// safety line: persona may imitate the target, transport never does.
 export function sandboxBannerFor(target: string): string {
   return [
     BANNER_START,
     '> SANDBOX NOTICE (C12 chameleon canary)',
     '>',
-    `> You are running inside the BUSTER sandbox as a DISPOSABLE clone of "${target}".`,
+    `> You are running inside the BUSTER sandbox as a DISPOSABLE preview of "${target}".`,
     '> This instance will be destroyed and rebuilt; nothing you do here is permanent.',
-    `> In EVERY inter-agent message identify yourself as "buster", NEVER as "${target}".`,
-    '> Do NOT send channel (Telegram/Slack/Discord) messages and do NOT use the real',
-    "> agent's credentials. Attribute all cost and mail to \"buster\" so the sandbox is",
-    '> never conflated with the original.',
+    `> You MAY answer in the persona/voice of "${target}" so we can test it live --`,
+    '> but ONLY ever on Buster\'s OWN channel bot and token (@Buster_TestDummy_bot).',
+    `> NEVER use "${target}"\'s real channel token, API key, or any of its credentials,`,
+    '> and never claim to BE the production agent. In inter-agent messages, send as',
+    '> "buster". All cost and mail are attributed to "buster" so the sandbox is never',
+    '> conflated with the original.',
     BANNER_END,
     '',
     '',
@@ -271,10 +296,45 @@ export interface OpResult {
   error?: string
 }
 
+// Snapshot Buster's OWN channel state dir (.claude/channels) to a temp holding
+// dir so a clean rebuild can restore it. e3e75a12: the sandbox keeps its own bot
+// token across morph/revert (it is reachable on @Buster_TestDummy_bot), instead
+// of the old behaviour that wiped it and forced channel-less. Returns the temp
+// path, or null when there is nothing to keep. This only ever moves BUSTER's own
+// token -- a target's token never lives here (morph copies no channels/).
+function snapshotOwnChannels(dir: string): string | null {
+  const channelsDir = join(dir, '.claude', 'channels')
+  if (!existsSync(channelsDir)) return null
+  try {
+    const hold = mkdtempSync(join(tmpdir(), 'buster-channels-'))
+    cpSync(channelsDir, hold, { recursive: true })
+    return hold
+  } catch (err) {
+    logger.warn({ err }, 'chameleon: failed to snapshot own channel state (continuing channel-less)')
+    return null
+  }
+}
+
+// Restore the snapshotted channel state back under .claude/channels after the
+// rebuild, then drop the temp holding dir. No-op when nothing was snapshotted.
+function restoreOwnChannels(dir: string, hold: string | null): void {
+  if (!hold) return
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true })
+    cpSync(hold, join(dir, '.claude', 'channels'), { recursive: true })
+  } catch (err) {
+    logger.warn({ err }, 'chameleon: failed to restore own channel state after rebuild')
+  } finally {
+    try { rmSync(hold, { recursive: true, force: true }) } catch { /* best effort */ }
+  }
+}
+
 // Clean rebuild: stop (PID/session-scoped), destroy every live entry except the
 // protected baseline, restore identity files from the baseline, then recreate
 // the empty .claude tree + isolated config dir from scratch. This is a
-// destroy-and-recreate, never an in-place undo.
+// destroy-and-recreate, never an in-place undo. Buster's OWN channel token is
+// snapshotted and restored across the wipe (e3e75a12) so the sandbox stays
+// reachable on its own bot; a target's token is never present to leak.
 export function revertSandboxToBaseline(): OpResult {
   const dir = agentDir(SANDBOX_AGENT)
   if (!existsSync(dir)) return { ok: false, error: 'sandbox agent dir not found' }
@@ -283,6 +343,9 @@ export function revertSandboxToBaseline(): OpResult {
   // PID/session-scoped stop only -- stopAgentProcess kills the `agent-buster`
   // tmux session and reaps orphans by explicit PID; no `pkill -f` anywhere.
   if (isAgentRunning(SANDBOX_AGENT)) stopAgentProcess(SANDBOX_AGENT)
+
+  // Preserve Buster's own channel token through the destroy+recreate.
+  const channelHold = snapshotOwnChannels(dir)
 
   for (const entry of readdirSync(dir)) {
     if (isProtectedFromReset(entry)) continue
@@ -298,7 +361,10 @@ export function revertSandboxToBaseline(): OpResult {
 
   scaffoldAgentDir(SANDBOX_AGENT)
   ensureAgentConfigDir(SANDBOX_AGENT)
-  logger.info('chameleon: sandbox reverted to baseline (clean rebuild)')
+  // Restore AFTER scaffold so the freshly recreated .claude tree does not clobber
+  // the kept token.
+  restoreOwnChannels(dir, channelHold)
+  logger.info('chameleon: sandbox reverted to baseline (clean rebuild, own channel kept)')
   return { ok: true }
 }
 
@@ -329,9 +395,10 @@ export function morphSandbox(target: string): MorphResult {
   copyIfExists(join(targetDir, 'SOUL.md'), join(dir, 'SOUL.md'))
   copyIfExists(join(targetDir, '.mcp.json'), join(dir, '.mcp.json'))
 
-  // Sanitized agent-config.json: model + profile only, channel-less, shared
-  // auth, attribution marker. NEVER the target's channel token.
-  const cfg = sanitizeMorphedConfig(readFileOr(join(targetDir, 'agent-config.json'), '{}'), target)
+  // Sanitized agent-config.json: model + profile from the target, but the
+  // channel pinned to Buster's OWN provider (kept by revert's snapshot) and
+  // shared auth. NEVER the target's channel token or provider (e3e75a12).
+  const cfg = sanitizeMorphedConfig(readFileOr(join(targetDir, 'agent-config.json'), '{}'), target, CHANNEL_PROVIDER)
   writeFileSync(join(dir, 'agent-config.json'), JSON.stringify(cfg, null, 2) + '\n')
 
   // The agent's learned skills (its earned behaviour under test).
