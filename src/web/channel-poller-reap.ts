@@ -82,6 +82,52 @@ function readBotPid(chanDir: string): number | null {
   }
 }
 
+// process.kill(pid, 0) probes existence without signalling. ESRCH -> gone;
+// EPERM -> exists but owned by another user (still alive). Our pollers are
+// same-user, but treat EPERM as alive to stay on the safe (present) side.
+function isPidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === 'EPERM'
+  }
+}
+
+/**
+ * Is there a LIVE channel poller for this agent's channel? The inverse of the
+ * reap question, used by the channel-health monitor to catch an MCP child that
+ * was killed EXTERNALLY (a dashboard deploy-restart or OS-sleep) -- a case the
+ * pane ✘-marker never renders, so the pane-based detector misses it.
+ *
+ * Two independent signals, both liveness-checked: the supervised bot.pid and
+ * the `ps eww -e` env-var scan (catches a poller whose bot.pid went stale).
+ * Returns:
+ *   true   -- at least one signal found a live poller
+ *   false  -- the ps scan SUCCEEDED and both signals are clean (definitively absent)
+ *   null   -- could not determine (ps scan failed and no live bot.pid): fail-safe,
+ *             callers must NOT act on null (avoids a false reconnect on the live agent)
+ *
+ * `agentDirPath` is the agent dir for a sub-agent, or undefined for the main
+ * agent (whose channel state lives under ~/.claude/channels).
+ */
+export function probeChannelPollerPresence(
+  provider: ChannelProviderType,
+  agentDirPath?: string,
+): boolean | null {
+  const chanDir = channelStateDir(provider, agentDirPath)
+  const botPid = readBotPid(chanDir)
+  if (botPid != null && isPidAlive(botPid)) return true
+  let scanOk = true
+  let pids: number[] = []
+  try {
+    const out = execSync('/bin/ps eww -e', { timeout: 5000, encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
+    pids = parsePollerPidsFromPs(out, STATE_ENV_VAR[provider], chanDir)
+  } catch (err) {
+    scanOk = false
+    logger.warn({ err, chanDir }, 'channel-poller-reap: presence ps scan failed')
+  }
+  if (pids.some(isPidAlive)) return true
+  return scanOk ? false : null
+}
+
 export interface ReapResult {
   reaped: number[]
   source: { fromBotPid: number | null; fromEnvScan: number[] }

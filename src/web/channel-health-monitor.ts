@@ -1,13 +1,14 @@
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
-import { listAgentNames } from './agent-config.js'
-import { isAgentRunning, capturePane } from './agent-process.js'
+import { listAgentNames, agentDir } from './agent-config.js'
+import { isAgentRunning, capturePane, isAgentChannelIntentionallyEnabled, agentHasChannel } from './agent-process.js'
 import {
   attemptChannelMcpReconnect,
   resolveAgentSession,
   resolveAgentProviderType,
 } from './channel-mcp-reconnect.js'
 import { getProvider } from '../channel-provider.js'
+import { probeChannelPollerPresence } from './channel-poller-reap.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 
 // Detect `plugin:X · ✘ failed` (or ✘ error / ✘ disconnected) in the
@@ -35,6 +36,36 @@ function getBackoffMs(attempt: number): number {
 function isPluginFailedInPane(pane: string, pluginPaneId: string): boolean {
   if (!pane.includes(pluginPaneId)) return false
   return PLUGIN_FAILED_RX.test(pane)
+}
+
+// Complementary failure signal to the pane ✘-marker: an MCP poller killed
+// EXTERNALLY (dashboard deploy-restart / OS-sleep) leaves a dead pipe that
+// Claude Code does not render as ✘, so isPluginFailedInPane misses it. We then
+// fall back to probing whether the poller process actually exists.
+//
+// Pure so it is unit-testable: reconnect ONLY when the channel is supposed to be
+// up AND the probe is CERTAIN the poller is absent (false). `null` means the
+// probe could not determine presence -> fail-safe, never act (no false reconnect
+// on the live orchestrator).
+export function shouldReconnectOnMissingPoller(facts: {
+  expectedUp: boolean
+  pollerPresent: boolean | null
+}): boolean {
+  return facts.expectedUp && facts.pollerPresent === false
+}
+
+// Is this agent's channel SUPPOSED to be up (so a missing poller is a fault, not
+// the normal channel-less state)? The main agent's channel is always expected;
+// a sub-agent's only when its plugin is intentionally enabled AND it has a token.
+function isChannelExpectedUp(agentName: string): boolean {
+  if (agentName === MAIN_AGENT_ID) return true
+  return isAgentChannelIntentionallyEnabled(agentName) && agentHasChannel(agentName)
+}
+
+// Where the agent's channel state lives: undefined (=> ~/.claude/channels) for
+// the main agent, the agent dir for a sub-agent.
+function probeDirForAgent(agentName: string): string | undefined {
+  return agentName === MAIN_AGENT_ID ? undefined : agentDir(agentName)
 }
 
 export interface ChannelHealthStatus {
@@ -72,7 +103,19 @@ function checkAgent(agentName: string, session: string): void {
   const providerType = resolveAgentProviderType(agentName)
   const provider = getProvider(providerType)
 
-  if (!isPluginFailedInPane(pane, provider.pluginPaneId)) {
+  const paneFailing = isPluginFailedInPane(pane, provider.pluginPaneId)
+
+  // When the pane shows no ✘, also probe whether the poller process is actually
+  // alive -- an externally-killed MCP child (deploy-restart / OS-sleep) the pane
+  // never flags. Only probe when the channel is expected up, and only treat a
+  // CERTAIN absence (false) as a fault; null (probe inconclusive) is ignored.
+  let missingPoller = false
+  if (!paneFailing && isChannelExpectedUp(agentName)) {
+    const present = probeChannelPollerPresence(providerType, probeDirForAgent(agentName))
+    missingPoller = shouldReconnectOnMissingPoller({ expectedUp: true, pollerPresent: present })
+  }
+
+  if (!paneFailing && !missingPoller) {
     if (state) {
       logger.info({ agentName, provider: providerType }, 'channel-health-monitor: plugin recovered')
       reconnectState.delete(agentName)
@@ -82,7 +125,7 @@ function checkAgent(agentName: string, session: string): void {
 
   const attempt = state ? state.attempts : 0
   logger.warn(
-    { agentName, attempt, provider: providerType },
+    { agentName, attempt, provider: providerType, reason: paneFailing ? 'pane-failed' : 'poller-missing' },
     'channel-health-monitor: plugin failure detected, attempting reconnect',
   )
 
