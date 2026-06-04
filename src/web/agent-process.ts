@@ -31,6 +31,15 @@ const LAUNCH_MAX_ATTEMPTS = 2
 // exit-1 was observed within ~1s; 2s clears it with margin while staying
 // inside the dashboard Start button's acceptable latency.
 const LAUNCH_LIVENESS_DELAY_S = 2
+// Settle window after tearing down a DEAD attempt, before the next launch.
+// When attempt 0 crashes (e.g. `claude --continue` on a stale deferred-tool
+// marker), its dying process may still hold the per-agent config-dir
+// `.claude.json` lock for a beat. Spawning the fallback launch immediately
+// lets it lose that lock race and exit 1 silently too -- the same WSL bug the
+// isolated config dir fixes for the steady state, re-introduced by two claude
+// processes touching one config dir back-to-back. A short settle lets the dead
+// process fully release before the retry.
+const LAUNCH_RETRY_SETTLE_S = 3
 
 // Pure launch-retry decision so the spawn loop is unit-testable without tmux.
 // `running` is the post-settle liveness probe; `attempt` is 0-based; `maxAttempt`
@@ -43,6 +52,21 @@ export function decideLaunchRetry(
   if (running) return 'ok'
   if (attempt < maxAttempt) return 'retry'
   return 'give-up'
+}
+
+// Whether a given launch attempt should carry `--continue`.
+//
+// `claude --continue` resumes the prior transcript, but if that transcript
+// ended parked on a stale deferred-tool marker, `claude` exits 1 with
+// "No deferred tool marker found in the resumed session" inside the liveness
+// window. Re-running the SAME --continue command (the old retry behaviour)
+// just fails again -> the agent stays DOWN with an empty pane and no resume
+// menu. So only the FIRST attempt resumes; any retry after a liveness-window
+// death drops --continue and starts a FRESH session. The in-session transcript
+// is lost, but durable state lives in the memory system, so a fresh boot is an
+// acceptable fallback that beats a dead agent. Pure so it is unit-testable.
+export function shouldContinueSession(hasPriorSession: boolean, attempt: number): boolean {
+  return hasPriorSession && attempt === 0
 }
 
 function resolveAgentProvider(name: string): ChannelProviderType {
@@ -246,10 +270,6 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     const projectsRoot = join(claudeConfigDir, 'projects')
     const encodedProject = dir.replace(/\//g, '-')
     const hasPriorSession = existsSync(join(projectsRoot, encodedProject))
-    // opts.fresh forces a brand-new conversation (auto-restart 'fresh' mode):
-    // omit --continue so the heavy accumulated context is dropped. Without it
-    // we resume the prior session (the 'continue' mode / normal restart).
-    const continueFlag = (hasPriorSession && !opts.fresh) ? '--continue ' : ''
     const stateEnvVar = agentProvider === 'slack' ? 'SLACK_STATE_DIR' : agentProvider === 'discord' ? 'DISCORD_STATE_DIR' : 'TELEGRAM_STATE_DIR'
     const unsetTokens = 'unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN'
     // Slack plugin is third-party; its "not on approved allowlist" check is
@@ -261,7 +281,10 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     const channelFlag = hasChannel ? `--channels plugin:${provider.pluginId}` : ''
     // Single-quote `${model}` so values like `claude-opus-4-8[1m]` (1M-context
     // suffix) are not glob-expanded by the shell that tmux spawns the command in.
-    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${channelSetup}${apiKeyEnv}${claudeConfigEnv}${ollamaEnv}${deepseekEnv}cd "${dir}" && ${CLAUDE} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
+    // `continueFlag` is decided per-attempt (see shouldContinueSession): the
+    // first attempt resumes, a liveness-window death falls back to a fresh boot.
+    const buildLaunchCmd = (continueFlag: string): string =>
+      `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${channelSetup}${apiKeyEnv}${claudeConfigEnv}${ollamaEnv}${deepseekEnv}cd "${dir}" && ${CLAUDE} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
 
     // `tmux new-session -d "cmd"` returns as soon as the SESSION exists, not
     // when the inner claude is up: if claude exits within ~1s (the silent
@@ -272,7 +295,22 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     // -- does not leave the dashboard reporting a started agent that died.
     let launched = false
     for (let attempt = 0; attempt < LAUNCH_MAX_ATTEMPTS; attempt++) {
-      execSync(`${TMUX} new-session -d -s ${session} "${cmd}"`, { timeout: 10000 })
+      // opts.fresh (auto-restart 'fresh' mode) forces a brand-new conversation
+      // on every attempt -- it drops the heavy accumulated context, so it must
+      // override the attempt-0 resume that shouldContinueSession would grant.
+      const useContinue = !opts.fresh && shouldContinueSession(hasPriorSession, attempt)
+      const cmd = buildLaunchCmd(useContinue ? '--continue ' : '')
+      // Pass `cmd` as a single execFileSync argv element, NOT interpolated into
+      // a double-quoted execSync string. The launch command embeds its own
+      // double quotes (cd "...", export X="...") and unexpanded $HOME/$PATH;
+      // wrapping it in `"${cmd}"` for a shell makes the OUTER shell consume
+      // those quotes and expand $PATH -- and on this WSL host $PATH contains
+      // Windows entries with spaces ("/mnt/c/Program Files/..."), so the now-
+      // unquoted value word-splits and tmux receives a shredded multi-arg
+      // command that dies on launch (empty pane, agent stays DOWN -- the very
+      // symptom this fix targets). execFileSync hands tmux the command verbatim
+      // as one argument; tmux's own `sh -c` then parses the embedded quotes.
+      execFileSync(TMUX, ['new-session', '-d', '-s', session, cmd], { timeout: 10000 })
       try { execSync(`sleep ${LAUNCH_LIVENESS_DELAY_S}`, { timeout: 5000 }) } catch { /* best effort */ }
       const decision = decideLaunchRetry(isAgentRunning(name), attempt, LAUNCH_MAX_ATTEMPTS - 1)
       if (decision === 'ok') { launched = true; break }
@@ -282,8 +320,18 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
       }
       // decision === 'retry': tear down the dead husk (in case a non-default
       // tmux remain-on-exit left a lingering shell) before the next attempt.
-      logger.warn({ name, session, attempt }, 'Agent session died within liveness window, retrying launch')
+      // If this attempt used --continue, the next one drops it (shouldContinue-
+      // Session returns false for attempt > 0): a stale deferred-tool marker in
+      // the resumed transcript is the prime suspect, so we fall back to a fresh
+      // boot rather than re-running the identical --continue command.
+      logger.warn(
+        { name, session, attempt, usedContinue: useContinue, nextIsFreshSession: useContinue },
+        'Agent session died within liveness window, retrying launch (fresh session if --continue was used)',
+      )
       try { execSync(`${TMUX} kill-session -t ${session} 2>/dev/null`, { timeout: 3000 }) } catch { /* ok */ }
+      // Let the dead process release the config-dir lock before relaunching, so
+      // the fallback launch does not lose the same lock race and silently die.
+      try { execSync(`sleep ${LAUNCH_RETRY_SETTLE_S}`, { timeout: 5000 }) } catch { /* best effort */ }
     }
     if (!launched) return { ok: false, error: 'Agent process exited immediately after launch' }
 
@@ -399,6 +447,69 @@ export function dismissResumeSummaryModalIfPresent(session: string): void {
   } catch (err) {
     logger.warn({ err, session }, 'Failed to probe/dismiss resume-from-summary modal')
   }
+}
+
+// A6: the resume-from-summary modal does not always render within a single
+// fixed window -- on a large/old session it can appear later than the one-shot
+// dismiss above, and a missed dismiss leaves the next keystroke (/name) typed
+// into the modal. Mirror the watchdog's answer_resume_prompt(): POLL the pane
+// and press "1"+Enter the moment the menu appears, stopping early once the
+// prompt is actually ready. Pure decision over a captured pane so the polling
+// loop stays unit-testable.
+export function decideResumeMenuAction(pane: string | null): 'dismiss' | 'ready' | 'wait' {
+  if (pane == null) return 'wait'
+  if (RESUME_SUMMARY_MODAL_RX.test(pane)) return 'dismiss'
+  if (detectPaneState(pane) === 'idle') return 'ready'
+  return 'wait'
+}
+
+const RESUME_WATCH_MAX_ATTEMPTS = 20
+const RESUME_WATCH_POLL_MS = 2000
+
+// Non-blocking resume-menu watcher: re-arms via setTimeout so it never blocks
+// the event loop for the whole window (the server keeps serving). Presses
+// "1"+Enter whenever the resume menu is visible and keeps polling until the
+// prompt is ready or the attempt budget is exhausted, then invokes onSettled.
+// Wired into scheduleIdentitySetup so EVERY launch (and every channel-monitor
+// respawn) handles an old/big session's resume menu, not just dave's external
+// watchdog. opts are injectable so the loop is testable without real timers.
+export function scheduleResumeMenuWatch(
+  session: string,
+  onSettled: () => void,
+  opts: { maxAttempts?: number; pollMs?: number } = {},
+): void {
+  const maxAttempts = opts.maxAttempts ?? RESUME_WATCH_MAX_ATTEMPTS
+  const pollMs = opts.pollMs ?? RESUME_WATCH_POLL_MS
+  let attempts = 0
+  const tick = (): void => {
+    let action: 'dismiss' | 'ready' | 'wait' = 'wait'
+    try {
+      action = decideResumeMenuAction(capturePane(session))
+    } catch (err) {
+      logger.warn({ err, session }, 'resume-menu watch: pane capture/decide failed')
+    }
+    if (action === 'dismiss') {
+      try {
+        execFileSync(TMUX, ['send-keys', '-t', session, '1'], { timeout: 5000 })
+        execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
+        execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+        logger.info({ session }, 'resume-menu watch: answered resume-from-summary -> 1')
+      } catch (err) {
+        logger.warn({ err, session }, 'resume-menu watch: failed to send dismiss')
+      }
+      // Keep polling: confirm the menu cleared and the prompt becomes ready.
+    } else if (action === 'ready') {
+      onSettled()
+      return
+    }
+    attempts++
+    if (attempts >= maxAttempts) {
+      onSettled()
+      return
+    }
+    setTimeout(tick, pollMs)
+  }
+  setTimeout(tick, 0)
 }
 
 // Post-(re)start identity setup. Every freshly spawned Claude Code session is
