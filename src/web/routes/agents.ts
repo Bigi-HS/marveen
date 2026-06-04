@@ -81,6 +81,7 @@ import {
 } from '../agent-process.js'
 import { addDesiredAgent, removeDesiredAgent } from '../agent-desired-state.js'
 import { readActiveModelFromProjectDir, readContextTokensFromProjectDir } from '../active-model.js'
+import { collectFleetHealth } from '../agent-health.js'
 import { detectPaneState } from '../../pane-state.js'
 import { detectReauthNeeded } from '../reauth-detect.js'
 import { readAutoRestartConfig, writeAutoRestartConfig } from '../auto-restart-store.js'
@@ -447,6 +448,18 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     }
 
     json(res, entries)
+    return true
+  }
+
+  // Fleet health board: one read-only record per agent (main orchestrator
+  // first) combining alive / last-progress / last-inbound / last-restart /
+  // live-context / channel-state / cumulative-token-usage, plus a derived
+  // status (stopped | idle | active | stalled). Matched as a literal path
+  // BEFORE the /api/agents/:name param route below so "health" is not parsed
+  // as an agent name. Polled by the dashboard; reuses the same transcript and
+  // token-usage readers the rest of the app already relies on.
+  if (path === '/api/agents/health' && method === 'GET') {
+    json(res, collectFleetHealth())
     return true
   }
 
