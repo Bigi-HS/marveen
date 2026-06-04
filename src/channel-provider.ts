@@ -425,3 +425,19 @@ export function readChannelToken(provider: ChannelProviderType, envFilePath: str
   const match = content.match(new RegExp(`${key}=(.+)`))
   return match ? match[1].trim() : null
 }
+
+// Pure decision: given the `enabledPlugins` map from a Claude Code settings.json
+// and a channel provider, is that provider's plugin intentionally enabled?
+//
+// Plugin keys are namespaced (`telegram@claude-plugins-official`,
+// `slack-channel@marveen-marketplace`, `discord@claude-plugins-official`), so we
+// match on the provider prefix. A missing/empty map means no channel plugin is
+// enabled -> false. Shared by agent-process (channel-monitor recovery gate) and
+// agent-preflight so the two stay in lockstep without duplicating the logic.
+export function channelIntentFromEnabledPlugins(
+  enabledPlugins: Record<string, unknown> | null | undefined,
+  provider: ChannelProviderType,
+): boolean {
+  if (enabledPlugins == null) return false
+  return Object.entries(enabledPlugins).some(([k, v]) => k.startsWith(provider) && v === true)
+}

@@ -15,7 +15,7 @@ import { existsSync, lstatSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { logger } from '../logger.js'
 import { CHANNEL_PROVIDER } from '../config.js'
-import { channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
+import { channelStateDir, readChannelToken, channelIntentFromEnabledPlugins, type ChannelProviderType } from '../channel-provider.js'
 import {
   agentDir,
   readAgentModel,
@@ -139,22 +139,23 @@ export function gatherPreflightFacts(name: string): PreflightFacts {
   const chanDir = channelStateDir(provider, dir)
   const hasToken = !!readChannelToken(provider, join(chanDir, '.env'))
 
-  // Mirrors agent-process.isAgentChannelIntentionallyEnabled: the config-dir
-  // settings.json (channel-neutral by construction) is the source of truth for
-  // channel INTENT; a bare token file is not. Kept in sync by the
-  // channel-token-without-intent finding above + the contract test.
+  // Mirrors agent-process.isAgentChannelIntentionallyEnabled: the agent's LAUNCH
+  // settings (<dir>/.claude/settings.json) are the source of truth for channel
+  // INTENT, NOT the channel-neutral .claude-config copy (whose plugin keys are
+  // stripped, so it reported false for every config-dir agent). A bare token
+  // file is not intent. Shares channelIntentFromEnabledPlugins with agent-process
+  // so the two cannot drift.
   let channelIntentEnabled = false
-  const cfgSettings = join(canonical, 'settings.json')
-  if (existsSync(cfgSettings)) {
+  const launchSettings = join(dir, '.claude', 'settings.json')
+  if (existsSync(launchSettings)) {
     try {
-      const parsed = JSON.parse(readFileSync(cfgSettings, 'utf-8'))
-      const ep = parsed?.enabledPlugins as Record<string, unknown> | undefined
-      channelIntentEnabled = ep == null ? false : Object.entries(ep).some(([k, v]) => k.startsWith(provider) && v === true)
+      const parsed = JSON.parse(readFileSync(launchSettings, 'utf-8'))
+      channelIntentEnabled = channelIntentFromEnabledPlugins(parsed?.enabledPlugins as Record<string, unknown> | undefined, provider)
     } catch {
       channelIntentEnabled = false
     }
   } else {
-    // Pre-config-dir agent: fall back to token presence, matching agent-process.
+    // Never-launched agent: fall back to token presence, matching agent-process.
     channelIntentEnabled = hasToken
   }
 
