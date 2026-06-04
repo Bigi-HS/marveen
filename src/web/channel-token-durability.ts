@@ -71,7 +71,13 @@ export function restoreChannelEnv(
   vault: SecretVault = realVault,
 ): boolean {
   try {
-    if (existsSync(envPath)) return false
+    // An existing .env with REAL content is authoritative -- skip restore. But an
+    // empty/whitespace .env (a half-write or a botched provision) is not a live
+    // token, so fall through and re-materialise from the vault. existsSync alone
+    // would leave such a file in place and the channel stays silent (Thor T2).
+    // Mirrors the empty-guard shouldUpdateBackup already applies on the backup side.
+    const current = existsSync(envPath) ? readFileSync(envPath, 'utf-8') : null
+    if (current != null && current.trim().length > 0) return false
     const content = vault.get(channelEnvVaultId(name, provider))
     if (content == null || content.trim().length === 0) return false
     mkdirSync(dirname(envPath), { recursive: true })
