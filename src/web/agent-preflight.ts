@@ -154,10 +154,11 @@ export function gatherPreflightFacts(name: string): PreflightFacts {
     } catch {
       channelIntentEnabled = false
     }
-  } else {
-    // Never-launched agent: fall back to token presence, matching agent-process.
-    channelIntentEnabled = hasToken
   }
+  // No launch settings.json (or unreadable) -> intent stays false, matching
+  // agent-process: a bare token is not intent (Thor T3). This also makes the
+  // channel-token-without-intent preflight finding fire on an orphan token,
+  // surfacing exactly the ambiguous state instead of masking it.
 
   const modelId = readAgentModel(name)
 

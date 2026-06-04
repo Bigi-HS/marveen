@@ -61,8 +61,15 @@ describe('isAgentChannelIntentionallyEnabled -- source contract', () => {
     expect(fnBody).toMatch(/channelIntentFromEnabledPlugins\(/)
   })
 
-  it('falls back to agentHasChannel when no launch settings.json exists', () => {
-    expect(AGENT_PROC_SRC).toMatch(/return agentHasChannel\(name\)/)
+  it('returns false (NOT token-presence) when no launch settings.json exists (Thor T3)', () => {
+    // A bare token is not intent: the fallback must be `return false`, not
+    // `return agentHasChannel(name)`, so an orphan-token never-launched agent
+    // cannot trip the channel monitor into a false recovery / death-loop.
+    const fnIdx = AGENT_PROC_SRC.indexOf('export function isAgentChannelIntentionallyEnabled')
+    const fnEnd = AGENT_PROC_SRC.indexOf('\nexport ', fnIdx + 1)
+    const fnBody = AGENT_PROC_SRC.slice(fnIdx, fnEnd > fnIdx ? fnEnd : fnIdx + 1500)
+    expect(fnBody).not.toMatch(/return agentHasChannel\(name\)/)
+    expect(fnBody).toMatch(/return false/)
   })
 })
 

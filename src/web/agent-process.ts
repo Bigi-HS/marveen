@@ -132,8 +132,13 @@ export function agentHasChannel(name: string): boolean {
  * it reported `false` for EVERY config-dir agent and silently disabled channel
  * recovery fleet-wide (the ed2525f1 gap). The launch settings carry the intent.
  *
- * Falls back to agentHasChannel() (token presence) only when no launch
- * settings.json exists yet (never-launched / pre-config agent).
+ * When the launch settings.json is absent or unreadable we return FALSE, not
+ * token-presence: a bare token file is NOT intent. Treating an orphan token as
+ * intent reintroduces the exact death-loop / false-reconnect we guard against
+ * (Thor T3) -- the channel monitor would try to recover a channel that was never
+ * actually brought up. A genuinely channel-enabled agent always has its plugin
+ * enabled in .claude/settings.json (the launcher writes it on every launch), so
+ * "no confirmable intent" safely resolves to "not enabled".
  */
 export function isAgentChannelIntentionallyEnabled(name: string): boolean {
   const provider = resolveAgentProvider(name)
@@ -143,10 +148,11 @@ export function isAgentChannelIntentionallyEnabled(name: string): boolean {
     try {
       const parsed = JSON.parse(readFileSync(launchSettings, 'utf-8'))
       return channelIntentFromEnabledPlugins(parsed?.enabledPlugins as Record<string, unknown> | undefined, provider)
-    } catch { /* fall through */ }
+    } catch { /* unreadable -> cannot confirm intent -> false */ }
   }
-  // No launch settings.json yet: fall back to token presence.
-  return agentHasChannel(name)
+  // No (or unreadable) launch settings.json: cannot confirm intent. A bare token
+  // file is not intent (orphan-token death-loop guard, Thor T3).
+  return false
 }
 
 export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}): { ok: boolean; pid?: number; error?: string } {
