@@ -26,7 +26,7 @@ import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
 import { notifyChannel } from '../notify.js'
 import { getProvider, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import { attemptChannelMcpReconnect } from './channel-mcp-reconnect.js'
-import { readLastIngestionTimestamp, TRANSCRIPT_DIR } from './inbound-probe.js'
+import { readLastIngestionTimestamp, readLastAssistantTimestamp, TRANSCRIPT_DIR } from './inbound-probe.js'
 import { shouldAutoRestartDownAgent, parseEtimeToSeconds } from './agent-restart-policy.js'
 // getClaudePidForSession + hasChannelPluginAlive live in the shared liveness
 // module so the standalone channel-coordinator reuses the exact same probe.
@@ -529,6 +529,106 @@ function checkMainKeepaliveStaleness(): void {
   }
 }
 
+// --- Main-session STALL watchdog (queued-input-but-no-progress, decision #1) ---
+//
+// The 2026-06-03 incident: marveen-channels stopped processing for 10h+. Dominik's
+// messages 19:15-22:14 were INGESTED into the transcript (queued) but never acted
+// on -- no crash, no 429, a pure STALL (hung MCP pipe / input-queue wedge). Every
+// existing detector missed it because they all key off "is inbound arriving / is
+// the poller alive", which were ALL TRUE during the stall:
+//   - keepalive staleness: refreshKeepaliveFromInbound advanced the file to the
+//     last INGESTED inbound ts -> looked fresh.
+//   - plugin liveness: the bun poller was alive (receiving) -> "quiet conversation".
+//   - inbound-probe: ingestion WAS happening (real msgs) -> not "deaf".
+// The missing signal is whether the agent is PROCESSING: a healthy session appends
+// `assistant` transcript entries as a turn produces output; a stalled one does not.
+// So compare last-inbound-ingestion vs last-assistant-activity: inbound newer than
+// the last assistant turn by > threshold = queued-but-no-progress = STALL.
+//
+// Threshold 10 min (Dominik 2026-06-04): a legitimate long reasoning turn does not
+// false-positive, the 10h void recovers within ~10 min, and it sits under the 18-min
+// keepalive net. Recovery = context-PRESERVING `--continue` respawn (resumeMarveenSession);
+// the transcript is replayed so the conversation survives -- no cooperation needed
+// from the wedged session (a memory-save prompt would never be processed in a stall).
+const STALL_THRESHOLD_MS = 10 * 60 * 1000
+// Token-awareness (decision #2): if the stall is rate-limit/no-token driven, a
+// respawn won't help and we must not hammer. Enforce a 30-min minimum between
+// stall recoveries; when the token returns, the session comes back on a respawn
+// and the heartbeat recovery routine (memory-heartbeat SKILL) re-engages.
+const STALL_RECOVERY_BACKOFF_MS = 30 * 60 * 1000
+let marveenLastStallRecovery = 0
+
+/**
+ * Pure decision: should the main session be recovered for a queued-input stall?
+ *
+ * Stall = inbound has been ingested but no assistant turn has advanced past it,
+ * and that has held longer than the threshold. Guards:
+ *   - no inbound recorded -> nothing queued -> false
+ *   - last assistant activity is at/after the last inbound -> already progressed -> false
+ *   - inbound newer than threshold ago is not yet a stall -> false
+ *   - within a recent main-session respawn's cold-start window -> false (booting)
+ *   - within the stall-recovery backoff -> false (don't hammer a 429/no-token stall)
+ *
+ * Pure + exported so the incident timeline and every false-positive guard are
+ * unit-tested without touching tmux or the transcript.
+ */
+export function shouldRecoverStalledQueue(opts: {
+  lastInboundTs: number | null
+  lastProgressTs: number | null
+  stallThresholdMs: number
+  nowMs: number
+  msSinceLastMainRespawn: number | null
+  respawnGraceMs: number
+  msSinceLastStallRecovery: number | null
+  stallBackoffMs: number
+}): boolean {
+  const {
+    lastInboundTs, lastProgressTs, stallThresholdMs, nowMs,
+    msSinceLastMainRespawn, respawnGraceMs, msSinceLastStallRecovery, stallBackoffMs,
+  } = opts
+  if (lastInboundTs == null) return false
+  if (lastProgressTs != null && lastProgressTs >= lastInboundTs) return false
+  if (nowMs - lastInboundTs < stallThresholdMs) return false
+  if (msSinceLastMainRespawn != null && msSinceLastMainRespawn < respawnGraceMs) return false
+  if (msSinceLastStallRecovery != null && msSinceLastStallRecovery < stallBackoffMs) return false
+  return true
+}
+
+// Side-effecting: detect a main-session queued-input stall and, when confirmed,
+// alert + context-preserving --continue respawn. Called from the monitor tick
+// only on the "plugin alive" main-session branch -- exactly the state the stall
+// hides in (plugin up, session not processing). Read-only until the decision
+// fires, so a healthy session is never disturbed.
+function checkMainSessionStall(): void {
+  const now = Date.now()
+  const lastInboundTs = readLastIngestionTimestamp(TRANSCRIPT_DIR)
+  const lastProgressTs = readLastAssistantTimestamp(TRANSCRIPT_DIR)
+  const lastRespawn = lastMainRespawnAt()
+  const recover = shouldRecoverStalledQueue({
+    lastInboundTs,
+    lastProgressTs,
+    stallThresholdMs: STALL_THRESHOLD_MS,
+    nowMs: now,
+    msSinceLastMainRespawn: lastRespawn ? now - lastRespawn : null,
+    respawnGraceMs: MARVEEN_POST_RESPAWN_GRACE_MS,
+    msSinceLastStallRecovery: marveenLastStallRecovery ? now - marveenLastStallRecovery : null,
+    stallBackoffMs: STALL_RECOVERY_BACKOFF_MS,
+  })
+  if (!recover) return
+  const stalledMin = Math.round((now - (lastInboundTs as number)) / 60000)
+  logger.warn(
+    { lastInboundTs, lastProgressTs, stalledMin },
+    'Main session STALLED: inbound queued but no assistant progress -- context-preserving --continue respawn',
+  )
+  sendAlert(`⚠️ A fő session ${stalledMin} perce nem dolgozza fel a beérkezett üzeneteket (queued, de nincs progress). Context-megőrző --continue respawn most a ${MAIN_CHANNELS_SESSION} session-on...`)
+  if (resumeMarveenSession()) {
+    marveenLastStallRecovery = now
+    // Fold into the cross-path grace so the keepalive / down / inbound-probe
+    // paths all defer during this respawn's cold start (no restart stacking).
+    marveenLastHardRestart = now
+  }
+}
+
 function sendAlert(text: string): void {
   notifyChannel(text).catch(() => {})
 }
@@ -735,6 +835,11 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           // Process-alive does NOT prove the inbound MCP pipe is healthy (the
           // deafness blind spot). Cross-check the keep-alive freshness.
           checkMainKeepaliveStaleness()
+          // Plugin-alive + pipe-fresh STILL does not prove the agent is
+          // PROCESSING. The 10h-outage blind spot: inbound queued in the
+          // transcript while no assistant turn advances. Detect that and
+          // recover with a context-preserving --continue respawn.
+          checkMainSessionStall()
         } else if (agentDownSince.has(t.session)) {
           logger.info({ session: t.session, provider: t.provider }, 'Agent channel plugin recovered')
           agentDownSince.delete(t.session)

@@ -176,6 +176,83 @@ export function readLastIngestionTimestamp(transcriptDir: string): number | null
   }
 }
 
+/**
+ * Scan the newest JSONL session file for the most recent ASSISTANT activity,
+ * i.e. the last line whose top-level `type` is "assistant". Returns its
+ * timestamp (ms since epoch), or null if none found.
+ *
+ * This is the "progress" signal for the main-session stall detector: a healthy
+ * session that is actually working appends assistant entries (text + tool_use)
+ * as a turn produces output. A session that has stopped processing -- inbound
+ * still being ingested into the transcript while no assistant turn follows --
+ * is the 10h-outage blind spot that every existing "is inbound arriving / is
+ * the poller alive" check misses (they were all true during the stall).
+ *
+ * Same tail-read + PII-safety contract as readLastIngestionTimestamp: only the
+ * extracted timestamp is ever returned/logged, never line contents.
+ */
+export function readLastAssistantTimestamp(transcriptDir: string): number | null {
+  try {
+    if (!existsSync(transcriptDir)) return null
+    const entries = readdirSync(transcriptDir).filter(f => f.endsWith('.jsonl'))
+    if (entries.length === 0) return null
+
+    let newestFile = ''
+    let newestMtime = 0
+    for (const entry of entries) {
+      const fullPath = join(transcriptDir, entry)
+      try {
+        const st = statSync(fullPath)
+        if (st.mtimeMs > newestMtime) {
+          newestMtime = st.mtimeMs
+          newestFile = fullPath
+        }
+      } catch {
+        // file disappeared between readdir and stat — skip
+      }
+    }
+    if (!newestFile) return null
+
+    // Tail-read only the last 256 KB (mirrors readLastIngestionTimestamp) so a
+    // multi-hundred-MB transcript never blocks the event loop.
+    const TAIL_BYTES = 262144
+    const fd = openSync(newestFile, 'r')
+    let rawText: string
+    try {
+      const fileSize = statSync(newestFile).size
+      const readOffset = Math.max(0, fileSize - TAIL_BYTES)
+      const readLength = fileSize - readOffset
+      const buf = Buffer.allocUnsafe(readLength)
+      readSync(fd, buf, 0, readLength, readOffset)
+      rawText = buf.toString('utf-8')
+    } finally {
+      closeSync(fd)
+    }
+
+    const firstNewline = rawText.indexOf('\n')
+    const trimmed = firstNewline > 0 ? rawText.slice(firstNewline + 1) : rawText
+    const lines = trimmed.split('\n')
+    let lastTs: number | null = null
+    for (const line of lines) {
+      // Cheap pre-filter before JSON.parse: skip lines that are not assistant
+      // entries. The transcript also carries user/system/queue-operation lines.
+      if (!line.includes('"type":"assistant"')) continue
+      try {
+        const obj = JSON.parse(line) as { type?: string; timestamp?: string }
+        if (obj.type === 'assistant' && typeof obj.timestamp === 'string') {
+          const ts = new Date(obj.timestamp).getTime()
+          if (Number.isFinite(ts)) lastTs = ts
+        }
+      } catch {
+        // malformed line — skip, do not abort
+      }
+    }
+    return lastTs
+  } catch {
+    return null
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Prober lifecycle
 // ---------------------------------------------------------------------------
