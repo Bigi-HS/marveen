@@ -560,6 +560,63 @@ export function identitySlashCommands(displayName: string): string[] {
 // reliably ready ~5s after that.
 const MODAL_DISMISS_DELAY_MS = 8000
 const IDENTITY_SEND_DELAY_MS = 5000
+// Resume-menu poll cadence (A6): a large/old session can render the "Resume from
+// summary" modal seconds AFTER launch -- well past the fixed MODAL_DISMISS_DELAY_MS
+// one-shot, which then missed it and left the session wedged behind the modal.
+// We poll (mirroring the watchdog answer_resume_prompt loop, now first-class in the
+// launcher) until the modal is answered or the active prompt is up.
+const RESUME_POLL_INTERVAL_MS = 2000
+const RESUME_POLL_MAX_ATTEMPTS = 20 // ~40s window, matches the watchdog
+
+// Pure: decide what the resume-menu poller should do for a captured pane.
+//   'answer-resume' -- the "Resume from summary" modal is up; pick 1 + Enter
+//   'ready'         -- the active prompt footer is up (detectPaneState idle); done
+//   'wait'          -- neither yet; keep polling
+// Resume takes precedence: if the modal is up we must answer it even if a stale
+// footer is also visible in scrollback.
+export function classifyResumePane(pane: string): 'answer-resume' | 'ready' | 'wait' {
+  if (RESUME_SUMMARY_MODAL_RX.test(pane)) return 'answer-resume'
+  if (detectPaneState(pane) === 'idle') return 'ready'
+  return 'wait'
+}
+
+// Background, non-blocking, bounded poll that answers the resume-from-summary
+// modal whenever it renders and resolves once the prompt is ready. Fire-and-
+// forget (recursive setTimeout); errors are swallowed so a miss never tears down
+// the caller. onReady fires on the active prompt or after the attempt budget.
+function answerResumeMenuWhenReady(session: string, onReady: () => void, attempt = 0): void {
+  if (attempt >= RESUME_POLL_MAX_ATTEMPTS) {
+    logger.warn({ session, attempts: attempt }, 'resume-menu poll: neither modal nor active prompt within window; proceeding')
+    onReady()
+    return
+  }
+  let pane: string | null = null
+  try {
+    pane = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
+  } catch {
+    // session likely gone; nothing more to do
+    onReady()
+    return
+  }
+  const decision = classifyResumePane(pane)
+  if (decision === 'ready') {
+    if (attempt > 0) logger.info({ session, attempt }, 'resume-menu poll: active prompt ready')
+    onReady()
+    return
+  }
+  if (decision === 'answer-resume') {
+    try {
+      execFileSync(TMUX, ['send-keys', '-t', session, '1'], { timeout: 5000 })
+      execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
+      execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+      logger.info({ session, attempt }, 'resume-menu poll: answered Resume-from-summary (1)')
+    } catch (err) {
+      logger.warn({ err, session }, 'resume-menu poll: answer send failed')
+    }
+    // keep polling: the modal -> /compact -> prompt transition takes a beat.
+  }
+  setTimeout(() => answerResumeMenuWhenReady(session, onReady, attempt + 1), RESUME_POLL_INTERVAL_MS)
+}
 
 // Schedule the identity setup for a freshly (re)spawned session: once it has
 // had time to render, dismiss any first-run/resume modals, then send `/name`.
@@ -571,21 +628,25 @@ export function scheduleIdentitySetup(session: string, displayName: string): voi
   setTimeout(() => {
     try {
       dismissSurveyModalIfPresent(session)
-      dismissResumeSummaryModalIfPresent(session)
     } catch (err) {
-      logger.warn({ err, session }, 'Post-restart modal dismiss failed')
+      logger.warn({ err, session }, 'Post-restart survey-modal dismiss failed')
     }
-    setTimeout(() => {
-      try {
-        for (const cmd of identitySlashCommands(displayName)) {
-          execFileSync(TMUX, ['send-keys', '-t', session, cmd, 'Enter'], { timeout: 5000 })
-          execFileSync('/bin/sleep', ['1'], { timeout: 2000 })
+    // A6: poll for the resume-from-summary menu (which can render late on a
+    // large/old session, past the old fixed one-shot) and answer it, then send
+    // identity once the prompt is actually ready -- not at a blind fixed delay.
+    answerResumeMenuWhenReady(session, () => {
+      setTimeout(() => {
+        try {
+          for (const cmd of identitySlashCommands(displayName)) {
+            execFileSync(TMUX, ['send-keys', '-t', session, cmd, 'Enter'], { timeout: 5000 })
+            execFileSync('/bin/sleep', ['1'], { timeout: 2000 })
+          }
+          logger.info({ session, displayName }, 'Set session /name')
+        } catch (err) {
+          logger.warn({ err, session, displayName }, 'Failed to set session /name')
         }
-        logger.info({ session, displayName }, 'Set session /name')
-      } catch (err) {
-        logger.warn({ err, session, displayName }, 'Failed to set session /name')
-      }
-    }, IDENTITY_SEND_DELAY_MS)
+      }, IDENTITY_SEND_DELAY_MS)
+    })
   }, MODAL_DISMISS_DELAY_MS)
 }
 
