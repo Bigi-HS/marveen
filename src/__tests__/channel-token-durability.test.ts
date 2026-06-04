@@ -87,6 +87,22 @@ describe('backupChannelEnv / restoreChannelEnv', () => {
     expect(readFileSync(envPath, 'utf-8')).toBe('TELEGRAM_BOT_TOKEN=live\n')
   })
 
+  it('Thor T2: restores when the existing .env is empty/whitespace (half-write)', () => {
+    mkdirSync(join(root, '.claude', 'channels', 'telegram'), { recursive: true })
+    writeFileSync(envPath, '   \n')  // present but no real content -> channel silent
+    const id = channelEnvVaultId('dave', 'telegram')
+    const v = fakeVault({ [id]: 'TELEGRAM_BOT_TOKEN=secret123\n' })
+    expect(restoreChannelEnv('dave', 'telegram', envPath, v)).toBe(true)
+    expect(readFileSync(envPath, 'utf-8')).toBe('TELEGRAM_BOT_TOKEN=secret123\n')
+  })
+
+  it('Thor T2: empty existing .env with no vault backup stays a no-op', () => {
+    mkdirSync(join(root, '.claude', 'channels', 'telegram'), { recursive: true })
+    writeFileSync(envPath, '')
+    const v = fakeVault()
+    expect(restoreChannelEnv('dave', 'telegram', envPath, v)).toBe(false)
+  })
+
   it('restore is a no-op when the vault has no backup', () => {
     const v = fakeVault()
     expect(restoreChannelEnv('dave', 'telegram', envPath, v)).toBe(false)
