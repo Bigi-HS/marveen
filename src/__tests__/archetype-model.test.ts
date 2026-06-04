@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   ARCHETYPE_MODEL,
+  MODEL_ALIASES,
   modelForArchetype,
   resolveAgentModelFromConfig,
   resolveModelId,
@@ -43,8 +44,10 @@ describe('modelForArchetype', () => {
     for (const [arch, alias] of Object.entries(ARCHETYPE_MODEL)) {
       const id = modelForArchetype(arch)
       expect(id, arch).toBe(resolveModelId(alias))
-      // resolved id must not itself still be an alias key
-      expect(Object.keys(ARCHETYPE_MODEL)).not.toContain(id)
+      // the resolved id must be a FINAL model id, not still a MODEL_ALIASES key
+      // (i.e. resolveModelId fully resolved it, no second indirection). Thor F1:
+      // this previously checked ARCHETYPE_MODEL keys, which passed by accident.
+      expect(Object.keys(MODEL_ALIASES)).not.toContain(id)
     }
   })
 })
@@ -69,5 +72,13 @@ describe('resolveAgentModelFromConfig (precedence)', () => {
   })
   it('unknown archetype with no model -> DEFAULT_MODEL', () => {
     expect(resolveAgentModelFromConfig({ archetype: 'wizard' })).toBe(DEFAULT_MODEL)
+  })
+
+  // Thor F4: a non-string `model` (e.g. a number from a hand-edited config) must
+  // be ignored, not coerced, so resolution falls through to archetype / default.
+  it('non-string model is ignored -> archetype, else DEFAULT_MODEL', () => {
+    expect(resolveAgentModelFromConfig({ model: 42 as unknown as string, archetype: 'monitor' }))
+      .toBe(resolveModelId('haiku'))
+    expect(resolveAgentModelFromConfig({ model: 42 as unknown as string })).toBe(DEFAULT_MODEL)
   })
 })
