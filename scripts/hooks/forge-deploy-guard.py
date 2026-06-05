@@ -2,6 +2,14 @@
 """PreToolUse hook (Bash): blocks dashboard restart commands unless Genesis-GO
 marker is present (store/.genesis-go). Prevents accidental live deploys.
 
+Covered patterns (conscious scope -- all paths that restart the dashboard):
+  - tmux send-keys ... dist/index.js  (fleet-deploy-verify path)
+  - node dist/index.js                (direct invocation)
+  - bun run dist/index.js             (bun direct)
+  - dashboard.*restart                (any generic restart label)
+
+NOT covered: kill/pkill alone (no restart implied), npm run dev (dev server).
+
 Exit 0 = allow. Exit 2 = block (Claude Code shows the reason to the agent).
 """
 import sys
@@ -10,7 +18,9 @@ import json
 import re
 
 RESTART_PATTERN = re.compile(
-    r'tmux\s+send.*(dist/index\.js|dashboard.*restart)',
+    r'(tmux\s+send.*dist/index\.js'
+    r'|(?:node|bun\s+run)\s+dist/index\.js'
+    r'|dashboard.*restart)',
     re.IGNORECASE,
 )
 

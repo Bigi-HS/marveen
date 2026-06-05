@@ -39,7 +39,7 @@ def main():
     if not matches:
         sys.exit(0)
 
-    cmd = (payload.get("tool_input") or {}).get("command", "")[:120]
+    cmd = (payload.get("tool_input") or {}).get("command", "")[:120].replace("\n", "\\n")
     ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     tags = list(dict.fromkeys(m.lower() for m in matches))
 
