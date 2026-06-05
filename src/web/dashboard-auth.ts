@@ -35,3 +35,20 @@ export function checkBearerToken(header: string | undefined, expected: string): 
   if (provided.length !== wanted.length) return false
   return timingSafeEqual(provided, wanted)
 }
+
+// Operator-facing access instructions printed on startup. SECURITY: the URL must
+// NOT carry the token. A URL with ?token=<root-equivalent-credential> leaks into
+// shell history, server/proxy access logs, the browser address bar and referrers.
+// We print a tokenless URL and the token on its OWN line; the UI prompts for it
+// and stores it client-side (the dashboard still strips a legacy ?token= too).
+export function buildDashboardAccessMessage(port: number, token: string): string {
+  return [
+    '',
+    'Dashboard access:',
+    `  1. Open in your browser:  http://127.0.0.1:${port}/`,
+    '  2. When prompted, paste this access token:',
+    `     ${token}`,
+    '',
+    '',
+  ].join('\n')
+}

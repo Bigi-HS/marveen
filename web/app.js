@@ -1,8 +1,9 @@
 // === Dashboard auth bootstrap ===
-// The server prints an URL like http://127.0.0.1:3420/?token=XXX on startup.
-// On first visit we pluck the token out of the URL, store it in localStorage,
-// strip it from the visible URL, and then inject it into every /api/* fetch
-// as a Bearer header so the server lets us through.
+// The server prints a TOKENLESS URL plus the access token on its own line. On a
+// 401 we prompt the operator to paste that token; it is stored in localStorage
+// and injected into every /api/* fetch as a Bearer header. A legacy ?token=XXX
+// URL is still accepted for backward compat -- we pluck it out and immediately
+// strip it from the visible URL so it never lingers in history.
 (() => {
   const TOKEN_KEY = 'marveen-dashboard-token'
   const urlParams = new URLSearchParams(window.location.search)
@@ -33,14 +34,19 @@
     }
     const res = await originalFetch(input, init)
     if (res.status === 401 && isSameOriginApi) {
-      // Token missing, wrong, or revoked. Wipe and prompt once per page load.
+      // Token missing, wrong, or revoked. Prompt the operator to paste it -- the
+      // server prints the token on its own line; it is no longer in the URL.
       localStorage.removeItem(TOKEN_KEY)
       if (!window.__marveenAuthPrompted) {
         window.__marveenAuthPrompted = true
-        alert(
-          'Dashboard authentication failed. Check the server log for the access URL ' +
-          '(look for "Dashboard access URL" with ?token=...), then reopen it in your browser.'
+        const entered = window.prompt(
+          'Dashboard access token required.\n' +
+          'Paste the token from the server log ("Dashboard access" → access token):'
         )
+        if (entered && entered.trim()) {
+          localStorage.setItem(TOKEN_KEY, entered.trim())
+          location.reload()
+        }
       }
     }
     return res

@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL } from './config.js'
-import { loadOrCreateDashboardToken, checkBearerToken } from './web/dashboard-auth.js'
+import { loadOrCreateDashboardToken, checkBearerToken, buildDashboardAccessMessage } from './web/dashboard-auth.js'
 import { json } from './web/http-helpers.js'
 import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
 import { ensureAgentHooks, ensureDefaultScheduledTasks } from './web/agent-scaffold.js'
@@ -219,12 +219,10 @@ export function startWebServer(port = 3420): http.Server {
     logger.info({ port }, `Web dashboard: http://localhost:${port}`)
     // Do NOT log the bearer token: launchd/journal/pipe captures of the
     // structured log would otherwise carry a root-equivalent credential.
-    // Print the bootstrap URL directly to stderr instead so it shows in the
-    // interactive terminal but does not land in the pino log stream.
-    const bootstrapUrl = `http://127.0.0.1:${port}/?token=${DASHBOARD_TOKEN}`
-    process.stderr.write(
-      `\nDashboard access URL (paste into browser, token is stored afterward):\n  ${bootstrapUrl}\n\n`
-    )
+    // Print the access instructions to stderr (interactive terminal only, not the
+    // pino stream). The token is on its OWN line and never in the URL, so a
+    // pasted/logged URL cannot leak the credential.
+    process.stderr.write(buildDashboardAccessMessage(port, DASHBOARD_TOKEN))
   })
 
   const routerInterval = startMessageRouter()
