@@ -9,6 +9,9 @@ Covered patterns (conscious scope -- all paths that restart the dashboard):
   - dashboard.*restart                (any generic restart label)
 
 NOT covered: kill/pkill alone (no restart implied), npm run dev (dev server).
+Known false-positive (A4, harmless): env var names like DASHBOARD_RESTART=1 in a
+  command string match the dashboard.*restart arm and cause a false-block. This is
+  an unrealistic pattern in real Forge workflows; accepted as a conscious trade-off.
 
 Exit 0 = allow. Exit 2 = block (Claude Code shows the reason to the agent).
 """
