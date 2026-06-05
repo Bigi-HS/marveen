@@ -107,17 +107,34 @@ export function readAgentModel(name: string): string {
   }
 }
 
+// Pure: normalise an archetype input to canonical form (trimmed, lowercased), or
+// null when empty/blank/non-string (which clears the override). Shared by the
+// reader and writer so they cannot drift.
+export function normalizeArchetypeInput(raw: unknown): string | null {
+  return typeof raw === 'string' && raw.trim() ? raw.trim().toLowerCase() : null
+}
+
 // The agent's archetype (workload class), or null when unset. Drives the model
-// right-sizing default (ARCHETYPE_MODEL) and can be surfaced on the dashboard.
+// right-sizing default (ARCHETYPE_MODEL) and is surfaced on the dashboard.
 export function readAgentArchetype(name: string): string | null {
   const configPath = join(agentDir(name), 'agent-config.json')
   try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    const a = config.archetype
-    return typeof a === 'string' && a.trim() ? a.trim().toLowerCase() : null
+    return normalizeArchetypeInput(JSON.parse(readFileOr(configPath, '{}')).archetype)
   } catch {
     return null
   }
+}
+
+// Set (or clear) the agent's archetype. An empty/blank value removes the override
+// so model resolution falls back to the explicit model / DEFAULT_MODEL.
+export function writeAgentArchetype(name: string, archetype: string): void {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  let config: Record<string, unknown> = {}
+  try { config = JSON.parse(readFileOr(configPath, '{}')) } catch {}
+  const a = normalizeArchetypeInput(archetype)
+  if (a) config.archetype = a
+  else delete config.archetype
+  atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
 }
 
 export function writeAgentModel(name: string, model: string): void {
