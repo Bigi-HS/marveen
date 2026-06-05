@@ -7,6 +7,7 @@ import {
 import { logger } from '../../logger.js'
 import { COORDINATOR_AGENT_ID } from '../../channel-coordinator/ingest.js'
 import { sanitizeAgentIdent } from '../../prompt-safety.js'
+import { aiDefenceGuard } from '../../aidefence-guard.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
 
@@ -39,6 +40,21 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       logger.warn({ from: from.trim(), to: to.trim() }, 'Rejected /api/messages POST forging channel-coordinator id')
       json(res, { error: 'from is reserved for the in-process channel coordinator' }, 403)
       return true
+    }
+    const guard = aiDefenceGuard(from.trim(), content.trim())
+    if (guard.verdict === 'BLOCK') {
+      logger.warn(
+        { from: from.trim(), to: to.trim(), findings: guard.findings },
+        'AIDefence: message BLOCKED',
+      )
+      json(res, { error: 'Message blocked by AIDefence security guard', findings: guard.findings }, 400)
+      return true
+    }
+    if (guard.verdict === 'FLAG') {
+      logger.warn(
+        { from: from.trim(), to: to.trim(), findings: guard.findings },
+        'AIDefence: message FLAGGED (allowed through)',
+      )
     }
     const msg = createAgentMessage(from.trim(), to.trim(), content.trim())
     logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent }, 'Agent message created')
