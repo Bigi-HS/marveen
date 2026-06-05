@@ -74,6 +74,32 @@ export function needsRecovery(verdict: PipeLiveness): boolean {
 }
 
 /**
+ * Aggregate several conflict probes issued within one cycle into a single
+ * verdict, tolerant of the native long-poll's brief inter-cycle gap.
+ *
+ * The native Telegram poller issues a long getUpdates (30-50s), processes, then
+ * issues the next one; between cycles there is a sub-second-to-seconds gap. A
+ * single timeout=0 probe that lands in that gap returns a clean 200 even though
+ * the poller is perfectly healthy. So a ONE-OFF 200 must NOT be read as death.
+ *
+ * Rule:
+ *   - ANY 409 across the probes -> alive (the slot was held at least once;
+ *     a wedged/dead pipe never produces a 409).
+ *   - EVERY probe a clean 200 -> the slot was reliably free across the whole
+ *     window -> not polling (dead/wedged). A healthy long-poll spanning ~30s
+ *     cannot be absent from several probes a few seconds apart.
+ *   - anything else (network errors, mixed non-200) -> inconclusive (status 0).
+ */
+export function reduceConflictProbes(
+  results: ReadonlyArray<{ conflicted: boolean; status: number }>,
+): { conflicted: boolean; status: number } {
+  if (results.length === 0) return { conflicted: false, status: 0 }
+  if (results.some(r => r.conflicted)) return { conflicted: true, status: 409 }
+  if (results.every(r => r.status === 200)) return { conflicted: false, status: 200 }
+  return { conflicted: false, status: 0 }
+}
+
+/**
  * Escalate only after the pipe has been dead for `threshold` consecutive
  * cycles (default 2 = ~10 min at a 5-min cadence) AND we have not already
  * alerted for this outage. The anti-spam invariant: one alert per outage, no
@@ -146,6 +172,16 @@ export function formatRecoveryEvent(ev: RecoveryEvent): string {
 
 const PROJECT_ROOT = process.env.MARVEEN_ROOT ?? process.cwd()
 const PROVIDER: ChannelProviderType = 'telegram'
+
+// Conflict-probe retries within one cycle, to ride over the native poller's
+// inter-cycle gap (see reduceConflictProbes). A healthy long-poll spans ~30s,
+// so 3 probes ~2s apart will catch it in-flight at least once.
+const CONFLICT_PROBE_RETRIES = 3
+const CONFLICT_PROBE_GAP_MS = 2000
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
 
 function statePath(): string {
   return join(PROJECT_ROOT, 'store', 'telegram-pipe-watchdog.state.json')
@@ -240,14 +276,23 @@ export async function runCycle(now: number = Date.now()): Promise<CycleResult> {
   const prev = readState()
   const token = readMainToken()
 
-  // Probe presence (cheap, local) + conflict (authoritative liveness).
+  // Probe presence (cheap, local) + conflict (authoritative liveness). Probe
+  // the conflict several times so the native long-poll's brief inter-cycle gap
+  // cannot masquerade as a dead pipe (a one-off 200 is not death).
   const present = probeChannelPollerPresence(PROVIDER, undefined)
   let conflicted = false
   let probeStatus = 0
   if (token) {
-    const probe = await probeTelegramConflict(token)
-    conflicted = probe.conflicted
-    probeStatus = probe.status
+    const results: { conflicted: boolean; status: number }[] = []
+    for (let i = 0; i < CONFLICT_PROBE_RETRIES; i++) {
+      const probe = await probeTelegramConflict(token)
+      results.push({ conflicted: probe.conflicted, status: probe.status })
+      if (probe.conflicted) break // a 409 is conclusive (alive) -- stop early
+      if (i < CONFLICT_PROBE_RETRIES - 1) await sleep(CONFLICT_PROBE_GAP_MS)
+    }
+    const agg = reduceConflictProbes(results)
+    conflicted = agg.conflicted
+    probeStatus = agg.status
   }
 
   const verdict = assessPipeLiveness({ present, conflicted, probeStatus })

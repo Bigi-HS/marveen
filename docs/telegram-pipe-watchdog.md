@@ -29,6 +29,15 @@ slot is **free** (nobody is polling = dead pipe). Process presence (`bot.pid` +
 probe. A network error is **inconclusive** and never triggers action (fail-safe
 on the live orchestrator).
 
+**Poll-gap tolerance (important):** the native poller long-polls in ~30-50s
+cycles with a brief gap between them, so a *single* `timeout=0` probe can land
+in that gap and read `200` even on a healthy pipe. A lone `200` is therefore
+**not** treated as death. Each cycle probes up to 3 times ~2s apart
+(`reduceConflictProbes`): **any** `409` -> alive (stops early); only when
+**every** probe sees a free slot is the pipe declared dead. A genuine ~30s
+long-poll cannot be absent from all three probes, so this removes the
+false-positive without missing a real death.
+
 - `dead` -> drive recovery via the tested `attemptChannelMcpReconnect` (`/mcp`
   menu navigation; reads the `Status:` header, only presses Reconnect/Enable,
   **never** Disable).

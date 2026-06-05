@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import {
   assessPipeLiveness,
   needsRecovery,
+  reduceConflictProbes,
   shouldEscalate,
   nextState,
   formatRecoveryEvent,
@@ -49,6 +50,48 @@ describe('needsRecovery', () => {
     expect(needsRecovery('dead')).toBe(true)
     expect(needsRecovery('healthy')).toBe(false)
     expect(needsRecovery('inconclusive')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// reduceConflictProbes -- poll-gap tolerance across in-cycle retries
+// ---------------------------------------------------------------------------
+
+describe('reduceConflictProbes', () => {
+  it('any single 409 across the probes means alive (poll-gap tolerant)', () => {
+    // A healthy long-poll is in-flight for one probe and gone (gap) for others.
+    expect(reduceConflictProbes([
+      { conflicted: false, status: 200 },
+      { conflicted: true, status: 409 },
+      { conflicted: false, status: 200 },
+    ])).toEqual({ conflicted: true, status: 409 })
+  })
+
+  it('only declares 200 when EVERY probe saw a free slot (reliable dead)', () => {
+    expect(reduceConflictProbes([
+      { conflicted: false, status: 200 },
+      { conflicted: false, status: 200 },
+      { conflicted: false, status: 200 },
+    ])).toEqual({ conflicted: false, status: 200 })
+  })
+
+  it('a lone 200 (single probe) still maps to 200 -- the IO layer is what retries', () => {
+    expect(reduceConflictProbes([{ conflicted: false, status: 200 }])).toEqual({ conflicted: false, status: 200 })
+  })
+
+  it('mixed non-200 / network errors are inconclusive (status 0)', () => {
+    expect(reduceConflictProbes([
+      { conflicted: false, status: 200 },
+      { conflicted: false, status: 0 },
+    ])).toEqual({ conflicted: false, status: 0 })
+    expect(reduceConflictProbes([
+      { conflicted: false, status: 500 },
+      { conflicted: false, status: 0 },
+    ])).toEqual({ conflicted: false, status: 0 })
+  })
+
+  it('empty result set is inconclusive', () => {
+    expect(reduceConflictProbes([])).toEqual({ conflicted: false, status: 0 })
   })
 })
 
