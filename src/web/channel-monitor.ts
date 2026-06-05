@@ -274,6 +274,25 @@ let marveenLastHardRestart = 0
 // shares the same post-respawn grace (single source of truth).
 export const MARVEEN_POST_RESPAWN_GRACE_MS = 360_000
 
+// Pure: the most recent main-session respawn time across all three writers --
+// the keepalive path (marveenLastKeepaliveRespawn), the hard-restart/inbound path
+// (marveenLastHardRestart) and the external file-stamp watchdog. This fold is what
+// mediates "which path defers to which": whoever stamped LAST wins, and the others
+// read it back via lastMainRespawnAt() and suppress. Extracted so the combined
+// two-path defer interaction is unit-testable (Thor T6).
+export function mostRecentRespawn(keepaliveAt: number, hardRestartAt: number, fileStampAtMs: number): number {
+  return Math.max(keepaliveAt, hardRestartAt, fileStampAtMs)
+}
+
+// Pure: should a recovery path DEFER its respawn because another path (or this
+// one) respawned recently? True only when there is a prior respawn (>0) and we
+// are still inside the grace window. Both the keepalive and hard-restart paths
+// gate on this via lastMainRespawnAt(), so a respawn from EITHER path suppresses
+// the other -- this is what stops the restart-on-restart stacking (2026-06-01).
+export function shouldDeferRespawn(now: number, lastRespawnAt: number, graceMs: number): boolean {
+  return lastRespawnAt > 0 && (now - lastRespawnAt) < graceMs
+}
+
 /**
  * B2 fix: shared cross-path grace accessor.
  * Returns the wall-clock time (ms since epoch) of the most recent main-session
@@ -282,7 +301,7 @@ export const MARVEEN_POST_RESPAWN_GRACE_MS = 360_000
  * KEEPALIVE_RESPAWN_GRACE_MS of each other.
  */
 export function lastMainRespawnAt(): number {
-  return Math.max(marveenLastKeepaliveRespawn, marveenLastHardRestart, fileRespawnStampMs())
+  return mostRecentRespawn(marveenLastKeepaliveRespawn, marveenLastHardRestart, fileRespawnStampMs())
 }
 
 // Cross-LAYER coordination with the independent systemd-timer watchdog
@@ -644,7 +663,7 @@ function handleMarveenDown(): void {
   // escalation. This is what stops the restart-on-restart stacking that caused
   // the 2026-06-01 480s outage (see MARVEEN_POST_RESPAWN_GRACE_MS).
   const lastRespawn = lastMainRespawnAt()
-  if (lastRespawn && now - lastRespawn < MARVEEN_POST_RESPAWN_GRACE_MS) {
+  if (shouldDeferRespawn(now, lastRespawn, MARVEEN_POST_RESPAWN_GRACE_MS)) {
     return
   }
   if (!marveenDownState) {
