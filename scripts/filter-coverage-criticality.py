@@ -41,7 +41,7 @@ def categorize_tier(filepath):
     # TIER-1: security/auth/data integrity (blocker)
     tier1_patterns = [
         r'^src/web/dashboard-auth\.ts$',
-        r'^src/web/aidefence-guard\.ts$',
+        r'^src/aidefence-guard\.ts$',
         r'^src/web/vault\.ts$',
         r'^src/web/channel-token-durability\.ts$',
         r'^src/web/routes/messages\.ts$',
@@ -49,7 +49,7 @@ def categorize_tier(filepath):
 
     # TIER-2: channel/lifecycle integrity (flag)
     tier2_patterns = [
-        r'^src/web/channel-provider\.ts$',
+        r'^src/channel-provider\.ts$',
         r'^src/web/channel-monitor\.ts$',
         r'^src/web/channel-health-monitor\.ts$',
         r'^src/web/channel-poller-reap\.ts$',

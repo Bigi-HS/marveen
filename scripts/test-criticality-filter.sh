@@ -12,17 +12,18 @@ echo
 
 # Sample PR uncovered lines (simulating a coverage report)
 # Using Thor tier definitions: TIER-1 (security/auth), TIER-2 (channel/lifecycle), TIER-3 (info)
+# Note: Using actual repo paths (not fictional web/ subdirs)
 SAMPLE_UNCOVERED=$(cat << 'EOF'
 src/web/dashboard-auth.ts L10-30
-src/web/aidefence-guard.ts:45-90
+src/aidefence-guard.ts:45-90
 src/web/vault.ts L5-25
+src/channel-provider.ts L100-120
 src/web/channel-monitor.ts L100-150
 src/web/agent-process.ts:200-220
 src/db.ts L12-34
 src/web/routes/messages.ts:80-120
 src/web/routes/agents.ts L40-60
 src/util/retry.ts L1-10
-src/components/Button.tsx L50-70
 EOF
 )
 
@@ -48,8 +49,8 @@ echo
 
 # Validation checks
 EXPECTED_TIER1=4  # dashboard-auth, aidefence-guard, vault, routes/messages
-EXPECTED_TIER2=3  # channel-monitor, agent-process, db
-EXPECTED_TIER3=3  # routes/agents, util/retry, components/Button
+EXPECTED_TIER2=4  # channel-provider, channel-monitor, agent-process, db
+EXPECTED_TIER3=2  # routes/agents, util/retry
 
 if [ "$TIER1_COUNT" -eq "$EXPECTED_TIER1" ]; then
   echo "✓ TIER-1 count correct ($TIER1_COUNT/$EXPECTED_TIER1)"
