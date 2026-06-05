@@ -17,6 +17,8 @@ import {
   resolveModelId,
   readAgentModel,
   writeAgentModel,
+  readAgentArchetype,
+  writeAgentArchetype,
   readAgentDisplayName,
   writeAgentDisplayName,
   readAgentSecurityProfile,
@@ -259,6 +261,7 @@ interface AgentSummary {
   displayName: string
   description: string
   model: string
+  archetype: string | null
   activeModel: string | null
   runningSince: number | null
   authMode: AuthMode
@@ -312,6 +315,7 @@ function getAgentSummary(name: string): AgentSummary {
     displayName: readAgentDisplayName(name),
     description: extractDescriptionFromClaudeMd(claudeMd),
     model: readAgentModel(name),
+    archetype: readAgentArchetype(name),
     activeModel: proc.running ? readActiveModelFromProjectDir(dir, runningSince ?? undefined, readAgentClaudeConfigDir(name) ?? undefined) : null,
     runningSince,
     authMode: readAgentAuthMode(name),
@@ -1268,13 +1272,14 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const body = await readBody(req)
     const configRoot = agentConfigRoot(name)
     const data = JSON.parse(body.toString()) as {
-      claudeMd?: string; soulMd?: string; mcpJson?: string; model?: string
+      claudeMd?: string; soulMd?: string; mcpJson?: string; model?: string; archetype?: string
       authMode?: AuthMode; apiKey?: string
     }
     if (data.claudeMd !== undefined) atomicWriteFileSync(join(configRoot, 'CLAUDE.md'), data.claudeMd)
     if (data.soulMd !== undefined) atomicWriteFileSync(join(agentDir(name), 'SOUL.md'), data.soulMd)
     if (data.mcpJson !== undefined) atomicWriteFileSync(join(agentDir(name), '.mcp.json'), data.mcpJson)
     if (data.model !== undefined) writeAgentModel(name, data.model)
+    if (data.archetype !== undefined) writeAgentArchetype(name, data.archetype)
     if (data.authMode !== undefined) {
       writeAgentAuthMode(name, data.authMode)
       if (data.authMode === 'api' && typeof data.apiKey === 'string' && data.apiKey.trim()) {

@@ -5,6 +5,7 @@ import {
   modelForArchetype,
   resolveAgentModelFromConfig,
   resolveModelId,
+  normalizeArchetypeInput,
   DEFAULT_MODEL,
 } from '../web/agent-config.js'
 
@@ -72,6 +73,21 @@ describe('resolveAgentModelFromConfig (precedence)', () => {
   })
   it('unknown archetype with no model -> DEFAULT_MODEL', () => {
     expect(resolveAgentModelFromConfig({ archetype: 'wizard' })).toBe(DEFAULT_MODEL)
+  })
+
+  // d410a410: the reader and the new writeAgentArchetype setter share this.
+  describe('normalizeArchetypeInput', () => {
+    it('trims and lowercases', () => {
+      expect(normalizeArchetypeInput('  HeartBeat ')).toBe('heartbeat')
+      expect(normalizeArchetypeInput('ENGINEER')).toBe('engineer')
+    })
+    it('returns null for empty/blank/non-string (clears the override)', () => {
+      expect(normalizeArchetypeInput('')).toBeNull()
+      expect(normalizeArchetypeInput('   ')).toBeNull()
+      expect(normalizeArchetypeInput(42)).toBeNull()
+      expect(normalizeArchetypeInput(null)).toBeNull()
+      expect(normalizeArchetypeInput(undefined)).toBeNull()
+    })
   })
 
   // Thor F4: a non-string `model` (e.g. a number from a hand-edited config) must
