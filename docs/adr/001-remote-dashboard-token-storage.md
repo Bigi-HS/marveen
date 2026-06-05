@@ -33,6 +33,7 @@ localStorage is accepted for remote dashboard token storage. This is Dominik's e
 ### Negative / tradeoffs
 - A compromised device (stolen phone/laptop) with a valid localStorage token could be used to access the dashboard -- but only from within the Tailscale network
 - If the Tailscale private boundary is breached, token persistence extends the exposure window
+- IndexedDB is excluded as a storage target -- it offers no security benefit over localStorage and adds unnecessary complexity
 
 ### Risks and mitigations
 - Compromised device + Tailscale access: mitigated by removing the device from the Tailscale network immediately on loss/compromise
