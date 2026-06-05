@@ -52,4 +52,20 @@ describe('parsePollerPidsFromPs (presence scan)', () => {
     const ps = 'garbage TELEGRAM_STATE_DIR=' + dir
     expect(parsePollerPidsFromPs(ps, envVar, dir)).toEqual([])
   })
+
+  it('P9-F3: does NOT match a longer dir the value is an exact prefix of', () => {
+    // includes() would false-positive here; the exact-match guard rejects it.
+    const ps = '  600 pts/0 S 0:00 bun start ' + envVar + '=' + dir + '-extra HOME=/h'
+    expect(parsePollerPidsFromPs(ps, envVar, dir)).toEqual([])
+  })
+
+  it('P9-F3: matches when the value is followed by whitespace (normal env dump)', () => {
+    const ps = '  601 pts/0 S 0:00 bun start ' + envVar + '=' + dir + ' HOME=/h'
+    expect(parsePollerPidsFromPs(ps, envVar, dir)).toEqual([601])
+  })
+
+  it('P9-F3: matches when the value is at end-of-line', () => {
+    const ps = '  602 pts/0 S 0:00 bun start ' + envVar + '=' + dir
+    expect(parsePollerPidsFromPs(ps, envVar, dir)).toEqual([602])
+  })
 })

@@ -52,7 +52,14 @@ export function parsePollerPidsFromPs(
   const needle = `${envVar}=${value}`
   const out: number[] = []
   for (const line of psOutput.split('\n')) {
-    if (!line.includes(needle)) continue
+    const idx = line.indexOf(needle)
+    if (idx === -1) continue
+    // Exact-match guard (P9-F3): the value must be terminated by whitespace or
+    // end-of-line, not more path chars. The `ps eww -e` env dump is space-
+    // separated, so `<ENV>=/x/telegram` must NOT match a row carrying
+    // `<ENV>=/x/telegram-extra` (a bare includes() substring would false-positive).
+    const after = line[idx + needle.length]
+    if (after !== undefined && !/\s/.test(after)) continue
     const m = line.match(/^\s*(\d+)\s/)
     if (!m) continue
     const pid = parseInt(m[1]!, 10)
