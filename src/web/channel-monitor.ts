@@ -639,7 +639,9 @@ function checkMainSessionStall(): void {
     { lastInboundTs, lastProgressTs, stalledMin },
     'Main session STALLED: inbound queued but no assistant progress -- context-preserving --continue respawn',
   )
-  sendAlert(`⚠️ A fő session ${stalledMin} perce nem dolgozza fel a beérkezett üzeneteket (queued, de nincs progress). Context-megőrző --continue respawn most a ${MAIN_CHANNELS_SESSION} session-on...`)
+  // Thor T7: name the configured main agent (BOT_NAME) instead of an implicit
+  // "marveen" / generic "fő session", so the alert is correct for any main agent.
+  sendAlert(`⚠️ A(z) ${BOT_NAME} fő session ${stalledMin} perce nem dolgozza fel a beérkezett üzeneteket (queued, de nincs progress). Context-megőrző --continue respawn most a ${MAIN_CHANNELS_SESSION} session-on...`)
   if (resumeMarveenSession()) {
     marveenLastStallRecovery = now
     // Fold into the cross-path grace so the keepalive / down / inbound-probe

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, mkdirSync, rmSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 // --- Mock the IO-heavy dependencies so the module imports cleanly and the
@@ -195,6 +195,26 @@ describe('promoteToLive guards', () => {
   })
   it('refuses an unknown target', () => {
     expect(promoteToLive('nope', { confirm: true }).ok).toBe(false)
+  })
+})
+
+describe('promoteToLive backup dir (Thor T4)', () => {
+  const base = '/tmp/test-claudeclaw/agents'
+  const sandbox = join(base, SANDBOX_AGENT)
+  const target = join(base, 'dave')
+  beforeEach(() => {
+    rmSync(sandbox, { recursive: true, force: true })
+    rmSync(target, { recursive: true, force: true })
+    mkdirSync(sandbox, { recursive: true }) // empty sandbox -> nothing to promote/back up
+    mkdirSync(target, { recursive: true })
+  })
+  it('removes the empty backup dir and reports no backup when nothing was promoted', () => {
+    const r = promoteToLive('dave', { confirm: true })
+    expect(r.ok).toBe(true)
+    expect(r.promoted).toEqual([])
+    expect(r.backupDir).toBeUndefined()
+    // no leftover .c12-backup-* clutter in the target
+    expect(readdirSync(target).filter(f => f.startsWith('.c12-backup-'))).toEqual([])
   })
 })
 
