@@ -79,6 +79,24 @@ describe('aiDefenceGuard — PII', () => {
     expect(r.verdict).toBe('PASS')
   })
 
+  it('Anthropic key matches anthropic-key pattern only (F1: no double-match with openai-key)', () => {
+    const key = `sk-ant-${'a'.repeat(40)}`
+    const r = aiDefenceGuard('unknown', `Using key ${key} in prod`)
+    expect(r.verdict).toBe('FLAG')
+    const patterns = r.findings.map(f => f.pattern)
+    expect(patterns).toContain('anthropic-key')
+    expect(patterns).not.toContain('openai-key')
+    expect(patterns.filter(p => p === 'anthropic-key').length).toBe(1)
+  })
+
+  it('OpenAI key matches openai-key pattern (not anthropic-key)', () => {
+    const key = `sk-${'a'.repeat(48)}`
+    const r = aiDefenceGuard('unknown', `key: ${key}`)
+    const patterns = r.findings.map(f => f.pattern)
+    expect(patterns).toContain('openai-key')
+    expect(patterns).not.toContain('anthropic-key')
+  })
+
   it('excerpt redacts PII value but keeps surrounding context', () => {
     const r = aiDefenceGuard('scout', 'User email is test@example.org in the DB.')
     const f = r.findings.find(f => f.pattern === 'email')

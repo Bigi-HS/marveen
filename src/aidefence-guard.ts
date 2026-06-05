@@ -98,7 +98,8 @@ const PII_PATTERNS: PatternDef[] = [
   {
     type: 'PII',
     name: 'openai-key',
-    rx: /\bsk-[a-zA-Z0-9]{32,}\b/g,
+    // Negative lookahead excludes sk-ant- (Anthropic) so each key matches only once.
+    rx: /\bsk-(?!ant-)[a-zA-Z0-9]{32,}\b/g,
     severity: 'high',
   },
   {
@@ -113,6 +114,8 @@ const PII_PATTERNS: PatternDef[] = [
     name: 'token-assignment',
     // Key=value or key: value patterns where the value is 16+ non-space chars.
     // Catches hardcoded tokens, passwords, secrets in plain text.
+    // Known F2: "token: claude-sonnet-4-6" (17 chars, lowercase+hyphen) triggers FLAG.
+    // Accepted: FLAG/high log-noise is preferable to missing a real secret leak.
     rx: /(?:api[_-]?key|secret|token|password|passwd|pwd|bearer)\s*[=:]\s*['"]?[a-zA-Z0-9+/=_\-]{16,}/gi,
     severity: 'high',
   },
