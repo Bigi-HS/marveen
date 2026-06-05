@@ -171,10 +171,10 @@ class TestDreamEngineSafeguards(unittest.TestCase):
             dream_engine.VAULT_PATH = old_path
 
     def test_keyword_index_cold_tier_only(self):
-        """F3: keyword-index refresh must only touch cold-tier entries >24h (B1 FIX: mocked API)"""
+        """C1 FIX: keyword-index refresh makes API calls for cold-tier only >24h (verify via mock)"""
         conn = sqlite3.connect(self.test_db_path)
 
-        # Insert hot/warm entries (should NOT be touched)
+        # Insert hot/warm entries (should NOT be touched by API)
         now = int(datetime.now(tz=timezone.utc).timestamp())
         old_ts = int((datetime.now(tz=timezone.utc) - timedelta(hours=48)).timestamp())
 
@@ -194,6 +194,11 @@ class TestDreamEngineSafeguards(unittest.TestCase):
         """, ('applegate', 'old cold entry', 'cold', '', old_ts))
 
         conn.commit()
+
+        # Get the cold entry ID for later verification
+        c = conn.cursor()
+        c.execute("SELECT id FROM memories WHERE category='cold'")
+        cold_entry_id = c.fetchone()[0]
         conn.close()
 
         # Override DB path
@@ -201,35 +206,27 @@ class TestDreamEngineSafeguards(unittest.TestCase):
         old_path = dream_engine.VAULT_PATH
         dream_engine.VAULT_PATH = self.test_db_path
 
-        # B1 FIX: Mock get_token and urllib.request.urlopen for API calls
-        # The mock also updates the local test DB to verify the code path
+        # C1 FIX: Verify API calls via mock (not DB state, since API server does vault updates)
         with patch("dream_engine.get_token", return_value="test-token"):
             with patch("dream_engine.urllib.request.urlopen") as mock_open:
                 # Mock the context manager behavior
                 mock_response = MagicMock()
-                mock_response.read.return_value = b'{"ok":true}'
                 mock_open.return_value.__enter__ = MagicMock(return_value=mock_response)
                 mock_open.return_value.__exit__ = MagicMock(return_value=False)
 
                 updated = keyword_index_refresh_cold()
 
-        # Verify: only cold-tier >24h entries were updated
-        conn = sqlite3.connect(self.test_db_path)
-        c = conn.cursor()
+        # Verify: exactly 1 API call (for the cold entry >24h)
+        self.assertEqual(mock_open.call_count, 1, "Should make exactly 1 API call for cold-tier entry >24h")
 
-        c.execute("SELECT keywords FROM memories WHERE category='hot'")
-        hot_kw = c.fetchone()[0]
-        self.assertEqual(hot_kw, '', "Hot entry should NOT be modified")
+        # Verify the API call was correct
+        call_req = mock_open.call_args[0][0]
+        self.assertIn(f"/api/memories/{cold_entry_id}", call_req.full_url, "API call URL should target the cold entry")
+        self.assertEqual(call_req.method, "PUT", "API call should use PUT method")
 
-        c.execute("SELECT keywords FROM memories WHERE category='warm'")
-        warm_kw = c.fetchone()[0]
-        self.assertEqual(warm_kw, '', "Warm entry should NOT be modified")
+        # Verify hot/warm IDs are NOT in any API call URLs
+        self.assertEqual(updated, 1, "Should have processed exactly 1 entry")
 
-        c.execute("SELECT keywords FROM memories WHERE category='cold'")
-        cold_kw = c.fetchone()[0]
-        self.assertNotEqual(cold_kw, '', "Cold entry >24h should be updated")
-
-        conn.close()
         dream_engine.VAULT_PATH = old_path
 
     def test_hot_warm_keyword_gaps_flag(self):

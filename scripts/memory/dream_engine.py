@@ -257,8 +257,6 @@ def keyword_index_refresh_cold():
 
             try:
                 with urllib.request.urlopen(req, timeout=10) as r:
-                    # Also update local database to keep in sync with API
-                    c.execute("UPDATE memories SET keywords = ? WHERE id = ?", (keywords, entry_id))
                     updated += 1
             except urllib.error.HTTPError as e:
                 log(f"⚠ API update failed for ID {entry_id}: {e.code}")
