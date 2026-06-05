@@ -187,7 +187,10 @@ export function logRecoveryEvent(ev: RecoveryEvent): void {
 
 function readMainToken(): string | null {
   try {
-    const tokenPath = join(channelStateDir(PROVIDER, PROJECT_ROOT), '.env')
+    // The MAIN orchestrator's channel state lives under the HOME .claude dir
+    // (channelStateDir with no agentDir), matching probeChannelPollerPresence's
+    // `undefined` dir for the main agent. This is NOT the project root.
+    const tokenPath = join(channelStateDir(PROVIDER, undefined), '.env')
     const tok = readChannelToken(PROVIDER, tokenPath)
     return tok || null
   } catch {
