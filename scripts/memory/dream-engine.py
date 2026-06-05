@@ -216,8 +216,15 @@ def check_hot_warm_keyword_gaps():
         return []
 
 def keyword_index_refresh_cold():
-    """Refresh keywords for cold-tier entries >24h old (safeguard: cold only)"""
+    """Refresh keywords for cold-tier entries >24h old via API (A1 FIX: API-based UPDATE)"""
     try:
+        import urllib.request
+
+        token = get_token()
+        if not token:
+            log("✗ Token not found, cannot refresh via API")
+            return 0
+
         conn = sqlite3.connect(VAULT_PATH)
         c = conn.cursor()
 
@@ -238,14 +245,25 @@ def keyword_index_refresh_cold():
             words = content.split()[:10]
             keywords = ', '.join(words)
 
-            c.execute("UPDATE memories SET keywords = ? WHERE id = ?", (keywords, entry_id))
-            updated += 1
+            # Use API PUT /api/memories/:id endpoint (A1 FIX: not direct sqlite3)
+            payload = {"keywords": keywords}
+            req = urllib.request.Request(
+                f"{API_BASE}/api/memories/{entry_id}",
+                data=json.dumps(payload).encode(),
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                method="PUT"
+            )
 
-        conn.commit()
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    updated += 1
+            except urllib.error.HTTPError as e:
+                log(f"⚠ API update failed for ID {entry_id}: {e.code}")
+
         conn.close()
 
         if updated > 0:
-            log(f"ℹ Keyword-index refreshed: {updated} cold-tier entries")
+            log(f"ℹ Keyword-index refreshed: {updated} cold-tier entries (via API)")
 
         return updated
     except Exception as e:

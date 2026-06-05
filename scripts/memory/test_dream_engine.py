@@ -133,17 +133,25 @@ class TestDreamEngineSafeguards(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        # Test 1: Same domain+reasoningbank -> conflict (dedup=True)
-        is_dup = dedup_check('test content', 'vault-ops, reasoningbank, new')
-        self.assertTrue(is_dup, "Should flag as duplicate (same domain+reasoningbank)")
+        # A2 FIX: Override dream_engine.VAULT_PATH to use test DB
+        import dream_engine
+        old_path = dream_engine.VAULT_PATH
+        dream_engine.VAULT_PATH = self.test_db_path
 
-        # Test 2: Different domain+reasoningbank -> no conflict (dedup=False)
-        is_dup = dedup_check('test content', 'fleet-ops, reasoningbank, new')
-        self.assertFalse(is_dup, "Should NOT flag as duplicate (different domain)")
+        try:
+            # Test 1: Same domain+reasoningbank -> conflict (dedup=True)
+            is_dup = dedup_check('test content', 'vault-ops, reasoningbank, new')
+            self.assertTrue(is_dup, "Should flag as duplicate (same domain+reasoningbank)")
 
-        # Test 3: Only reasoningbank (no domain) -> no conflict (dedup=False)
-        is_dup = dedup_check('test content', 'reasoningbank, nightly')
-        self.assertFalse(is_dup, "Should NOT flag (no domain keyword)")
+            # Test 2: Different domain+reasoningbank -> no conflict (dedup=False)
+            is_dup = dedup_check('test content', 'fleet-ops, reasoningbank, new')
+            self.assertFalse(is_dup, "Should NOT flag as duplicate (different domain)")
+
+            # Test 3: Only reasoningbank (no domain) -> no conflict (dedup=False)
+            is_dup = dedup_check('test content', 'reasoningbank, nightly')
+            self.assertFalse(is_dup, "Should NOT flag (no domain keyword)")
+        finally:
+            dream_engine.VAULT_PATH = old_path
 
     def test_keyword_index_cold_tier_only(self):
         """F3: keyword-index refresh must only touch cold-tier entries >24h"""
