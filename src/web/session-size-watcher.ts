@@ -22,20 +22,28 @@ import { statSync, readdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { logger } from '../logger.js'
-import { listAgentNames, agentDir } from './agent-config.js'
+import { listAgentNames, agentDir, readAgentClaudeConfigDir } from './agent-config.js'
 import { agentSessionName, isAgentRunning, capturePane, sendPromptToSession } from './agent-process.js'
+import { readContextTokensFromProjectDir } from './active-model.js'
 import { isReadyForPrompt } from '../pane-state.js'
 
 // Transcript size at which we compact. Empirically: Dave's 113k-token session
 // produced a 1.5MB JSONL. 1MB is comfortably past normal work but well before
 // the resume-menu risk zone. Adjust via THRESHOLDS if needed.
+// Legacy byte proxy, kept for latestTranscriptSizeBytes + the future hard-ceiling
+// tier (card: non-idle session checkpoint). No longer the compaction trigger.
 export const DEFAULT_SIZE_THRESHOLD_BYTES = 1 * 1024 * 1024 // 1MB
+// Phase 3 (token-aware): the live context size in TOKENS is the real per-turn
+// cache_read driver. The byte proxy under-/over-fired vs the actual cost (a
+// 950K-token session is what each turn re-reads, not the transcript bytes). 250K
+// is comfortably past normal work yet well before the limit / resume-menu zone.
+export const DEFAULT_TOKEN_THRESHOLD = 250_000
 // Do not compact the same session more often than this, so /compact does not
 // interrupt a freshly-compacted agent that immediately starts heavy work again.
 export const DEFAULT_COOLDOWN_MS = 3 * 60 * 60 * 1000 // 3 hours
 
 export interface SessionSizeThresholds {
-  sizeThresholdBytes: number
+  tokenThreshold: number
   cooldownMs: number
 }
 
@@ -43,19 +51,20 @@ export interface SessionSizeThresholds {
  * Pure decision: should we send /compact to this session now?
  *
  * Returns true only when:
- *   - The transcript is large enough (>= sizeThresholdBytes)
- *   - The cooldown since the last compaction has elapsed
+ *   - The live context is large enough (>= tokenThreshold), measured in TOKENS
+ *     (the actual cache_read cost re-read every turn), not transcript bytes.
+ *   - The cooldown since the last compaction has elapsed.
  *
- * Pane-state (idle/busy) is checked by the caller so it stays out of the
- * pure function and can be asserted separately.
+ * Pane-state (idle/busy) is checked by the caller so it stays out of the pure
+ * function and can be asserted separately.
  */
 export function shouldCompactSession(
-  transcriptSizeBytes: number | null,
+  contextTokens: number | null,
   lastCompactedAt: number | null,
   now: number,
   thresholds: SessionSizeThresholds,
 ): boolean {
-  if (transcriptSizeBytes == null || transcriptSizeBytes < thresholds.sizeThresholdBytes) return false
+  if (contextTokens == null || contextTokens < thresholds.tokenThreshold) return false
   if (lastCompactedAt != null && now - lastCompactedAt < thresholds.cooldownMs) return false
   return true
 }
@@ -89,8 +98,16 @@ export function latestTranscriptSizeBytes(agentName: string): number | null {
   }
 }
 
+// Phase 3: the live session's context size in TOKENS (input + cache_read +
+// cache_creation from the last usage), via the shared active-model reader. This
+// is the actual per-turn cost /compact targets -- a far better signal than the
+// transcript file bytes. Config-dir-aware (the agent's isolated CLAUDE_CONFIG_DIR).
+export function latestContextTokens(agentName: string): number | null {
+  return readContextTokensFromProjectDir(agentDir(agentName), readAgentClaudeConfigDir(agentName) ?? undefined)
+}
+
 const THRESHOLDS: SessionSizeThresholds = {
-  sizeThresholdBytes: DEFAULT_SIZE_THRESHOLD_BYTES,
+  tokenThreshold: DEFAULT_TOKEN_THRESHOLD,
   cooldownMs: DEFAULT_COOLDOWN_MS,
 }
 
@@ -105,22 +122,22 @@ const INTERVAL_MS = 10 * 60 * 1000 // every 10 minutes
 const lastCompactedAt = new Map<string, number>()
 
 function checkAgent(name: string): void {
-  const sizeBytes = latestTranscriptSizeBytes(name)
+  const contextTokens = latestContextTokens(name)
   const last = lastCompactedAt.get(name) ?? null
   const now = Date.now()
 
-  if (!shouldCompactSession(sizeBytes, last, now, THRESHOLDS)) return
+  if (!shouldCompactSession(contextTokens, last, now, THRESHOLDS)) return
 
   const session = agentSessionName(name)
   const pane = capturePane(session)
   if (pane == null || !isReadyForPrompt(pane)) {
-    logger.debug({ agent: name, sizeBytes }, 'session-size-watcher: transcript large but pane not idle, deferring')
+    logger.debug({ agent: name, contextTokens }, 'session-size-watcher: context large but pane not idle, deferring')
     return
   }
 
   logger.info(
-    { agent: name, transcriptSizeMb: ((sizeBytes ?? 0) / 1024 / 1024).toFixed(2) },
-    'session-size-watcher: transcript exceeds threshold while agent is idle, sending /compact',
+    { agent: name, contextTokens },
+    'session-size-watcher: context exceeds token threshold while agent is idle, sending /compact',
   )
   try {
     sendPromptToSession(session, '/compact')

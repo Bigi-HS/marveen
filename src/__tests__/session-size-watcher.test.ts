@@ -3,13 +3,13 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   shouldCompactSession,
-  DEFAULT_SIZE_THRESHOLD_BYTES,
+  DEFAULT_TOKEN_THRESHOLD,
   DEFAULT_COOLDOWN_MS,
   type SessionSizeThresholds,
 } from '../web/session-size-watcher.js'
 
 const THRESHOLDS: SessionSizeThresholds = {
-  sizeThresholdBytes: DEFAULT_SIZE_THRESHOLD_BYTES,
+  tokenThreshold: DEFAULT_TOKEN_THRESHOLD,
   cooldownMs: DEFAULT_COOLDOWN_MS,
 }
 
@@ -25,34 +25,34 @@ describe('shouldCompactSession', () => {
   })
 
   it('returns false when transcript is below the threshold', () => {
-    expect(shouldCompactSession(DEFAULT_SIZE_THRESHOLD_BYTES - 1, null, NOW, THRESHOLDS)).toBe(false)
+    expect(shouldCompactSession(DEFAULT_TOKEN_THRESHOLD - 1, null, NOW, THRESHOLDS)).toBe(false)
   })
 
   it('returns true when transcript meets the threshold and no prior compact', () => {
-    expect(shouldCompactSession(DEFAULT_SIZE_THRESHOLD_BYTES, null, NOW, THRESHOLDS)).toBe(true)
+    expect(shouldCompactSession(DEFAULT_TOKEN_THRESHOLD, null, NOW, THRESHOLDS)).toBe(true)
   })
 
   it('returns true when transcript is over threshold and no prior compact', () => {
-    expect(shouldCompactSession(DEFAULT_SIZE_THRESHOLD_BYTES * 2, null, NOW, THRESHOLDS)).toBe(true)
+    expect(shouldCompactSession(DEFAULT_TOKEN_THRESHOLD * 2, null, NOW, THRESHOLDS)).toBe(true)
   })
 
   it('returns false when cooldown has not elapsed since last compact', () => {
     const lastCompact = NOW - DEFAULT_COOLDOWN_MS + 1000 // 1s inside cooldown
-    expect(shouldCompactSession(DEFAULT_SIZE_THRESHOLD_BYTES * 2, lastCompact, NOW, THRESHOLDS)).toBe(false)
+    expect(shouldCompactSession(DEFAULT_TOKEN_THRESHOLD * 2, lastCompact, NOW, THRESHOLDS)).toBe(false)
   })
 
   it('returns true when cooldown has elapsed since last compact', () => {
     const lastCompact = NOW - DEFAULT_COOLDOWN_MS - 1 // just past the cooldown
-    expect(shouldCompactSession(DEFAULT_SIZE_THRESHOLD_BYTES * 2, lastCompact, NOW, THRESHOLDS)).toBe(true)
+    expect(shouldCompactSession(DEFAULT_TOKEN_THRESHOLD * 2, lastCompact, NOW, THRESHOLDS)).toBe(true)
   })
 
   it('returns true when last compact was exactly at the threshold boundary', () => {
     const lastCompact = NOW - DEFAULT_COOLDOWN_MS // exactly at boundary
-    expect(shouldCompactSession(DEFAULT_SIZE_THRESHOLD_BYTES * 2, lastCompact, NOW, THRESHOLDS)).toBe(true)
+    expect(shouldCompactSession(DEFAULT_TOKEN_THRESHOLD * 2, lastCompact, NOW, THRESHOLDS)).toBe(true)
   })
 
   it('respects custom thresholds', () => {
-    const custom: SessionSizeThresholds = { sizeThresholdBytes: 500, cooldownMs: 60_000 }
+    const custom: SessionSizeThresholds = { tokenThreshold: 500, cooldownMs: 60_000 }
     expect(shouldCompactSession(499, null, NOW, custom)).toBe(false)
     expect(shouldCompactSession(500, null, NOW, custom)).toBe(true)
     expect(shouldCompactSession(500, NOW - 30_000, NOW, custom)).toBe(false) // inside cooldown
@@ -91,8 +91,10 @@ describe('session-size-watcher -- source contracts', () => {
     expect(SRC).toMatch(/lastCompactedAt\.delete\(name\)/)
   })
 
-  it('logs the transcript size in MB when compacting', () => {
-    expect(SRC).toMatch(/transcriptSizeMb/)
+  it('triggers on context TOKENS (the cache_read driver), not transcript bytes', () => {
+    expect(SRC).toMatch(/latestContextTokens/)
+    expect(SRC).toMatch(/readContextTokensFromProjectDir/)
+    expect(SRC).toMatch(/contextTokens/)
   })
 
   it('scopes to sub-agents only (does not target the main channels session)', () => {
