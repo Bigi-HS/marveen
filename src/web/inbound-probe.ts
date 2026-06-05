@@ -111,59 +111,50 @@ export function shouldTriggerDeafnessRespawn(opts: {
  * NOTE: Do NOT log line contents — JSONL lines may contain full Telegram
  * message text (PII). Only the extracted timestamp is ever logged.
  */
-// B1 fix: tail-read only the last 256 KB so a transcript grown to 100s of MB
-// never blocks the event loop.
-const TRANSCRIPT_TAIL_BYTES = 262144 // 256 KB
-
-// Thor T1: find the newest *.jsonl in transcriptDir (by mtime), tail-read its
-// last 256 KB, and return the lines (with a possibly-partial first line dropped),
-// or null when the dir is absent / has no JSONL / the file vanished. Shared by the
-// ingestion + assistant scans so the newest-file + tail-read logic lives in ONE
-// place. PII-safe: callers only ever extract timestamps, never log line contents.
-function tailLinesOfNewestJsonl(transcriptDir: string): string[] | null {
-  if (!existsSync(transcriptDir)) return null
-  const entries = readdirSync(transcriptDir).filter(f => f.endsWith('.jsonl'))
-  if (entries.length === 0) return null
-
-  let newestFile = ''
-  let newestMtime = 0
-  for (const entry of entries) {
-    const fullPath = join(transcriptDir, entry)
-    try {
-      const st = statSync(fullPath)
-      if (st.mtimeMs > newestMtime) {
-        newestMtime = st.mtimeMs
-        newestFile = fullPath
-      }
-    } catch {
-      // file disappeared between readdir and stat — skip
-    }
-  }
-  if (!newestFile) return null
-
-  const fd = openSync(newestFile, 'r')
-  let rawText: string
-  try {
-    const fileSize = statSync(newestFile).size
-    const readOffset = Math.max(0, fileSize - TRANSCRIPT_TAIL_BYTES)
-    const readLength = fileSize - readOffset
-    const buf = Buffer.allocUnsafe(readLength)
-    readSync(fd, buf, 0, readLength, readOffset)
-    rawText = buf.toString('utf-8')
-  } finally {
-    closeSync(fd)
-  }
-
-  // Drop a possibly-partial first line when we started mid-file.
-  const firstNewline = rawText.indexOf('\n')
-  const trimmed = firstNewline > 0 ? rawText.slice(firstNewline + 1) : rawText
-  return trimmed.split('\n')
-}
-
 export function readLastIngestionTimestamp(transcriptDir: string): number | null {
   try {
-    const lines = tailLinesOfNewestJsonl(transcriptDir)
-    if (lines == null) return null
+    if (!existsSync(transcriptDir)) return null
+    const entries = readdirSync(transcriptDir).filter(f => f.endsWith('.jsonl'))
+    if (entries.length === 0) return null
+
+    // Pick the newest file by mtime.
+    let newestFile = ''
+    let newestMtime = 0
+    for (const entry of entries) {
+      const fullPath = join(transcriptDir, entry)
+      try {
+        const st = statSync(fullPath)
+        if (st.mtimeMs > newestMtime) {
+          newestMtime = st.mtimeMs
+          newestFile = fullPath
+        }
+      } catch {
+        // file disappeared between readdir and stat — skip
+      }
+    }
+    if (!newestFile) return null
+
+    // B1 fix: tail-read only the last 256 KB to avoid blocking the event loop
+    // on a transcript that has grown to 100s of MB.
+    const TAIL_BYTES = 262144 // 256 KB
+    const fd = openSync(newestFile, 'r')
+    let rawText: string
+    try {
+      const fileSize = statSync(newestFile).size
+      const readOffset = Math.max(0, fileSize - TAIL_BYTES)
+      const readLength = fileSize - readOffset
+      const buf = Buffer.allocUnsafe(readLength)
+      readSync(fd, buf, 0, readLength, readOffset)
+      rawText = buf.toString('utf-8')
+    } finally {
+      // fd is always closed — openSync never leaves a dangling descriptor
+      closeSync(fd)
+    }
+
+    // Drop a possibly-partial first line when we started mid-file.
+    const firstNewline = rawText.indexOf('\n')
+    const trimmed = firstNewline > 0 ? rawText.slice(firstNewline + 1) : rawText
+    const lines = trimmed.split('\n')
     let lastTs: number | null = null
     for (const line of lines) {
       if (!line.includes('<channel source=')) continue
@@ -202,8 +193,45 @@ export function readLastIngestionTimestamp(transcriptDir: string): number | null
  */
 export function readLastAssistantTimestamp(transcriptDir: string): number | null {
   try {
-    const lines = tailLinesOfNewestJsonl(transcriptDir)
-    if (lines == null) return null
+    if (!existsSync(transcriptDir)) return null
+    const entries = readdirSync(transcriptDir).filter(f => f.endsWith('.jsonl'))
+    if (entries.length === 0) return null
+
+    let newestFile = ''
+    let newestMtime = 0
+    for (const entry of entries) {
+      const fullPath = join(transcriptDir, entry)
+      try {
+        const st = statSync(fullPath)
+        if (st.mtimeMs > newestMtime) {
+          newestMtime = st.mtimeMs
+          newestFile = fullPath
+        }
+      } catch {
+        // file disappeared between readdir and stat — skip
+      }
+    }
+    if (!newestFile) return null
+
+    // Tail-read only the last 256 KB (mirrors readLastIngestionTimestamp) so a
+    // multi-hundred-MB transcript never blocks the event loop.
+    const TAIL_BYTES = 262144
+    const fd = openSync(newestFile, 'r')
+    let rawText: string
+    try {
+      const fileSize = statSync(newestFile).size
+      const readOffset = Math.max(0, fileSize - TAIL_BYTES)
+      const readLength = fileSize - readOffset
+      const buf = Buffer.allocUnsafe(readLength)
+      readSync(fd, buf, 0, readLength, readOffset)
+      rawText = buf.toString('utf-8')
+    } finally {
+      closeSync(fd)
+    }
+
+    const firstNewline = rawText.indexOf('\n')
+    const trimmed = firstNewline > 0 ? rawText.slice(firstNewline + 1) : rawText
+    const lines = trimmed.split('\n')
     let lastTs: number | null = null
     for (const line of lines) {
       // Cheap pre-filter before JSON.parse: skip lines that are not assistant

@@ -96,18 +96,32 @@ def extract_patterns(cluster):
     return patterns
 
 def dedup_check(content, keywords):
-    """Check if similar entry exists (keyword-search)"""
+    """Check if similar entry exists (keyword-search). F4 FIX: require domain+reasoningbank match."""
     try:
         conn = sqlite3.connect(VAULT_PATH)
         c = conn.cursor()
 
-        # Search for existing entries with same keywords
+        # Extract domain keyword (vault-ops, fleet-ops, etc.) from input
         keyword_list = [kw.strip() for kw in keywords.split(',')]
+        domain_kw = None
         for kw in keyword_list:
-            c.execute("SELECT id FROM memories WHERE category='cold' AND keywords LIKE ?;", (f'%{kw}%',))
-            if c.fetchone():
-                conn.close()
-                return True  # Found existing entry
+            if any(domain in kw for domain in ['vault-', 'fleet-', 'spec-', 'test-']):
+                domain_kw = kw
+                break
+
+        if not domain_kw:
+            return False  # No domain keyword, no conflict possible
+
+        # Search: cold entries with SAME domain keyword AND "reasoningbank" (not just any keyword)
+        # This prevents false-positives on shared keywords like "reasoningbank"
+        c.execute("""
+            SELECT id FROM memories
+            WHERE category='cold' AND keywords LIKE ? AND keywords LIKE ?
+        """, (f'%{domain_kw}%', '%reasoningbank%'))
+
+        if c.fetchone():
+            conn.close()
+            return True  # Found existing entry with same domain+reasoningbank
 
         conn.close()
         return False  # No conflict
@@ -144,25 +158,62 @@ def generate_rb_entry(theme, patterns):
     return content, entry['kulcsszavak']
 
 def write_rb_entry(content, keywords):
-    """Write ReasoningBank entry to cold tier (vault)"""
+    """Write ReasoningBank entry to cold tier via API (F2: API-based writes)"""
+    try:
+        token = get_token()
+        if not token:
+            log("✗ Token not found, cannot write via API")
+            return None
+
+        # Use /api/memories endpoint instead of direct sqlite3
+        import urllib.request
+        payload = {
+            "agent_id": AGENT_ID,
+            "content": content,
+            "category": "cold",
+            "keywords": keywords
+        }
+
+        req = urllib.request.Request(
+            f"{API_BASE}/api/memories",
+            data=json.dumps(payload).encode(),
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method="POST"
+        )
+
+        with urllib.request.urlopen(req, timeout=10) as r:
+            resp = json.load(r)
+            entry_id = resp.get('id')
+            log(f"✓ RB entry written (ID {entry_id}) via API")
+            return entry_id
+    except Exception as e:
+        log(f"✗ Write via API failed: {e}")
+        return None
+
+def check_hot_warm_keyword_gaps():
+    """F3: Check hot/warm entries for keyword gaps -> FLAG (no auto-write)"""
     try:
         conn = sqlite3.connect(VAULT_PATH)
         c = conn.cursor()
 
+        # Find hot/warm entries without keywords
         c.execute("""
-            INSERT INTO memories (agent_id, content, category, keywords)
-            VALUES (?, ?, ?, ?)
-        """, (AGENT_ID, content, 'cold', keywords))
+            SELECT id, category, content FROM memories
+            WHERE category IN ('hot', 'warm') AND (keywords IS NULL OR keywords='')
+        """)
 
-        entry_id = c.lastrowid
-        conn.commit()
+        gaps = c.fetchall()
         conn.close()
 
-        log(f"✓ RB entry written (ID {entry_id})")
-        return entry_id
+        if gaps:
+            flag_msg = f"FLAG: {len(gaps)} hot/warm keyword-gaps (curator review needed)"
+            for entry_id, category, content in gaps:
+                log(f"⚠ {flag_msg}: ID {entry_id} ({category})")
+            return gaps
+        return []
     except Exception as e:
-        log(f"✗ Write failed: {e}")
-        return None
+        log(f"✗ Hot/warm check failed: {e}")
+        return []
 
 def keyword_index_refresh_cold():
     """Refresh keywords for cold-tier entries >24h old (safeguard: cold only)"""
@@ -173,7 +224,7 @@ def keyword_index_refresh_cold():
         cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
         cutoff_ts = cutoff.timestamp()
 
-        # Find cold-tier entries without keywords
+        # Find cold-tier entries without keywords (F3: explicitly cold-tier only)
         c.execute("""
             SELECT id, content FROM memories
             WHERE category='cold' AND created_at < ? AND (keywords IS NULL OR keywords='')
@@ -265,11 +316,17 @@ def run_dream_engine():
             if entry_id:
                 rb_entries.append((entry_id, theme))
 
-    # 5. Keyword-index refresh (cold-tier only)
+    # 5. Check hot/warm keyword-gaps (F3: FLAG, no auto-write)
+    log("Checking hot/warm keyword-gaps...")
+    hot_warm_gaps = check_hot_warm_keyword_gaps()
+    for gap_id, cat, content in hot_warm_gaps:
+        flags.append(f"HOT/WARM_GAP: ID {gap_id} ({cat}) needs keywords (curator review)")
+
+    # 6. Keyword-index refresh (cold-tier only)
     log("Refreshing keyword-index (cold-tier)...")
     kw_updated = keyword_index_refresh_cold()
 
-    # 6. Generate report
+    # 7. Generate report
     log("Generating report...")
     report = generate_report(clusters, rb_entries, flags)
     log("\n" + report)

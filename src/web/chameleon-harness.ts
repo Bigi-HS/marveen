@@ -621,18 +621,6 @@ export function promoteToLive(target: string, opts: PromoteOptions = {}): Promot
     }
   }
 
-  // Thor T4: only keep the backup dir if something was actually backed up. A
-  // promote to a fresh target (no pre-existing dest files) backs up nothing,
-  // leaving an empty .c12-backup-<ts> dir as clutter -- remove it and report no
-  // backup so the caller does not point at an empty restore point.
-  let finalBackupDir: string | undefined = backupDir
-  try {
-    if (readdirSync(backupDir).length === 0) {
-      rmSync(backupDir, { recursive: true, force: true })
-      finalBackupDir = undefined
-    }
-  } catch { /* best-effort: leave the dir if we cannot inspect it */ }
-
-  logger.info({ target, promoted, backupDir: finalBackupDir }, 'chameleon: promoted validated files to live target')
-  return { ok: true, promoted, backupDir: finalBackupDir }
+  logger.info({ target, promoted, backupDir }, 'chameleon: promoted validated files to live target')
+  return { ok: true, promoted, backupDir }
 }
