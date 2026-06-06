@@ -122,6 +122,24 @@ class TestDreamEngineCore(unittest.TestCase):
         self.assertIn('Real pattern from content', patterns['worked'])
         self.assertNotIn('Strategy from', patterns['worked'][0], "Should not add fallback when real patterns exist")
 
+    def test_has_real_signal_true(self):
+        """G1 GUARD: has_real_signal detects real patterns"""
+        from dream_engine import has_real_signal
+        patterns = {
+            'worked': ['Real pattern from content'],
+            'avoid': ['Anti-pattern to avoid']
+        }
+        self.assertTrue(has_real_signal(patterns), "Should detect real patterns")
+
+    def test_has_real_signal_false_generic_only(self):
+        """G1 GUARD: has_real_signal returns False for generic-only"""
+        from dream_engine import has_real_signal
+        patterns = {
+            'worked': ['Generic pattern extraction needed'],
+            'avoid': ['Review for edge cases']
+        }
+        self.assertFalse(has_real_signal(patterns), "Should return False for generic-only patterns")
+
 class TestDreamEngineSafeguards(unittest.TestCase):
     """Test safeguards: never-delete, dedup-flag, snapshot (F1 Real Tests)"""
 

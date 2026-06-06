@@ -387,6 +387,25 @@ Status: OK"""
 
     return report
 
+def has_real_signal(patterns):
+    """Check if patterns contain real content (not generic fallback) - G1 GUARD"""
+    generic_keywords = [
+        "pattern TBD",
+        "generic pattern extraction",
+        "review for edge cases",
+        "placeholder"
+    ]
+
+    for key in ['worked', 'avoid']:
+        if key in patterns:
+            for pattern in patterns[key]:
+                pattern_lower = pattern.lower()
+                # If any pattern has real content (not just generic marker), it's real signal
+                if not any(gk in pattern_lower for gk in generic_keywords):
+                    return True
+
+    return False
+
 def run_dream_engine():
     """Main dream-engine workflow"""
     log("=== Dream-Engine Nightly Start ===")
@@ -414,6 +433,12 @@ def run_dream_engine():
 
     for theme, cluster_entries in clusters.items():
         patterns = extract_patterns(cluster_entries)
+
+        # G1 GUARD: Skip if patterns are generic-only (no real content)
+        if not has_real_signal(patterns):
+            log(f"ℹ Skipped {theme}: generic-only patterns (no real Mi működött / Mit kerülj content)")
+            continue
+
         content, keywords = generate_rb_entry(theme, patterns)
 
         # Dedup-check
