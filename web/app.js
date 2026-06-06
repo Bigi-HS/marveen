@@ -996,6 +996,9 @@ const AVATARS = [
 
 let selectedAvatar = null
 let agents = []
+// Category map { "Category": ["agent_name", ...] } fetched at runtime from
+// /api/agent-categories (kanban 78ba4672). Used only by the tree view.
+let agentCategories = {}
 let currentAgent = null
 // API-safe agent id for the currently open detail modal. Sub-agents key off
 // their name; the main agent's detail object carries name:'marveen' for legacy
@@ -1268,6 +1271,12 @@ async function loadAgents() {
       fetch('/api/marveen'),
     ])
     agents = await agentsRes.json()
+    // Category map for the tree view; non-fatal if it fails (tree degrades to
+    // an all-Uncategorized list, the flat view is unaffected).
+    try {
+      const catRes = await fetch('/api/agent-categories')
+      if (catRes.ok) agentCategories = await catRes.json()
+    } catch { /* keep last-known categories */ }
     if (marveenRes.ok) {
       window._marveen = await marveenRes.json()
       // A backend CHANNEL_PROVIDER-éhez igazitsuk a kliens-default-ot,
@@ -1279,7 +1288,7 @@ async function loadAgents() {
         if (typeof updateProviderUI === 'function') updateProviderUI()
       }
     }
-    renderAgents()
+    renderActiveAgentsView()
   } catch (err) {
     console.error('Betöltés hiba:', err)
   }
@@ -9455,4 +9464,149 @@ document.getElementById('terminalClose')?.addEventListener('click', () => {
   }
   window.addEventListener('hashchange', routeFromHash)
   routeFromHash()
+})()
+
+// === Agents team-tree view (kanban 78ba4672) ===
+// A category-grouped tree alongside the existing flat card grid. Reads the
+// runtime category map (agentCategories) + the existing `agents` array; no new
+// agent data fields. View choice + collapse state persist in localStorage.
+
+function getAgentsViewMode() {
+  return localStorage.getItem('agents_view_mode') === 'list' ? 'list' : 'tree' // default: tree (AC5)
+}
+function setAgentsViewMode(m) {
+  localStorage.setItem('agents_view_mode', m === 'list' ? 'list' : 'tree')
+}
+function getCollapsedCategories() {
+  try {
+    const v = JSON.parse(localStorage.getItem('agents_tree_collapsed') || '[]')
+    return new Set(Array.isArray(v) ? v : [])
+  } catch { return new Set() }
+}
+function setCollapsedCategories(set) {
+  localStorage.setItem('agents_tree_collapsed', JSON.stringify([...set]))
+}
+
+// Show the active view (tree or list), toggle button state, and render it.
+function renderActiveAgentsView() {
+  const mode = getAgentsViewMode()
+  const grid = document.getElementById('agentsGrid')
+  const tree = document.getElementById('agentsTree')
+  const btnTree = document.getElementById('viewToggleTree')
+  const btnList = document.getElementById('viewToggleList')
+  if (btnTree) btnTree.classList.toggle('active', mode === 'tree')
+  if (btnList) btnList.classList.toggle('active', mode === 'list')
+  if (mode === 'tree') {
+    if (grid) grid.hidden = true
+    if (tree) tree.hidden = false
+    renderAgentsTree()
+  } else {
+    if (tree) tree.hidden = true
+    if (grid) grid.hidden = false
+    renderAgents()
+  }
+}
+
+function renderAgentsTree() {
+  const tree = document.getElementById('agentsTree')
+  if (!tree) return
+  tree.innerHTML = ''
+
+  // Combined dataset: the main agent (marveen) as a pseudo-agent + sub-agents.
+  const all = []
+  if (window._marveen) {
+    all.push({ name: 'marveen', displayName: window._marveen.name || 'Marveen', running: true, team: { reportsTo: null }, _main: true })
+  }
+  for (const a of agents) all.push(a)
+  const byName = new Map(all.map(a => [a.name, a]))
+
+  const collapsed = getCollapsedCategories()
+  const placed = new Set()
+  const cats = (agentCategories && typeof agentCategories === 'object') ? agentCategories : {}
+
+  const renderCategory = (catName, memberNames) => {
+    // Resolve to present agents; config entries not in the fleet are ignored
+    // silently (edge case: agent removed but still in config).
+    const members = memberNames.map((n) => byName.get(n)).filter(Boolean)
+    members.forEach((m) => placed.add(m.name))
+    if (members.length === 0) return // AC7: empty category hidden
+
+    const runningCount = members.filter((m) => m.running).length
+    const isCollapsed = collapsed.has(catName)
+
+    const cat = document.createElement('div')
+    cat.className = 'tree-category' + (isCollapsed ? ' collapsed' : '')
+
+    const header = document.createElement('div')
+    header.className = 'tree-category-header'
+    header.innerHTML = `
+      <span class="tree-caret">&#9660;</span>
+      <span class="tree-category-name">${escapeHtml(catName)}</span>
+      <span class="tree-category-summary">${runningCount}/${members.length} fut</span>
+    `
+    header.addEventListener('click', () => {
+      const set = getCollapsedCategories()
+      if (set.has(catName)) set.delete(catName); else set.add(catName)
+      setCollapsedCategories(set)
+      renderAgentsTree()
+    })
+    cat.appendChild(header)
+
+    const memWrap = document.createElement('div')
+    memWrap.className = 'tree-members'
+
+    // AC4: nest an agent under its supervisor when both are in THIS category.
+    // Decision (per spec edge-case): cross-category reportsTo does NOT draw a
+    // connecting line (it would span unrelated groups); instead the agent shows
+    // a muted "reports to X" annotation so the relationship stays visible.
+    const memberNameSet = new Set(members.map((m) => m.name))
+    const roots = members.filter((m) => !m.team?.reportsTo || !memberNameSet.has(m.team.reportsTo))
+    const childrenBySup = new Map()
+    for (const m of members) {
+      const sup = m.team?.reportsTo
+      if (sup && memberNameSet.has(sup)) {
+        if (!childrenBySup.has(sup)) childrenBySup.set(sup, [])
+        childrenBySup.get(sup).push(m)
+      }
+    }
+
+    const agentRow = (a, isChild) => {
+      const row = document.createElement('div')
+      row.className = 'tree-agent' + (isChild ? ' child' : '')
+      const dotClass = a.running ? 'running' : 'stopped' // AC3
+      const label = escapeHtml(a.displayName || a.name)
+      const sup = a.team?.reportsTo
+      const xcat = (sup && !memberNameSet.has(sup))
+        ? `<span class="tree-reports-xcat">&#8627; ${escapeHtml(sup)}</span>` : ''
+      row.innerHTML = `<span class="process-dot ${dotClass}"></span><span class="tree-agent-name">${label}</span>${xcat}`
+      row.addEventListener('click', () => {
+        if (a._main) { if (typeof openMarveenDetail === 'function') openMarveenDetail() }
+        else openAgentDetail(a.name)
+      })
+      return row
+    }
+
+    for (const r of roots) {
+      memWrap.appendChild(agentRow(r, false))
+      for (const child of (childrenBySup.get(r.name) || [])) {
+        memWrap.appendChild(agentRow(child, true))
+      }
+    }
+    cat.appendChild(memWrap)
+    tree.appendChild(cat)
+  }
+
+  for (const catName of Object.keys(cats)) renderCategory(catName, cats[catName] || [])
+
+  // AC1/AC7: agents in no category fall into "Uncategorized" (hidden if empty).
+  const uncategorized = all.filter((a) => !placed.has(a.name))
+  if (uncategorized.length > 0) renderCategory('Uncategorized', uncategorized.map((a) => a.name))
+}
+
+// Wire the view toggle (elements exist in the initial agents-page markup).
+;(() => {
+  const btnTree = document.getElementById('viewToggleTree')
+  const btnList = document.getElementById('viewToggleList')
+  btnTree?.addEventListener('click', () => { setAgentsViewMode('tree'); renderActiveAgentsView() })
+  btnList?.addEventListener('click', () => { setAgentsViewMode('list'); renderActiveAgentsView() })
 })()
