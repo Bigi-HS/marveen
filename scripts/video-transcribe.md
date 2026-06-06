@@ -36,11 +36,17 @@ No auto-reinstall; run these once to recreate `store/whisper-env/`:
 cd /home/domin/marveen
 mkdir -p store/whisper-env/bin
 
-# 1. micromamba static binary (no sudo). The host has no bzip2, so extract the
-#    .tar.bz2 with python's bz2 stdlib, not tar.
-curl -Ls -o /tmp/mm.tar.bz2 https://micro.mamba.pm/api/micromamba/linux-64/latest
-python3 - <<'PY'
-import tarfile, os
+# 1. micromamba static binary (no sudo), PINNED version + sha256-verified.
+#    The host has no bzip2, so extract the .tar.bz2 with python's bz2 stdlib.
+MM_VER=2.8.0
+MM_SHA=d4f5869b8b5b8e4e8b10375d84ae998edb3f4b439e05228fc5099082935a75ec
+curl -Ls -o /tmp/mm.tar.bz2 "https://micro.mamba.pm/api/micromamba/linux-64/${MM_VER}"
+python3 - "$MM_SHA" <<'PY'
+import hashlib, sys, tarfile, os
+want = sys.argv[1]
+got = hashlib.sha256(open("/tmp/mm.tar.bz2","rb").read()).hexdigest()
+if got != want:
+    sys.exit(f"micromamba sha256 MISMATCH: got {got} want {want}")
 with tarfile.open("/tmp/mm.tar.bz2","r:bz2") as t:
     m=t.getmember("bin/micromamba"); m.name="micromamba"
     t.extract(m,"store/whisper-env/bin")
@@ -52,9 +58,13 @@ export MAMBA_ROOT_PREFIX=/home/domin/marveen/store/whisper-env
 store/whisper-env/bin/micromamba create -y -p store/whisper-env/env \
     -c conda-forge python=3.11 ffmpeg pip
 
-# 3. python deps (prebuilt wheels for cp311 -- no compiler needed)
-store/whisper-env/env/bin/pip install faster-whisper yt-dlp
+# 3. python deps PINNED (prebuilt cp311 wheels -- no compiler needed)
+store/whisper-env/env/bin/pip install 'faster-whisper==1.2.1' 'yt-dlp==2026.3.17'
 ```
+
+Pinned reference versions (the set this was built + validated against):
+micromamba 2.8.0, python 3.11, ffmpeg 8.1, faster-whisper 1.2.1 (ctranslate2
+4.7.2), yt-dlp 2026.03.17. `yt-dlp` may be bumped if a site extractor breaks.
 
 Verify: `store/whisper-env/env/bin/yt-dlp --version` and
 `store/whisper-env/env/bin/python -c "import faster_whisper"`.

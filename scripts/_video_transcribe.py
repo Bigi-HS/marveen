@@ -34,7 +34,7 @@ def main() -> int:
     ap.add_argument("--audio", required=True)
     ap.add_argument("--out-base", required=True, help="output path without extension")
     ap.add_argument("--model", default="medium")
-    ap.add_argument("--lang", default="auto", help="hu | en | auto")
+    ap.add_argument("--lang", default="auto", help="hu | en | auto (source speech language)")
     ap.add_argument("--download-root", default=None, help="model cache dir")
     args = ap.parse_args()
 
@@ -58,6 +58,9 @@ def main() -> int:
         download_root=args.download_root,
     )
 
+    # Transcribe in the SOURCE language (detected or forced via --lang). The
+    # transcript is intentionally same-language as the speech (no translation --
+    # out of scope; the tool just handles both HU and EN sources).
     segments, info = model.transcribe(
         args.audio,
         language=language,
