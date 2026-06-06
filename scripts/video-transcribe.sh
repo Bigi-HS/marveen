@@ -43,7 +43,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$URL" ] || { echo "ERROR: no URL given. Usage: $0 <url> [--lang hu|en|auto] [--model small|medium] [--translate]" >&2; exit 2; }
+[ -n "$URL" ] || { echo "ERROR: no URL given. Usage: $0 <url> [--lang hu|en|auto] [--model small|medium] [--out-dir DIR]" >&2; exit 2; }
 
 # --- input validation (security: external URL -> subprocess -> yt-dlp) ------
 # (1) URL allowlist: https ONLY (no file://, ftp://, etc.) and only YouTube /
