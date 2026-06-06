@@ -75,6 +75,53 @@ class TestDreamEngineCore(unittest.TestCase):
         word_count = len(content.split())
         self.assertLess(word_count, 500, f"RB entry too large: {word_count} words")
 
+    def test_pattern_extraction_with_real_content(self):
+        """F1 FIX: extract_patterns should parse real **Mi működött** sections"""
+        cluster = [{
+            'keywords': 'vault-ops',
+            'content': '''**Téma**: Test
+**Mi működött**:
+- Bounded scope approach
+- Atomic transaction
+**Mit kerülj**:
+- Auto-deletion without approval
+**Források**: Test
+'''
+        }]
+        patterns = extract_patterns(cluster)
+        self.assertIn('Bounded scope approach', patterns['worked'], "Should extract real patterns from content")
+        self.assertIn('Auto-deletion without approval', patterns['avoid'], "Should extract avoid patterns from content")
+
+    def test_pattern_extraction_case_insensitive(self):
+        """F1 FIX: extract_patterns should handle lowercase **mi működött**"""
+        cluster = [{
+            'keywords': 'vault-ops',
+            'content': '''**Téma**: Test
+**mi működött**:
+- Case insensitive pattern
+**mit kerülj**:
+- Lowercase marker
+**Források**: Test
+'''
+        }]
+        patterns = extract_patterns(cluster)
+        self.assertIn('Case insensitive pattern', patterns['worked'], "Should extract from lowercase **mi működött**")
+        self.assertIn('Lowercase marker', patterns['avoid'], "Should extract from lowercase **mit kerülj**")
+
+    def test_fallback_precedence_fix(self):
+        """F2 FIX: fallback should NOT fire if patterns already exist"""
+        cluster = [{
+            'keywords': 'vault-ops, worked, success',
+            'content': '''**Mi működött**:
+- Real pattern from content
+'''
+        }]
+        patterns = extract_patterns(cluster)
+        # Should have real pattern, NOT fallback pattern
+        self.assertEqual(len(patterns['worked']), 1, "Should have exactly 1 pattern (real, not fallback)")
+        self.assertIn('Real pattern from content', patterns['worked'])
+        self.assertNotIn('Strategy from', patterns['worked'][0], "Should not add fallback when real patterns exist")
+
 class TestDreamEngineSafeguards(unittest.TestCase):
     """Test safeguards: never-delete, dedup-flag, snapshot (F1 Real Tests)"""
 

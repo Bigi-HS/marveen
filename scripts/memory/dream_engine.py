@@ -25,18 +25,19 @@ def log(msg):
     print(f"[{ts}] {msg}")
 
 def snapshot_vault(keep_last_n=7):
-    """Create read-only snapshot of vault before processing, cleanup old snapshots"""
+    """Create read-only snapshot of vault before processing, cleanup old snapshots (A1: deterministic sort)"""
     timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
     snapshot_path = f"store/vault_snapshot_{timestamp}.db"
     try:
         shutil.copy2(VAULT_PATH, snapshot_path)
         log(f"✓ Snapshot created: {snapshot_path}")
 
-        # Cleanup old snapshots: keep only last N
+        # Cleanup old snapshots: keep only last N (A1 FIX: sort by filename, not mtime)
         try:
             from pathlib import Path
             store_dir = Path("store")
-            snapshots = sorted(store_dir.glob("vault_snapshot_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+            # Sort by filename (ISO timestamp) instead of mtime (which can be identical for close calls)
+            snapshots = sorted(store_dir.glob("vault_snapshot_*.db"), key=lambda p: p.name, reverse=True)
             for old_snapshot in snapshots[keep_last_n:]:
                 old_snapshot.unlink()
                 log(f"ℹ Removed old snapshot: {old_snapshot.name}")
@@ -104,41 +105,70 @@ def cluster_entries(entries):
     return clusters
 
 def extract_patterns(cluster):
-    """Extract 'mi működött' + 'mit kerülj' from cluster content"""
+    """Extract 'mi működött' + 'mit kerülj' from cluster content (F1+F2 fixes)"""
     worked = []
     avoid = []
 
     for entry in cluster:
         content = entry.get('content', '')
         keywords = entry.get('keywords', '')
+        keywords_lower = keywords.lower()
 
-        # Look for sections that contain patterns
-        # Split by common markers: "## Mi működött", "**Mi működött**", etc.
+        # F1 FIX: Case-insensitive detection and section extraction
         content_lower = content.lower()
 
-        # Extract from content sections
-        if '**mi működött**' in content_lower or '## mi működött' in content_lower:
-            # Find lines between "Mi működött" and next section
-            parts = content.split('**Mi működött**')
-            if len(parts) > 1:
-                section = parts[1].split('**')[0] if '**' in parts[1] else parts[1]
-                # Extract bullet points or lines as patterns
-                lines = [line.strip().lstrip('- ').strip() for line in section.split('\n') if line.strip() and line.strip().startswith('-')]
-                worked.extend([line for line in lines if line and len(line) > 5])
+        # Extract "Mi működött" patterns (case-insensitive search, but preserve original case)
+        worked_marker_idx = content_lower.find('**mi működött**')
+        if worked_marker_idx == -1:
+            worked_marker_idx = content_lower.find('## mi működött')
 
-        if '**mit kerülj**' in content_lower or '## mit kerülj' in content_lower:
-            # Find lines between "Mit kerülj" and next section
-            parts = content.split('**Mit kerülj**')
-            if len(parts) > 1:
-                section = parts[1].split('**')[0] if '**' in parts[1] else parts[1]
-                # Extract bullet points or lines as patterns
-                lines = [line.strip().lstrip('- ').strip() for line in section.split('\n') if line.strip() and line.strip().startswith('-')]
-                avoid.extend([line for line in lines if line and len(line) > 5])
+        if worked_marker_idx != -1:
+            # Find the end of the marker (skip past **marker**:)
+            marker_end = content.find(':', worked_marker_idx)
+            if marker_end == -1:
+                marker_end = worked_marker_idx + 15  # Approx length of marker
 
-        # Fallback: if no patterns found, use keywords as hint
-        if not worked and 'success' in keywords.lower() or 'worked' in keywords.lower():
+            # Find next section marker after the content starts
+            next_marker = content.find('**', marker_end + 1)
+            if next_marker == -1:
+                next_marker = content.find('##', marker_end + 1)
+            if next_marker == -1:
+                next_marker = len(content)
+
+            section = content[marker_end:next_marker]
+            # Extract bullet points
+            lines = [line.strip().lstrip('- ').strip() for line in section.split('\n')
+                    if line.strip() and line.strip().startswith('-')]
+            worked.extend([line for line in lines if line and len(line) > 5])
+
+        # Extract "Mit kerülj" patterns (case-insensitive search)
+        avoid_marker_idx = content_lower.find('**mit kerülj**')
+        if avoid_marker_idx == -1:
+            avoid_marker_idx = content_lower.find('## mit kerülj')
+
+        if avoid_marker_idx != -1:
+            # Find the end of the marker
+            marker_end = content.find(':', avoid_marker_idx)
+            if marker_end == -1:
+                marker_end = avoid_marker_idx + 13  # Approx length of marker
+
+            # Find next section marker
+            next_marker = content.find('**', marker_end + 1)
+            if next_marker == -1:
+                next_marker = content.find('##', marker_end + 1)
+            if next_marker == -1:
+                next_marker = len(content)
+
+            section = content[marker_end:next_marker]
+            # Extract bullet points
+            lines = [line.strip().lstrip('- ').strip() for line in section.split('\n')
+                    if line.strip() and line.strip().startswith('-')]
+            avoid.extend([line for line in lines if line and len(line) > 5])
+
+        # F2 FIX: Operator precedence - add parentheses to fix logic
+        if not worked and ('success' in keywords_lower or 'worked' in keywords_lower):
             worked.append(f"Strategy from {keywords} domain")
-        if not avoid and 'fail' in keywords.lower() or 'bug' in keywords.lower():
+        if not avoid and ('fail' in keywords_lower or 'bug' in keywords_lower):
             avoid.append(f"Known issue in {keywords} domain")
 
     # Deduplicate
