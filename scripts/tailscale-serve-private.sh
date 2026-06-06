@@ -36,22 +36,48 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 # CRITICAL SAFETY GATE: refuse to do anything if Funnel is configured. Funnel
 # publishes to the public internet -- the one thing this must never do.
 #
-# Fail-CLOSED on an unreadable status (Thor advisory #1): if `tailscale funnel
-# status` itself errors (e.g. tailscaled is down), we must NOT silently treat
-# the empty output as "no funnel". We cannot confirm safety, so we abort loudly
-# instead of masking a daemon-down with a false "safe".
+# The AUTHORITATIVE discriminator is `serve status --json`'s AllowFunnel map:
+# null / absent / all-false = tailnet-only (safe); any handler set true = a
+# PUBLIC funnel. We do NOT grep `tailscale funnel status` text: on tailscale
+# 1.98 that command echoes the (tailnet-only) SERVE config too, so a text grep
+# false-positives "FUNNEL ACTIVE" on a perfectly safe serve (observed on the
+# first live flip).
+#
+# Fail-CLOSED on an unreadable/unparseable status (Thor advisory #1): if the
+# status errors (e.g. tailscaled down) we must NOT treat it as "no funnel" --
+# we cannot confirm safety, so we abort loudly.
 assert_funnel_off() {
-  local f rc
-  f="$("$TS" funnel status 2>&1)" && rc=0 || rc=$?
+  local j rc
+  j="$("$TS" serve status --json 2>&1)" && rc=0 || rc=$?
   if [ "$rc" -ne 0 ]; then
-    echo "----- tailscale funnel status (rc=$rc) -----" >&2
-    printf '%s\n' "$f" >&2
-    die "could not read Funnel status (tailscaled down?). Refusing to proceed -- cannot confirm the dashboard is not publicly exposed."
+    echo "----- tailscale serve status --json (rc=$rc) -----" >&2
+    printf '%s\n' "$j" >&2
+    die "could not read serve status (tailscaled down?). Refusing to proceed -- cannot confirm the dashboard is not publicly exposed."
   fi
-  if printf '%s' "$f" | grep -qiE 'https://|:443|:8443|:10000|proxy '; then
-    echo "----- tailscale funnel status -----" >&2
-    printf '%s\n' "$f" >&2
-    die "FUNNEL IS ACTIVE -- refusing to proceed. Run '$TS funnel reset' first. This config must be tailnet-only."
+  local verdict
+  verdict="$(printf '%s' "$j" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("PARSE_ERROR"); sys.exit(0)
+af = d.get("AllowFunnel")
+if af is None:
+    print("TAILNET_ONLY")          # no funnel configured -> proven safe
+elif isinstance(af, dict):
+    print("PUBLIC" if any(af.values()) else "TAILNET_ONLY")
+else:
+    # Unexpected shape (not null, not a map) -> we CANNOT prove tailnet-only.
+    # Fail-closed at a security assert (Chad FLAG): never infer safe blindly.
+    print("PARSE_ERROR")
+' 2>/dev/null)"
+  if [ "$verdict" = "PARSE_ERROR" ] || [ -z "$verdict" ]; then
+    die "could not parse serve status JSON. Refusing to proceed -- cannot confirm the dashboard is not publicly exposed."
+  fi
+  if [ "$verdict" = "PUBLIC" ]; then
+    echo "----- tailscale serve status --json -----" >&2
+    printf '%s\n' "$j" >&2
+    die "PUBLIC FUNNEL IS ACTIVE (AllowFunnel set) -- refusing to proceed. Run '$TS funnel reset' first. This config must be tailnet-only."
   fi
 }
 
