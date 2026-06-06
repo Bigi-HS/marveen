@@ -3,8 +3,10 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   shouldCompactSession,
+  shouldHardCompact,
   DEFAULT_TOKEN_THRESHOLD,
   DEFAULT_COOLDOWN_MS,
+  DEFAULT_HARD_CEILING_TOKENS,
   type SessionSizeThresholds,
 } from '../web/session-size-watcher.js'
 
@@ -65,6 +67,37 @@ describe('shouldCompactSession', () => {
 })
 
 // ---------------------------------------------------------------------------
+// shouldHardCompact -- the hard-ceiling tier (card 8a734a43)
+// ---------------------------------------------------------------------------
+
+describe('shouldHardCompact', () => {
+  it('returns false when context is null', () => {
+    expect(shouldHardCompact(null, DEFAULT_HARD_CEILING_TOKENS)).toBe(false)
+  })
+
+  it('returns false below the hard ceiling', () => {
+    expect(shouldHardCompact(DEFAULT_HARD_CEILING_TOKENS - 1, DEFAULT_HARD_CEILING_TOKENS)).toBe(false)
+  })
+
+  it('returns true at and above the hard ceiling', () => {
+    expect(shouldHardCompact(DEFAULT_HARD_CEILING_TOKENS, DEFAULT_HARD_CEILING_TOKENS)).toBe(true)
+    expect(shouldHardCompact(DEFAULT_HARD_CEILING_TOKENS + 200_000, DEFAULT_HARD_CEILING_TOKENS)).toBe(true)
+  })
+
+  it('has NO cooldown term -- fires purely on the ceiling (cooldown bypass is intentional)', () => {
+    // shouldHardCompact takes only (contextTokens, hardCeiling); recency cannot
+    // suppress it. That is the whole point of the hard tier.
+    expect(shouldHardCompact.length).toBe(2)
+  })
+
+  it('the default hard ceiling is well above the soft threshold', () => {
+    expect(DEFAULT_HARD_CEILING_TOKENS).toBeGreaterThan(DEFAULT_TOKEN_THRESHOLD)
+    expect(DEFAULT_HARD_CEILING_TOKENS).toBeGreaterThanOrEqual(600_000)
+    expect(DEFAULT_HARD_CEILING_TOKENS).toBeLessThanOrEqual(700_000)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Source-contract tests: structural guarantees about the watcher
 // ---------------------------------------------------------------------------
 
@@ -115,5 +148,38 @@ describe('session-size-watcher -- source contracts', () => {
 
   it('exports startSessionSizeWatcher', () => {
     expect(SRC).toMatch(/export function startSessionSizeWatcher/)
+  })
+})
+
+describe('session-size-watcher -- hard-ceiling tier contracts', () => {
+  it('the hard-ceiling check ALSO gates on idle (never compacts a busy pane)', () => {
+    // checkAgentHardCeiling must contain the same idle guard as the soft tier.
+    const hardFn = SRC.slice(SRC.indexOf('function checkAgentHardCeiling'))
+    expect(hardFn).toMatch(/!isReadyForPrompt\(pane\)/)
+  })
+
+  it('the hard tier bypasses the cooldown (no lastCompactedAt gate before sending)', () => {
+    // shouldHardCompact has no cooldown parameter; the check sets lastCompactedAt
+    // AFTER compacting (to inform the soft tier) but never reads it as a gate.
+    const hardFn = SRC.slice(SRC.indexOf('function checkAgentHardCeiling'), SRC.indexOf('export function startSessionSizeWatcher'))
+    expect(hardFn).toMatch(/shouldHardCompact/)
+    expect(hardFn).not.toMatch(/lastCompactedAt\.get/)
+  })
+
+  it('runs a separate faster sweep than the 10-min soft sweep', () => {
+    expect(SRC).toMatch(/HARD_CEILING_INTERVAL_MS/)
+    expect(SRC).toMatch(/setInterval\(hardSweep, HARD_CEILING_INTERVAL_MS\)/)
+  })
+
+  it('makes the never-idle stuck-warning threshold env-configurable', () => {
+    expect(SRC).toMatch(/process\.env\.SESSION_HARD_CEILING_STUCK_WARN_MS/)
+  })
+
+  it('does NOT send to a busy pane (no risky turn-boundary injection here)', () => {
+    // The only sendPromptToSession in the hard path is guarded by the idle check
+    // above; there is no "queue to busy pane" path.
+    const hardFn = SRC.slice(SRC.indexOf('function checkAgentHardCeiling'), SRC.indexOf('export function startSessionSizeWatcher'))
+    const sends = (hardFn.match(/sendPromptToSession/g) || []).length
+    expect(sends).toBe(1)
   })
 })
