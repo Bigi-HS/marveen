@@ -62,7 +62,14 @@ try:
 except Exception:
     print("PARSE_ERROR"); sys.exit(0)
 af = d.get("AllowFunnel")
-print("PUBLIC" if isinstance(af, dict) and any(af.values()) else "TAILNET_ONLY")
+if af is None:
+    print("TAILNET_ONLY")          # no funnel configured -> proven safe
+elif isinstance(af, dict):
+    print("PUBLIC" if any(af.values()) else "TAILNET_ONLY")
+else:
+    # Unexpected shape (not null, not a map) -> we CANNOT prove tailnet-only.
+    # Fail-closed at a security assert (Chad FLAG): never infer safe blindly.
+    print("PARSE_ERROR")
 ' 2>/dev/null)"
   if [ "$verdict" = "PARSE_ERROR" ] || [ -z "$verdict" ]; then
     die "could not parse serve status JSON. Refusing to proceed -- cannot confirm the dashboard is not publicly exposed."
