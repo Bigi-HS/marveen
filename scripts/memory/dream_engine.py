@@ -24,13 +24,26 @@ def log(msg):
     ts = datetime.now(tz=timezone.utc).isoformat()
     print(f"[{ts}] {msg}")
 
-def snapshot_vault():
-    """Create read-only snapshot of vault before processing"""
+def snapshot_vault(keep_last_n=7):
+    """Create read-only snapshot of vault before processing, cleanup old snapshots (A1: deterministic sort)"""
     timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
     snapshot_path = f"store/vault_snapshot_{timestamp}.db"
     try:
         shutil.copy2(VAULT_PATH, snapshot_path)
         log(f"✓ Snapshot created: {snapshot_path}")
+
+        # Cleanup old snapshots: keep only last N (A1 FIX: sort by filename, not mtime)
+        try:
+            from pathlib import Path
+            store_dir = Path("store")
+            # Sort by filename (ISO timestamp) instead of mtime (which can be identical for close calls)
+            snapshots = sorted(store_dir.glob("vault_snapshot_*.db"), key=lambda p: p.name, reverse=True)
+            for old_snapshot in snapshots[keep_last_n:]:
+                old_snapshot.unlink()
+                log(f"ℹ Removed old snapshot: {old_snapshot.name}")
+        except Exception as cleanup_err:
+            log(f"⚠ Snapshot cleanup failed: {cleanup_err}")
+
         return snapshot_path
     except Exception as e:
         log(f"✗ Snapshot failed: {e}")
@@ -46,23 +59,27 @@ def get_token():
         return None
 
 def collect_daily_log(hours=24):
-    """Collect daily-log entries from past N hours (API call)"""
-    # NOTE: This is a placeholder. The actual daily-log API endpoint TBD.
-    # For now, we fetch from SQLite daily_log table if it exists, or skip.
+    """Collect daily-log entries from past N hours via /api/daily-log endpoint"""
+    token = get_token()
+    if not token:
+        log("✗ Token not found, cannot fetch daily-log via API")
+        return []
+
     try:
-        conn = sqlite3.connect(VAULT_PATH)
-        c = conn.cursor()
+        # Use /api/daily-log endpoint to fetch entries for applegate agent
+        req = urllib.request.Request(
+            f"{API_BASE}/api/daily-log?agent={AGENT_ID}&hours={hours}",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method="GET"
+        )
 
-        # Check if daily_log table exists (API stores it somewhere)
-        # For MVP: we read from memory 'daily-log' category if it exists
-        # Future: use /api/daily-log?agent=applegate&hours=24
-
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
-        cutoff_ts = cutoff.timestamp()
-
-        # Placeholder: return empty for now (daily-log storage TBD)
-        log("ℹ Daily-log collection (API TBD, returning empty for MVP)")
-        conn.close()
+        with urllib.request.urlopen(req, timeout=10) as r:
+            resp = json.load(r)
+            entries = resp if isinstance(resp, list) else resp.get('entries', [])
+            log(f"ℹ Daily-log collected: {len(entries)} entries from past {hours}h")
+            return entries
+    except urllib.error.HTTPError as e:
+        log(f"⚠ Daily-log API failed: {e.code}")
         return []
     except Exception as e:
         log(f"✗ Daily-log collect failed: {e}")
@@ -88,13 +105,86 @@ def cluster_entries(entries):
     return clusters
 
 def extract_patterns(cluster):
-    """Extract 'mi működött' + 'mit kerülj' from cluster (placeholder)"""
-    # MVP: simple extraction. Full NLP/clustering future.
-    patterns = {
-        'worked': ['pattern TBD from content'],
-        'avoid': ['pattern TBD from content']
+    """Extract 'mi működött' + 'mit kerülj' from cluster content (F1+F2 fixes)"""
+    worked = []
+    avoid = []
+
+    for entry in cluster:
+        content = entry.get('content', '')
+        keywords = entry.get('keywords', '')
+        keywords_lower = keywords.lower()
+
+        # F1 FIX: Case-insensitive detection and section extraction
+        content_lower = content.lower()
+
+        # Extract "Mi működött" patterns (case-insensitive search, but preserve original case)
+        worked_marker_idx = content_lower.find('**mi működött**')
+        if worked_marker_idx == -1:
+            worked_marker_idx = content_lower.find('## mi működött')
+
+        if worked_marker_idx != -1:
+            # Find the end of the marker (skip past **marker**:)
+            marker_end = content.find(':', worked_marker_idx)
+            if marker_end == -1:
+                marker_end = worked_marker_idx + 15  # Approx length of marker
+
+            # Find next section marker after the content starts
+            next_marker = content.find('**', marker_end + 1)
+            if next_marker == -1:
+                next_marker = content.find('##', marker_end + 1)
+            if next_marker == -1:
+                next_marker = len(content)
+
+            section = content[marker_end:next_marker]
+            # Extract bullet points
+            lines = [line.strip().lstrip('- ').strip() for line in section.split('\n')
+                    if line.strip() and line.strip().startswith('-')]
+            worked.extend([line for line in lines if line and len(line) > 5])
+
+        # Extract "Mit kerülj" patterns (case-insensitive search)
+        avoid_marker_idx = content_lower.find('**mit kerülj**')
+        if avoid_marker_idx == -1:
+            avoid_marker_idx = content_lower.find('## mit kerülj')
+
+        if avoid_marker_idx != -1:
+            # Find the end of the marker
+            marker_end = content.find(':', avoid_marker_idx)
+            if marker_end == -1:
+                marker_end = avoid_marker_idx + 13  # Approx length of marker
+
+            # Find next section marker
+            next_marker = content.find('**', marker_end + 1)
+            if next_marker == -1:
+                next_marker = content.find('##', marker_end + 1)
+            if next_marker == -1:
+                next_marker = len(content)
+
+            section = content[marker_end:next_marker]
+            # Extract bullet points
+            lines = [line.strip().lstrip('- ').strip() for line in section.split('\n')
+                    if line.strip() and line.strip().startswith('-')]
+            avoid.extend([line for line in lines if line and len(line) > 5])
+
+        # F2 FIX: Operator precedence - add parentheses to fix logic
+        if not worked and ('success' in keywords_lower or 'worked' in keywords_lower):
+            worked.append(f"Strategy from {keywords} domain")
+        if not avoid and ('fail' in keywords_lower or 'bug' in keywords_lower):
+            avoid.append(f"Known issue in {keywords} domain")
+
+    # Deduplicate
+    worked = list(dict.fromkeys(worked))
+    avoid = list(dict.fromkeys(avoid))
+
+    # Ensure we always have at least placeholder patterns
+    if not worked:
+        worked = ["Generic pattern extraction needed"]
+    if not avoid:
+        avoid = ["Review for edge cases"]
+
+    return {
+        'worked': worked,
+        'avoid': avoid
     }
-    return patterns
 
 def dedup_check(content, keywords):
     """Check if similar entry exists (keyword-search). F4 FIX: require domain+reasoningbank match."""
