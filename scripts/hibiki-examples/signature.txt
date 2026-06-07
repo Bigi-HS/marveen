@@ -1,0 +1,1 @@
+[PLACEHOLDER -- Genesis/Dominik to confirm the Hibiki signature phrase before launch (G-AC1 deploy blocker). The push script refuses to send a live message while this file contains "PLACEHOLDER".]
