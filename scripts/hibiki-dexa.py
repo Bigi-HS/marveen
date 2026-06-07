@@ -238,7 +238,14 @@ def add_dexa_result(
     results.sort(key=lambda r: r["date"])
     data["dexa_results"] = results
 
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    # Atomic write with owner-only perms: the progress store holds body-
+    # composition data, so persist via tmp + replace and chmod 0600 (F-AC3,
+    # consistent with the push pipeline's state file). A crash mid-write leaves
+    # the prior store intact rather than a truncated/corrupt file.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.chmod(0o600)
+    tmp.replace(path)
     return [DexaResult.from_record(r) for r in results]
 
 

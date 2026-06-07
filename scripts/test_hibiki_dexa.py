@@ -99,6 +99,11 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(loaded), 1)
         self.assertEqual(loaded[0].date, "2026-01-05")
 
+    def test_add_writes_owner_only_perms(self):
+        # F-AC3: the body-composition store must be owner-only (0600).
+        dexa.add_dexa_result(dexa.DexaResult.from_record(SCAN_1), self.store)
+        self.assertEqual(self.store.stat().st_mode & 0o777, 0o600)
+
     def test_add_preserves_other_keys(self):
         self.store.parent.mkdir(parents=True)
         self.store.write_text(json.dumps({"weight_log": [{"date": "2026-01-01", "kg": 80}]}))
