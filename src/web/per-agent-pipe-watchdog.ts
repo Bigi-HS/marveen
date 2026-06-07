@@ -35,6 +35,7 @@ import { probeChannelPollerPresence } from './channel-poller-reap.js'
 import { attemptChannelMcpReconnect, resolveAgentProviderType } from './channel-mcp-reconnect.js'
 import { listAgentNames, agentDir } from './agent-config.js'
 import { isAgentRunning, agentHasChannel, isAgentChannelIntentionallyEnabled } from './agent-process.js'
+import { readAgentHangState, type HangVerdict } from './pipe-hang-detector.js'
 import {
   assessPipeLiveness,
   reduceConflictProbes,
@@ -275,4 +276,81 @@ export async function runSubAgentSweep(
     }
   }
   return { skipped: false, reason: 'swept', results }
+}
+
+// ---------------------------------------------------------------------------
+// HANG sweep (card 31ab64fe Part 1): recover a WEDGED socketpair -- the agent
+// called a Telegram MCP tool and it HUNG (no tool_result), the symptom no other
+// layer sees. UNLIKE the liveness sweep above this runs REGARDLESS of dashboard
+// state: a hang is neither a pane-✘ nor a missing poller nor a 409=200, so the
+// in-process monitor and the 409 probe both miss it -- there is no overlap to
+// double-drive. The recovery is the same tested /mcp navigation.
+// ---------------------------------------------------------------------------
+
+// A real Telegram reply returns in well under this; a wedged call never returns.
+const HANG_THRESHOLD_MS = 90_000
+
+// Remember the tool_use id we already drove /mcp for, per agent. An abandoned
+// hung call STAYS in the transcript (it never gets a result), so without this we
+// would re-/mcp the same dead call every tick. We act ONCE per distinct hung
+// tool_use; a genuinely new hang (different id) re-arms recovery.
+const handledHangId = new Map<string, string>()
+
+export interface HangSweepResult {
+  swept: string[]
+  recovered: string[]
+  results: Record<string, HangVerdict>
+}
+
+export interface HangSweepDeps {
+  listChannelSubAgents: () => string[]
+  readHangState: (name: string, nowMs: number, thresholdMs: number) => HangVerdict
+  reconnect: (name: string) => { ok: boolean; message: string }
+  thresholdMs: number
+}
+
+const DEFAULT_HANG_DEPS: HangSweepDeps = {
+  listChannelSubAgents,
+  readHangState: readAgentHangState,
+  reconnect: attemptChannelMcpReconnect,
+  thresholdMs: HANG_THRESHOLD_MS,
+}
+
+export function runHangSweep(now: number = Date.now(), deps: HangSweepDeps = DEFAULT_HANG_DEPS): HangSweepResult {
+  const swept: string[] = []
+  const recovered: string[] = []
+  const results: Record<string, HangVerdict> = {}
+  for (const name of deps.listChannelSubAgents()) {
+    swept.push(name)
+    let verdict: HangVerdict
+    try {
+      verdict = deps.readHangState(name, now, deps.thresholdMs)
+    } catch (err) {
+      logger.warn({ err, agent: name }, 'per-agent-pipe-watchdog: hang read error')
+      continue
+    }
+    results[name] = verdict
+    if (verdict.state !== 'hung') {
+      // Recovered or idle -> forget the handled id so a future hang re-arms.
+      if (verdict.state === 'ok' || verdict.state === 'none') handledHangId.delete(name)
+      continue
+    }
+    if (verdict.toolUseId && handledHangId.get(name) === verdict.toolUseId) {
+      // Already drove /mcp for THIS hung call; don't re-fire on the abandoned one.
+      continue
+    }
+    logger.warn(
+      { agent: name, hungForMs: verdict.hungForMs, toolUseId: verdict.toolUseId },
+      'per-agent-pipe-watchdog: HUNG Telegram MCP call -- driving /mcp recovery',
+    )
+    const rc = deps.reconnect(name)
+    if (verdict.toolUseId) handledHangId.set(name, verdict.toolUseId)
+    if (rc.ok) recovered.push(name)
+    logEvent(name, {
+      ts: now,
+      kind: rc.ok ? 'recovered' : 'recovery-attempt',
+      detail: `hang ${verdict.hungForMs}ms -> /mcp ${rc.ok ? 'ok' : 'failed'}: ${rc.message}`,
+    })
+  }
+  return { swept, recovered, results }
 }

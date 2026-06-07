@@ -55,6 +55,15 @@ while true; do
       sub="$(cd "$ROOT" && timeout 120 "$NODE" dist/web/per-agent-pipe-watchdog-cli.js 2>>"$LOG")"
       log "subagent-sweep: ${sub:-<no output / timeout>}"
     fi
+
+    # HANG sweep (card 31ab64fe Part 1): recover a WEDGED socketpair (an MCP
+    # tool_use that hangs with no tool_result) -- invisible to the liveness sweep
+    # above and to the in-process monitor. Runs REGARDLESS of dashboard state
+    # (no overlap), reads transcripts only, drives /mcp once per distinct hang.
+    if [ -f "$ROOT/dist/web/per-agent-hang-cli.js" ]; then
+      hang="$(cd "$ROOT" && timeout 120 "$NODE" dist/web/per-agent-hang-cli.js 2>>"$LOG")"
+      log "hang-sweep: ${hang:-<no output / timeout>}"
+    fi
   fi
   sleep "$INTERVAL"
 done
