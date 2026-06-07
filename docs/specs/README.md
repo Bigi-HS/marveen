@@ -13,7 +13,7 @@ Key sections:
 
 ## Pipeline
 
-Quill writes spec → Thor audits independently → Dave implements → Thor+Dave gate → Forge deploys.
+Quill writes spec → Thor audits independently → Dave implements → Thor+Dave gate → Armorer deploys.
 
 Quill does not audit its own specs. That is Thor's role.
 
