@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL } from './config.js'
-import { loadOrCreateDashboardToken, checkBearerToken, buildDashboardAccessMessage } from './web/dashboard-auth.js'
+import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, buildDashboardAccessMessage } from './web/dashboard-auth.js'
 import { json } from './web/http-helpers.js'
 import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
 import { ensureAgentHooks, ensureDefaultScheduledTasks } from './web/agent-scaffold.js'
@@ -47,6 +47,7 @@ import { tryHandleTokenUsage } from './web/routes/token-usage.js'
 import { tryHandleIdeas } from './web/routes/ideas.js'
 import { tryHandleToolLog } from './web/routes/tool-log.js'
 import { tryHandleAgentCategories } from './web/routes/agent-categories.js'
+import { tryHandleAdmin } from './web/routes/admin.js'
 import { tryHandleStatic } from './web/routes/static.js'
 import type { RouteContext } from './web/routes/types.js'
 
@@ -63,6 +64,11 @@ export function startWebServer(port = 3420): http.Server {
   ensureDirs()
 
   const DASHBOARD_TOKEN = loadOrCreateDashboardToken()
+  // Seed the in-memory token the auth middleware checks. The middleware reads it
+  // via getDashboardToken() (not this const) so the admin rotate-token endpoint
+  // can swap it at runtime without a restart. DASHBOARD_TOKEN is only used for
+  // the one-time startup access message below.
+  initDashboardToken(DASHBOARD_TOKEN)
   const allowedOrigins = new Set([
     `http://localhost:${port}`,
     `http://127.0.0.1:${port}`,
@@ -106,7 +112,7 @@ export function startWebServer(port = 3420): http.Server {
         /^\/api\/agents\/[^/]+\/avatar$/.test(path)
       ))
     if (path === '/api/auth/status' && method === 'GET') {
-      const ok = checkBearerToken(req.headers.authorization, DASHBOARD_TOKEN)
+      const ok = checkBearerToken(req.headers.authorization, getDashboardToken())
       return json(res, { authenticated: ok })
     }
     // The live pane SSE stream is consumed via EventSource, which cannot set an
@@ -115,8 +121,9 @@ export function startWebServer(port = 3420): http.Server {
     // header-only.
     const isSseStream = method === 'GET' && /^\/api\/agents\/[^/]+\/pane\/stream$/.test(path)
     if (path.startsWith('/api/') && !isPublicApi) {
-      const headerOk = checkBearerToken(req.headers.authorization, DASHBOARD_TOKEN)
-      const queryOk = isSseStream && checkBearerToken(`Bearer ${url.searchParams.get('token') ?? ''}`, DASHBOARD_TOKEN)
+      const activeToken = getDashboardToken()
+      const headerOk = checkBearerToken(req.headers.authorization, activeToken)
+      const queryOk = isSseStream && checkBearerToken(`Bearer ${url.searchParams.get('token') ?? ''}`, activeToken)
       if (!headerOk && !queryOk) {
         res.writeHead(401, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'Unauthorized' }))
@@ -141,6 +148,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleAgentTerminal(routeCtx)) return
       if (await tryHandleAgentTaskState(routeCtx)) return
       if (await tryHandleAgentCategories(routeCtx)) return
+      if (await tryHandleAdmin(routeCtx)) return
       if (await tryHandleAgents(routeCtx, WEB_DIR)) return
       if (await tryHandleMarveen(routeCtx, WEB_DIR)) return
       if (await tryHandleBackgroundTasks(routeCtx)) return
