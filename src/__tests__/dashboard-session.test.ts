@@ -52,11 +52,13 @@ describe('session mint/verify', () => {
     expect(verifySession(Buffer.from('a.b.c').toString('base64url')).valid).toBe(false)
   })
 
-  it('rejects a sid that was never issued by this process', () => {
+  it('keeps a validly-signed, unexpired cookie valid across a restart (stateless)', () => {
     const v = createSession()
-    // Wipe the issued-set: even a correctly-signed cookie is now unknown.
+    // Model a server restart: the in-memory session state is dropped, but the
+    // persistent signing secret + the cookie are unchanged. The fix makes
+    // validation stateless, so the session survives (no more constant re-login).
     __resetSessionStateForTests()
-    expect(verifySession(v).valid).toBe(false)
+    expect(verifySession(v).valid).toBe(true)
   })
 })
 
@@ -102,6 +104,14 @@ describe('revocation', () => {
     revokeSession(a)
     expect(verifySession(a).valid).toBe(false)
     expect(verifySession(b).valid).toBe(true)
+  })
+
+  it('keeps a revoked session revoked across a restart (persisted)', () => {
+    const v = createSession()
+    revokeSession(v)
+    // Model a restart: the revocation list reloads from disk, so logout sticks.
+    __resetSessionStateForTests()
+    expect(verifySession(v).valid).toBe(false)
   })
 })
 
