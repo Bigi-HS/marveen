@@ -140,7 +140,12 @@ class DueActionsTests(unittest.TestCase):
     def test_missing_plan_yields_error_action(self):
         now = datetime(2026, 6, 8, 6, 35)
         acts = push.due_actions(now, None, self.supps, self.config, set())
-        self.assertIn("plan-error", {a["key"] for a in acts})
+        # kind distinguishes the alert; key is "session" so it dedupes once/day.
+        err = next(a for a in acts if a["kind"] == "plan-error")
+        self.assertEqual(err["key"], "session")
+        # and once the daily delivery is marked sent, it does not re-queue.
+        acts2 = push.due_actions(now, None, self.supps, self.config, {"session"})
+        self.assertFalse(any(a["kind"] == "plan-error" for a in acts2))
 
     def test_rest_day_when_no_session_for_today(self):
         plan = _plan([_strength_session("monday")])
@@ -212,6 +217,18 @@ class RunIntegrationTests(unittest.TestCase):
         self.assertEqual(summary["sent"], 1)
         self.assertIn("plan-error", summary["kinds"])
         self.assertTrue(any("nem elerheto" in t for t in sent))
+
+    def test_corrupt_plan_alert_fires_once_not_every_tick(self):
+        # Regression (Thor BLOCK): the missing/corrupt-plan alert must dedupe like
+        # the session push -- a second tick the same day must send nothing, else
+        # the alert re-fires every 5 minutes and spams Telegram.
+        self._write(os.path.join("plans", "hibiki-plan-2026-W24.json"), "{ not json")
+        sent, sender = self._collect_sender()
+        s1 = push.run(datetime(2026, 6, 8, 6, 35), self.tmp, sender)
+        s2 = push.run(datetime(2026, 6, 8, 6, 40), self.tmp, sender)
+        self.assertEqual(s1["sent"], 1)
+        self.assertEqual(s2["sent"], 0)
+        self.assertEqual(len(sent), 1)
 
     def test_summary_carries_no_supplement_names(self):
         sent, sender = self._collect_sender()

@@ -205,7 +205,10 @@ def due_actions(now: datetime, plan: dict | None, supplements: list[dict], confi
     push_min = minutes_of_day(config.get("session_push_time", DEFAULT_SESSION_PUSH_TIME))
     if now_min >= push_min and "session" not in sent:
         if plan is None:
-            actions.append({"key": "plan-error", "kind": "plan-error",
+            # Shares the "session" dedup key with the real session/rest push: the
+            # daily-delivery event fires once per day, so a missing/corrupt plan
+            # alerts once -- never re-fires every tick (would spam Telegram).
+            actions.append({"key": "session", "kind": "plan-error",
                             "build": build_plan_error_message})
         else:
             session = find_today_session(plan, d)
