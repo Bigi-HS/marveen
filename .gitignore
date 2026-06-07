@@ -8,6 +8,13 @@ dist/
 store/
 workspace/
 agents/
+# Version-control ONLY per-agent agent-config.json (no secrets: model/team/
+# displayName/securityProfile/channelProvider/claudeConfigDir). Everything else
+# under agents/ (channel state, tokens, .mcp.json, credentials) stays ignored.
+!agents/
+agents/*/*
+!agents/*/
+!agents/*/agent-config.json
 reports/
 .claude/
 !.claude/settings.json

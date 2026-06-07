@@ -1,0 +1,16 @@
+{
+  "model": "claude-sonnet-4-6",
+  "securityProfile": "developer-senior",
+  "displayName": "Thor",
+  "claudeConfigDir": "/home/domin/marveen/agents/thor/.claude-config",
+  "channelProvider": "telegram",
+  "team": {
+    "role": "leader",
+    "reportsTo": null,
+    "delegatesTo": [
+      "buster"
+    ],
+    "autoDelegation": false,
+    "trustFrom": []
+  }
+}

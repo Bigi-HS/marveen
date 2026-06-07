@@ -1,0 +1,16 @@
+{
+  "model": "claude-opus-4-8[1m]",
+  "securityProfile": "developer-senior",
+  "displayName": "Dave",
+  "claudeConfigDir": "/home/domin/marveen/agents/dave/.claude-config",
+  "channelProvider": "telegram",
+  "team": {
+    "role": "leader",
+    "reportsTo": null,
+    "delegatesTo": [
+      "buster"
+    ],
+    "autoDelegation": false,
+    "trustFrom": []
+  }
+}
