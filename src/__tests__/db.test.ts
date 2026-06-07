@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { statSync, existsSync, chmodSync, mkdtempSync, rmSync } from 'node:fs'
+import { statSync, existsSync, chmodSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -22,8 +22,8 @@ import {
   deletePendingTaskRetryById,
   markPendingTaskRetryAlert,
   clearPendingTaskRetryAlert,
+  tightenDbPermissions,
 } from '../db.js'
-import { STORE_DIR, DB_FILENAME } from '../config.js'
 
 // Use in-memory database for tests to avoid polluting the live vault.
 // Each test run gets a fresh, isolated DB that doesn't affect store/claudeclaw.db.
@@ -241,78 +241,61 @@ describe('pending task retries', () => {
 })
 
 describe('database file permissions', () => {
-  // File permissions test verifies tightenDbPermissions enforcement.
-  // We use a temp DB file (not :memory:) to test real file mode bits,
-  // but isolated from the live vault to avoid pollution.
-  let tempDbPath: string
-  const originalDbPath = join(STORE_DIR, DB_FILENAME)
+  // Verifies tightenDbPermissions enforcement on a real on-disk file, fully
+  // isolated from the live vault: we initialise a DB at a temp path (which
+  // materialises the main file + WAL sidecar), loosen everything to 0o644,
+  // then call tightenDbPermissions(tempDbPath) and assert it narrows them
+  // back to owner-only. This is genuine enforcement -- it would fail if
+  // tightenDbPermissions were gutted -- without ever touching store/.
+  const tempDbPath = join(tmpdir(), `test-db-permissions-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const tempFiles = [tempDbPath, `${tempDbPath}-wal`, `${tempDbPath}-shm`, `${tempDbPath}-journal`]
 
-  beforeAll(async () => {
-    // Create a completely separate temp DB file for this test-suite.
-    // This avoids any risk of interfering with the live vault.
-    tempDbPath = join(tmpdir(), `test-db-permissions-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
-
-    // Enforcement (not just observation): loosen the sidecars to 0o644
-    // first, then re-run initDatabase(tempDbPath) to prove tightenDbPermissions
-    // actually narrows them. Without this, the tests would pass even if
-    // tightenDbPermissions were removed entirely.
-    const fileList = [tempDbPath, `${tempDbPath}-wal`, `${tempDbPath}-shm`, `${tempDbPath}-journal`]
-    for (const p of fileList) {
+  beforeAll(() => {
+    // Open at the temp path (override skips tightenDbPermissions) to create
+    // the main file and its WAL sidecar on disk.
+    initDatabase(tempDbPath)
+    // Loosen every existing file so the tighten step has something to fix;
+    // otherwise the assertions would pass even if tightenDbPermissions did nothing.
+    for (const p of tempFiles) {
       if (existsSync(p)) {
         try { chmodSync(p, 0o644) } catch { /* best effort */ }
       }
     }
-    // Initialize with the isolated temp file. Note: override path skips tightenDbPermissions,
-    // but temp file was pre-loosened, so tightenDbPermissions would fail.
-    // Instead, manually call it: initDatabase(tempDbPath) skips it, so we
-    // need a different approach.
-    //
-    // Better: use the real STORE_DIR + DB_FILENAME but loosen it first.
-    // On second thought: to keep tests truly isolated and not interfere with
-    // live vault, create a temp file and manually pre-loosen before init.
-    // But since override skips tightenDbPermissions, the test can't verify it works.
-    //
-    // SOLUTION: use STORE_DIR (live vault) for this test only, with careful cleanup.
-    // We loosen the files, init, and test. Then restore originals.
-    for (const p of [originalDbPath, `${originalDbPath}-wal`, `${originalDbPath}-shm`, `${originalDbPath}-journal`]) {
-      if (existsSync(p)) {
-        try { chmodSync(p, 0o644) } catch { /* best effort */ }
-      }
-    }
-    // Re-init with the live vault path so tightenDbPermissions is called
-    initDatabase()
+    // Run the enforcement under test against the temp path.
+    tightenDbPermissions(tempDbPath)
   })
 
   afterAll(() => {
-    // Cleanup: remove the temp test file we created (if any)
-    for (const p of [tempDbPath, `${tempDbPath}-wal`, `${tempDbPath}-shm`, `${tempDbPath}-journal`]) {
+    // Re-point the shared handle back to an in-memory DB so later re-runs /
+    // other suites never depend on the temp file, then remove it.
+    initDatabase(':memory:')
+    for (const p of tempFiles) {
       try { rmSync(p, { force: true }) } catch { /* best effort */ }
     }
   })
 
-  it('claudeclaw.db is tightened to owner-only (0o600) by initDatabase', () => {
-    const dbPath = join(STORE_DIR, DB_FILENAME)
-    expect(existsSync(dbPath)).toBe(true)
-    const mode = statSync(dbPath).mode & 0o777
+  it('main DB file is tightened to owner-only (0o600) by tightenDbPermissions', () => {
+    expect(existsSync(tempDbPath)).toBe(true)
+    const mode = statSync(tempDbPath).mode & 0o777
     expect(mode).toBe(0o600)
   })
 
   it('WAL sidecar (when present) is tightened to 0o600', () => {
-    const walPath = join(STORE_DIR, `${DB_FILENAME}-wal`)
+    const walPath = `${tempDbPath}-wal`
     if (!existsSync(walPath)) return // WAL may not exist on a freshly-initialised empty DB
     const mode = statSync(walPath).mode & 0o777
     expect(mode).toBe(0o600)
   })
 
   it('SHM sidecar (when present) is tightened to 0o600', () => {
-    const shmPath = join(STORE_DIR, `${DB_FILENAME}-shm`)
+    const shmPath = `${tempDbPath}-shm`
     if (!existsSync(shmPath)) return
     const mode = statSync(shmPath).mode & 0o777
     expect(mode).toBe(0o600)
   })
 
   it('rollback-journal sidecar (when present) is tightened to 0o600', () => {
-    const journalPath = join(STORE_DIR, `${DB_FILENAME}-journal`)
+    const journalPath = `${tempDbPath}-journal`
     if (!existsSync(journalPath)) return
     const mode = statSync(journalPath).mode & 0o777
     expect(mode).toBe(0o600)

@@ -19,7 +19,7 @@ let db: Database.Database
 //   (2) After Database() + PRAGMA wal, chmod the sidecars (WAL/SHM/
 //       journal) -- they were created during the pragma call at umask.
 //       This path also fixes older installs whose files sit at 0o644.
-function tightenDbPermissions(dbPath: string): void {
+export function tightenDbPermissions(dbPath: string): void {
   const sidecars = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, `${dbPath}-journal`]
   for (const path of sidecars) {
     if (!existsSync(path)) continue
