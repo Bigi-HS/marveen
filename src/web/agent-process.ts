@@ -592,7 +592,7 @@ function answerResumeMenuWhenReady(session: string, onReady: () => void, attempt
   }
   let pane: string | null = null
   try {
-    pane = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
+    pane = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
   } catch {
     // session likely gone; nothing more to do
     onReady()
