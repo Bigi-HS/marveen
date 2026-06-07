@@ -13,8 +13,10 @@
 #   * The sweep is scoped to ONLY 'buster' via the sim driver's injected
 #     listChannelSubAgents dep -- the other 5 live agents are never enumerated.
 #   * The dead-pipe sim kills Buster's OWN bun child by a SINGLE verified PID
-#     (matched on the agents/buster/ cwd path). NEVER pkill -f. Aborts if the
-#     match is not exactly one buster-owned process.
+#     identified by PROCESS ANCESTRY (descendant of the agent-buster tmux pane),
+#     NOT a plugin-cache path -- Buster's child runs from the GLOBAL plugin cache
+#     (~/.claude/plugins/...), so a path match on agents/buster/ finds nothing.
+#     NEVER pkill -f. Aborts unless exactly one buster-owned (by-ancestry) match.
 #   * Buster is reverted at the end (c12 revert) so the sandbox is left clean.
 #
 # PREREQUISITE (provisioned by the operator/Armorer at activation, NOT by this
@@ -38,13 +40,40 @@ NODE="$(command -v node)"
 TMUXB="$(command -v tmux)"
 
 BUSTER_SESSION="agent-buster"
-BUSTER_CHILD_RX="agents/buster/.claude-config/plugins/.*telegram.*--shell=bun.*start"
+# Broad candidate pattern (ANY agent's telegram bun child). We then keep ONLY the
+# one whose process ancestry leads back to the agent-buster pane -- matching by
+# ANCESTRY, not by the plugin-cache path, because the cache may be global
+# (~/.claude/plugins, as Buster runs) or agent-isolated, and detection must not
+# depend on which.
+BUN_TELEGRAM_RX="telegram.*--shell=bun.*start"
 BUSTER_TOKEN="$ROOT/agents/buster/.claude/channels/telegram/.env"
 DRIVER="$ROOT/scripts/_per-agent-watchdog-sim-driver.mjs"
 CLI_DIST="$ROOT/dist/web/per-agent-pipe-watchdog-cli.js"
 
 fail() { echo "SIM: FAIL -- $*" >&2; exit 1; }
 note() { echo "SIM: $*"; }
+
+# True if $1 is $2 or a descendant of $2 (walk the PPid chain up). Bounded so a
+# pathological/looping chain can never hang the gate.
+is_descendant() {
+  local pid="$1" ancestor="$2" guard=0 ppid
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ] && [ "$guard" -lt 64 ]; do
+    [ "$pid" = "$ancestor" ] && return 0
+    ppid="$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null)"
+    [ -n "$ppid" ] || return 1
+    pid="$ppid"; guard=$((guard + 1))
+  done
+  return 1
+}
+
+# All telegram bun children that are descendants of the agent-buster pane. This
+# is the ONLY way we identify "Buster's child" -- by ancestry, never by path.
+buster_telegram_children() {
+  local pane_pid="$1" p
+  for p in $(pgrep -f "$BUN_TELEGRAM_RX" || true); do
+    is_descendant "$p" "$pane_pid" && echo "$p"
+  done
+}
 
 # --- preconditions ---------------------------------------------------------
 [ -n "$NODE" ]  || fail "node not on PATH"
@@ -58,22 +87,20 @@ env -u TMUX "$TMUXB" has-session -t "$BUSTER_SESSION" 2>/dev/null \
 
 note "preconditions OK (buster up + channel token present)"
 
-# --- locate Buster's OWN bun telegram child, scoped + verified -------------
-# pgrep on the buster cwd path so we can NEVER match another agent's child.
-mapfile -t PIDS < <(pgrep -f "$BUSTER_CHILD_RX" || true)
+# --- locate Buster's OWN bun telegram child, by ANCESTRY + verified --------
+# Resolve the agent-buster pane pid, then keep only telegram bun children whose
+# PPid chain leads back to it. This can NEVER match another agent's child
+# (different session/ancestry) regardless of where the plugin cache lives.
+PANE_PID="$(env -u TMUX "$TMUXB" list-panes -t "$BUSTER_SESSION" -F '#{pane_pid}' 2>/dev/null | head -1)"
+[ -n "$PANE_PID" ] || fail "could not resolve the agent-buster pane pid"
+mapfile -t PIDS < <(buster_telegram_children "$PANE_PID")
 if [ "${#PIDS[@]}" -eq 0 ]; then
-  fail "no buster bun-telegram child found (already dead?) -- expected exactly one before the kill sim"
+  fail "no telegram bun child found under the agent-buster pane (PID $PANE_PID) -- buster has no live channel child (already dead, or channel not provisioned)"
 elif [ "${#PIDS[@]}" -gt 1 ]; then
-  fail "expected exactly ONE buster bun child, found ${#PIDS[@]}: ${PIDS[*]} -- aborting (will not guess)"
+  fail "expected exactly ONE buster-owned telegram bun child, found ${#PIDS[@]}: ${PIDS[*]} -- aborting (will not guess)"
 fi
 CHILD_PID="${PIDS[0]}"
-# Double-check the matched cmdline really is buster's, not a coincidental match.
-CHILD_CMD="$(tr '\0' ' ' < /proc/$CHILD_PID/cmdline 2>/dev/null || true)"
-case "$CHILD_CMD" in
-  *agents/buster/*) : ;;
-  *) fail "matched PID $CHILD_PID is NOT a buster child (cmd: $CHILD_CMD) -- aborting" ;;
-esac
-note "buster bun child = PID $CHILD_PID (verified buster-owned)"
+note "buster bun child = PID $CHILD_PID (verified by ancestry to agent-buster pane $PANE_PID)"
 
 # --- baseline: confirm the scoped sweep is a NO-OP recovery while healthy ---
 # (pipe healthy -> verdict healthy/inconclusive -> no reconnect). Optional but
@@ -119,7 +146,7 @@ note "waiting for buster pipe to recover (child respawn after /mcp)..."
 RECOVERED=no
 for _ in $(seq 1 12); do
   sleep 5
-  if pgrep -f "$BUSTER_CHILD_RX" >/dev/null 2>&1; then RECOVERED=yes; break; fi
+  if [ -n "$(buster_telegram_children "$PANE_PID")" ]; then RECOVERED=yes; break; fi
 done
 [ "$RECOVERED" = yes ] || note "WARN: buster bun child not observed back within ~60s (manual check advised)"
 
