@@ -61,3 +61,6 @@ claudeclaw.log
 
 # Local backup archives from scripts/backup.sh
 backups/
+
+# also ignore a node_modules symlink FILE at repo root (not just the dir)
+/node_modules
