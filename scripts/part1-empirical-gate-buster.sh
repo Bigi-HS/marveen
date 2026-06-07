@@ -48,7 +48,9 @@ FIRED_FLAG="$ROOT/store/.part1-gate-hook-fired"
 ALERT_CHAT="8643929442"
 
 fail() { echo "GATE: FAIL -- $*" >&2; exit 1; }
-note() { echo "GATE: $*"; }
+# note -> stderr so functions can return a result on stdout without the progress
+# lines polluting a $(...) capture.
+note() { echo "GATE: $*" >&2; }
 
 is_descendant() {
   local pid="$1" ancestor="$2" guard=0 ppid
@@ -111,48 +113,69 @@ case "${1:-}" in
     [ -n "$NODE" ] || fail "node not on PATH"
     env -u TMUX "$TMUXB" has-session -t "$BUSTER_SESSION" 2>/dev/null || fail "$BUSTER_SESSION not running"
     grep -q "_part1-gate-probe.py" "$SETTINGS" 2>/dev/null || fail "hook not in settings.json -- run '$0 setup' + relaunch Buster first"
+    OBSERVE="$ROOT/scripts/_part1-gate-observe.py"
+    [ -f "$OBSERVE" ] || fail "observe helper missing ($OBSERVE)"
     : > "$MARKER" || true; rm -f "$FIRED_FLAG" || true
     note "marker cleared"
 
-    CHILD="$(resolve_one_child)"; note "buster bun child = PID $CHILD (by ancestry)"
+    observe_reply() { python3 "$OBSERVE" --since "$1" 2>/dev/null; }
 
-    # --- WEDGE pass: SIGSTOP = alive-but-unresponsive (closest to socketpair wedge)
-    note "=== WEDGE pass (SIGSTOP child $CHILD) ==="
-    kill -STOP "$CHILD" 2>/dev/null || fail "could not SIGSTOP $CHILD"
-    sleep 1
-    trigger_buster_reply
-    note "waiting up to 90s for the reply to fail + the hook to fire..."
-    WEDGE_FIRED=no
-    for _ in $(seq 1 18); do
-      sleep 5
-      [ -f "$FIRED_FLAG" ] && { WEDGE_FIRED=yes; break; }
-    done
-    kill -CONT "$CHILD" 2>/dev/null || true
-    note "child resumed (SIGCONT). WEDGE hook fired: $WEDGE_FIRED"
-    [ "$WEDGE_FIRED" = yes ] && { note "wedge-pass marker payload:"; tail -n 3 "$MARKER" | sed 's/^/GATE:   /'; }
+    # run_pass LABEL MODE(stop|kill) -> echoes "<outcome>:<hook_fired>" on stdout.
+    # The v1 flaw fixed here: instead of SIGCONT after a fixed 90s (which let the
+    # reply land on a resumed, healthy child and SUCCEED), we HOLD the wedge and
+    # use the transcript to (a) confirm the reply is actually CALLED while wedged,
+    # then (b) classify its terminal state -- failed / success / HANG (no result).
+    run_pass() {
+      local label="$1" mode="$2" child since state called=no outcome=hang fired=no
+      child="$(resolve_one_child)" || { echo "no-child:no"; return 0; }
+      note "[$label] buster bun child = PID $child (ancestry); mode=$mode"
+      rm -f "$FIRED_FLAG" || true
+      since="$(date +%s)"
+      if [ "$mode" = stop ]; then
+        kill -STOP "$child" 2>/dev/null || { note "[$label] SIGSTOP failed"; echo "stop-failed:no"; return 0; }
+      else
+        kill "$child" 2>/dev/null || true; sleep 2
+        kill -0 "$child" 2>/dev/null && kill -9 "$child" 2>/dev/null || true
+      fi
+      trigger_buster_reply >&2 || true
+      sleep 5; case "$(observe_reply "$since")" in STATE=none*) trigger_buster_reply >&2 || true;; esac
 
-    # --- CONTRAST pass: child KILL (child gone). Re-resolve (may have respawned).
-    note "=== CONTRAST pass (kill child = child-gone case) ==="
-    rm -f "$FIRED_FLAG" || true
-    sleep 3
-    CHILD2="$(resolve_one_child || true)"
-    if [ -n "${CHILD2:-}" ]; then
-      kill "$CHILD2" 2>/dev/null || true; sleep 2
-      kill -0 "$CHILD2" 2>/dev/null && kill -9 "$CHILD2" 2>/dev/null || true
-      trigger_buster_reply
-      note "waiting up to 60s for the kill-case hook to fire..."
-      KILL_FIRED=no
-      for _ in $(seq 1 12); do sleep 5; [ -f "$FIRED_FLAG" ] && { KILL_FIRED=yes; break; }; done
-      note "CONTRAST (child-kill) hook fired: $KILL_FIRED"
-    else
-      note "WARN: no child to kill for contrast pass (skipped)"
-      KILL_FIRED="n/a"
-    fi
+      note "[$label] waiting for Buster to CALL reply (<=150s)..."
+      for _ in $(seq 1 30); do
+        sleep 5; state="$(observe_reply "$since")"
+        case "$state" in STATE=none*) : ;; *) called=yes; break ;; esac
+      done
+      if [ "$called" != yes ]; then
+        [ "$mode" = stop ] && kill -CONT "$child" 2>/dev/null || true
+        note "[$label] OUTCOME=no-call -- Buster never called reply (inconclusive)"
+        echo "no-call:no"; return 0
+      fi
+
+      note "[$label] reply CALLED ($state). Holding wedge, polling terminal state (<=90s)..."
+      for _ in $(seq 1 18); do
+        sleep 5; state="$(observe_reply "$since")"
+        case "$state" in
+          STATE=failed*)  outcome=failed;  break ;;
+          STATE=success*) outcome=success; break ;;
+        esac
+      done
+      [ "$mode" = stop ] && kill -CONT "$child" 2>/dev/null || true
+      [ -f "$FIRED_FLAG" ] && fired=yes
+      note "[$label] OUTCOME=$outcome HOOK_FIRED=$fired ($state)"
+      [ -s "$MARKER" ] && { note "[$label] marker payload:"; tail -n 2 "$MARKER" | sed 's/^/GATE:   /' >&2; }
+      echo "$outcome:$fired"; return 0
+    }
+
+    note "=== WEDGE pass (SIGSTOP = alive-but-unresponsive) ==="
+    WEDGE="$(run_pass WEDGE stop)"
+    sleep 5
+    note "=== CONTRAST pass (child KILL = child-gone) ==="
+    KILLP="$(run_pass KILL kill)"
 
     echo
-    note "VERDICT  HOOK_FIRES_ON_WEDGE=$WEDGE_FIRED  HOOK_FIRES_ON_CHILD_KILL=${KILL_FIRED:-n/a}"
-    note "marker file: $MARKER (inspect payload for tool_result/error schema)"
-    note "Report this verdict to marveen BEFORE the Part 1 impl. Then run: $0 restore  (and Armorer reverts Buster)"
+    note "VERDICT  wedge=$WEDGE  child_kill=$KILLP   (format outcome:hook_fired)"
+    note "Interpretation: failed:yes -> PostToolUseFailure FIRES on a failed reply (hook detector viable). failed:no -> fires-not (transcript-tail). hang:* -> wedge HANGS the call, NO failure event -> hook CANNOT fire -> transcript-tail / hang-detector (conclusive). success/no-call -> inconclusive, retry."
+    note "marker: $MARKER  | Report to marveen, then: $0 restore (+ Armorer revert Buster)"
     ;;
 
   restore)
