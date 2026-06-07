@@ -26,6 +26,42 @@ export function loadOrCreateDashboardToken(): string {
   return fresh
 }
 
+// In-memory copy of the active bearer token the auth middleware checks. Kept
+// here (not as a closure const in web.ts) so the token can be rotated at
+// runtime via the admin API without a server restart: rotateDashboardToken()
+// persists a fresh token to disk AND updates this value, so the auth gate
+// honours the new token immediately and the old one stops working.
+let activeDashboardToken: string | null = null
+
+// Seed the in-memory token on startup. web.ts calls this once with the value
+// loadOrCreateDashboardToken() returned, so getDashboardToken() and the file
+// stay in sync from the first request.
+export function initDashboardToken(token: string): void {
+  activeDashboardToken = token
+}
+
+// Current active bearer token. Falls back to loadOrCreateDashboardToken() if
+// init was never called (e.g. a unit test importing the rotate route in
+// isolation), so the auth check always has a value to compare against.
+export function getDashboardToken(): string {
+  if (activeDashboardToken === null) {
+    activeDashboardToken = loadOrCreateDashboardToken()
+  }
+  return activeDashboardToken
+}
+
+// Generate a fresh bearer token, persist it to store/.dashboard-token
+// (atomic, mode 0600) and swap the in-memory value so the new token is valid
+// immediately and the previous one is rejected -- no restart required.
+// Returns the new token so the caller can surface it once to the operator.
+export function rotateDashboardToken(): string {
+  const fresh = randomBytes(32).toString('hex')
+  mkdirSync(join(PROJECT_ROOT, 'store'), { recursive: true })
+  atomicWriteFileSync(DASHBOARD_TOKEN_PATH, fresh, { mode: 0o600 })
+  activeDashboardToken = fresh
+  return fresh
+}
+
 export function checkBearerToken(header: string | undefined, expected: string): boolean {
   if (!header) return false
   const m = /^Bearer\s+(.+)$/.exec(header)
