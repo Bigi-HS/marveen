@@ -172,6 +172,7 @@
         <select id="kanbanProjectFilter" style="font-size:13px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg);min-width:140px;">
           <option value="">Mind</option>
         </select>
+        <button id="kanbanArchiveBtn" type="button" title="Korábbi kész feladatok archívuma" style="margin-left:auto;font-size:13px;padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg);cursor:pointer;">🗄 Archívum</button>
       </div>
       <div class="kanban-board" id="kanbanBoard">
         <div class="kanban-col" data-status="planned">
@@ -200,10 +201,22 @@
         </div>
         <div class="kanban-col" data-status="done">
           <div class="kanban-col-header">
-            <span class="kanban-col-title">Kész</span>
+            <span class="kanban-col-title">Kész (ma)</span>
             <span class="kanban-col-count" id="countDone">0</span>
           </div>
           <div class="kanban-col-body" data-status="done"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Kanban archive modal: done cards older than today (auto-archived) + manually archived -->
+    <div class="modal-overlay" id="kanbanArchiveOverlay">
+      <div class="modal" style="max-width:560px">
+        <div class="modal-header">
+          <h2>🗄 Archívum</h2>
+          <button class="modal-close" id="kanbanArchiveClose">&times;</button>
+        </div>
+        <div class="modal-body" id="kanbanArchiveBody" style="max-height:60vh;overflow-y:auto;display:flex;flex-direction:column;gap:6px;">
         </div>
       </div>
     </div>

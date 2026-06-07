@@ -289,6 +289,54 @@ document.getElementById('kanbanProjectFilter').addEventListener('change', (e) =>
   renderKanban()
 })
 
+// === Archive view ===
+// The "Kész" column shows only today's completions (the backend auto-archives
+// done cards last touched before today). Older done cards live here, read-only.
+const kanbanArchiveOverlay = document.getElementById('kanbanArchiveOverlay')
+document.getElementById('kanbanArchiveBtn').addEventListener('click', openArchiveModal)
+document.getElementById('kanbanArchiveClose').addEventListener('click', () => closeModal(kanbanArchiveOverlay))
+kanbanArchiveOverlay.addEventListener('click', (e) => { if (e.target === kanbanArchiveOverlay) closeModal(kanbanArchiveOverlay) })
+
+async function openArchiveModal() {
+  const body = document.getElementById('kanbanArchiveBody')
+  body.innerHTML = '<div style="color:var(--muted);padding:8px;">Betöltés…</div>'
+  openModal(kanbanArchiveOverlay)
+  try {
+    const res = await fetch('/api/kanban/archived')
+    const cards = await res.json()
+    renderArchiveList(cards)
+  } catch (err) {
+    console.error('Archívum betöltés hiba:', err)
+    body.innerHTML = '<div style="color:var(--danger,#e66);padding:8px;">Nem sikerült betölteni az archívumot.</div>'
+  }
+}
+
+function renderArchiveList(cards) {
+  const body = document.getElementById('kanbanArchiveBody')
+  body.innerHTML = ''
+  if (!cards.length) {
+    body.innerHTML = '<div style="color:var(--muted);padding:8px;">Az archívum üres.</div>'
+    return
+  }
+  for (const card of cards) {
+    const row = document.createElement('div')
+    row.style.cssText = 'padding:8px 10px;border:1px solid var(--border);border-radius:8px;cursor:pointer;display:flex;flex-direction:column;gap:3px;'
+    const seq = card.seq != null ? `<span style="font-family:monospace;font-size:11px;color:var(--muted);margin-right:5px">#${card.seq}</span>` : ''
+    const archived = card.archived_at
+      ? new Date(card.archived_at * 1000).toLocaleDateString('hu-HU', { year: 'numeric', month: 'short', day: 'numeric' })
+      : ''
+    const project = card.project ? `<span class="kanban-card-project">${escapeHtml(card.project)}</span>` : ''
+    const assignee = card.assignee ? `<span style="color:var(--muted)">${escapeHtml(String(card.assignee))}</span>` : ''
+    row.innerHTML = `
+      <div style="font-weight:500">${seq}${escapeHtml(card.title)}</div>
+      <div style="font-size:12px;color:var(--muted);display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        ${project}${assignee}<span>archiválva: ${archived}</span>
+      </div>`
+    row.addEventListener('click', () => { closeModal(kanbanArchiveOverlay); showCardDetail(card) })
+    body.appendChild(row)
+  }
+}
+
 // The kanban "owner" is the assignee whose type is 'owner' -- the person the
 // board is primarily run for, on any deployment. Identified by type, never by
 // a hard-coded display name, so the quick "show what's on me" view is generic.
