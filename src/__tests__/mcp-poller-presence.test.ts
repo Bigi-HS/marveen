@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { shouldReconnectOnMissingPoller } from '../web/channel-health-monitor.js'
-import { parsePollerPidsFromPs } from '../web/channel-poller-reap.js'
+import { parsePollerPidsFromPs, probeChannelPollerPresence } from '../web/channel-poller-reap.js'
 
 // Item 3: catch an MCP poller killed EXTERNALLY (dashboard deploy-restart /
 // OS-sleep) that the pane ✘-marker never renders. The decision is pure and the
@@ -67,5 +69,21 @@ describe('parsePollerPidsFromPs (presence scan)', () => {
   it('P9-F3: matches when the value is at end-of-line', () => {
     const ps = '  602 pts/0 S 0:00 bun start ' + envVar + '=' + dir
     expect(parsePollerPidsFromPs(ps, envVar, dir)).toEqual([602])
+  })
+})
+
+describe('probeChannelPollerPresence (P9-F2 shared per-tick scan)', () => {
+  // A throwaway agent dir guarantees no bot.pid on disk, so the verdict is driven
+  // purely by the supplied ps scan -- no real `ps eww -e` is forked.
+  const agentDir = join(tmpdir(), 'eph-poller-probe-nonexistent-agent')
+
+  it('uses the SUPPLIED scan instead of forking its own ps (absent -> false)', () => {
+    const scan = { ok: true, output: '  999 pts/0 S 0:00 some-unrelated-process\n' }
+    expect(probeChannelPollerPresence('telegram', agentDir, scan)).toBe(false)
+  })
+
+  it('fails safe to null when the supplied scan failed (ok=false)', () => {
+    const scan = { ok: false, output: '' }
+    expect(probeChannelPollerPresence('telegram', agentDir, scan)).toBeNull()
   })
 })
