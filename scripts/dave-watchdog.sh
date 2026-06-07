@@ -24,7 +24,27 @@ MAX_PER_HOUR=8
 # the explicit `model` field from agent-config.json while these bash watchdogs are
 # in use, or teach read_model the archetype map first.
 read_model() {
-  python3 -c "import json;print(json.load(open('$ACONF')).get('model','claude-sonnet-4-6'))" 2>/dev/null || echo claude-sonnet-4-6
+  # Prints the configured model on the happy path. On a missing/unparseable
+  # config or absent 'model' field, emit a LOUD warning (log + stderr) so the
+  # misconfig is visible, then still default (don't hard-stop the agent).
+  local model
+  model="$(python3 -c "import json,sys
+try:
+    m=json.load(open('$ACONF')).get('model')
+except Exception:
+    sys.exit(3)
+if not m:
+    sys.exit(4)
+print(m)" 2>/dev/null)"
+  case "$?" in
+    0) printf '%s\n' "$model" ;;
+    3) log "WARN read_model: $ACONF missing or unparseable -> defaulting to claude-sonnet-4-6"
+       echo "WARN read_model: $ACONF missing or unparseable -> defaulting to claude-sonnet-4-6" >&2
+       echo claude-sonnet-4-6 ;;
+    *) log "WARN read_model: $ACONF has no 'model' field -> defaulting to claude-sonnet-4-6"
+       echo "WARN read_model: $ACONF has no 'model' field -> defaulting to claude-sonnet-4-6" >&2
+       echo claude-sonnet-4-6 ;;
+  esac
 }
 
 # claude --continue on an old/large session shows an interactive menu:
