@@ -60,7 +60,9 @@ fi
 
 if [[ "$do_cron" == 1 ]]; then
   echo "Installing cron entry (every 5 minutes)..."
-  line="*/5 * * * * cd $REPO_ROOT && /usr/bin/env python3 $PUSH --quiet >> $LOG 2>&1 $CRON_MARKER"
+  # Quote every path so the line survives spaces in the repo path (common on WSL,
+  # e.g. /mnt/c/Users/...); an unquoted path silently breaks the token-free cron.
+  line="*/5 * * * * cd \"$REPO_ROOT\" && /usr/bin/env python3 \"$PUSH\" --quiet >> \"$LOG\" 2>&1 $CRON_MARKER"
   current="$(crontab -l 2>/dev/null || true)"
   if grep -qF "$CRON_MARKER" <<<"$current"; then
     # Replace the existing managed line (in case the path changed).

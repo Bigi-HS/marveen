@@ -7,6 +7,7 @@ Run: python3 scripts/test_hibiki_daily_push.py
 import importlib.util
 import json
 import os
+import stat
 import tempfile
 import unittest
 from datetime import date, datetime
@@ -229,6 +230,15 @@ class RunIntegrationTests(unittest.TestCase):
         self.assertEqual(s1["sent"], 1)
         self.assertEqual(s2["sent"], 0)
         self.assertEqual(len(sent), 1)
+
+    def test_state_file_is_owner_only(self):
+        sent, sender = self._collect_sender()
+        now = datetime(2026, 6, 8, 6, 35)
+        push.run(now, self.tmp, sender)
+        state = push.state_path(self.tmp, now.date())
+        self.assertTrue(os.path.exists(state))
+        mode = stat.S_IMODE(os.stat(state).st_mode)
+        self.assertEqual(mode, 0o600)
 
     def test_summary_carries_no_supplement_names(self):
         sent, sender = self._collect_sender()

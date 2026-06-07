@@ -291,6 +291,9 @@ def save_state(store_root: str, d: date, sent: set[str]) -> None:
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"sent": sorted(sent)}, fh)
+        # 0600 for store-file consistency: the dedup keys carry supplement names,
+        # so keep the state file owner-only like the rest of the private store.
+        os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except OSError as exc:
         log.warning("could not persist push state: %s", exc.__class__.__name__)
