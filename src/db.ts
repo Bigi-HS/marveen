@@ -186,30 +186,40 @@ export function initDatabase(dbPathOverride?: string): void {
     const current = db.prepare("SELECT sql FROM sqlite_master WHERE name='kanban_cards'").get() as { sql: string } | undefined
     const hasSomeday = !!current?.sql?.match(/CHECK\s*\(\s*status\s+IN\s*\([^)]*'someday'[^)]*\)\s*\)/i)
     if (current?.sql && !hasSomeday) {
-      db.exec(`
-        CREATE TABLE kanban_cards_new (
-          id TEXT PRIMARY KEY,
-          title TEXT NOT NULL,
-          description TEXT,
-          status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','in_progress','waiting','done','someday')),
-          assignee TEXT,
-          priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
-          project TEXT,
-          parent_id TEXT REFERENCES kanban_cards(id),
-          due_date INTEGER,
-          sort_order REAL NOT NULL DEFAULT 0,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL,
-          archived_at INTEGER,
-          dispatched_at INTEGER
-        );
-        INSERT INTO kanban_cards_new (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, archived_at, dispatched_at)
-          SELECT id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, archived_at, dispatched_at FROM kanban_cards;
-        DROP TABLE kanban_cards;
-        ALTER TABLE kanban_cards_new RENAME TO kanban_cards;
-      `)
-      db.exec('CREATE INDEX IF NOT EXISTS idx_kanban_parent ON kanban_cards(parent_id)')
-      db.exec('CREATE INDEX IF NOT EXISTS idx_kanban_status ON kanban_cards(status, archived_at)')
+      // Wrap the whole rebuild in a transaction so the CREATE/INSERT/DROP/RENAME
+      // either all commit or all roll back -- a mid-way crash never leaves a
+      // half-migrated table. DROP IF EXISTS first so a prior aborted run can't
+      // wedge it on "table kanban_cards_new already exists". rowid is carried
+      // explicitly in the INSERT so each card's display number (seq = rowid) is
+      // preserved across the rebuild even when the old table has rowid gaps.
+      const rebuild = db.transaction(() => {
+        db.exec('DROP TABLE IF EXISTS kanban_cards_new')
+        db.exec(`
+          CREATE TABLE kanban_cards_new (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT,
+            status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','in_progress','waiting','done','someday')),
+            assignee TEXT,
+            priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
+            project TEXT,
+            parent_id TEXT REFERENCES kanban_cards(id),
+            due_date INTEGER,
+            sort_order REAL NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            archived_at INTEGER,
+            dispatched_at INTEGER
+          );
+          INSERT INTO kanban_cards_new (rowid, id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, archived_at, dispatched_at)
+            SELECT rowid, id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, archived_at, dispatched_at FROM kanban_cards;
+          DROP TABLE kanban_cards;
+          ALTER TABLE kanban_cards_new RENAME TO kanban_cards;
+        `)
+        db.exec('CREATE INDEX IF NOT EXISTS idx_kanban_parent ON kanban_cards(parent_id)')
+        db.exec('CREATE INDEX IF NOT EXISTS idx_kanban_status ON kanban_cards(status, archived_at)')
+      })
+      rebuild()
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)

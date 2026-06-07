@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { rmSync } from 'node:fs'
+import Database from 'better-sqlite3'
 import {
   initDatabase, getDb, createKanbanCard,
   listKanbanCards, listArchivedKanbanCards, moveKanbanCard,
@@ -69,5 +70,56 @@ describe('kanban daily auto-archive', () => {
     const active = listKanbanCards()
     const card = active.find((c) => c.id === 'to-someday')
     expect(card?.status).toBe('someday')
+  })
+})
+
+// The someday CHECK-widening migration only fires on a DB whose kanban_cards
+// was created with the OLD narrow CHECK (a fresh test DB already has the wide
+// CHECK, so it never exercises the table-rebuild path). Build a legacy-schema
+// DB by hand to drive the rebuild and prove it preserves row identity.
+describe('kanban someday migration (legacy-schema rebuild)', () => {
+  const LEGACY_DB = '/tmp/test-kanban-legacy.db'
+  beforeEach(() => rmSync(LEGACY_DB, { force: true }))
+  afterAll(() => rmSync(LEGACY_DB, { force: true }))
+
+  it('preserves rowid/seq across the rebuild (even with rowid gaps) and accepts someday', () => {
+    // Seed a DB with the pre-someday schema and a rowid gap (delete the middle).
+    const raw = new Database(LEGACY_DB)
+    raw.exec(`CREATE TABLE kanban_cards (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','in_progress','waiting','done')),
+      assignee TEXT,
+      priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
+      project TEXT,
+      parent_id TEXT REFERENCES kanban_cards(id),
+      due_date INTEGER,
+      sort_order REAL NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      archived_at INTEGER,
+      dispatched_at INTEGER
+    )`)
+    const now = Math.floor(Date.now() / 1000)
+    const ins = raw.prepare('INSERT INTO kanban_cards (id, title, status, sort_order, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)')
+    ins.run('card-a', 'A', 'planned', now, now)  // rowid 1
+    ins.run('card-b', 'B', 'planned', now, now)  // rowid 2
+    ins.run('card-c', 'C', 'planned', now, now)  // rowid 3
+    raw.prepare('DELETE FROM kanban_cards WHERE id = ?').run('card-b')  // gap at rowid 2
+    raw.close()
+
+    // Boot the real init -> the someday rebuild migration runs.
+    initDatabase(LEGACY_DB)
+
+    // seq is the SQLite rowid; the rebuild must carry it so display numbers are
+    // stable. card-c must stay #3, not slide down to #2.
+    const cards = listKanbanCards()
+    expect(cards.find((c) => c.id === 'card-a')?.seq).toBe(1)
+    expect(cards.find((c) => c.id === 'card-c')?.seq).toBe(3)
+
+    // and the widened CHECK now accepts someday.
+    createKanbanCard({ id: 'new-someday', title: 'idea', status: 'someday' })
+    expect(listKanbanCards().find((c) => c.id === 'new-someday')?.status).toBe('someday')
   })
 })
