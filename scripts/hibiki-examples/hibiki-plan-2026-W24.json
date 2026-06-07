@@ -1,0 +1,99 @@
+{
+  "plan_id": "2026-W24",
+  "generated_at": "2026-06-08T06:00:00",
+  "goals": {
+    "primary": "fat loss (sustainable caloric deficit)",
+    "secondary": "muscle retention / growth",
+    "tertiary": "flexibility"
+  },
+  "nutrition_targets": {
+    "calories": 2300,
+    "protein_g": 170,
+    "updated_at": "2026-06-08",
+    "notes": "Mifflin-St Jeor TDEE - 350 kcal; protein 1.8-2.2 g/kg per ISSN (deficit lean-mass retention)."
+  },
+  "week_notes": "Accumulation week 1/4 (block periodization, Israetel MEV->MAV). Main sets RPE 7-8 / RIR 2-3. Week 4 of this mesocycle is the deload.",
+  "weekly_sessions": [
+    {
+      "day": "monday",
+      "session_type": "strength",
+      "scheduled_time": null,
+      "duration_min": 60,
+      "deload": false,
+      "exercises": [
+        { "name": "Back squat", "sets": 4, "reps_or_duration": 6, "load_scheme": "RPE 7-8", "notes": "knees out, chest up" },
+        { "name": "Bench press", "sets": 3, "reps_or_duration": 8, "load_scheme": "RIR 2-3", "notes": "scapular retraction" },
+        { "name": "Barbell row", "sets": 3, "reps_or_duration": 10, "load_scheme": "RIR 2-3", "notes": "elbows close" }
+      ],
+      "form_cues": []
+    },
+    {
+      "day": "tuesday",
+      "session_type": "mobility",
+      "scheduled_time": null,
+      "duration_min": 30,
+      "deload": false,
+      "exercises": [
+        { "name": "Hip mobility flow", "sets": 2, "reps_or_duration": "8 min", "load_scheme": "bodyweight", "notes": "" },
+        { "name": "Thoracic rotations", "sets": 2, "reps_or_duration": "10/side", "load_scheme": "bodyweight", "notes": "" }
+      ],
+      "form_cues": []
+    },
+    {
+      "day": "wednesday",
+      "session_type": "rest",
+      "scheduled_time": null,
+      "duration_min": 0,
+      "deload": false,
+      "exercises": [],
+      "form_cues": [],
+      "notes": "Active recovery: 20-30 min easy walk."
+    },
+    {
+      "day": "thursday",
+      "session_type": "strength",
+      "scheduled_time": null,
+      "duration_min": 60,
+      "deload": false,
+      "exercises": [
+        { "name": "Deadlift", "sets": 3, "reps_or_duration": 5, "load_scheme": "RPE 7-8", "notes": "chest up, lat engagement, bar close" },
+        { "name": "Overhead press", "sets": 3, "reps_or_duration": 8, "load_scheme": "RIR 2-3", "notes": "head back as bar passes" },
+        { "name": "Pull-up", "sets": 3, "reps_or_duration": "AMRAP-2", "load_scheme": "bodyweight", "notes": "" }
+      ],
+      "form_cues": []
+    },
+    {
+      "day": "friday",
+      "session_type": "mobility",
+      "scheduled_time": null,
+      "duration_min": 30,
+      "deload": false,
+      "exercises": [
+        { "name": "Ankle + hip flexor mobility", "sets": 2, "reps_or_duration": "8 min", "load_scheme": "bodyweight", "notes": "" },
+        { "name": "Shoulder CARs", "sets": 2, "reps_or_duration": "5/side", "load_scheme": "bodyweight", "notes": "" }
+      ],
+      "form_cues": []
+    },
+    {
+      "day": "saturday",
+      "session_type": "cardio",
+      "scheduled_time": null,
+      "duration_min": 40,
+      "deload": false,
+      "exercises": [
+        { "name": "Zone 2 cardio", "sets": 1, "reps_or_duration": "40 min", "load_scheme": "HR < 70% max", "notes": "conversational pace" }
+      ],
+      "form_cues": []
+    },
+    {
+      "day": "sunday",
+      "session_type": "rest",
+      "scheduled_time": null,
+      "duration_min": 0,
+      "deload": false,
+      "exercises": [],
+      "form_cues": [],
+      "notes": "Full rest."
+    }
+  ]
+}
