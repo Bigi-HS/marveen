@@ -84,7 +84,27 @@ export const DEFAULT_COOLDOWN_MS = 3 * 60 * 60 * 1000 // 3 hours
 // the same safety invariant as the soft tier (compact ONLY at a between-turn
 // idle boundary, never mid-tool). It never sends to a busy pane; it just catches
 // the next idle window sooner and ignores the cooldown.
+//
+// Model-adaptive (Phase 4, paired with the soft tier): the hard ceiling is
+// derived per-agent as contextWindow(model) * HARD_CEILING_FRACTION, with the
+// fraction kept strictly ABOVE the soft COMPACT_THRESHOLD_FRACTION so the two
+// tiers never invert -- the soft (idle-only) trigger always sits below the hard
+// (cooldown-bypassing) trigger for every model. A fixed 650K ceiling was wrong
+// the same way the fixed soft threshold was: it never fired for a 200K-window
+// Sonnet/Haiku agent (real limit far below 650K), and for a 1M Opus agent it sat
+// BELOW the new 750K soft trigger, preempting it. Adaptive fixes both (Sonnet
+// 200K -> hard 180K > soft 150K; Opus 1M -> hard 900K > soft 750K).
+// DEFAULT_HARD_CEILING_TOKENS stays exported as the explicit value the pure
+// shouldHardCompact() callers/tests pass; the live sweep uses the adaptive fn.
+export const HARD_CEILING_FRACTION = 0.9
 export const DEFAULT_HARD_CEILING_TOKENS = 650_000
+
+// Resolve the per-agent hard ceiling = contextWindow(model) * HARD_CEILING_FRACTION.
+// Pure given the model id, so it is unit-testable and its ordering vs
+// adaptiveTokenThresholdForModel (soft < hard) is asserted directly.
+export function adaptiveHardCeilingForModel(modelId: string | null | undefined): number {
+  return Math.floor(contextWindowForModel(modelId) * HARD_CEILING_FRACTION)
+}
 // Fast lane: poll over-ceiling agents far more often than the 10-min soft sweep
 // so a busy agent's brief between-turn idle is caught quickly.
 const HARD_CEILING_INTERVAL_MS = 2 * 60 * 1000 // every 2 minutes
@@ -231,7 +251,11 @@ function checkAgent(name: string): void {
 // mid-tool pane -- we only catch the next between-turn idle, sooner.
 function checkAgentHardCeiling(name: string): void {
   const contextTokens = latestContextTokens(name)
-  if (!shouldHardCompact(contextTokens, DEFAULT_HARD_CEILING_TOKENS)) {
+  // Per-model hard ceiling = contextWindow(model) * 0.9, mirroring the soft
+  // tier's per-model derivation, so a 200K-window agent's ceiling is ~180K and a
+  // 1M agent's is ~900K -- both strictly above their soft trigger, never inverted.
+  const hardCeiling = adaptiveHardCeilingForModel(resolveAgentModelId(name))
+  if (!shouldHardCompact(contextTokens, hardCeiling)) {
     overCeilingSince.delete(name)
     return
   }
@@ -261,7 +285,7 @@ function checkAgentHardCeiling(name: string): void {
   }
 
   logger.info(
-    { agent: name, contextTokens, hardCeiling: DEFAULT_HARD_CEILING_TOKENS },
+    { agent: name, contextTokens, hardCeiling },
     'session-size-watcher: context over HARD ceiling while idle, sending /compact (cooldown bypassed)',
   )
   try {

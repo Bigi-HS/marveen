@@ -5,7 +5,9 @@ import {
   shouldCompactSession,
   shouldHardCompact,
   adaptiveTokenThresholdForModel,
+  adaptiveHardCeilingForModel,
   COMPACT_THRESHOLD_FRACTION,
+  HARD_CEILING_FRACTION,
   DEFAULT_TOKEN_THRESHOLD,
   DEFAULT_COOLDOWN_MS,
   DEFAULT_HARD_CEILING_TOKENS,
@@ -164,6 +166,68 @@ describe('shouldHardCompact', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Model-adaptive HARD ceiling = contextWindow(model) * 0.9, paired with the
+// soft tier so the two never invert (the bug: a fixed 650K ceiling preempted
+// the 750K soft trigger for opus-1M and was a dead no-op for 200K models).
+// ---------------------------------------------------------------------------
+
+describe('adaptiveHardCeilingForModel', () => {
+  it('the hard fraction is 0.9 and sits strictly above the soft 0.75', () => {
+    expect(HARD_CEILING_FRACTION).toBe(0.9)
+    expect(HARD_CEILING_FRACTION).toBeGreaterThan(COMPACT_THRESHOLD_FRACTION)
+  })
+
+  it('Sonnet/Haiku (200K window) -> 180K hard ceiling', () => {
+    expect(adaptiveHardCeilingForModel('claude-sonnet-4-6')).toBe(180_000)
+    expect(adaptiveHardCeilingForModel('claude-haiku-4-5-20251001')).toBe(180_000)
+  })
+
+  it('Opus 1M (opus-4-8[1m]) -> 900K hard ceiling', () => {
+    expect(adaptiveHardCeilingForModel('claude-opus-4-8[1m]')).toBe(900_000)
+  })
+
+  it('resolves aliases too (opus -> 900K, sonnet -> 180K)', () => {
+    expect(adaptiveHardCeilingForModel('opus')).toBe(900_000)
+    expect(adaptiveHardCeilingForModel('sonnet')).toBe(180_000)
+  })
+
+  it('an unknown / nullish model falls back to the default window * 0.9', () => {
+    const expected = Math.floor(DEFAULT_CONTEXT_WINDOW * HARD_CEILING_FRACTION)
+    expect(adaptiveHardCeilingForModel('some-future-model-x')).toBe(expected)
+    expect(adaptiveHardCeilingForModel(null)).toBe(expected)
+    expect(adaptiveHardCeilingForModel(undefined)).toBe(expected)
+  })
+
+  it('INVARIANT: for every model the hard ceiling is strictly above the soft threshold (no tier inversion)', () => {
+    // This is the regression guard for the bug this change fixes: soft (idle-only)
+    // must always trigger BEFORE hard (cooldown-bypassing), for every archetype.
+    for (const model of [
+      'claude-sonnet-4-6',
+      'claude-haiku-4-5-20251001',
+      'claude-opus-4-8[1m]',
+      'opus',
+      'sonnet',
+      'some-unknown-model',
+      null,
+      undefined,
+    ]) {
+      const soft = adaptiveTokenThresholdForModel(model)
+      const hard = adaptiveHardCeilingForModel(model)
+      expect(hard).toBeGreaterThan(soft)
+    }
+  })
+
+  it('the 200K hard ceiling (180K) is now a LIVE trigger, not the dead fixed 650K no-op', () => {
+    // The old fixed 650K ceiling could never fire for a 200K-window agent; the
+    // adaptive 180K sits within reach and above its 150K soft trigger.
+    const hard = adaptiveHardCeilingForModel('claude-sonnet-4-6')
+    expect(hard).toBeLessThan(DEFAULT_HARD_CEILING_TOKENS)
+    expect(shouldHardCompact(180_000, hard)).toBe(true)
+    expect(shouldHardCompact(179_999, hard)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Source-contract tests: structural guarantees about the watcher
 // ---------------------------------------------------------------------------
 
@@ -202,6 +266,16 @@ describe('session-size-watcher -- source contracts', () => {
     const checkFn = SRC.slice(SRC.indexOf('function checkAgent('), SRC.indexOf('function checkAgentHardCeiling'))
     expect(checkFn).toMatch(/adaptiveTokenThresholdForModel\(/)
     expect(checkFn).toMatch(/resolveAgentModelId\(/)
+  })
+
+  it('the hard sweep also uses a per-model adaptive ceiling, not the fixed constant', () => {
+    // checkAgentHardCeiling must derive the ceiling from the agent's model too,
+    // so the hard tier is not a dead no-op for 200K models and never inverts the
+    // soft tier for opus-1M. It must NOT pass the fixed DEFAULT_HARD_CEILING_TOKENS.
+    const hardFn = SRC.slice(SRC.indexOf('function checkAgentHardCeiling'), SRC.indexOf('export function startSessionSizeWatcher'))
+    expect(hardFn).toMatch(/adaptiveHardCeilingForModel\(/)
+    expect(hardFn).toMatch(/resolveAgentModelId\(/)
+    expect(hardFn).not.toMatch(/shouldHardCompact\(contextTokens, DEFAULT_HARD_CEILING_TOKENS\)/)
   })
 
   it('scopes to sub-agents only (does not target the main channels session)', () => {
