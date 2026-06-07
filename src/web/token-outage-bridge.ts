@@ -41,19 +41,25 @@ const ALERT_CHAT_ID = process.env.WATCHDOG_ALERT_CHAT_ID ?? '8643929442'
 // respawn anyone else (channel-monitor / channel-watchdog) just did.
 const REDISPATCH_BACKOFF_MS = 5 * 60 * 1000
 
-// Best-effort match for the Claude Code usage-limit UI. The exact menu string is
-// version-dependent and could not be observed live (no agent was limited at
-// build time), so this is intentionally a tunable set requiring a STRONG limit
-// word -- validate + adjust against a real outage. Matched against the last
-// visible lines (where the menu renders), not full scrollback, to avoid a
-// conversation that merely mentions "usage limit" tripping it.
+// Match for the Claude Code usage/session-limit UI. The first three were observed
+// LIVE (2026-06-07, Dave+Thor freezes) and captured from the pane verbatim:
+//   "You've hit your session limit · resets 7:40pm (Europe/Budapest)"
+//   "Stop and wait for limit to reset"   (the menu option line)
+// The rest are generic fallbacks for older/other limit UIs. Each requires a
+// STRONG limit phrase so a conversation merely mentioning "usage limit" doesn't
+// trip it. Matched against the last visible lines (where the menu renders), not
+// full scrollback. NOTE: the menu header "What do you want to do?" and the
+// "Upgrade your plan" option are deliberately NOT patterns -- too generic alone.
 export const LIMIT_PATTERNS: RegExp[] = [
-  /usage limit reached/i,
+  /you've hit your (?:usage|session) limit/i,
+  /(?:usage|session) limit reached/i,
+  /stop and wait for limit to reset/i,
   /you've reached your usage limit/i,
   /approaching .*usage limit/i,
   /claude usage limit/i,
   /limit will reset/i,
-  /resets? at .*(am|pm|\d{1,2}:\d{2})/i,
+  // "resets 7:40pm (...)" / "resets at 3pm" -- requires a time so it stays strong.
+  /resets?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)/i,
 ]
 const PANE_TAIL_LINES = 18
 
@@ -99,7 +105,12 @@ export function classifyPane(paneText: string | null, patterns: RegExp[] = LIMIT
   const limited = patterns.some((re) => re.test(tail))
   let resetAtText: string | null = null
   if (limited) {
-    const m = tail.match(/resets?\s+at\s+([^\n.]+)/i) || tail.match(/reset[^\n]*?(\d{1,2}:\d{2}\s*(?:am|pm)?)/i)
+    // Prefer the observed "resets 7:40pm (Europe/Budapest)" / "resets at 3pm"
+    // form (time, optional am/pm, optional parenthesised TZ); fall back to the
+    // looser "reset will ... at <text>" phrasing.
+    const m =
+      tail.match(/resets?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*\([^)]+\))?)/i) ||
+      tail.match(/resets?\s+at\s+([^\n.]+)/i)
     if (m) resetAtText = m[1].trim()
   }
   return { limited, resetAtText }

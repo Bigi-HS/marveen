@@ -39,6 +39,26 @@ describe('classifyPane', () => {
     expect(classifyPane("you've reached your usage limit").limited).toBe(true)
   })
 
+  it('flags the live session-limit menu (observed 2026-06-07 verbatim)', () => {
+    const pane = [
+      'What do you want to do?',
+      "You've hit your session limit · resets 7:40pm (Europe/Budapest)",
+      'Stop and wait for limit to reset',
+      'Upgrade your plan',
+    ].join('\n')
+    const d = classifyPane(pane)
+    expect(d.limited).toBe(true)
+    expect(d.resetAtText).toBe('7:40pm (Europe/Budapest)')
+  })
+
+  it('flags the bare "Stop and wait for limit to reset" menu option', () => {
+    expect(classifyPane('❯ 1. Stop and wait for limit to reset').limited).toBe(true)
+  })
+
+  it('does not flag the generic menu header / upgrade option alone', () => {
+    expect(classifyPane('What do you want to do?\nUpgrade your plan').limited).toBe(false)
+  })
+
   it('does not flag a normal pane', () => {
     expect(classifyPane('❯ working on the PR\n● Done.').limited).toBe(false)
   })
