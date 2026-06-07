@@ -1451,20 +1451,70 @@ export async function hybridSearch(agentId: string, query: string, limit: number
   return ranked.slice(0, limit).map(([id]) => byId.get(id)!)
 }
 
-export async function backfillEmbeddings(): Promise<number> {
-  const rows = db.prepare('SELECT id, content, keywords FROM memories WHERE embedding IS NULL').all() as { id: number; content: string; keywords: string | null }[]
-  let count = 0
-  for (const row of rows) {
+export interface BackfillResult {
+  total: number // memories that started with a NULL embedding
+  succeeded: number // newly embedded
+  failed: number // attempted but got no vector back
+  aborted: boolean // stopped early because the embedder looked unreachable
+}
+
+// Backfill embeddings for every memory that predates the auto-embed pipeline (or
+// was created while Ollama was down) and so has a NULL embedding. New memories
+// already get embedded fire-and-forget in saveAgentMemory; this catches the
+// historical rows so hybrid (vector + FTS) search covers the whole vault.
+//
+// Sequential on purpose: one local Ollama, no value in hammering it in parallel
+// (and the await already serialises, so the old fixed 100ms-per-row sleep just
+// added ~11s for 113 rows -- dropped). If the embedder returns nothing 3 times
+// in a row we ABORT rather than churn the whole backlog into doomed requests --
+// that pattern means the daemon is down/unloaded, not that individual rows are
+// bad. The `embed` dep is injectable so the control flow is unit-testable
+// without a live Ollama.
+export async function backfillEmbeddings(
+  opts: {
+    embed?: (text: string) => Promise<number[] | null>
+    onProgress?: (done: number, total: number, succeeded: number) => void
+  } = {},
+): Promise<BackfillResult> {
+  const embed = opts.embed ?? generateEmbedding
+  const rows = db
+    .prepare('SELECT id, content, keywords FROM memories WHERE embedding IS NULL')
+    .all() as { id: number; content: string; keywords: string | null }[]
+  const total = rows.length
+  const update = db.prepare('UPDATE memories SET embedding = ? WHERE id = ?')
+
+  let succeeded = 0
+  let failed = 0
+  let consecutiveFail = 0
+  let aborted = false
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]
     const text = row.content + (row.keywords ? ' ' + row.keywords : '')
-    const emb = await generateEmbedding(text)
-    if (emb) {
-      db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(JSON.stringify(emb), row.id)
-      count++
+    let emb: number[] | null = null
+    try {
+      emb = await embed(text)
+    } catch {
+      emb = null
     }
-    // Small delay to not overwhelm Ollama
-    await new Promise(r => setTimeout(r, 100))
+
+    if (emb && emb.length > 0) {
+      update.run(JSON.stringify(emb), row.id)
+      succeeded++
+      consecutiveFail = 0
+    } else {
+      failed++
+      consecutiveFail++
+      if (consecutiveFail >= 3) {
+        logger.warn({ total, succeeded, failed }, 'backfillEmbeddings: 3 consecutive empty embeddings -- embedder unreachable, aborting')
+        aborted = true
+        break
+      }
+    }
+    opts.onProgress?.(i + 1, total, succeeded)
   }
-  return count
+
+  return { total, succeeded, failed, aborted }
 }
 
 // --- Pending Channel Requests ---

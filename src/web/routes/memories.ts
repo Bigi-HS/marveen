@@ -205,8 +205,9 @@ Respond ONLY with JSON, nothing else:
 
   if (path === '/api/memories/backfill' && method === 'POST') {
     try {
-      const count = await backfillEmbeddings()
-      json(res, { ok: true, count })
+      const r = await backfillEmbeddings()
+      // `count` kept for backward compat with the existing dashboard client.
+      json(res, { ok: !r.aborted, count: r.succeeded, ...r })
     } catch (err) {
       logger.error({ err }, 'Backfill failed')
       json(res, { error: 'Backfill failed' }, 500)
