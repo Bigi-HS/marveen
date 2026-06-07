@@ -425,7 +425,7 @@ function setupAssigneeFilter() {
 }
 
 function renderKanban() {
-  const grouped = { planned: [], in_progress: [], waiting: [], done: [] }
+  const grouped = { planned: [], in_progress: [], waiting: [], done: [], someday: [] }
   const assigneeFilter = kanbanAssigneeFilter.toLowerCase()
   for (const card of kanbanCards) {
     if (kanbanProjectFilter && (card.project || '') !== kanbanProjectFilter) continue
@@ -449,6 +449,7 @@ function renderKanban() {
   document.getElementById('countInProgress').textContent = grouped.in_progress.length
   document.getElementById('countWaiting').textContent = grouped.waiting.length
   document.getElementById('countDone').textContent = grouped.done.length
+  document.getElementById('countSomeday').textContent = grouped.someday.length
 
   // Async parent-badge: fetch children count per card, show badge if any
   loadSubtaskBadges()
@@ -699,7 +700,7 @@ async function showCardDetail(card) {
     : null
   const assigneeDisplay = assignee ? (assignee.displayName || assignee.name) : (rawDetailAssignee || '-- nincs --')
   const priorityLabels = { low: 'Alacsony', normal: 'Normál', high: 'Magas', urgent: 'Sürgős' }
-  const statusLabels = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Várakozik', done: 'Kész' }
+  const statusLabels = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Várakozik', done: 'Kész', someday: 'Valamikor' }
 
   const meta = document.getElementById('cardDetailMeta')
   const idLabel = (card.seq != null ? `#${card.seq} · ` : '') + card.id
@@ -888,7 +889,7 @@ async function showCardDetail(card) {
     if (children.length > 0) {
       section.style.display = ''
       list.innerHTML = ''
-      const statusLabelsShort = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Vár', done: 'Kész' }
+      const statusLabelsShort = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Vár', done: 'Kész', someday: 'Valamikor' }
       for (const ch of children) {
         const div = document.createElement('div')
         div.className = 'comment-item'
