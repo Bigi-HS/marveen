@@ -7,6 +7,40 @@
 
 ---
 
+## Forcing Questions
+
+> Answer all five before writing a single line of spec. If you cannot answer Q3 or Q4, stop and ask.
+> These are not filler -- they determine whether the spec should exist at all.
+
+**Q1 -- What problem does this solve?**  
+[Concrete problem statement. Not "we need X" but "Y currently breaks / is missing / causes Z."]
+
+**Q2 -- Who uses this, and how often?**  
+[Role + frequency. "Dominik, daily" vs "Thor, once per PR" changes scope significantly.]
+
+**Q3 -- What is the simplest version that works?**  
+[If the answer is "a one-liner script" or "an existing tool with config", say so. Don't build what can be configured.]
+
+**Q4 -- What happens if we don't build this?**  
+[Acceptable workaround? Manual step? Actual breakage? If "nothing breaks", reconsider priority.]
+
+**Q5 -- What are we explicitly NOT building?**  
+[Scope boundary. List what's tempting but out of scope. This prevents scope creep before it starts.]
+
+---
+
+## Spec Phases
+
+> Track which phase this spec is in. Move forward only when the current phase is resolved.
+
+- [ ] **Clarify** -- Forcing questions answered; ambiguities surfaced and resolved
+- [ ] **Decompose** -- Work broken into independently deliverable pieces (if applicable)
+- [ ] **Specify** -- ACs written, edge cases listed, execution context populated
+- [ ] **Validate** -- Thor audit green; open questions resolved
+- [ ] **Finalize** -- FINAL status set; handed to implementer
+
+---
+
 ## Scope
 
 In scope: [what this spec covers]  
