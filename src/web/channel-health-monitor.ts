@@ -8,7 +8,7 @@ import {
   resolveAgentProviderType,
 } from './channel-mcp-reconnect.js'
 import { getProvider } from '../channel-provider.js'
-import { probeChannelPollerPresence } from './channel-poller-reap.js'
+import { captureProcEnvScan, probeChannelPollerPresence, type ProcEnvScan } from './channel-poller-reap.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 
 // Detect `plugin:X · ✘ failed` (or ✘ error / ✘ disconnected) in the
@@ -84,7 +84,7 @@ export function getChannelHealth(agentName: string): ChannelHealthStatus {
   }
 }
 
-function checkAgent(agentName: string, session: string): void {
+function checkAgent(agentName: string, session: string, psScan: ProcEnvScan): void {
   const now = Date.now()
   const state = reconnectState.get(agentName)
 
@@ -111,7 +111,7 @@ function checkAgent(agentName: string, session: string): void {
   // CERTAIN absence (false) as a fault; null (probe inconclusive) is ignored.
   let missingPoller = false
   if (!paneFailing && isChannelExpectedUp(agentName)) {
-    const present = probeChannelPollerPresence(providerType, probeDirForAgent(agentName))
+    const present = probeChannelPollerPresence(providerType, probeDirForAgent(agentName), psScan)
     missingPoller = shouldReconnectOnMissingPoller({ expectedUp: true, pollerPresent: present })
   }
 
@@ -150,8 +150,12 @@ function checkAgent(agentName: string, session: string): void {
 
 export function startChannelHealthMonitor(): NodeJS.Timeout {
   function check() {
+    // One `ps eww -e` per tick, shared across every agent's poller probe (P9-F2)
+    // instead of forking `ps` per channel-enabled agent.
+    const psScan = captureProcEnvScan()
+
     try {
-      checkAgent(MAIN_AGENT_ID, MAIN_CHANNELS_SESSION)
+      checkAgent(MAIN_AGENT_ID, MAIN_CHANNELS_SESSION, psScan)
     } catch (err) {
       logger.debug({ err }, 'channel-health-monitor: main agent check error')
     }
@@ -159,7 +163,7 @@ export function startChannelHealthMonitor(): NodeJS.Timeout {
     for (const name of listAgentNames()) {
       if (!isAgentRunning(name)) continue
       try {
-        checkAgent(name, resolveAgentSession(name))
+        checkAgent(name, resolveAgentSession(name), psScan)
       } catch (err) {
         logger.debug({ err, agent: name }, 'channel-health-monitor: agent check error')
       }

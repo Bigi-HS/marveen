@@ -68,6 +68,26 @@ export function parsePollerPidsFromPs(
   return out
 }
 
+// A single `ps eww -e` snapshot, shareable across many per-agent presence probes
+// within one monitor tick (P9-F2). `ok=false` means the scan itself failed, so
+// callers must fail-safe (presence -> null) instead of reading the empty output.
+export interface ProcEnvScan {
+  ok: boolean
+  output: string
+}
+
+// Take one `ps eww -e` snapshot. Call once per tick and pass the result into
+// every probeChannelPollerPresence so a tick forks `ps` ONCE, not per agent.
+export function captureProcEnvScan(): ProcEnvScan {
+  try {
+    const output = execSync('/bin/ps eww -e', { timeout: 5000, encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
+    return { ok: true, output }
+  } catch (err) {
+    logger.warn({ err }, 'channel-poller-reap: presence ps scan failed')
+    return { ok: false, output: '' }
+  }
+}
+
 function listPollerPidsByStateDir(envVar: string, chanDir: string): number[] {
   try {
     const out = execSync('/bin/ps eww -e', { timeout: 5000, encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
@@ -114,25 +134,26 @@ function isPidAlive(pid: number): boolean {
  *
  * `agentDirPath` is the agent dir for a sub-agent, or undefined for the main
  * agent (whose channel state lives under ~/.claude/channels).
+ *
+ * `psScan` (P9-F2) lets a per-tick caller share ONE `ps eww -e` across every
+ * agent it probes instead of forking a `ps` per agent: pass the captured scan
+ * (see captureProcEnvScan) and it is sliced for this agent's state dir. When
+ * omitted, a fresh `ps eww -e` is taken (the standalone / single-probe path).
  */
 export function probeChannelPollerPresence(
   provider: ChannelProviderType,
   agentDirPath?: string,
+  psScan?: ProcEnvScan,
 ): boolean | null {
   const chanDir = channelStateDir(provider, agentDirPath)
   const botPid = readBotPid(chanDir)
   if (botPid != null && isPidAlive(botPid)) return true
-  let scanOk = true
-  let pids: number[] = []
-  try {
-    const out = execSync('/bin/ps eww -e', { timeout: 5000, encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
-    pids = parsePollerPidsFromPs(out, STATE_ENV_VAR[provider], chanDir)
-  } catch (err) {
-    scanOk = false
-    logger.warn({ err, chanDir }, 'channel-poller-reap: presence ps scan failed')
-  }
+  const scan = psScan ?? captureProcEnvScan()
+  const pids = scan.ok
+    ? parsePollerPidsFromPs(scan.output, STATE_ENV_VAR[provider], chanDir)
+    : []
   if (pids.some(isPidAlive)) return true
-  return scanOk ? false : null
+  return scan.ok ? false : null
 }
 
 export interface ReapResult {
