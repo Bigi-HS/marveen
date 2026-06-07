@@ -30,6 +30,7 @@ import {
   readAgentAuthMode,
   writeAgentAuthMode,
   readAgentClaudeConfigDir,
+  contextPercentForModel,
   type AuthMode,
 } from '../agent-config.js'
 import {
@@ -278,6 +279,10 @@ interface AgentSummary {
   /** Live context size in tokens (input+cache_read+cache_creation of the last
    *  turn), or null when not running / no transcript yet. */
   contextTokens: number | null
+  /** contextTokens as a percentage of the active model's context window
+   *  (200K / 1M), or null when not running. Drives the dashboard context-% badge
+   *  and is the same number the context-window watchdog alerts on. */
+  contextPercent: number | null
   /** True when the running session's pane shows a login/401 auth failure --
    *  drives the dashboard "reauth needed" badge + one-click /login button. */
   needsReauth: boolean
@@ -310,13 +315,23 @@ function getAgentSummary(name: string): AgentSummary {
   // no pane to inspect). One capture-pane per running agent on the list poll.
   const reauth = proc.running ? detectReauthNeeded(capturePane(agentSessionName(name))) : { needsReauth: false }
 
+  // Resolve the transcript-derived figures once (each read scans a .jsonl), then
+  // derive the percentage from the active model's window so the dashboard badge
+  // and the watchdog agree on one number.
+  const configDir = readAgentClaudeConfigDir(name) ?? undefined
+  const activeModel = proc.running ? readActiveModelFromProjectDir(dir, runningSince ?? undefined, configDir) : null
+  const contextTokens = proc.running ? readContextTokensFromProjectDir(dir, configDir) : null
+  // Window from the CONFIGURED model (readAgentModel keeps the "[1m]" marker the
+  // transcript drops), so a 1M-context Opus isn't mis-sized at the 200K default.
+  const contextPercent = contextTokens != null ? contextPercentForModel(contextTokens, readAgentModel(name)) : null
+
   return {
     name,
     displayName: readAgentDisplayName(name),
     description: extractDescriptionFromClaudeMd(claudeMd),
     model: readAgentModel(name),
     archetype: readAgentArchetype(name),
-    activeModel: proc.running ? readActiveModelFromProjectDir(dir, runningSince ?? undefined, readAgentClaudeConfigDir(name) ?? undefined) : null,
+    activeModel,
     runningSince,
     authMode: readAgentAuthMode(name),
     securityProfile: readAgentSecurityProfile(name),
@@ -329,7 +344,8 @@ function getAgentSummary(name: string): AgentSummary {
     session: proc.session,
     hasAvatar: findAvatarForAgent(name) !== null,
     autoRestart: readAutoRestartConfig(name),
-    contextTokens: proc.running ? readContextTokensFromProjectDir(dir, readAgentClaudeConfigDir(name) ?? undefined) : null,
+    contextTokens,
+    contextPercent,
     needsReauth: reauth.needsReauth,
     reauthReason: reauth.reason,
   }

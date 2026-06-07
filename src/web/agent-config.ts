@@ -121,6 +121,16 @@ export function contextWindowForModel(modelId: string | null | undefined): numbe
   return MODEL_CONTEXT_WINDOWS[resolved] ?? DEFAULT_CONTEXT_WINDOW
 }
 
+// Turn a raw context-token count into a percentage of the model's window,
+// rounded to a whole percent and clamped to [0, 100]. Shared by the dashboard
+// (per-agent badge) and the context-window watchdog so both report the same
+// number from the same window mapping.
+export function contextPercentForModel(tokens: number, modelId: string | null | undefined): number {
+  const window = contextWindowForModel(modelId)
+  if (!(window > 0) || !(tokens > 0)) return 0
+  return Math.max(0, Math.min(100, Math.round((tokens / window) * 100)))
+}
+
 export function readAgentModel(name: string): string {
   const configPath = join(agentDir(name), 'agent-config.json')
   try {
