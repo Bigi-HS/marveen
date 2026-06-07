@@ -376,3 +376,37 @@ export function isKnownAgent(name: string): boolean {
     return false
   }
 }
+
+// Normalise an inter-agent message recipient to a known agent NAME, or null
+// when it cannot be resolved to one.
+//
+// The footgun this closes: callers (humans, scripts) routinely address a
+// message to the tmux SESSION name ("agent-dave") instead of the agent NAME
+// ("dave"). The session prefix is "agent-" + name, so "agent-dave" is not a
+// known agent; the message used to queue, never match a real agent in the
+// router, and silently vanish in the pending state forever.
+//
+// Resolution order:
+//   1. trimmed input is already a known agent  -> keep it verbatim
+//   2. strip a SINGLE leading "agent-" prefix and re-check  -> the stripped name
+//   3. otherwise -> null (caller rejects with a 400)
+//
+// Only one "agent-" prefix is stripped: an agent literally named "agent-foo"
+// is not expressible (the session would be "agent-agent-foo"), so collapsing
+// repeated prefixes would only mask typos, not serve a real address.
+//
+// `isKnown` is injectable so the resolution logic can be unit-tested without
+// the filesystem; it defaults to the real isKnownAgent for production callers.
+export function normalizeRecipient(
+  to: string,
+  isKnown: (name: string) => boolean = isKnownAgent,
+): string | null {
+  const trimmed = (to ?? '').trim()
+  if (!trimmed) return null
+  if (isKnown(trimmed)) return trimmed
+  if (trimmed.startsWith('agent-')) {
+    const stripped = trimmed.slice('agent-'.length)
+    if (isKnown(stripped)) return stripped
+  }
+  return null
+}
