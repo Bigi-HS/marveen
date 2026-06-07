@@ -103,17 +103,49 @@ export function buildDashboardAccessMessage(port: number, token: string): string
 // A signed, opaque session value gates the browser UI without the raw access
 // token ever living in localStorage. The value is base64url("<payload>.<sig>")
 // where payload = "<sid>.<issuedAt>.<expiry>" (seconds) and sig =
-// HMAC-SHA256(secret, payload). Verification is offline (no DB) but revocation
-// is supported via an in-memory issued/revoked set, so logout takes effect
-// immediately for the running process. The sets are intentionally in-memory:
-// a server restart re-issues, and the expiry caps the blast radius regardless.
+// HMAC-SHA256(secret, payload). Verification is STATELESS: a cookie is valid iff
+// its signature matches the persistent secret AND it is not past its absolute
+// expiry AND its sid is not in the revocation list. Forgery is prevented by the
+// signature alone (an attacker cannot mint a valid sig without the secret), so a
+// server restart no longer invalidates live sessions -- the earlier in-memory
+// "issued sids" gate broke every session on each restart, which on this fleet
+// (the dashboard restarts often: supervisor/deploys/watchdog) meant the operator
+// was re-prompted for the token constantly. Revocation (logout) IS persisted so
+// it survives a restart; entries are pruned once past their own expiry.
+const REVOKED_SESSIONS_PATH = join(PROJECT_ROOT, 'store', '.dashboard-revoked-sessions.json')
 
 let sessionSecret: Buffer | null = null
-// Sids we have minted this process lifetime. A cookie whose sid is unknown
-// (e.g. signed by a previous secret, or forged) is treated as invalid even if
-// the signature somehow matched. Cleared sids (logout/expiry sweep) drop out.
-const issuedSids = new Set<string>()
-const revokedSids = new Set<string>()
+// sid -> absolute expiry (epoch seconds). Loaded lazily from disk so logout
+// takes effect immediately AND survives a restart. null = not yet loaded.
+let revokedSessions: Map<string, number> | null = null
+
+// Load (and prune) the persisted revocation list. Lazy + cached.
+function loadRevoked(): Map<string, number> {
+  if (revokedSessions) return revokedSessions
+  const m = new Map<string, number>()
+  try {
+    if (existsSync(REVOKED_SESSIONS_PATH)) {
+      const obj = JSON.parse(readFileSync(REVOKED_SESSIONS_PATH, 'utf-8')) as Record<string, number>
+      const now = Math.floor(Date.now() / 1000)
+      for (const [sid, exp] of Object.entries(obj)) {
+        // Drop entries already past expiry: the cookie is expired-rejected anyway.
+        if (Number.isFinite(exp) && exp > now) m.set(sid, exp)
+      }
+    }
+  } catch { /* start empty on any read/parse error */ }
+  revokedSessions = m
+  return m
+}
+
+// Persist the revocation list (best-effort, atomic, 0600).
+function persistRevoked(m: Map<string, number>): void {
+  try {
+    mkdirSync(join(PROJECT_ROOT, 'store'), { recursive: true })
+    const obj: Record<string, number> = {}
+    for (const [sid, exp] of m) obj[sid] = exp
+    atomicWriteFileSync(REVOKED_SESSIONS_PATH, JSON.stringify(obj), { mode: 0o600 })
+  } catch { /* best-effort: a failed write only means logout may not survive restart */ }
+}
 
 function loadOrCreateSessionSecret(): Buffer {
   if (sessionSecret) return sessionSecret
@@ -148,8 +180,6 @@ export function createSession(nowMs: number = Date.now()): string {
   const issuedAt = Math.floor(nowMs / 1000)
   const expiry = issuedAt + SESSION_MAX_AGE_SECONDS
   const payload = `${sid}.${issuedAt}.${expiry}`
-  issuedSids.add(sid)
-  revokedSids.delete(sid)
   return b64url(Buffer.from(`${payload}.${sign(payload)}`))
 }
 
@@ -181,14 +211,18 @@ export function verifySession(value: string | undefined, nowMs: number = Date.no
   const a = Buffer.from(sig)
   const b = Buffer.from(expected)
   if (a.length !== b.length || !timingSafeEqual(a, b)) return { valid: false, expired: false }
-  if (!issuedSids.has(sid) || revokedSids.has(sid)) return { valid: false, expired: false }
+  // Stateless validity: a matching signature proves we minted it (no issued-set
+  // needed, so sessions survive a restart). Only an explicit logout revokes.
+  if (loadRevoked().has(sid)) return { valid: false, expired: false }
   const exp = Number(expiry)
   if (!Number.isFinite(exp)) return { valid: false, expired: false }
   if (Math.floor(nowMs / 1000) >= exp) return { valid: false, expired: true, sid }
   return { valid: true, expired: false, sid }
 }
 
-// Revoke a single session (logout). Idempotent.
+// Revoke a single session (logout). Idempotent. Persisted so the logout
+// survives a server restart (until the cookie's own expiry, after which it is
+// expired-rejected and the entry is pruned on the next load).
 export function revokeSession(value: string | undefined): void {
   if (!value) return
   let decoded: string
@@ -196,11 +230,13 @@ export function revokeSession(value: string | undefined): void {
     const b64 = value.replace(/-/g, '+').replace(/_/g, '/')
     decoded = Buffer.from(b64, 'base64').toString('utf-8')
   } catch { return }
-  const sid = decoded.split('.')[0]
-  if (sid) {
-    revokedSids.add(sid)
-    issuedSids.delete(sid)
-  }
+  const parts = decoded.split('.')
+  const sid = parts[0]
+  if (!sid) return
+  const exp = Number(parts[2])
+  const m = loadRevoked()
+  m.set(sid, Number.isFinite(exp) ? exp : Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SECONDS)
+  persistRevoked(m)
 }
 
 // Parse a Cookie header into a name->value map. No external dependency; values
@@ -226,6 +262,7 @@ export const SESSION_COOKIE_NAME = 'gd_session'
 // Test-only: reset the in-memory session state so unit tests don't leak sids
 // across cases. Not used in production code paths.
 export function __resetSessionStateForTests(): void {
-  issuedSids.clear()
-  revokedSids.clear()
+  // Drop the in-memory revocation cache so the next call reloads from disk --
+  // this models a server restart (the very case the stateless fix targets).
+  revokedSessions = null
 }
