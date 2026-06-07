@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
-  listKanbanCards, createKanbanCard, updateKanbanCard,
+  listKanbanCards, listArchivedKanbanCards, createKanbanCard, updateKanbanCard,
   deleteKanbanCard, moveKanbanCard, archiveKanbanCard,
   getKanbanComments, addKanbanComment, listKanbanProjects,
   getKanbanCard, getChildCards, getDb,
@@ -46,6 +46,11 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/kanban' && method === 'GET') {
     json(res, listKanbanCards())
+    return true
+  }
+
+  if (path === '/api/kanban/archived' && method === 'GET') {
+    json(res, listArchivedKanbanCards())
     return true
   }
 

@@ -984,14 +984,32 @@ export interface KanbanComment {
   created_at: number
 }
 
+// Start of the current calendar day in the server's local TZ (Europe/Budapest).
+// Done cards last touched before this are auto-archived, so the board's "Kész"
+// column only shows what was completed today.
+function startOfTodayEpoch(): number {
+  const d = new Date()
+  d.setHours(0, 0, 0, 0)
+  return Math.floor(d.getTime() / 1000)
+}
+
 export function listKanbanCards(): KanbanCard[] {
-  const thirtyDaysAgo = Math.floor(Date.now() / 1000) - 30 * 86400
-  // Auto-archive done cards older than 30 days
+  // Auto-archive done cards not touched since before today (local calendar day),
+  // so the "Kész" column shows only today's completions; older done cards move
+  // to the archive view (listArchivedKanbanCards).
   db.prepare(
     "UPDATE kanban_cards SET archived_at = ? WHERE status = 'done' AND archived_at IS NULL AND updated_at < ?"
-  ).run(Math.floor(Date.now() / 1000), thirtyDaysAgo)
+  ).run(Math.floor(Date.now() / 1000), startOfTodayEpoch())
   return db
     .prepare('SELECT rowid AS seq, * FROM kanban_cards WHERE archived_at IS NULL ORDER BY sort_order ASC')
+    .all() as KanbanCard[]
+}
+
+// Archived cards (auto-archived day-old completions + manually archived), newest
+// archive first. Backs the kanban "Archívum" view.
+export function listArchivedKanbanCards(): KanbanCard[] {
+  return db
+    .prepare('SELECT rowid AS seq, * FROM kanban_cards WHERE archived_at IS NOT NULL ORDER BY archived_at DESC')
     .all() as KanbanCard[]
 }
 
