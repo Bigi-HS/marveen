@@ -22,22 +22,56 @@ import { statSync, readdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { logger } from '../logger.js'
-import { listAgentNames, agentDir, readAgentClaudeConfigDir } from './agent-config.js'
+import {
+  listAgentNames,
+  agentDir,
+  readAgentClaudeConfigDir,
+  readAgentModel,
+  contextWindowForModel,
+} from './agent-config.js'
 import { agentSessionName, isAgentRunning, capturePane, sendPromptToSession } from './agent-process.js'
-import { readContextTokensFromProjectDir } from './active-model.js'
+import { readContextTokensFromProjectDir, readActiveModelFromProjectDir } from './active-model.js'
 import { isReadyForPrompt } from '../pane-state.js'
 
 // Transcript size at which we compact. Empirically: Dave's 113k-token session
 // produced a 1.5MB JSONL. 1MB is comfortably past normal work but well before
-// the resume-menu risk zone. Adjust via THRESHOLDS if needed.
+// the resume-menu risk zone.
 // Legacy byte proxy, kept for latestTranscriptSizeBytes + the future hard-ceiling
 // tier (card: non-idle session checkpoint). No longer the compaction trigger.
 export const DEFAULT_SIZE_THRESHOLD_BYTES = 1 * 1024 * 1024 // 1MB
 // Phase 3 (token-aware): the live context size in TOKENS is the real per-turn
 // cache_read driver. The byte proxy under-/over-fired vs the actual cost (a
-// 950K-token session is what each turn re-reads, not the transcript bytes). 250K
-// is comfortably past normal work yet well before the limit / resume-menu zone.
+// 950K-token session is what each turn re-reads, not the transcript bytes).
+//
+// Phase 4 (model-adaptive): a single fixed threshold is wrong for every model
+// but one. 250K only ever fired for 1M-context (opus-4-8[1m]) agents and was a
+// dead no-op for Sonnet/Haiku (200K window -- they hit their hard limit before
+// 250K). The threshold is now derived per-agent as contextWindow * the fraction
+// below (Sonnet 200K -> 150K, opus-1M -> 750K), so every archetype gets a
+// preemptive compact. DEFAULT_TOKEN_THRESHOLD is kept only as the fallback when
+// the model's context window is unknown (DEFAULT_CONTEXT_WINDOW * fraction).
+export const COMPACT_THRESHOLD_FRACTION = 0.75
 export const DEFAULT_TOKEN_THRESHOLD = 250_000
+
+// Resolve the per-agent token threshold = contextWindow(model) * fraction. Uses
+// the agent's LIVE model from the transcript when available (it may differ from
+// the configured model after a manual /model switch), falling back to the
+// configured model id. Pure given the two model ids, so it is unit-testable via
+// adaptiveTokenThresholdForModel below.
+export function adaptiveTokenThresholdForModel(modelId: string | null | undefined): number {
+  return Math.floor(contextWindowForModel(modelId) * COMPACT_THRESHOLD_FRACTION)
+}
+
+// The live model the agent is currently answering on, falling back to its
+// configured model id (and ultimately the DEFAULT model inside readAgentModel).
+function resolveAgentModelId(agentName: string): string {
+  const live = readActiveModelFromProjectDir(
+    agentDir(agentName),
+    undefined,
+    readAgentClaudeConfigDir(agentName) ?? undefined,
+  )
+  return live ?? readAgentModel(agentName)
+}
 // Do not compact the same session more often than this, so /compact does not
 // interrupt a freshly-compacted agent that immediately starts heavy work again.
 export const DEFAULT_COOLDOWN_MS = 3 * 60 * 60 * 1000 // 3 hours
@@ -138,10 +172,9 @@ export function latestContextTokens(agentName: string): number | null {
   return readContextTokensFromProjectDir(agentDir(agentName), readAgentClaudeConfigDir(agentName) ?? undefined)
 }
 
-const THRESHOLDS: SessionSizeThresholds = {
-  tokenThreshold: DEFAULT_TOKEN_THRESHOLD,
-  cooldownMs: DEFAULT_COOLDOWN_MS,
-}
+// Only the cooldown is global; the token threshold is computed per-agent from
+// the agent's model context window (see checkAgent), so it is not part of this
+// shared default any more.
 
 // Initial delay before the first sweep. Agents need time to boot and complete
 // their startup modal dismiss before we probe them. Offset from other watchers:
@@ -164,7 +197,14 @@ function checkAgent(name: string): void {
   const last = lastCompactedAt.get(name) ?? null
   const now = Date.now()
 
-  if (!shouldCompactSession(contextTokens, last, now, THRESHOLDS)) return
+  // Model-adaptive threshold: contextWindow(model) * fraction, so a 200K-window
+  // Sonnet/Haiku agent compacts ~150K and a 1M Opus agent ~750K. Cooldown stays
+  // global. The idle-only gate below is unchanged.
+  const thresholds: SessionSizeThresholds = {
+    tokenThreshold: adaptiveTokenThresholdForModel(resolveAgentModelId(name)),
+    cooldownMs: DEFAULT_COOLDOWN_MS,
+  }
+  if (!shouldCompactSession(contextTokens, last, now, thresholds)) return
 
   const session = agentSessionName(name)
   const pane = capturePane(session)
@@ -174,7 +214,7 @@ function checkAgent(name: string): void {
   }
 
   logger.info(
-    { agent: name, contextTokens },
+    { agent: name, contextTokens, tokenThreshold: thresholds.tokenThreshold },
     'session-size-watcher: context exceeds token threshold while agent is idle, sending /compact',
   )
   try {

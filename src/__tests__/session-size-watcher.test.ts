@@ -4,11 +4,14 @@ import { join } from 'node:path'
 import {
   shouldCompactSession,
   shouldHardCompact,
+  adaptiveTokenThresholdForModel,
+  COMPACT_THRESHOLD_FRACTION,
   DEFAULT_TOKEN_THRESHOLD,
   DEFAULT_COOLDOWN_MS,
   DEFAULT_HARD_CEILING_TOKENS,
   type SessionSizeThresholds,
 } from '../web/session-size-watcher.js'
+import { DEFAULT_CONTEXT_WINDOW } from '../web/agent-config.js'
 
 const THRESHOLDS: SessionSizeThresholds = {
   tokenThreshold: DEFAULT_TOKEN_THRESHOLD,
@@ -63,6 +66,69 @@ describe('shouldCompactSession', () => {
 
   it('treats zero-size transcript as below threshold (empty file)', () => {
     expect(shouldCompactSession(0, null, NOW, THRESHOLDS)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Model-adaptive token threshold = contextWindow(model) * fraction
+// ---------------------------------------------------------------------------
+
+describe('adaptiveTokenThresholdForModel', () => {
+  it('the compaction fraction is 0.75 (75% of the context window)', () => {
+    expect(COMPACT_THRESHOLD_FRACTION).toBe(0.75)
+  })
+
+  it('Sonnet (200K window) -> 150K threshold', () => {
+    expect(adaptiveTokenThresholdForModel('claude-sonnet-4-6')).toBe(150_000)
+  })
+
+  it('Haiku (200K window) -> 150K threshold', () => {
+    expect(adaptiveTokenThresholdForModel('claude-haiku-4-5-20251001')).toBe(150_000)
+  })
+
+  it('Opus 1M (opus-4-8[1m]) -> 750K threshold', () => {
+    expect(adaptiveTokenThresholdForModel('claude-opus-4-8[1m]')).toBe(750_000)
+  })
+
+  it('resolves model aliases too (opus -> 750K, sonnet -> 150K)', () => {
+    expect(adaptiveTokenThresholdForModel('opus')).toBe(750_000)
+    expect(adaptiveTokenThresholdForModel('sonnet')).toBe(150_000)
+  })
+
+  it('an unknown model falls back to the default window * fraction', () => {
+    const expected = Math.floor(DEFAULT_CONTEXT_WINDOW * COMPACT_THRESHOLD_FRACTION)
+    expect(adaptiveTokenThresholdForModel('some-future-model-x')).toBe(expected)
+    expect(adaptiveTokenThresholdForModel(null)).toBe(expected)
+    expect(adaptiveTokenThresholdForModel(undefined)).toBe(expected)
+  })
+
+  it('a 1M agent compacts much later than a 200K agent (the whole point)', () => {
+    const sonnet = adaptiveTokenThresholdForModel('claude-sonnet-4-6')
+    const opus = adaptiveTokenThresholdForModel('claude-opus-4-8[1m]')
+    expect(opus).toBeGreaterThan(sonnet)
+    // The 200K agent's threshold (150K) is below the legacy fixed 250K, so the
+    // old constant would never have fired for it -- exactly the no-op bug fixed.
+    expect(sonnet).toBeLessThan(DEFAULT_TOKEN_THRESHOLD)
+  })
+
+  it('feeds shouldCompactSession: a 200K agent fires at 150K, below the old 250K', () => {
+    const thresholds: SessionSizeThresholds = {
+      tokenThreshold: adaptiveTokenThresholdForModel('claude-sonnet-4-6'),
+      cooldownMs: DEFAULT_COOLDOWN_MS,
+    }
+    expect(shouldCompactSession(149_999, null, NOW, thresholds)).toBe(false)
+    expect(shouldCompactSession(150_000, null, NOW, thresholds)).toBe(true)
+    // The old fixed 250K threshold would still be false here -- the regression.
+    expect(160_000).toBeLessThan(DEFAULT_TOKEN_THRESHOLD)
+  })
+
+  it('feeds shouldCompactSession: a 1M agent only fires at 750K', () => {
+    const thresholds: SessionSizeThresholds = {
+      tokenThreshold: adaptiveTokenThresholdForModel('claude-opus-4-8[1m]'),
+      cooldownMs: DEFAULT_COOLDOWN_MS,
+    }
+    expect(shouldCompactSession(749_999, null, NOW, thresholds)).toBe(false)
+    expect(shouldCompactSession(750_000, null, NOW, thresholds)).toBe(true)
   })
 })
 
@@ -128,6 +194,14 @@ describe('session-size-watcher -- source contracts', () => {
     expect(SRC).toMatch(/latestContextTokens/)
     expect(SRC).toMatch(/readContextTokensFromProjectDir/)
     expect(SRC).toMatch(/contextTokens/)
+  })
+
+  it('uses a per-model adaptive threshold (contextWindow * fraction), not a fixed constant', () => {
+    // checkAgent must compute the threshold from the agent's model, so a 200K
+    // agent gets a 150K threshold instead of the dead 250K no-op.
+    const checkFn = SRC.slice(SRC.indexOf('function checkAgent('), SRC.indexOf('function checkAgentHardCeiling'))
+    expect(checkFn).toMatch(/adaptiveTokenThresholdForModel\(/)
+    expect(checkFn).toMatch(/resolveAgentModelId\(/)
   })
 
   it('scopes to sub-agents only (does not target the main channels session)', () => {

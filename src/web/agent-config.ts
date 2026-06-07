@@ -97,6 +97,30 @@ export function resolveModelId(raw: string): string {
   return MODEL_ALIASES[raw] || raw
 }
 
+// Per-model context window (in tokens). Used to size the proactive /compact
+// threshold per archetype: a Sonnet/Haiku agent (200K window) must compact far
+// earlier than a 1M-context Opus agent, so a single fixed token threshold is
+// wrong for everyone but one model. Keys are full model ids (alias-resolved).
+export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  'claude-opus-4-8[1m]': 1_000_000,
+  'claude-sonnet-4-6': 200_000,
+  'claude-haiku-4-5-20251001': 200_000,
+}
+
+// Default context window for any model id we don't explicitly know. 200K is the
+// standard Claude window and the safe (smaller) assumption: it makes us compact
+// earlier rather than risk running a large session past its real limit.
+export const DEFAULT_CONTEXT_WINDOW = 200_000
+
+// Resolve a model id (alias or full) to its context window in tokens. Strips the
+// alias indirection first so 'opus'/'sonnet'/'haiku' resolve too. Falls back to
+// DEFAULT_CONTEXT_WINDOW for unknown ids (and for a null/empty input).
+export function contextWindowForModel(modelId: string | null | undefined): number {
+  if (!modelId || typeof modelId !== 'string') return DEFAULT_CONTEXT_WINDOW
+  const resolved = resolveModelId(modelId.trim())
+  return MODEL_CONTEXT_WINDOWS[resolved] ?? DEFAULT_CONTEXT_WINDOW
+}
+
 export function readAgentModel(name: string): string {
   const configPath = join(agentDir(name), 'agent-config.json')
   try {
