@@ -226,6 +226,24 @@ ensure_channel_watchdogs() {
   done
 }
 
+# Telegram MCP-pipe watchdog for the MAIN orchestrator (scripts/telegram-pipe-watchdog.sh,
+# PR#27). A self-looping daemon (5-min cycles) that is INDEPENDENT of both the orchestrator
+# session and the dashboard, so it survives a dashboard restart and can drive /mcp recovery
+# itself when the Telegram MCP bun child dies on a long sleep. It was launched by hand once,
+# so a WSL reboot left it dead until a human restarted it. Wiring it here makes it
+# reboot-persistent like every other watchdog: pgrep-skip keeps a running one, otherwise
+# relaunch. The pattern matches only the .sh daemon, not the node "-cli.js" cycle invocation,
+# so there is exactly one match -- no double-launch (two loops racing /mcp recovery). 2026-06-07.
+ensure_pipe_watchdog() {
+  pgrep -f "scripts/telegram-pipe-watchdog.sh" >/dev/null 2>&1 && return 0
+  if [ -x "$INSTALL_DIR/scripts/telegram-pipe-watchdog.sh" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start telegram-pipe-watchdog.sh"; return 0; fi
+    nohup bash "$INSTALL_DIR/scripts/telegram-pipe-watchdog.sh" >> "$STORE/telegram-pipe-watchdog.log" 2>&1 9>&- &
+    disown 2>/dev/null || true
+    log "telegram-pipe-watchdog: started"
+  fi
+}
+
 # --- one supervision pass --------------------------------------------------
 # Keep every sub-agent's OAuth credentials a symlink to the single main token
 # ($HOME/.claude/.credentials.json), which auto-refreshes. A sub-agent's Claude
@@ -303,6 +321,8 @@ tick() {
   ensure_channel_watchdogs
   # 4) ROLE-AGENT WATCHDOGS (Forge/Gauge/Quill/Scout -- permanent, channel-less)
   ensure_agent_watchdogs
+  # 5) TELEGRAM MCP-PIPE WATCHDOG (orchestrator pipe recovery -- reboot-persistent)
+  ensure_pipe_watchdog
 }
 
 # --- main ------------------------------------------------------------------
