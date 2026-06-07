@@ -5,6 +5,7 @@ import { execSync, execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL } from './config.js'
 import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, buildDashboardAccessMessage, createSession, verifySession, revokeSession, parseCookies, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from './web/dashboard-auth.js'
 import { json, readBody } from './web/http-helpers.js'
+import { createRateLimiter } from './web/rate-limit.js'
 import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
 import { ensureAgentHooks, ensureDefaultScheduledTasks } from './web/agent-scaffold.js'
 import { refreshMarveenBotUsername } from './web/telegram.js'
@@ -77,6 +78,29 @@ export function startWebServer(port = 3420): http.Server {
   ])
   const isSafeMethod = (m: string) => m === 'GET' || m === 'HEAD' || m === 'OPTIONS'
 
+  // Per-IP rate limiting (defence-in-depth; the dashboard is tailnet-only, so
+  // this guards against token brute-force and accidental request storms, not
+  // public-scale traffic). Two tiers keyed by client IP:
+  //   - strict: POST /api/auth/login -- anti-brute-force (~5/min)
+  //   - lenient: every other /api/* call (~100/10s burst)
+  // The long-lived SSE pane stream and static assets are never rate-limited.
+  const loginLimiter = createRateLimiter({ capacity: 5, refillPerSec: 5 / 60 })
+  const apiLimiter = createRateLimiter({ capacity: 100, refillPerSec: 10 })
+  // Bound memory under a churn of distinct client IPs; prune idle buckets.
+  const rateLimitPruneInterval = setInterval(() => {
+    loginLimiter.prune()
+    apiLimiter.prune()
+  }, 5 * 60 * 1000)
+  if (typeof rateLimitPruneInterval.unref === 'function') rateLimitPruneInterval.unref()
+  // Resolve the client IP, honouring the first hop of X-Forwarded-For set by
+  // the Tailscale Serve proxy in front of us. Falls back to the socket peer.
+  const clientIp = (req: http.IncomingMessage): string => {
+    const xff = req.headers['x-forwarded-for']
+    const raw = Array.isArray(xff) ? xff[0] : xff
+    const first = raw?.split(',')[0]?.trim()
+    return first || req.socket.remoteAddress || 'unknown'
+  }
+
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://localhost:${port}`)
     const path = url.pathname
@@ -99,6 +123,24 @@ export function startWebServer(port = 3420): http.Server {
       res.writeHead(403, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Origin not allowed' }))
       return
+    }
+
+    // Per-IP rate limiting (before the auth gate, so brute-force attempts are
+    // throttled even when they carry no/invalid credentials). Skips the
+    // long-lived SSE pane stream and non-/api static assets.
+    if (path.startsWith('/api/') && !/^\/api\/agents\/[^/]+\/pane\/stream$/.test(path)) {
+      const ip = clientIp(req)
+      const isLogin = method === 'POST' && path === '/api/auth/login'
+      const limiter = isLogin ? loginLimiter : apiLimiter
+      const verdict = limiter.allow(ip)
+      if (!verdict.allowed) {
+        res.writeHead(429, {
+          'Content-Type': 'application/json',
+          'Retry-After': String(Math.ceil(verdict.retryAfterMs / 1000)),
+        })
+        res.end(JSON.stringify({ error: 'rate limited' }))
+        return
+      }
     }
 
     // Auth gate: every /api/* route requires EITHER a valid HttpOnly session
@@ -144,7 +186,6 @@ export function startWebServer(port = 3420): http.Server {
       res.setHeader('Set-Cookie', `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${isHttps ? '; Secure' : ''}`)
       return json(res, { ok: true })
     }
-
     const isPublicApi =
       (path === '/api/auth/status' && method === 'GET') ||
       (method === 'GET' && (
@@ -367,6 +408,7 @@ export function startWebServer(port = 3420): http.Server {
     clearInterval(autoRestartInterval)
     clearInterval(sessionSizeInterval)
     clearInterval(updateCheckerInterval)
+    clearInterval(rateLimitPruneInterval)
     return origClose(cb)
   }
 
