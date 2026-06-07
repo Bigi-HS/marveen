@@ -172,7 +172,12 @@ export function buildMainSessionRespawnCmd(opts: {
   ].join(' ')
 }
 
-function resumeMarveenSession(): boolean {
+// Exported so the standalone token-outage bridge can re-dispatch the queued
+// inbound after a usage-limit reset by reusing this proven context-preserving
+// --continue respawn (instead of duplicating the reap/modal/identity/unlock
+// dance). Cross-process double-respawn is guarded via the .channel-last-respawn
+// stamp file (see lastMainRespawnAt / fileRespawnStampMs).
+export function resumeMarveenSession(): boolean {
   const provider = getProvider(getMainAgentProvider())
   try {
     // Reap any orphan bun/node poller BEFORE we respawn. tmux respawn-pane -k

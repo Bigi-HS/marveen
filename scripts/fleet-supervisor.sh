@@ -244,6 +244,23 @@ ensure_pipe_watchdog() {
   fi
 }
 
+# Token-outage auto-ACK watcher (scripts/token-outage-watch.sh, P3). A self-looping
+# deterministic daemon (~30s cycles) INDEPENDENT of the dashboard, so it keeps the
+# operator informed + captures/re-dispatches the queue even while the Claude account
+# is usage-limited (when the orchestrator session is frozen and the dashboard may be
+# the only thing still answering). Reboot-persistent like the pipe watchdog: pgrep-skip
+# keeps a running one, otherwise relaunch. Pattern matches only the .sh daemon, not the
+# node "-cli.js" cycle invocation.
+ensure_token_outage_watch() {
+  pgrep -f "scripts/token-outage-watch.sh" >/dev/null 2>&1 && return 0
+  if [ -x "$INSTALL_DIR/scripts/token-outage-watch.sh" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start token-outage-watch.sh"; return 0; fi
+    nohup bash "$INSTALL_DIR/scripts/token-outage-watch.sh" >> "$STORE/token-outage-watch.log" 2>&1 9>&- &
+    disown 2>/dev/null || true
+    log "token-outage-watch: started"
+  fi
+}
+
 # --- one supervision pass --------------------------------------------------
 # Keep every sub-agent's OAuth credentials a symlink to the single main token
 # ($HOME/.claude/.credentials.json), which auto-refreshes. A sub-agent's Claude
@@ -323,6 +340,8 @@ tick() {
   ensure_agent_watchdogs
   # 5) TELEGRAM MCP-PIPE WATCHDOG (orchestrator pipe recovery -- reboot-persistent)
   ensure_pipe_watchdog
+  # 6) TOKEN-OUTAGE AUTO-ACK WATCHER (usage-limit ack + queue capture/re-dispatch)
+  ensure_token_outage_watch
 }
 
 # --- main ------------------------------------------------------------------
