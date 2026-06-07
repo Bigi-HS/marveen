@@ -447,7 +447,7 @@ const SURVEY_MODAL_RX = /How is Claude doing this session/
 
 function dismissSurveyModalIfPresent(session: string): void {
   try {
-    const pane = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
+    const pane = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
     if (!SURVEY_MODAL_RX.test(pane)) return
     execFileSync(TMUX, ['send-keys', '-t', session, '0'], { timeout: 5000 })
     // Modal close is one frame; settle window so the next send-keys lands in
@@ -469,7 +469,7 @@ const RESUME_SUMMARY_MODAL_RX = /Resume from summary/
 
 export function dismissResumeSummaryModalIfPresent(session: string): void {
   try {
-    const pane = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
+    const pane = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
     if (!RESUME_SUMMARY_MODAL_RX.test(pane)) return
     execFileSync(TMUX, ['send-keys', '-t', session, '1'], { timeout: 5000 })
     execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
@@ -706,7 +706,7 @@ export function sendPromptToSession(session: string, text: string): void {
   // prove the buffer is clean, but proceeding without the clear is no
   // worse than the pre-fix status quo.
   try {
-    const preCapture = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
+    const preCapture = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
     if (shouldClearTruncatedPreamble(preCapture)) {
       logger.info({ session }, 'Cleared stale preamble from input buffer before sending prompt')
       clearInputBuffer(session)
@@ -784,11 +784,11 @@ export function sendEnterToSession(session: string): boolean {
   }
 }
 
-// Capture a pane snapshot with an execSync timeout. Null on any error so
+// Capture a pane snapshot with an execFileSync timeout. Null on any error so
 // the caller can treat "capture failed" as "not ready".
 export function capturePane(session: string): string | null {
   try {
-    return execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
+    return execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
   } catch {
     return null
   }
