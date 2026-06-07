@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { readFileSync, mkdirSync, rmSync } from 'node:fs'
+import { join as pathJoin } from 'node:path'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
@@ -11,6 +12,8 @@ import {
 import { buildHandoffContent } from '../channel-coordinator.js'
 import { COORDINATOR_AGENT_ID } from '../channel-coordinator/ingest.js'
 import { tryHandleMessages } from '../web/routes/messages.js'
+import { initDatabase } from '../db.js'
+import { AGENTS_BASE_DIR } from '../web/agent-config.js'
 
 // Regression tests for the channel-inbound framing fix (2026-06-02 cutover
 // post-mortem): the coordinator backfill handoff used to arrive at Marveen as
@@ -158,5 +161,71 @@ describe('contrast: untrusted wrap still adds the wrapper (non-coordinator uncha
     const out = wrapUntrusted('agent:zara', 'status update')
     expect(out).toMatch(/^<untrusted source="agent:zara">/)
     expect(out).toContain('status update')
+  })
+})
+
+// Recipient normalize/reject guard (card msg-addr-guard-82870b). The router
+// resolves the tmux session as `agent-${to}`, so a `to` of the SESSION name
+// ("agent-dave") would become "agent-agent-dave" -- never delivered, pending
+// forever -- and an unknown name likewise stranded. The route now strips a
+// stale "agent-" prefix when the unprefixed name is a real agent, and rejects
+// any recipient that is not a known agent with a 400.
+describe('/api/messages recipient guard (normalize session name + reject unknown)', () => {
+  // A throwaway agent created on disk under AGENTS_BASE_DIR so isKnownAgent()
+  // resolves it deterministically regardless of which agents the checkout has
+  // (the agents/ roster is runtime-generated and may be empty in a worktree).
+  const TEST_AGENT = 'tguard-recipient'
+  const testAgentDir = pathJoin(AGENTS_BASE_DIR, TEST_AGENT)
+
+  // The reject path returns before any DB write, but the normalize-SUCCESS path
+  // reaches createAgentMessage, so back it with an in-memory DB.
+  beforeAll(() => {
+    process.env.NODE_ENV = 'test'
+    initDatabase(':memory:')
+    mkdirSync(testAgentDir, { recursive: true })
+  })
+  afterAll(() => {
+    rmSync(testAgentDir, { recursive: true, force: true })
+  })
+
+  async function post(to: string): Promise<{ status: number; body: any }> {
+    const payload = JSON.stringify({ from: 'tguard-sender', to, content: 'ping' })
+    const req = Readable.from([Buffer.from(payload)]) as any
+    let status = 0
+    let body = ''
+    const res = {
+      writeHead(s: number) { status = s },
+      end(b?: string) { body = b ?? '' },
+    } as any
+    const handled = await tryHandleMessages({
+      req, res, path: '/api/messages', method: 'POST', url: new URL('http://x/api/messages'),
+    } as any)
+    expect(handled).toBe(true)
+    return { status, body: body ? JSON.parse(body) : null }
+  }
+
+  it('rejects an unknown recipient with 400 instead of accepting it as pending', async () => {
+    const { status, body } = await post('definitely-not-an-agent-xyz')
+    expect(status).toBe(400)
+    expect(body.error).toMatch(/unknown recipient/i)
+  })
+
+  it('rejects the SESSION name of a non-existent agent (agent-<garbage>) with 400', async () => {
+    const { status } = await post('agent-definitely-not-an-agent-xyz')
+    expect(status).toBe(400)
+  })
+
+  it('normalizes the tmux session name (agent-<name>) to the agent name and accepts it', async () => {
+    const { status, body } = await post(`agent-${TEST_AGENT}`)
+    expect(status).not.toBe(400)
+    // Stored against the agent NAME, not the session name, so the router can
+    // resolve it (agent-${to}) to the real tmux session.
+    expect(body.to_agent).toBe(TEST_AGENT)
+  })
+
+  it('leaves a plain valid agent name untouched', async () => {
+    const { status, body } = await post(TEST_AGENT)
+    expect(status).not.toBe(400)
+    expect(body.to_agent).toBe(TEST_AGENT)
   })
 })

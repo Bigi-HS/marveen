@@ -6,6 +6,7 @@ import {
 } from '../../db.js'
 import { logger } from '../../logger.js'
 import { COORDINATOR_AGENT_ID } from '../../channel-coordinator/ingest.js'
+import { isKnownAgent } from '../agent-config.js'
 import { sanitizeAgentIdent } from '../../prompt-safety.js'
 import { aiDefenceGuard } from '../../aidefence-guard.js'
 import { readBody, json } from '../http-helpers.js'
@@ -41,6 +42,31 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'from is reserved for the in-process channel coordinator' }, 403)
       return true
     }
+    // Resolve the recipient against the real agent roster. Two failure modes
+    // this guards (both previously accepted as pending and then silently lost,
+    // since the router resolves `agent-${to}` as the tmux session -- so a `to`
+    // of "agent-dave" became session "agent-agent-dave" which never exists, and
+    // an unknown name became "agent-<garbage>" that likewise never appears):
+    //   (a) NORMALIZE: callers sometimes address the tmux SESSION name
+    //       ("agent-dave") instead of the agent NAME ("dave"). Strip a leading
+    //       "agent-" prefix IFF the unprefixed name is a real agent AND the
+    //       prefixed form is not (so a hypothetical agent literally named
+    //       "agent-foo" is left untouched).
+    //   (b) REJECT: an unknown/non-existent recipient gets a 400 instead of
+    //       being accepted as a pending message that can never be delivered.
+    let toAgent = to.trim()
+    if (!isKnownAgent(sanitizeAgentIdent(toAgent)) && toAgent.startsWith('agent-')) {
+      const stripped = toAgent.slice('agent-'.length)
+      if (isKnownAgent(sanitizeAgentIdent(stripped))) {
+        logger.info({ from: from.trim(), to: toAgent, normalized: stripped }, 'Normalized recipient session name to agent name')
+        toAgent = stripped
+      }
+    }
+    if (!isKnownAgent(sanitizeAgentIdent(toAgent))) {
+      logger.warn({ from: from.trim(), to: to.trim() }, 'Rejected /api/messages POST to unknown recipient')
+      json(res, { error: `Unknown recipient '${to.trim()}': no such agent` }, 400)
+      return true
+    }
     const guard = aiDefenceGuard(from.trim(), content.trim())
     if (guard.verdict === 'BLOCK') {
       logger.warn(
@@ -56,7 +82,7 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
         'AIDefence: message FLAGGED (allowed through)',
       )
     }
-    const msg = createAgentMessage(from.trim(), to.trim(), content.trim())
+    const msg = createAgentMessage(from.trim(), toAgent, content.trim())
     logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent }, 'Agent message created')
     json(res, msg)
     return true
