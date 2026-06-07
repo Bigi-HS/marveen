@@ -44,6 +44,17 @@ while true; do
     # Bound the whole cycle so a hung probe cannot stall the loop.
     out="$(cd "$ROOT" && timeout 60 "$NODE" dist/web/telegram-pipe-watchdog-cli.js 2>>"$LOG")"
     log "cycle: ${out:-<no output / timeout>}"
+
+    # SUB-AGENT sweep (card 31ab64fe Part 2): recover the channel sub-agents'
+    # pipes too, but ONLY while the dashboard is DOWN (the CLI self-gates on
+    # that; when the dashboard is up the in-process channel-health-monitor owns
+    # per-agent recovery and a second driver would double-press the same /mcp
+    # menu). Usually a fast no-op skip; bounded higher because a real
+    # dashboard-down sweep probes several agents in sequence.
+    if [ -f "$ROOT/dist/web/per-agent-pipe-watchdog-cli.js" ]; then
+      sub="$(cd "$ROOT" && timeout 120 "$NODE" dist/web/per-agent-pipe-watchdog-cli.js 2>>"$LOG")"
+      log "subagent-sweep: ${sub:-<no output / timeout>}"
+    fi
   fi
   sleep "$INTERVAL"
 done
