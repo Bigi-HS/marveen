@@ -50,8 +50,11 @@
 
 set -u
 
-INSTALL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-STORE="$INSTALL_DIR/store"
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# STORE is env-overridable (like MAIN_AGENT_ID / DASH_PORT) so a test can isolate
+# all supervisor state (STATE_DIR, logs) into a temp dir without touching the live
+# store. Live runs leave it unset and use the install store.
+STORE="${FLEET_SUPERVISOR_STORE:-$INSTALL_DIR/store}"
 LOG="$STORE/fleet-supervisor.log"
 LOCK="$STORE/.fleet-supervisor.lock"
 STATE_DIR="$STORE/.fleet-supervisor"
@@ -60,6 +63,10 @@ TICK_SECONDS=60
 SETTLE_SECONDS=8            # how long a freshly launched component must survive
 RETRY_BASE_SECONDS=30       # first backoff after a rapid failure
 RETRY_MAX_SECONDS=$((30*60))  # cap: token-exhaustion long-wait
+# Hibiki token-free daily push: minimum seconds between push invocations from the
+# tick loop (the push script is itself idempotent; this only bounds how often we
+# spawn python). Matches the old cron cadence. Env-overridable for tests.
+HIBIKI_PUSH_THROTTLE_SECONDS="${HIBIKI_PUSH_THROTTLE_SECONDS:-300}"
 
 DRY_RUN=0
 ONCE=0
@@ -215,7 +222,7 @@ ensure_agent_watchdogs() {
 # included so its standalone watchdog also becomes reboot-persistent (pgrep-skip keeps
 # an already-running one). 2026-06-05.
 ensure_channel_watchdogs() {
-  for n in forge chad thor claudia bigben; do
+  for n in forge chad thor claudia bigben hibiki; do
     pgrep -f "scripts/${n}-watchdog.sh" >/dev/null 2>&1 && continue
     if [ -x "$INSTALL_DIR/scripts/${n}-watchdog.sh" ]; then
       if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start ${n}-watchdog.sh"; continue; fi
@@ -259,6 +266,29 @@ ensure_token_outage_watch() {
     disown 2>/dev/null || true
     log "token-outage-watch: started"
   fi
+}
+
+# Hibiki token-free daily push (spec B-AC2). WSL has no systemd, so a real cron
+# daemon needs `sudo service cron start` after every boot -- too fragile for a
+# token-free guarantee. The supervisor is already always-on (started reboot-safe
+# from fleet-boot.sh), so we tick the push here instead. The push script is fully
+# idempotent (a per-day state file dedupes every action), so calling it can never
+# double-send; the throttle below only bounds how often we spawn python. 2026-06-08.
+hibiki_push_due() {            # -> 0 if the throttle window has elapsed, 1 if not
+  local nextf="$STATE_DIR/hibiki-push.next" now next
+  now=$(date +%s)
+  [ -f "$nextf" ] || return 0
+  next=$(cat "$nextf" 2>/dev/null || echo 0); case "$next" in (*[!0-9]*|'') next=0;; esac
+  [ "$now" -ge "$next" ]
+}
+ensure_hibiki_push() {
+  local push="$INSTALL_DIR/scripts/hibiki-daily-push.py"
+  [ -f "$push" ] || return 0          # pipeline not installed -> nothing to do
+  hibiki_push_due || return 0         # throttled this tick
+  echo $(( $(date +%s) + HIBIKI_PUSH_THROTTLE_SECONDS )) > "$STATE_DIR/hibiki-push.next"
+  if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: hibiki-daily-push.py --quiet"; return 0; fi
+  python3 "$push" --quiet >> "$STORE/hibiki-push.log" 2>&1 \
+    || log "hibiki-push: tick invocation failed (non-fatal, retries next window)"
 }
 
 # --- one supervision pass --------------------------------------------------
@@ -342,29 +372,36 @@ tick() {
   ensure_pipe_watchdog
   # 6) TOKEN-OUTAGE AUTO-ACK WATCHER (usage-limit ack + queue capture/re-dispatch)
   ensure_token_outage_watch
+  # 7) HIBIKI TOKEN-FREE DAILY PUSH (throttled; reboot-safe replacement for WSL cron)
+  ensure_hibiki_push
 }
 
 # --- main ------------------------------------------------------------------
-# Single instance: hold an flock for the lifetime of the process. Dry-run is
-# read-only (no side effects), so it skips the lock and can be run for
-# inspection while the real daemon holds it.
-if [ "$DRY_RUN" -eq 0 ]; then
-  exec 9>"$LOCK"
-  if ! flock -n 9; then
-    echo "another fleet-supervisor is already running (lock $LOCK held)" >&2
+# Guard the daemon so the file can be `source`d by tests (which only want the
+# function + variable definitions above, never the lock + tick loop). When run
+# directly, BASH_SOURCE[0] == $0 and the daemon runs as before.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  # Single instance: hold an flock for the lifetime of the process. Dry-run is
+  # read-only (no side effects), so it skips the lock and can be run for
+  # inspection while the real daemon holds it.
+  if [ "$DRY_RUN" -eq 0 ]; then
+    exec 9>"$LOCK"
+    if ! flock -n 9; then
+      echo "another fleet-supervisor is already running (lock $LOCK held)" >&2
+      exit 0
+    fi
+  fi
+
+  [ "$DRY_RUN" -eq 1 ] && log "starting in DRY-RUN mode (no side effects)"
+
+  if [ "$ONCE" -eq 1 ]; then
+    tick
     exit 0
   fi
+
+  log "fleet-supervisor up (tick=${TICK_SECONDS}s, main=$MAIN_AGENT_ID)"
+  while true; do
+    tick
+    sleep "$TICK_SECONDS"
+  done
 fi
-
-[ "$DRY_RUN" -eq 1 ] && log "starting in DRY-RUN mode (no side effects)"
-
-if [ "$ONCE" -eq 1 ]; then
-  tick
-  exit 0
-fi
-
-log "fleet-supervisor up (tick=${TICK_SECONDS}s, main=$MAIN_AGENT_ID)"
-while true; do
-  tick
-  sleep "$TICK_SECONDS"
-done
