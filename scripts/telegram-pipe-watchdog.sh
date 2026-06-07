@@ -64,6 +64,17 @@ while true; do
       hang="$(cd "$ROOT" && timeout 120 "$NODE" dist/web/per-agent-hang-cli.js 2>>"$LOG")"
       log "hang-sweep: ${hang:-<no output / timeout>}"
     fi
+
+    # CONTEXT-WINDOW sweep (card fleet-context-early-warning): per-agent context-%
+    # early warning. The TUI statusline can't surface a ballooning session in a
+    # detached agent pane, so this reads each running agent's transcript, turns it
+    # into a % of the model window, and alerts the operator on Telegram when an
+    # agent crosses the high-water mark. Read-only on agents (no kill/restart), so
+    # it runs every cycle regardless of dashboard state, like the hang sweep.
+    if [ -f "$ROOT/dist/web/context-window-cli.js" ]; then
+      ctx="$(cd "$ROOT" && timeout 60 "$NODE" dist/web/context-window-cli.js 2>>"$LOG")"
+      log "context-sweep: ${ctx:-<no output / timeout>}"
+    fi
   fi
   sleep "$INTERVAL"
 done

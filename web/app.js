@@ -1315,6 +1315,17 @@ function formatContextTokens(n) {
   return `≈${k < 10 ? k.toFixed(1) : Math.round(k)}k token`
 }
 
+// Per-agent context-window % badge for the agent card. Green/amber/red mirrors
+// the watchdog's high-water mark (>=80% = the balloon early-warning); only shown
+// for a running agent with a real reading.
+function contextBadgeHtml(agent) {
+  if (!agent || !agent.running || typeof agent.contextPercent !== 'number') return ''
+  const p = agent.contextPercent
+  const color = p >= 80 ? '#e5484d' : p >= 50 ? '#f5a623' : '#3fb950'
+  return `<span class="agent-ctx-badge" title="Kontextus-ablak kihasználtság: ${p}%" ` +
+    `style="font-size:11px;font-weight:600;color:${color};border:1px solid ${color}55;border-radius:6px;padding:1px 6px">${p}%</span>`
+}
+
 // Populate the auto-restart controls + context display from an agent payload.
 // Works for sub-agents (agent.name) and the main session (agent.autoRestartId).
 function setupAutoRestartUI(agent) {
@@ -1544,6 +1555,7 @@ function renderAgents() {
       </div>
       <div class="agent-card-footer">
         <span class="agent-model-badge ${escapeHtml(modelClass)}">${escapeHtml(modelLabel)}</span>
+        ${contextBadgeHtml(agent)}
         <span class="process-indicator" title="${escapeHtml(processTip(isRunning))}"><span class="process-dot ${runDotClass}"></span>${runLabel}</span>
         <span class="tg-status" title="${escapeHtml(channelTip(chConnected))}"><span class="tg-dot ${chDotClass}"></span>${chLabel}</span>
       </div>
