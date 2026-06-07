@@ -3,8 +3,8 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL } from './config.js'
-import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, buildDashboardAccessMessage } from './web/dashboard-auth.js'
-import { json } from './web/http-helpers.js'
+import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, buildDashboardAccessMessage, createSession, verifySession, revokeSession, parseCookies, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from './web/dashboard-auth.js'
+import { json, readBody } from './web/http-helpers.js'
 import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
 import { ensureAgentHooks, ensureDefaultScheduledTasks } from './web/agent-scaffold.js'
 import { refreshMarveenBotUsername } from './web/telegram.js'
@@ -101,10 +101,50 @@ export function startWebServer(port = 3420): http.Server {
       return
     }
 
-    // Auth gate: every /api/* route requires a bearer token in the Authorization
-    // header. Exceptions: the auth-status probe (so the client can tell whether
-    // it needs to prompt the user), and GET requests for avatar images (loaded
-    // via <img src> which can't carry headers -- these are non-sensitive assets).
+    // Auth gate: every /api/* route requires EITHER a valid HttpOnly session
+    // cookie (browser UI, set via POST /api/auth/login) OR a bearer token in the
+    // Authorization header (scripts/curl, backward-compat). Exceptions: the
+    // auth-status probe (so the client can tell whether it needs to prompt the
+    // user), the login/logout endpoints themselves, and GET requests for avatar
+    // images (loaded via <img src> which can't carry headers).
+    const cookies = parseCookies(req.headers.cookie)
+    const sessionValue = cookies[SESSION_COOKIE_NAME]
+    // Honour Tailscale Serve's forwarded scheme so the Secure flag is set when
+    // the operator reaches the dashboard over HTTPS (*.ts.net), but not on the
+    // plain-HTTP loopback bind.
+    const forwardedProto = String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim()
+    const isHttps = forwardedProto === 'https' || (req.socket as { encrypted?: boolean }).encrypted === true
+    const hasValidSession = () => verifySession(sessionValue).valid
+    const hasValidBearer = () => checkBearerToken(req.headers.authorization, getDashboardToken())
+
+    // Login: exchange the access token for a session cookie. Public (it IS the
+    // authentication step), but rate-limited only by the token check itself.
+    if (path === '/api/auth/login' && method === 'POST') {
+      let token = ''
+      try {
+        const raw = (await readBody(req, { maxBytes: 4096 })).toString('utf-8')
+        token = raw ? (JSON.parse(raw).token ?? '') : ''
+      } catch { token = '' }
+      if (!checkBearerToken(`Bearer ${token}`, getDashboardToken())) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Invalid token' }))
+        return
+      }
+      const cookie = [
+        `${SESSION_COOKIE_NAME}=${createSession()}`,
+        'HttpOnly', 'SameSite=Strict', 'Path=/', `Max-Age=${SESSION_MAX_AGE_SECONDS}`,
+        ...(isHttps ? ['Secure'] : []),
+      ].join('; ')
+      res.setHeader('Set-Cookie', cookie)
+      return json(res, { ok: true })
+    }
+    // Logout: revoke this session and clear the cookie.
+    if (path === '/api/auth/logout' && method === 'POST') {
+      revokeSession(sessionValue)
+      res.setHeader('Set-Cookie', `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${isHttps ? '; Secure' : ''}`)
+      return json(res, { ok: true })
+    }
+
     const isPublicApi =
       (path === '/api/auth/status' && method === 'GET') ||
       (method === 'GET' && (
@@ -112,19 +152,16 @@ export function startWebServer(port = 3420): http.Server {
         /^\/api\/agents\/[^/]+\/avatar$/.test(path)
       ))
     if (path === '/api/auth/status' && method === 'GET') {
-      const ok = checkBearerToken(req.headers.authorization, getDashboardToken())
-      return json(res, { authenticated: ok })
+      return json(res, { authenticated: hasValidSession() || hasValidBearer() })
     }
     // The live pane SSE stream is consumed via EventSource, which cannot set an
-    // Authorization header -- accept the token via ?token= for this one GET
-    // path, validated with the same constant-time check. Everything else stays
-    // header-only.
+    // Authorization header. The session cookie is sent automatically on
+    // same-origin EventSource requests; we also still accept the legacy ?token=
+    // for backward compat (its removal is a follow-on chunk).
     const isSseStream = method === 'GET' && /^\/api\/agents\/[^/]+\/pane\/stream$/.test(path)
     if (path.startsWith('/api/') && !isPublicApi) {
-      const activeToken = getDashboardToken()
-      const headerOk = checkBearerToken(req.headers.authorization, activeToken)
-      const queryOk = isSseStream && checkBearerToken(`Bearer ${url.searchParams.get('token') ?? ''}`, activeToken)
-      if (!headerOk && !queryOk) {
+      const queryOk = isSseStream && checkBearerToken(`Bearer ${url.searchParams.get('token') ?? ''}`, getDashboardToken())
+      if (!hasValidSession() && !hasValidBearer() && !queryOk) {
         res.writeHead(401, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'Unauthorized' }))
         return

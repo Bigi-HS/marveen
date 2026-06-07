@@ -1,53 +1,66 @@
 // === Dashboard auth bootstrap ===
-// The server prints a TOKENLESS URL plus the access token on its own line. On a
-// 401 we prompt the operator to paste that token; it is stored in localStorage
-// and injected into every /api/* fetch as a Bearer header. A legacy ?token=XXX
-// URL is still accepted for backward compat -- we pluck it out and immediately
-// strip it from the visible URL so it never lingers in history.
+// The server prints a TOKENLESS URL plus the access token on its own line. The
+// operator pastes that token ONCE: we POST it to /api/auth/login, which sets an
+// HttpOnly session cookie. After that, same-origin requests carry the cookie
+// automatically -- the raw token is never stored in localStorage. On a 401 we
+// re-prompt for the token and re-login. A legacy ?token=XXX URL is still honored
+// for backward compat: we log in with it, then strip it from the visible URL.
 (() => {
-  const TOKEN_KEY = 'marveen-dashboard-token'
-  const urlParams = new URLSearchParams(window.location.search)
-  const urlToken = urlParams.get('token')
-  if (urlToken) {
-    localStorage.setItem(TOKEN_KEY, urlToken)
-    urlParams.delete('token')
-    const clean = window.location.pathname + (urlParams.toString() ? '?' + urlParams : '') + window.location.hash
-    window.history.replaceState({}, '', clean)
+  async function login(token) {
+    if (!token) return false
+    try {
+      const res = await originalFetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: token.trim() }),
+      })
+      return res.ok
+    } catch { return false }
   }
 
   const originalFetch = window.fetch.bind(window)
+
+  // Bootstrap from a legacy ?token= URL (logs in, then scrubs the URL).
+  const bootstrapLogin = (async () => {
+    const urlParams = new URLSearchParams(window.location.search)
+    const urlToken = urlParams.get('token')
+    if (urlToken) {
+      await login(urlToken)
+      urlParams.delete('token')
+      const clean = window.location.pathname + (urlParams.toString() ? '?' + urlParams : '') + window.location.hash
+      window.history.replaceState({}, '', clean)
+    }
+  })()
+
   window.fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input))
-    // Only attach the token to same-origin API calls. Relative paths always
-    // resolve to same-origin; absolute URLs must match the current origin.
     const isSameOriginApi =
       url.startsWith('/api/') ||
       (url.startsWith(window.location.origin + '/api/'))
     if (isSameOriginApi) {
-      const token = localStorage.getItem(TOKEN_KEY)
-      if (token) {
-        init = init || {}
-        const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined))
-        headers.set('Authorization', 'Bearer ' + token)
-        init.headers = headers
+      await bootstrapLogin
+      // Ensure the session cookie rides along on same-origin API calls.
+      init = init || {}
+      if (input instanceof Request ? input.credentials === undefined : init.credentials === undefined) {
+        init.credentials = 'same-origin'
       }
     }
-    const res = await originalFetch(input, init)
-    if (res.status === 401 && isSameOriginApi) {
-      // Token missing, wrong, or revoked. Prompt the operator to paste it -- the
-      // server prints the token on its own line; it is no longer in the URL.
-      localStorage.removeItem(TOKEN_KEY)
-      if (!window.__marveenAuthPrompted) {
-        window.__marveenAuthPrompted = true
-        const entered = window.prompt(
-          'Dashboard access token required.\n' +
-          'Paste the token from the server log ("Dashboard access" → access token):'
-        )
-        if (entered && entered.trim()) {
-          localStorage.setItem(TOKEN_KEY, entered.trim())
-          location.reload()
-        }
+    let res = await originalFetch(input, init)
+    if (res.status === 401 && isSameOriginApi && !url.startsWith('/api/auth/')) {
+      // Session missing, expired, or revoked. Prompt for the token once and
+      // re-login; on success, replay the original request transparently.
+      if (!window.__marveenAuthPrompting) {
+        window.__marveenAuthPrompting = (async () => {
+          const entered = window.prompt(
+            'Dashboard access token required.\n' +
+            'Paste the token from the server log ("Dashboard access" → access token):'
+          )
+          return entered && entered.trim() ? login(entered) : false
+        })()
       }
+      const ok = await window.__marveenAuthPrompting
+      window.__marveenAuthPrompting = null
+      if (ok) res = await originalFetch(input, init)
     }
     return res
   }
@@ -9406,9 +9419,10 @@ function openTerminalModal(agentName) {
   openModal(overlay)
   setTimeout(() => term.focus(), 50)
 
-  // SSE pane stream
-  const token = localStorage.getItem('marveen-dashboard-token') || ''
-  const sse = new EventSource(`/api/agents/${encodeURIComponent(agentName)}/pane/stream?token=${encodeURIComponent(token)}`)
+  // SSE pane stream. Same-origin EventSource sends the HttpOnly session cookie
+  // automatically, so no ?token= is needed (server still accepts the legacy
+  // query param for backward compat -- removal is a follow-on chunk).
+  const sse = new EventSource(`/api/agents/${encodeURIComponent(agentName)}/pane/stream`, { withCredentials: true })
   sse.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data)
