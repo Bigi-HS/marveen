@@ -85,6 +85,47 @@ scripts/video-transcribe.sh 'https://youtu.be/XXXX'
 scripts/video-transcribe.sh 'https://www.twitch.tv/videos/123456789' --lang hu --model medium
 ```
 
+## Telegram voice messages (per-agent, local, zero cloud token)
+
+Any agent with its own Telegram channel (Genesis, Claudia, Big Ben, ...) can
+transcribe an inbound **voice message** locally, reusing this same env. This is
+the canonical recipe; per-agent `CLAUDE.md` files are gitignored, so it lives
+here (tracked) to stay versioned.
+
+When a channel message arrives with `attachment_kind="voice"` +
+`attachment_file_id` and **no** `[Hang átirat]:` prefix (i.e. not already
+auto-transcribed), the agent runs, from the repo root `/home/domin/marveen`:
+
+```bash
+# 1. fetch the voice file via the agent's own Telegram MCP tool (bot-scoped):
+#    download_attachment(attachment_file_id) -> e.g.
+#    /home/domin/.claude/channels/telegram/inbox/<...>.oga
+
+# 2. convert to 16 kHz mono WAV with the ENV's ffmpeg (system ffmpeg is absent):
+store/whisper-env/env/bin/ffmpeg -y -loglevel error -i <audio.oga> \
+    -ar 16000 -ac 1 /tmp/voice.wav
+
+# 3. transcribe with faster-whisper via the shared helper (medium for voice):
+store/whisper-env/env/bin/python scripts/_video_transcribe.py \
+    --audio /tmp/voice.wav --out-base /tmp/voice \
+    --model medium --lang hu --download-root store/whisper-env/models
+#    -> /tmp/voice.txt (+ .srt); stdout: DETECTED_LANG= / SEGMENTS=
+```
+
+Then treat `/tmp/voice.txt` as a **text instruction**. For irreversible or
+precision-critical actions (calendar time/date/attendee, money, deletion,
+anything going to a third party), read the understood instruction back for
+confirmation before acting.
+
+`download_attachment` is part of each agent's own Telegram MCP server, scoped to
+that agent's bot token -- Telegram `file_id`s are bot-specific, so a file sent to
+one bot cannot be fetched by another. The ffmpeg + whisper steps are identical to
+the video path above.
+
+**Model = `medium`** for voice (not `small`): on short clips `small` garbles
+Hungarian morphology ("kíváncsiságból" -> "kíváncsiségból"); `medium`
+transcribes cleanly and short voice clips are fast enough regardless.
+
 ## Model note (CPU, no GPU) -- measured on this host (20-core CPU)
 
 `large-v3` is too slow on CPU. Measured on a 109 s Hungarian news clip + a 19 s
