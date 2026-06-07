@@ -4,6 +4,7 @@ dist/
 
 # Secrets & personal data
 .env
+.env.*
 store/
 workspace/
 agents/
@@ -30,6 +31,11 @@ test-results/
 
 # Generated from template (personal config)
 CLAUDE.md
+CLAUDE.md.bak-*
+
+# Python bytecode cache
+__pycache__/
+*.pyc
 
 # Custom MCP servers and config (user-specific)
 mcp-servers/
