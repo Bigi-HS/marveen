@@ -9,6 +9,7 @@
     "dev": "tsx src/index.ts",
     "setup": "tsx scripts/setup.ts",
     "status": "tsx scripts/status.ts",
+    "backfill-embeddings": "tsx scripts/backfill-embeddings.ts",
     "schedule": "tsx src/schedule-cli.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
