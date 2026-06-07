@@ -141,7 +141,7 @@ export function initDatabase(dbPathOverride?: string): void {
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       description TEXT,
-      status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','in_progress','waiting','done')),
+      status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','in_progress','waiting','done','someday')),
       assignee TEXT,
       priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
       project TEXT,
@@ -174,6 +174,48 @@ export function initDatabase(dbPathOverride?: string): void {
     db.exec('ALTER TABLE kanban_cards ADD COLUMN dispatched_at INTEGER')
   } catch {
     // column already exists
+  }
+  // Migration: widen the kanban_cards status CHECK to include 'someday'
+  // (the "Valamikor" / far-future column). Older installs created the table
+  // with the narrower CHECK(status IN ('planned','in_progress','waiting','done'))
+  // and CREATE TABLE IF NOT EXISTS is a no-op on the next boot, so inserting or
+  // moving a card to 'someday' would hit a CHECK-constraint failure. SQLite
+  // can't ALTER a CHECK in place, so rebuild the table whenever its current
+  // schema lacks 'someday' in the status CHECK. Idempotent on fresh DBs.
+  try {
+    const current = db.prepare("SELECT sql FROM sqlite_master WHERE name='kanban_cards'").get() as { sql: string } | undefined
+    const hasSomeday = !!current?.sql?.match(/CHECK\s*\(\s*status\s+IN\s*\([^)]*'someday'[^)]*\)\s*\)/i)
+    if (current?.sql && !hasSomeday) {
+      db.exec(`
+        CREATE TABLE kanban_cards_new (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          description TEXT,
+          status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','in_progress','waiting','done','someday')),
+          assignee TEXT,
+          priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
+          project TEXT,
+          parent_id TEXT REFERENCES kanban_cards(id),
+          due_date INTEGER,
+          sort_order REAL NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          archived_at INTEGER,
+          dispatched_at INTEGER
+        );
+        INSERT INTO kanban_cards_new (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, archived_at, dispatched_at)
+          SELECT id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, archived_at, dispatched_at FROM kanban_cards;
+        DROP TABLE kanban_cards;
+        ALTER TABLE kanban_cards_new RENAME TO kanban_cards;
+      `)
+      db.exec('CREATE INDEX IF NOT EXISTS idx_kanban_parent ON kanban_cards(parent_id)')
+      db.exec('CREATE INDEX IF NOT EXISTS idx_kanban_status ON kanban_cards(status, archived_at)')
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (!/already exists/i.test(msg)) {
+      console.error('[db] kanban_cards someday migration failed:', msg)
+    }
   }
   // Migration: add agent_id, category, auto_generated columns to memories
   try {
@@ -960,7 +1002,7 @@ export interface KanbanCard {
   seq?: number
   title: string
   description: string | null
-  status: 'planned' | 'in_progress' | 'waiting' | 'done'
+  status: 'planned' | 'in_progress' | 'waiting' | 'done' | 'someday'
   assignee: string | null
   priority: 'low' | 'normal' | 'high' | 'urgent'
   project: string | null
