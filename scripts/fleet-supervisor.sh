@@ -198,7 +198,7 @@ ensure_dave_watchdog() {
 # they were given per-agent Telegram bots, so they need the channel-aware watchdog
 # (fresh launch + --channels + TELEGRAM_STATE_DIR), not the channel-less one.
 ensure_agent_watchdogs() {
-  for n in gauge quill scout applegate; do
+  for n in gauge quill scout applegate radar; do
     pgrep -f "scripts/agent-watchdog.sh $n\$" >/dev/null 2>&1 && continue
     if [ -x "$INSTALL_DIR/scripts/agent-watchdog.sh" ]; then
       if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start agent-watchdog.sh $n"; continue; fi
@@ -215,7 +215,7 @@ ensure_agent_watchdogs() {
 # included so its standalone watchdog also becomes reboot-persistent (pgrep-skip keeps
 # an already-running one). 2026-06-05.
 ensure_channel_watchdogs() {
-  for n in forge chad thor claudia; do
+  for n in forge chad thor claudia bigben; do
     pgrep -f "scripts/${n}-watchdog.sh" >/dev/null 2>&1 && continue
     if [ -x "$INSTALL_DIR/scripts/${n}-watchdog.sh" ]; then
       if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start ${n}-watchdog.sh"; continue; fi

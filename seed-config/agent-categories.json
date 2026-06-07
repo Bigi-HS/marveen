@@ -1,10 +1,35 @@
 {
-  "Orchestrator": ["marveen"],
-  "Engineering": ["dave", "forge"],
-  "QA": ["thor", "gauge", "buster"],
-  "Security": ["chad"],
-  "Memory": ["applegate"],
-  "Research": ["scout"],
-  "Spec": ["quill"],
-  "PA": ["claudia"]
+  "Orchestrator": [
+    "marveen"
+  ],
+  "Engineering": [
+    "dave",
+    "forge"
+  ],
+  "QA": [
+    "thor",
+    "gauge",
+    "buster"
+  ],
+  "Security": [
+    "chad"
+  ],
+  "Memory": [
+    "applegate"
+  ],
+  "Research": [
+    "scout"
+  ],
+  "Spec": [
+    "quill"
+  ],
+  "PA": [
+    "claudia"
+  ],
+  "Marketing": [
+    "radar"
+  ],
+  "Content": [
+    "bigben"
+  ]
 }
