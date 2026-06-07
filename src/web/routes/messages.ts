@@ -7,6 +7,7 @@ import {
 import { logger } from '../../logger.js'
 import { COORDINATOR_AGENT_ID } from '../../channel-coordinator/ingest.js'
 import { sanitizeAgentIdent } from '../../prompt-safety.js'
+import { normalizeRecipient } from '../agent-config.js'
 import { aiDefenceGuard } from '../../aidefence-guard.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
@@ -56,7 +57,19 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
         'AIDefence: message FLAGGED (allowed through)',
       )
     }
-    const msg = createAgentMessage(from.trim(), to.trim(), content.trim())
+    // Normalize the recipient before queueing. A message addressed to the tmux
+    // SESSION name ("agent-dave") instead of the agent NAME ("dave") used to
+    // queue, never match in the router, and silently vanish forever. Resolve
+    // it to a known agent (stripping a single leading "agent-" prefix) or, if
+    // it is still unknown, reject with a 400 instead of accepting an
+    // undeliverable message.
+    const recipient = normalizeRecipient(to)
+    if (!recipient) {
+      logger.warn({ from: from.trim(), to: to.trim() }, 'Rejected /api/messages POST: unknown recipient')
+      json(res, { error: `Unknown recipient: ${to.trim()}` }, 400)
+      return true
+    }
+    const msg = createAgentMessage(from.trim(), recipient, content.trim())
     logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent }, 'Agent message created')
     json(res, msg)
     return true
