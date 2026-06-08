@@ -34,6 +34,14 @@ if [ -f "$INSTALL_DIR/.env" ]; then
   [ -n "$_oauth" ] && export CLAUDE_CODE_OAUTH_TOKEN="$_oauth"
   unset _api_key _oauth
 fi
+# Canonical fleet setup-token is AUTHORITATIVE: if store/.claude-oauth-token (or
+# the Medic-maintained store/fleet-oauth.env) is present, it overrides whatever
+# .env carried, so the orchestrator authenticates off the same static ~1y bearer
+# as the rest of the fleet (the env var also overrides a stale .credentials.json).
+# No-op when no token file exists, so .env-only boxes are unaffected.
+if [ -r "$INSTALL_DIR/scripts/lib/fleet-oauth-env.sh" ]; then
+  FLEET_ROOT="$INSTALL_DIR" . "$INSTALL_DIR/scripts/lib/fleet-oauth-env.sh"
+fi
 CHANNEL_PROVIDER="${CHANNEL_PROVIDER:-telegram}"
 SESSION="${MAIN_AGENT_ID:-marveen}-channels"
 

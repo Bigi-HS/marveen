@@ -76,7 +76,7 @@ answer_resume_prompt() {
 
 launch() {
   local model; model="$(read_model)"
-  local cmd="export PATH=\"/usr/local/bin:/usr/bin:/bin:\$PATH\" && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN && export CLAUDE_CONFIG_DIR=\"$CFG\" && cd \"/home/domin/marveen/agents/dave\" && /usr/bin/claude --continue --dangerously-skip-permissions --model '$model'"
+  local cmd="export PATH=\"/usr/local/bin:/usr/bin:/bin:\$PATH\" && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN && export CLAUDE_CONFIG_DIR=\"$CFG\" && cd \"/home/domin/marveen/agents/dave\" && export FLEET_ROOT=/home/domin/marveen && . /home/domin/marveen/scripts/lib/fleet-oauth-env.sh && /usr/bin/claude --continue --dangerously-skip-permissions --model '$model'"
   tmux new-session -d -s agent-dave "$cmd"
   log "launched agent-dave (--continue, model=$model) -- watching for resume menu"
   answer_resume_prompt

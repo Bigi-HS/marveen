@@ -66,7 +66,7 @@ answer_resume_prompt() {
 launch() {
   local model; model="$(read_model)"
   tmux set-environment -g -u TELEGRAM_BOT_TOKEN 2>/dev/null || true
-  local cmd="export PATH=\"\$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN && export CLAUDE_CONFIG_DIR=\"$CFG\" && cd \"$AGENT_DIR\" && /usr/bin/claude --continue --dangerously-skip-permissions --model '$model'"
+  local cmd="export PATH=\"\$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN && export CLAUDE_CONFIG_DIR=\"$CFG\" && cd \"$AGENT_DIR\" && export FLEET_ROOT=/home/domin/marveen && . /home/domin/marveen/scripts/lib/fleet-oauth-env.sh && /usr/bin/claude --continue --dangerously-skip-permissions --model '$model'"
   tmux new-session -d -s "$SESSION" "$cmd"
   log "launched $SESSION (channel-less, --continue, model=$model)"
   answer_resume_prompt
