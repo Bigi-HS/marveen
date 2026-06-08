@@ -354,3 +354,57 @@ export function runHangSweep(now: number = Date.now(), deps: HangSweepDeps = DEF
   }
   return { swept, recovered, results }
 }
+
+// ---------------------------------------------------------------------------
+// CLI orchestration (card 31ab64fe Part 1 activation): one watchdog tick runs
+// BOTH sweeps -- the liveness sweep (dashboard-down only) and the hang sweep
+// (always). Kept here, not in the CLI entry, so it is unit-testable without the
+// process.exit / stdout shell. Each sweep is isolated in its own try so one
+// failing never suppresses the other or wedges the caller.
+// ---------------------------------------------------------------------------
+
+export interface WatchdogSweepDeps {
+  subSweep: () => Promise<SweepResult>
+  hangSweep: () => HangSweepResult
+}
+
+const DEFAULT_WATCHDOG_SWEEP_DEPS: WatchdogSweepDeps = {
+  subSweep: () => runSubAgentSweep(),
+  hangSweep: () => runHangSweep(),
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+// Run a full watchdog tick and return the one-line verdicts (the CLI prints
+// them). The hang sweep runs regardless of the liveness sweep's outcome.
+export async function runWatchdogSweeps(
+  deps: WatchdogSweepDeps = DEFAULT_WATCHDOG_SWEEP_DEPS,
+): Promise<string[]> {
+  const lines: string[] = []
+
+  try {
+    const res = await deps.subSweep()
+    if (res.skipped) {
+      lines.push(`sweep=skipped reason=${res.reason}`)
+    } else {
+      const parts = Object.entries(res.results).map(
+        ([name, r]) => `${name}:${r.verdict}${r.recovered ? '+recovered' : ''}${r.escalated ? '+escalated' : ''}`,
+      )
+      lines.push(`sweep=done agents=${parts.length} ${parts.join(' ')}`.trimEnd())
+    }
+  } catch (err) {
+    lines.push(`sweep=error detail=${errMsg(err)}`)
+  }
+
+  try {
+    const h = deps.hangSweep()
+    const hung = Object.values(h.results).filter((v) => v.state === 'hung').length
+    lines.push(`hang=done swept=${h.swept.length} hung=${hung} recovered=${h.recovered.length}`)
+  } catch (err) {
+    lines.push(`hang=error detail=${errMsg(err)}`)
+  }
+
+  return lines
+}
