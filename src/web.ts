@@ -6,6 +6,7 @@ import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL } from './config.js'
 import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, buildDashboardAccessMessage, createSession, verifySession, revokeSession, parseCookies, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from './web/dashboard-auth.js'
 import { json, readBody } from './web/http-helpers.js'
 import { createRateLimiter } from './web/rate-limit.js'
+import { securityHeaders } from './web/security-headers.js'
 import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
 import { ensureAgentHooks, ensureDefaultScheduledTasks } from './web/agent-scaffold.js'
 import { refreshMarveenBotUsername } from './web/telegram.js'
@@ -113,6 +114,17 @@ export function startWebServer(port = 3420): http.Server {
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
     }
+    // Resolve the forwarded scheme up front so the security headers (HSTS) and
+    // the Secure cookie flag agree. Tailscale Serve terminates TLS and forwards
+    // X-Forwarded-Proto; a direct loopback hit is plain HTTP.
+    const forwardedProto = String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim()
+    const isHttps = forwardedProto === 'https' || (req.socket as { encrypted?: boolean }).encrypted === true
+    // Apply security response headers (HSTS over HTTPS) to every response,
+    // including OPTIONS preflights and the early CSRF/rate-limit rejections.
+    for (const [name, value] of Object.entries(securityHeaders({ isHttps }))) {
+      res.setHeader(name, value)
+    }
+
     if (method === 'OPTIONS') { res.writeHead(204); res.end(); return }
 
     // Block state-changing requests from browsers running on foreign origins.
@@ -151,11 +163,6 @@ export function startWebServer(port = 3420): http.Server {
     // images (loaded via <img src> which can't carry headers).
     const cookies = parseCookies(req.headers.cookie)
     const sessionValue = cookies[SESSION_COOKIE_NAME]
-    // Honour Tailscale Serve's forwarded scheme so the Secure flag is set when
-    // the operator reaches the dashboard over HTTPS (*.ts.net), but not on the
-    // plain-HTTP loopback bind.
-    const forwardedProto = String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim()
-    const isHttps = forwardedProto === 'https' || (req.socket as { encrypted?: boolean }).encrypted === true
     const hasValidSession = () => verifySession(sessionValue).valid
     const hasValidBearer = () => checkBearerToken(req.headers.authorization, getDashboardToken())
 

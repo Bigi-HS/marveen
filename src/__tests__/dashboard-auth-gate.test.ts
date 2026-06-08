@@ -25,6 +25,7 @@ import {
   SESSION_MAX_AGE_SECONDS,
   __resetSessionStateForTests,
 } from '../web/dashboard-auth.js'
+import { securityHeaders } from '../web/security-headers.js'
 
 // A faithful, minimal re-implementation of the web.ts auth region: login,
 // logout, and the cookie-OR-bearer gate. It uses the REAL session functions so
@@ -39,6 +40,9 @@ function buildServer(): http.Server {
     const sessionValue = cookies[SESSION_COOKIE_NAME]
     const forwardedProto = String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim()
     const isHttps = forwardedProto === 'https'
+    for (const [name, value] of Object.entries(securityHeaders({ isHttps }))) {
+      res.setHeader(name, value)
+    }
     const hasValidSession = () => verifySession(sessionValue).valid
     const hasValidBearer = () => checkBearerToken(req.headers.authorization, getDashboardToken())
 
@@ -88,7 +92,7 @@ function req(
   method: string,
   path: string,
   opts: { headers?: Record<string, string>; body?: string } = {},
-): Promise<{ status: number; body: any; setCookie?: string }> {
+): Promise<{ status: number; body: any; setCookie?: string; hsts?: string }> {
   return new Promise((resolve, reject) => {
     const u = new URL(base + path)
     const r = http.request(
@@ -100,7 +104,12 @@ function req(
           const raw = Buffer.concat(chunks).toString('utf-8')
           let body: any = null
           try { body = raw ? JSON.parse(raw) : null } catch { body = raw }
-          resolve({ status: resp.statusCode || 0, body, setCookie: resp.headers['set-cookie']?.[0] })
+          resolve({
+            status: resp.statusCode || 0,
+            body,
+            setCookie: resp.headers['set-cookie']?.[0],
+            hsts: resp.headers['strict-transport-security'],
+          })
         })
       },
     )
@@ -206,6 +215,28 @@ describe('auth gate (cookie OR bearer)', () => {
   it('rejects a forged/garbage cookie', async () => {
     const r = await req('GET', '/api/anything', { headers: { Cookie: `${SESSION_COOKIE_NAME}=forged` } })
     expect(r.status).toBe(401)
+  })
+})
+
+describe('HSTS security header', () => {
+  it('sends Strict-Transport-Security when reached over HTTPS (Tailscale Serve)', async () => {
+    const r = await req('GET', '/api/anything', {
+      headers: { Authorization: `Bearer ${TOKEN}`, 'X-Forwarded-Proto': 'https' },
+    })
+    expect(r.status).toBe(200)
+    expect(r.hsts).toBe('max-age=31536000; includeSubDomains')
+  })
+
+  it('omits HSTS on the plain-HTTP loopback bind', async () => {
+    const r = await req('GET', '/api/anything', { headers: { Authorization: `Bearer ${TOKEN}` } })
+    expect(r.status).toBe(200)
+    expect(r.hsts).toBeUndefined()
+  })
+
+  it('still sends HSTS on an unauthenticated 401 over HTTPS', async () => {
+    const r = await req('GET', '/api/anything', { headers: { 'X-Forwarded-Proto': 'https' } })
+    expect(r.status).toBe(401)
+    expect(r.hsts).toBe('max-age=31536000; includeSubDomains')
   })
 })
 
