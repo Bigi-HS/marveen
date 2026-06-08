@@ -12,10 +12,43 @@ function resolveTemplatePlaceholders(content: string): string {
   return content.replaceAll('{{PROJECT_ROOT}}', PROJECT_ROOT)
 }
 
-// Idempotent migration: every agent's settings.json should carry the
-// PreCompact hook (memory save + skill reflection). Pre-refactor agents
-// were scaffolded before scaffoldAgentDir seeded the template, so their
-// file is permissions-only. Merge the template's hooks block in place.
+// Substring that uniquely identifies the SessionStart memory auto-inject hook
+// inside a hooks-block command, so the targeted merge below can find it in the
+// template and detect whether an agent already carries it.
+const MEMORY_HOOK_MARKER = 'memory-replay.py'
+
+type HookCommand = { type?: string; command?: string; prompt?: string }
+type HookEntry = { matcher?: string; hooks?: HookCommand[] }
+type HooksBlock = Record<string, HookEntry[]>
+
+function entryReferences(entry: HookEntry, marker: string): boolean {
+  return (entry.hooks ?? []).some(h => typeof h.command === 'string' && h.command.includes(marker))
+}
+
+// Targeted idempotent merge: ensure the template's memory SessionStart
+// auto-inject hook(s) are present in `target`. Returns true iff it mutated
+// `target`. It only ever ADDS the memory entry (appended to SessionStart);
+// it never removes or rewrites the agent's own hooks. This is what lets an
+// agent that already has a hooks block -- and is therefore skipped by the
+// all-or-nothing seed in ensureAgentHooks -- still pick up a hook that was
+// added to the template after the agent was first scaffolded.
+export function ensureMemoryHook(target: HooksBlock, template: HooksBlock): boolean {
+  const memoryEntries = (template.SessionStart ?? []).filter(e => entryReferences(e, MEMORY_HOOK_MARKER))
+  if (memoryEntries.length === 0) return false  // template has no memory hook -> nothing to merge
+  const existingStart = target.SessionStart ?? []
+  if (existingStart.some(e => entryReferences(e, MEMORY_HOOK_MARKER))) return false  // already present
+  target.SessionStart = [...existingStart, ...memoryEntries]
+  return true
+}
+
+// Idempotent migration: every agent's settings.json should carry the shared
+// hooks (PreCompact memory-save/skill-reflection + the SessionStart taskstate
+// and memory auto-inject replays). Two cases:
+//   - Pre-refactor agents have a permissions-only file (no hooks block): seed
+//     the whole template hooks block.
+//   - Agents that already have a hooks block were scaffolded before a given
+//     hook existed in the template, so the all-or-nothing seed would skip them
+//     forever. For those we run a targeted merge of just the memory hook.
 export function ensureAgentHooks(name: string): boolean {
   const settingsPath = join(agentDir(name), '.claude', 'settings.json')
   const tplPath = join(PROJECT_ROOT, 'templates', 'settings.json.template')
@@ -32,8 +65,16 @@ export function ensureAgentHooks(name: string): boolean {
   if (existsSync(settingsPath)) {
     try { existing = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { /* overwrite */ }
   }
-  if (existing.hooks) return false  // user already has hooks, leave alone
-  existing.hooks = tpl.hooks
+  let changed = false
+  if (!existing.hooks) {
+    existing.hooks = tpl.hooks  // permissions-only agent -> seed full template hooks
+    changed = true
+  } else {
+    // Agent already has hooks: leave them alone, but additively backfill the
+    // memory auto-inject hook if the template defines one and it is missing.
+    changed = ensureMemoryHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+  }
+  if (!changed) return false
   mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
   atomicWriteFileSync(settingsPath, JSON.stringify(existing, null, 2))
   return true
