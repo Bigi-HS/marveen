@@ -363,15 +363,17 @@ export function startWebServer(port = 3420): http.Server {
   // the first dashboard load. Re-fetched lazily otherwise.
   refreshMarveenBotUsername().catch(() => {})
 
-  // Backfill the PreCompact hook into existing agents' settings.json so the
-  // auto-skill / auto-memory flow runs on context compaction. No-op if the
-  // agent already has its own hooks block.
+  // Backfill the shared hooks into existing agents' settings.json: the full
+  // template block for permissions-only agents, or a targeted merge of the
+  // SessionStart memory auto-inject hook for agents that already have a hooks
+  // block (those are skipped by the all-or-nothing seed and would otherwise
+  // never receive a hook added to the template after they were scaffolded).
   try {
     const patched: string[] = []
     for (const agentName of listAgentNames()) {
       if (ensureAgentHooks(agentName)) patched.push(agentName)
     }
-    if (patched.length) logger.info({ patched }, 'PreCompact hook backfilled into agent settings.json')
+    if (patched.length) logger.info({ patched }, 'Agent hooks backfilled into settings.json')
   } catch (err) {
     logger.warn({ err }, 'Agent hook backfill skipped')
   }
