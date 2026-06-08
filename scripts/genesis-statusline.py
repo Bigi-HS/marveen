@@ -5,8 +5,11 @@ WHY a python port: the upstream is shell+jq, and this host has no jq. python3 is
 always present, so the whole thing is one dependency-free script.
 
 Claude Code pipes one JSON object on stdin (schema: context_window, model, cost,
-workspace, ...). We render a single status line to stdout. Only the first line is
-shown in the TUI footer. The headline segment is the CONTEXT-WINDOW %-bar: it is
+rate_limits, workspace, ...). We render a single status line to stdout. Only the
+first line is shown in the TUI footer. As a side effect we also persist the
+rate_limits / context_window / cost snapshot to ~/.claude/statusline-last.json
+(atomic, best-effort) so the fleet rate-limit governor can read the latest
+account state without scraping each pane. The headline segment is the CONTEXT-WINDOW %-bar: it is
 the per-pane early warning for a session ballooning toward the account/context
 limit (the failure mode that froze a 634K-token opus-1M run).
 
@@ -20,6 +23,14 @@ import json
 import os
 import subprocess
 import sys
+import time
+
+# Where the latest rate-limit / context / cost snapshot is persisted for the
+# fleet rate-limit governor (and a future dashboard widget) to read. Overridable
+# via env so tests can point it at a temp file.
+STATUSLINE_LAST_PATH = os.environ.get("STATUSLINE_LAST_PATH") or os.path.join(
+    os.path.expanduser("~"), ".claude", "statusline-last.json"
+)
 
 # ANSI: kept raw so the TUI renders color. Tests strip these before asserting.
 RESET = "\033[0m"
@@ -124,6 +135,35 @@ def _fmt_cost(value):
         return 0.0
 
 
+def persist_snapshot(data, path=STATUSLINE_LAST_PATH, now=None):
+    """Persist the rate-limit / context / cost snapshot for the fleet governor.
+
+    Claude Code includes a `rate_limits` block (e.g. five_hour.used_percentage +
+    resets_at) on stdin; the rate-limit governor reads it from this file instead
+    of from each pane's TUI. Written atomically (temp + os.replace) so a reader
+    never sees a half-written file. Best-effort: ANY failure is swallowed -- the
+    status line renders on every prompt and must never break because of a side
+    channel write.
+    """
+    snapshot = {
+        "captured_at": int(now if now is not None else time.time()),
+        "rate_limits": data.get("rate_limits") or {},
+        "context_window": data.get("context_window") or {},
+        "cost": data.get("cost") or {},
+    }
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        tmp = f"{path}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(snapshot, handle)
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 -- never let persistence break the status line
+        pass
+    return snapshot
+
+
 def main():
     raw = sys.stdin.read()
     try:
@@ -132,6 +172,7 @@ def main():
         data = {}
     if not isinstance(data, dict):
         data = {}
+    persist_snapshot(data)
     sys.stdout.write(render_statusline(data))
 
 
