@@ -87,12 +87,26 @@ class ResolutionTests(unittest.TestCase):
             ["marveen", "marveen-channels"],
         )
 
-    def test_all_is_every_agent_session(self):
+    def test_all_is_every_supervised_agent_session(self):
         sessions = handlers_restart._sessions_for("all")
-        self.assertEqual(sessions, [f"agent-{a}" for a in dispatch.AGENTS])
-        # Every dispatch agent is covered, exactly once.
-        self.assertEqual(len(sessions), len(dispatch.AGENTS))
+        expected = [
+            f"agent-{a}" for a in dispatch.AGENTS
+            if a in handlers_restart.SUPERVISED_AGENTS
+        ]
+        self.assertEqual(sessions, expected)
+        # Each supervised agent appears exactly once.
         self.assertEqual(len(set(sessions)), len(sessions))
+
+    def test_all_excludes_unsupervised_agents(self):
+        # buster (chameleon sandbox) and heartbeat (not a tmux agent session) have
+        # no reviving watchdog -> "all" must never target them.
+        sessions = handlers_restart._sessions_for("all")
+        self.assertNotIn("agent-buster", sessions)
+        self.assertNotIn("agent-heartbeat", sessions)
+
+    def test_unsupervised_single_agent_resolves_to_no_session(self):
+        self.assertEqual(handlers_restart._sessions_for("buster"), [])
+        self.assertEqual(handlers_restart._sessions_for("heartbeat"), [])
 
     def test_all_excludes_the_orchestrator_by_default(self):
         self.assertFalse(handlers_restart.ALL_INCLUDES_ORCHESTRATOR)
@@ -155,6 +169,16 @@ class KillPathTests(unittest.TestCase):
         ex = FakeExecutor(alive={"agent-dave"}, kill_fail={"agent-dave"})
         reply = handlers_restart.handle(_ctx(ex, "dave"))
         self.assertIn("HIBA", reply.text)
+
+    def test_unsupervised_target_is_refused_never_killed(self):
+        # Even with the session reported alive, an unsupervised target must NOT be
+        # killed (it would never come back). The handler refuses and runs nothing.
+        for target in ("buster", "heartbeat"):
+            ex = FakeExecutor(alive={f"agent-{target}"})
+            reply = handlers_restart.handle(_ctx(ex, target))
+            self.assertEqual(ex.killed_sessions(), [], target)
+            self.assertEqual(ex.all_argv(), [], target)  # no tmux call at all
+            self.assertIn("nincs felugyelo watchdog", reply.text, target)
 
 
 class SafetyTests(unittest.TestCase):

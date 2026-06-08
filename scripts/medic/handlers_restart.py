@@ -53,6 +53,22 @@ ALL_INCLUDES_ORCHESTRATOR = False
 # session naming lives with the handler that acts on it.
 ORCHESTRATOR_SESSIONS: Tuple[str, ...] = ("marveen", "marveen-channels")
 
+# Agents fleet-supervisor.sh ensures a reviving watchdog for -- the ONLY targets
+# for which "kill the session and let the supervisor bring it back" actually
+# holds. Source of truth: scripts/fleet-supervisor.sh ensure_dave_watchdog +
+# ensure_agent_watchdogs (gauge/quill/scout/applegate/radar) +
+# ensure_channel_watchdogs (forge/chad/thor/claudia/bigben/hibiki).
+# Deliberately EXCLUDED (verified 2026-06-08, no supervisor revival path):
+#   buster    -- the chameleon sandbox, managed by the c12 harness, not supervised
+#   heartbeat -- the memoria-heartbeat, not a tmux "agent-*" session at all
+# Killing an excluded target would be a permanent silent stop, so `restart`
+# refuses it instead of falsely promising a ~30-60s revival.
+SUPERVISED_AGENTS = frozenset({
+    "dave",
+    "gauge", "quill", "scout", "applegate", "radar",
+    "forge", "chad", "thor", "claudia", "bigben", "hibiki",
+})
+
 
 def _sessions_for(target: str) -> List[str]:
     """Map a pre-validated restart target to the tmux session names to bounce.
@@ -61,14 +77,18 @@ def _sessions_for(target: str) -> List[str]:
     has already enum-validated it); we do not re-validate loosely.
     """
     if target == "all":
-        sessions = [f"agent-{a}" for a in AGENTS]
+        # Only supervised agents -- "all" must not silently permanent-kill an
+        # un-revivable session (buster/heartbeat).
+        sessions = [f"agent-{a}" for a in AGENTS if a in SUPERVISED_AGENTS]
         if ALL_INCLUDES_ORCHESTRATOR:
             sessions += list(ORCHESTRATOR_SESSIONS)
         return sessions
     if target == "genesis":
         return list(ORCHESTRATOR_SESSIONS)
-    # Otherwise it is a single agent id.
-    return [f"agent-{target}"]
+    if target in SUPERVISED_AGENTS:
+        return [f"agent-{target}"]
+    # Unsupervised single agent: no reviving watchdog -> nothing to bounce.
+    return []
 
 
 def _session_alive(ctx: HandlerContext, session: str) -> bool:
@@ -89,6 +109,15 @@ def handle(ctx: HandlerContext) -> Reply:
     target = ctx.arg
     if target is None:  # unreachable: dispatch guarantees an arg for `restart`
         return Reply("restart: hianyzo cel (belso hiba).")
+
+    # Refuse a single unsupervised target: no watchdog would revive it, so a kill
+    # is a permanent silent stop. Never kill what nothing brings back.
+    if target not in ("all", "genesis") and target not in SUPERVISED_AGENTS:
+        return Reply(
+            f"restart {target}: nincs felugyelo watchdog, nem eled ujra auto -- "
+            "kihagyva (buster=chameleon-sandbox, heartbeat=nem agent-session). "
+            "Ezt kezi inditas / a c12-harness kezeli, nem a Medic."
+        )
 
     sessions = _sessions_for(target)
 
