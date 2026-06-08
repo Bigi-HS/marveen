@@ -292,25 +292,71 @@ ensure_hibiki_push() {
 }
 
 # --- one supervision pass --------------------------------------------------
+# Credential locations, env-overridable so the reconcile unit test can isolate
+# them into a temp dir (same pattern as FLEET_SUPERVISOR_STORE) without touching
+# the live tokens.
+MAIN_CRED="${FLEET_MAIN_CRED:-$HOME/.claude/.credentials.json}"
+AGENTS_DIR="${FLEET_AGENTS_DIR:-$INSTALL_DIR/agents}"
+
+# Echo the numeric claudeAiOauth.expiresAt from a credentials file, or nothing
+# on any error (missing / corrupt / not-a-cred-file). Used to compare token
+# freshness between a drifted standalone file and the main token.
+cred_expires_at() {
+  python3 - "$1" 2>/dev/null <<'PY'
+import sys, json
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+    print(int(d["claudeAiOauth"]["expiresAt"]))
+except Exception:
+    pass
+PY
+}
+
 # Keep every sub-agent's OAuth credentials a symlink to the single main token
 # ($HOME/.claude/.credentials.json), which auto-refreshes. A sub-agent's Claude
 # can refresh via atomic-rename, which silently replaces the symlink with a
 # standalone file -- it then drifts to its own expiry and prompts for re-auth
 # (the dave/thor outage on 2026-06-05). Reconcile every tick so it self-heals.
+#
+# PROMOTE-ON-DRIFT (2026-06-08): only ever re-linking a drifted agent back to
+# main DISCARDS the fresh token that agent's Claude just minted -- so the fleet
+# kept riding the EXPIRED main token until something else happened to refresh it
+# (the 2026-06-08 outage: hibiki refreshed at 11:55, main not updated until 12:57,
+# and in between Genesis+Claudia hit re-auth prompts and froze). Fix: when a
+# drifted standalone token is NEWER than main, PROMOTE it up to main first, so a
+# refresh by ANY agent heals the single shared token for everyone.
 reconcile_agent_creds() {
-  local main="$HOME/.claude/.credentials.json"
+  local main="$MAIN_CRED"
   [ -e "$main" ] || return 0
   local f
-  for f in "$INSTALL_DIR"/agents/*/.claude-config/.credentials.json; do
+  for f in "$AGENTS_DIR"/*/.claude-config/.credentials.json; do
     [ -e "$f" ] || continue
     # Already the correct symlink? leave it.
     if [ -L "$f" ] && [ "$(readlink "$f")" = "$main" ]; then
       continue
     fi
-    # Drifted into a standalone file -- back up once, then re-link.
+    # Drifted into a standalone file (a sub-agent refreshed in place). Back it up,
+    # promote it to main if it is newer, then re-link. A wrong-target symlink (the
+    # else case below) just gets re-linked -- a symlink carries no fresh token.
     if [ ! -L "$f" ]; then
       cp -a "$f" "$f.drift-$(date +%Y%m%d-%H%M%S)" 2>/dev/null
-      log "creds: $(basename "$(dirname "$(dirname "$f")")") drifted to standalone file -- re-linking to main token"
+      local agent fexp mexp
+      agent="$(basename "$(dirname "$(dirname "$f")")")"
+      fexp="$(cred_expires_at "$f")"
+      mexp="$(cred_expires_at "$main")"
+      # Promote when the drifted token parses AND (main is unparseable OR older).
+      if [ -n "$fexp" ] && { [ -z "$mexp" ] || [ "$fexp" -gt "$mexp" ]; }; then
+        local tmp="$main.promote.$$"
+        if cp "$f" "$tmp" 2>/dev/null && chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$main" 2>/dev/null; then
+          log "creds: $agent refreshed the token (exp $fexp > main ${mexp:-none}) -- promoted to main, re-linking"
+        else
+          rm -f "$tmp" 2>/dev/null
+          log "creds: $agent drifted (newer) but promote to main FAILED -- re-linking to main"
+        fi
+      else
+        log "creds: $agent drifted to standalone file (not newer) -- re-linking to main token"
+      fi
     fi
     ln -sf "$main" "$f"
   done
