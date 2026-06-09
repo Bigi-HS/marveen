@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
-import { OLLAMA_URL } from '../config.js'
+import { OLLAMA_URL, PROJECT_ROOT } from '../config.js'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import {
@@ -23,6 +23,13 @@ import { runPreflight, logPreflightFindings, summarizePreflightErrors } from './
 
 const TMUX = resolveFromPath('tmux')
 const CLAUDE = resolveFromPath('claude')
+
+// Canonical fleet OAuth helper (PR #85). Sourcing it exports
+// CLAUDE_CODE_OAUTH_TOKEN from the static setup-token into the launched
+// agent's environ, overriding a stale symlinked .credentials.json. The bash
+// watchdogs already source it; this path covers the DASHBOARD launch (restart
+// button, chameleon sandbox, scaffold) that the bash migration could not reach.
+const FLEET_OAUTH_HELPER = join(PROJECT_ROOT, 'scripts', 'lib', 'fleet-oauth-env.sh')
 
 // How many times startAgentProcess will (re)spawn the tmux session when the
 // inner claude dies inside the liveness window. Two total attempts: the
@@ -292,6 +299,19 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
       claudeConfigDir = ensureAgentConfigDir(name)
     }
     const claudeConfigEnv = `export CLAUDE_CONFIG_DIR="${claudeConfigDir}" && `
+    // Fleet OAuth migration (PR #85 follow-up): shared-auth Claude agents
+    // launched through the dashboard SOURCE the audited helper so the static
+    // setup-token is exported as CLAUDE_CODE_OAUTH_TOKEN, which overrides a
+    // stale symlinked .credentials.json -- closing the drift-discard / re-auth
+    // outage class on the dashboard-launch path the bash watchdogs don't touch.
+    // The token lands ONLY in the spawned shell's environ: it never enters this
+    // process, the launch argv, or any log. Additive -- no-op when the helper or
+    // token file is absent. own_team / api agents are excluded: they
+    // authenticate off their own login or ANTHROPIC_API_KEY, not the shared token.
+    const fleetOauthEnv =
+      isClaude && authMode === 'shared' && existsSync(FLEET_OAUTH_HELPER)
+        ? `export FLEET_ROOT="${PROJECT_ROOT}" && . "${FLEET_OAUTH_HELPER}" && `
+        : ''
     // `--continue` requires an existing session; on a brand-new agent the
     // Claude Code projects directory does not yet exist and `claude` exits
     // immediately with an obscure "No deferred tool marker found" error
@@ -318,7 +338,7 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     // `continueFlag` is decided per-attempt (see shouldContinueSession): the
     // first attempt resumes, a liveness-window death falls back to a fresh boot.
     const buildLaunchCmd = (continueFlag: string): string =>
-      `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${channelSetup}${apiKeyEnv}${claudeConfigEnv}${ollamaEnv}${deepseekEnv}cd "${dir}" && ${CLAUDE} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
+      `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${channelSetup}${apiKeyEnv}${claudeConfigEnv}${fleetOauthEnv}${ollamaEnv}${deepseekEnv}cd "${dir}" && ${CLAUDE} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
 
     // `tmux new-session -d "cmd"` returns as soon as the SESSION exists, not
     // when the inner claude is up: if claude exits within ~1s (the silent
