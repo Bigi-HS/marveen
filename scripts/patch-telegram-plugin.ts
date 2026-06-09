@@ -18,7 +18,7 @@
 // backup is restored if the gate fails. The plugin file holds no secrets, and
 // this script neither reads nor prints any token.
 
-import { existsSync, readdirSync, readFileSync, writeFileSync, copyFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync, copyFileSync, renameSync, lstatSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { createRequire } from 'node:module'
@@ -41,9 +41,12 @@ function findTelegramServers(root: string, depth = 0): string[] {
   try { entries = readdirSync(root) } catch { return [] }
   for (const name of entries) {
     const p = join(root, name)
-    let isDir = false
-    try { isDir = statSync(p).isDirectory() } catch { continue }
-    if (isDir) {
+    // lstat (not stat): never follow a symlink -- a symlinked dir or file inside
+    // the (owner-only) plugin cache must not redirect the walk or the write.
+    let st
+    try { st = lstatSync(p) } catch { continue }
+    if (st.isSymbolicLink()) continue
+    if (st.isDirectory()) {
       out.push(...findTelegramServers(p, depth + 1))
     } else if (name === 'server.ts' && p.toLowerCase().includes('telegram')) {
       out.push(p)
@@ -57,7 +60,10 @@ function findTelegramServers(root: string, depth = 0): string[] {
 // we only guard against a malformed edit. Returns null on success, else a reason.
 function syntaxError(src: string, file: string): string | null {
   let ts: typeof import('typescript')
-  try { ts = require('typescript') } catch { return null /* no tsc available: skip the gate */ }
+  try { ts = require('typescript') } catch {
+    process.stderr.write('  ! typescript not available -- skipping the syntax gate (transform is a deterministic string edit; --revert backs up regardless)\n')
+    return null
+  }
   const res = ts.transpileModule(src, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
     reportDiagnostics: true,
@@ -80,7 +86,11 @@ function applyOne(file: string): 'patched' | 'already' | 'not-found' | 'gate-fai
   }
   const backup = file + BACKUP_SUFFIX
   if (!existsSync(backup)) copyFileSync(file, backup)
-  writeFileSync(file, r.patched)
+  // Atomic write: stage to a temp file then rename, so a crash mid-write can
+  // never leave a half-written (corrupt) plugin file behind.
+  const tmp = file + '.patch-tmp'
+  writeFileSync(tmp, r.patched)
+  renameSync(tmp, file)
   return 'patched'
 }
 
