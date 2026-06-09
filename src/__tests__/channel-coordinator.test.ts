@@ -16,8 +16,9 @@ import {
   buildHandoffContent,
   transientBackoffMs,
   inNative409Cooldown,
+  requiredDownDebounce,
 } from '../channel-coordinator.js'
-import { decideNativeChannelDown } from '../channel-coordinator/liveness.js'
+import { decideNativeChannelDown, classifyNativeChannel } from '../channel-coordinator/liveness.js'
 
 // ---- mapUpdate (pure normalization) -------------------------------------
 
@@ -305,6 +306,65 @@ describe('decideNativeChannelDown (backfill gate)', () => {
 
   it('alive + missing keepalive file (null age) -> NOT down (cannot prove wedged)', () => {
     expect(decideNativeChannelDown({ claudePid: 1234, pluginAlive: true, keepaliveAgeMs: null, msSinceLastRespawn: null })).toBe(false)
+  })
+})
+
+// classifyNativeChannel splits 'down' into soft/hard so the coordinator can
+// demand a longer confirmed streak for the weak (false-negative-prone) signal
+// before issuing a consuming getUpdates that could 409 the live native (pipe-RCA #3).
+describe('classifyNativeChannel (soft/hard down split)', () => {
+  const STARTUP_GRACE_MS = 360_000
+  const KEEPALIVE_STALE_MS = 18 * 60 * 1000
+
+  it('startup grace -> up', () => {
+    expect(classifyNativeChannel({ claudePid: null, pluginAlive: false, keepaliveAgeMs: 0, msSinceLastRespawn: 1000 })).toBe('up')
+  })
+
+  it('claude session gone -> HARD', () => {
+    expect(classifyNativeChannel({ claudePid: null, pluginAlive: false, keepaliveAgeMs: 0, msSinceLastRespawn: STARTUP_GRACE_MS + 1 })).toBe('hard')
+  })
+
+  it('plugin-scan miss BUT fresh keepalive -> SOFT (the false-negative-prone signal)', () => {
+    expect(classifyNativeChannel({ claudePid: 1234, pluginAlive: false, keepaliveAgeMs: 60_000, msSinceLastRespawn: null })).toBe('soft')
+  })
+
+  it('plugin-scan miss AND stale keepalive (corroborated) -> HARD', () => {
+    expect(classifyNativeChannel({ claudePid: 1234, pluginAlive: false, keepaliveAgeMs: KEEPALIVE_STALE_MS + 1, msSinceLastRespawn: null })).toBe('hard')
+  })
+
+  it('plugin-scan miss AND missing keepalive (no positive liveness) -> SOFT', () => {
+    expect(classifyNativeChannel({ claudePid: 1234, pluginAlive: false, keepaliveAgeMs: null, msSinceLastRespawn: null })).toBe('soft')
+  })
+
+  it('plugin alive + wedged TUI (stale keepalive) -> HARD', () => {
+    expect(classifyNativeChannel({ claudePid: 1234, pluginAlive: true, keepaliveAgeMs: KEEPALIVE_STALE_MS + 1, msSinceLastRespawn: null })).toBe('hard')
+  })
+
+  it('plugin alive + fresh keepalive -> up', () => {
+    expect(classifyNativeChannel({ claudePid: 1234, pluginAlive: true, keepaliveAgeMs: 60_000, msSinceLastRespawn: null })).toBe('up')
+  })
+
+  it('decideNativeChannelDown stays behaviour-preserving: down iff not up', () => {
+    const facts = [
+      { claudePid: null, pluginAlive: false, keepaliveAgeMs: 0, msSinceLastRespawn: 1000 },
+      { claudePid: null, pluginAlive: false, keepaliveAgeMs: 0, msSinceLastRespawn: STARTUP_GRACE_MS + 1 },
+      { claudePid: 1234, pluginAlive: false, keepaliveAgeMs: 60_000, msSinceLastRespawn: null },
+      { claudePid: 1234, pluginAlive: true, keepaliveAgeMs: KEEPALIVE_STALE_MS + 1, msSinceLastRespawn: null },
+      { claudePid: 1234, pluginAlive: true, keepaliveAgeMs: 60_000, msSinceLastRespawn: null },
+    ]
+    for (const f of facts) expect(decideNativeChannelDown(f)).toBe(classifyNativeChannel(f) !== 'up')
+  })
+})
+
+describe('requiredDownDebounce (streak scales with confidence)', () => {
+  it('soft down demands the longer streak', () => {
+    expect(requiredDownDebounce('soft')).toBe(6)
+  })
+  it('hard down is trusted at the short streak', () => {
+    expect(requiredDownDebounce('hard')).toBe(2)
+  })
+  it('up never gates here but maps to the short streak', () => {
+    expect(requiredDownDebounce('up')).toBe(2)
   })
 })
 

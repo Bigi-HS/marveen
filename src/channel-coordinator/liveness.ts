@@ -167,35 +167,63 @@ export interface NativeStateFacts {
   msSinceLastRespawn: number | null
 }
 
-// PURE decision: is the native channel currently NOT consuming inbound (so the
-// coordinator should backfill)? Conservative -- biased toward "up" (let the
-// native own inbound + its typing indicator), because a false "down" only
-// causes the coordinator to attempt a poll that 409-yields if native is in fact
-// alive. Layers:
-//   - startup grace: within STARTUP_GRACE_MS of a respawn the plugin is still
-//     coming up; never declare down.
-//   - process gone: no claude pid, or no plugin grandchild -> down.
-//   - wedged TUI: process alive BUT keepalive stale past KEEPALIVE_STALE_MS ->
-//     the scheduled keepalive can't run, so the TUI is stuck (not just quiet).
-export function decideNativeChannelDown(f: NativeStateFacts): boolean {
-  if (f.msSinceLastRespawn != null && f.msSinceLastRespawn < STARTUP_GRACE_MS) return false
-  if (f.claudePid == null) return true
-  if (!f.pluginAlive) return true
-  if (f.keepaliveAgeMs != null && f.keepaliveAgeMs > KEEPALIVE_STALE_MS) return true
-  return false
+// How confident are we that the native channel is NOT consuming inbound?
+//   'up'   -- native owns inbound; coordinator must stay idle.
+//   'hard' -- strong / corroborated evidence of down (claude session gone, or a
+//             wedged TUI: the scheduled keepalive cannot run). Act quickly.
+//   'soft' -- ONLY the false-negative-prone signal fired: the process-tree scan
+//             reported the plugin poller missing, but a fresh keepalive shows the
+//             TUI is alive and running its scheduled work. hasChannelPluginAlive
+//             false-negatives when the bun poller is reparented (not a child of
+//             the resolved claude pid) and bot.pid is absent. We must NOT issue a
+//             consuming getUpdates on this weak signal until it is re-confirmed
+//             over a longer streak, or we 409 the live native (pipe-RCA #3).
+export type NativeDownKind = 'up' | 'soft' | 'hard'
+
+// PURE classification. Conservative -- biased toward 'up' (let the native own
+// inbound + its typing indicator), because a false 'down' only causes the
+// coordinator to attempt a poll that 409-yields if native is in fact alive.
+export function classifyNativeChannel(f: NativeStateFacts): NativeDownKind {
+  if (f.msSinceLastRespawn != null && f.msSinceLastRespawn < STARTUP_GRACE_MS) return 'up'
+  if (f.claudePid == null) return 'hard' // session gone -- nothing can poll
+  const keepaliveStale = f.keepaliveAgeMs != null && f.keepaliveAgeMs > KEEPALIVE_STALE_MS
+  if (!f.pluginAlive) {
+    // Plugin-scan miss. A fresh keepalive (TUI alive within KEEPALIVE_STALE_MS)
+    // makes this the weak, false-negative-prone signal -> 'soft'. A stale/absent
+    // keepalive corroborates a genuinely down/wedged TUI -> 'hard'.
+    return keepaliveStale ? 'hard' : 'soft'
+  }
+  if (keepaliveStale) return 'hard' // plugin process up but TUI wedged (keepalive stuck)
+  return 'up'
 }
 
-// Side-effecting: gather the live facts for the main channels session and apply
-// the pure decision.
-export function probeNativeChannelDown(session: string, provider: ChannelProviderType, agentName?: string): boolean {
+// PURE decision: is the native channel currently NOT consuming inbound? Kept as a
+// thin wrapper over classifyNativeChannel so existing callers/behaviour are
+// unchanged -- only the coordinator consumes the finer soft/hard granularity.
+export function decideNativeChannelDown(f: NativeStateFacts): boolean {
+  return classifyNativeChannel(f) !== 'up'
+}
+
+// Side-effecting: gather the live facts for the main channels session.
+function probeNativeFacts(session: string, provider: ChannelProviderType, agentName?: string): NativeStateFacts {
   const now = Date.now()
   const claudePid = getClaudePidForSession(session)
   const pluginAlive = claudePid != null ? hasChannelPluginAlive(claudePid, provider, agentName) : false
   const respawnMs = readRespawnStampMs()
-  return decideNativeChannelDown({
+  return {
     claudePid,
     pluginAlive,
     keepaliveAgeMs: readKeepaliveAgeMs(now),
     msSinceLastRespawn: respawnMs > 0 ? now - respawnMs : null,
-  })
+  }
+}
+
+export function probeNativeChannelDown(session: string, provider: ChannelProviderType, agentName?: string): boolean {
+  return decideNativeChannelDown(probeNativeFacts(session, provider, agentName))
+}
+
+// Side-effecting: like probeNativeChannelDown but returns the down KIND so the
+// coordinator can demand a longer confirmed streak for the weak 'soft' signal.
+export function probeNativeChannelKind(session: string, provider: ChannelProviderType, agentName?: string): NativeDownKind {
+  return classifyNativeChannel(probeNativeFacts(session, provider, agentName))
 }
