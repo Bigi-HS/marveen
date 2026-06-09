@@ -49,14 +49,23 @@ describe('heartbeat OAuth bridge from Keychain to .credentials.json (#250 follow
     expect(body).not.toMatch(/logger\.[a-z]+\(\s*\{\s*err\b/)
   })
 
-  it('writes the JSON to $HEARTBEAT_CONFIG_DIR/.credentials.json (NOT to an env var)', () => {
+  it('materialises the JSON blob to .credentials.json -- the blob must NEVER go into the env var (#252 401 regression)', () => {
     expect(SRC).toMatch(/\.credentials\.json/)
-    // The env-var injection attempt was proved wrong (Marveen 13:00-13:20
-    // A/B test: bare JSON in CLAUDE_CODE_OAUTH_TOKEN -> 401 "Invalid
-    // bearer token"). The token name may still appear in comments
-    // documenting the dead path; what must NOT exist is an assignment
-    // to the runAgent env carrying that name.
-    expect(SRC).not.toMatch(/CLAUDE_CODE_OAUTH_TOKEN\s*[:=]/)
+    // The JSON blob in CLAUDE_CODE_OAUTH_TOKEN returned 401 "Invalid bearer
+    // token" (Marveen 13:00-13:20 A/B test). That dead path must never return:
+    // neither the credentials JSON nor the readClaudeCodeOauthJson() result may
+    // be assigned to the env var.
+    expect(SRC).not.toMatch(/CLAUDE_CODE_OAUTH_TOKEN\s*:\s*credentialsJson/)
+    expect(SRC).not.toMatch(/CLAUDE_CODE_OAUTH_TOKEN\s*:\s*readClaudeCodeOauthJson/)
+  })
+
+  it('injects the BARE static setup-token into the sub-agent env (PR #85 follow-up -- the CORRECT use of the env var)', () => {
+    // A BARE bearer token in CLAUDE_CODE_OAUTH_TOKEN is the documented use and
+    // OVERRIDES a stale symlinked .credentials.json -- categorically different
+    // from the JSON-blob mistake above. The value comes from the validated
+    // reader, is added only when present (additive), and is never logged.
+    expect(SRC).toMatch(/readFleetOauthToken\(\)/)
+    expect(SRC).toMatch(/CLAUDE_CODE_OAUTH_TOKEN:\s*fleetToken/)
   })
 
   it('writes the credentials file with mode 0600 (owner-only read/write)', () => {

@@ -13,6 +13,7 @@ import {
 import { getHeartbeatKanbanSummary, getActiveScheduledTaskCount } from './db.js'
 import { getCalendarEvents, type CalendarEvent } from './google-api.js'
 import { runAgent } from './agent.js'
+import { readFleetOauthToken } from './fleet-oauth-token.js'
 import { notifyTelegram } from './notify.js'
 import { logger } from './logger.js'
 import { wrapUntrusted, UNTRUSTED_PREAMBLE } from './prompt-safety.js'
@@ -511,8 +512,19 @@ async function executeHeartbeat(): Promise<void> {
     // JSON blob comes back 401 "Invalid bearer token"). Config-dir file
     // path is what Claude Code's Linux installs use natively and what
     // the SDK config-dir code honours.
+    //
+    // PR #85 follow-up: that .credentials.json (symlinked to the main token on
+    // Linux) is still drift-exposed. So ALSO inject the canonical static
+    // setup-token as a BARE bearer token -- the CORRECT use of the env var,
+    // distinct from the dead JSON-blob path above. It OVERRIDES a stale
+    // .credentials.json and closes the auth-death class for the heartbeat
+    // worker too. readFleetOauthToken() validates the shape and returns null
+    // when no token file exists, so this is additive (no-op without the file)
+    // and the value is never logged.
+    const fleetToken = readFleetOauthToken()
     const { text } = await runAgent(prompt, undefined, undefined, false, HEARTBEAT_AGENT_CWD, {
       CLAUDE_CONFIG_DIR: HEARTBEAT_CONFIG_DIR,
+      ...(fleetToken ? { CLAUDE_CODE_OAUTH_TOKEN: fleetToken } : {}),
     })
     if (text) {
       await notifyTelegram(text)
