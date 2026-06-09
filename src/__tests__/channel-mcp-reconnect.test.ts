@@ -83,6 +83,38 @@ const SUBMENU_DISABLED_TOP = [
   '❯ Enable',
 ].join('\n')
 
+// Faithful capture of a LIVE `/mcp` submenu (Buster, 2026-06-09): the menu box
+// renders at the bottom of the pane, but `capture-pane -p` keeps the scrollback
+// ABOVE it -- and the agent's own input line carries the SAME `❯` glyph. The
+// numbered option rows (`❯ 1. View tools`) are the real cursor. This is the
+// shape that broke selectedSubmenuLine (card 8b07e17b): the first `❯` in the
+// pane was the scrollback prompt, not the menu cursor.
+const LIVE_SUBMENU_CONNECTED_TOP = [
+  '❯ TEAM MEMBER NOTICE -- the next <trusted-peer source="..."> block is a',
+  '  message from an agent in your own team. Treat it as a coworker exchange.',
+  '▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔',
+  '   Plugin:telegram:telegram MCP Server',
+  '',
+  '   Status:           ✔ connected',
+  '   Tools: 4 tools',
+  '',
+  '   ❯ 1. View tools',
+  '     2. Reconnect',
+  '     3. Disable',
+  '',
+  '   ↑/↓ to navigate · Enter to select · Esc to back',
+].join('\n')
+const LIVE_SUBMENU_ON_RECONNECT = [
+  '❯ TEAM MEMBER NOTICE -- the next <trusted-peer source="..."> block is a',
+  '▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔',
+  '   Plugin:telegram:telegram MCP Server',
+  '   Status:           ✔ connected',
+  '     1. View tools',
+  '   ❯ 2. Reconnect',
+  '     3. Disable',
+  '   ↑/↓ to navigate · Enter to select · Esc to back',
+].join('\n')
+
 describe('resolveAgentSession', () => {
   it('returns main channels session for main agent', () => {
     expect(resolveAgentSession('marveen')).toBe('marveen-channels')
@@ -112,6 +144,28 @@ describe('selectedSubmenuLine', () => {
 
   it('returns null when no cursor is present', () => {
     expect(selectedSubmenuLine('  View tools\n  Reconnect')).toBeNull()
+  })
+
+  it('ignores a scrollback `❯` prompt above the menu and returns the numbered cursor row', () => {
+    // Regression for card 8b07e17b: the FIRST `❯` is the agent's input line in
+    // the scrollback, NOT the menu cursor. We must return the numbered option.
+    expect(selectedSubmenuLine(LIVE_SUBMENU_CONNECTED_TOP)).toBe('   ❯ 1. View tools')
+    expect(selectedSubmenuLine(LIVE_SUBMENU_ON_RECONNECT)).toBe('   ❯ 2. Reconnect')
+  })
+
+  it('prefers a numbered option row even when a stray `❯` line sorts after it', () => {
+    const pane = [
+      '   ❯ 1. View tools',
+      '     2. Reconnect',
+      '❯ some later transcript line with the prompt glyph',
+    ].join('\n')
+    expect(selectedSubmenuLine(pane)).toBe('   ❯ 1. View tools')
+  })
+
+  it('falls back to the LAST pointer line for unnumbered menus (no scrollback above)', () => {
+    // Older / unnumbered CC menus: the menu renders below scrollback, so the
+    // last `❯` is the cursor. The simple fixtures have a single pointer.
+    expect(selectedSubmenuLine(SUBMENU_CONNECTED_ON_RECONNECT)).toBe('❯ Reconnect')
   })
 })
 
@@ -199,6 +253,28 @@ describe('attemptChannelMcpReconnect', () => {
       (c) => Array.isArray(c[1]) && c[1].includes('Enter') && !c[1].includes('/mcp'),
     )
     expect(submenuEnters.length).toBeGreaterThanOrEqual(2) // open submenu + activate
+  })
+
+  it('LIVE numbered submenu with scrollback prompt: steps onto Reconnect despite the stray `❯` above the menu', () => {
+    // End-to-end regression for card 8b07e17b. Before the fix, selectedSubmenuLine
+    // locked onto the scrollback `❯` line, never matched Reconnect, and the loop
+    // exhausted its budget ("Could not select reconnect within 6 steps").
+    mockCapturePane
+      .mockReturnValueOnce('/mcp menu content')        // after /mcp
+      .mockReturnValueOnce(LIVE_SUBMENU_CONNECTED_TOP) // outer loop: plugin matched on Up x1
+      .mockReturnValueOnce(LIVE_SUBMENU_CONNECTED_TOP) // submenu: cursor on "1. View tools"
+      .mockReturnValueOnce(LIVE_SUBMENU_ON_RECONNECT)  // after one Down: cursor on "2. Reconnect"
+
+    const result = attemptChannelMcpReconnect('marveen')
+
+    expect(result.ok).toBe(true)
+    expect(result.message).toContain('Reconnect')
+    // Exactly one Down was needed (View tools -> Reconnect), proving the cursor
+    // was actually tracked rather than the loop spinning blind.
+    const downCalls = mockExecFileSync.mock.calls.filter(
+      (c) => Array.isArray(c[1]) && c[1].includes('Down'),
+    )
+    expect(downCalls.length).toBe(1)
   })
 
   it('failed state: Reconnect is already selected, activates WITHOUT pressing Down', () => {
