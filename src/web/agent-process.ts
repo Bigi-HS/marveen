@@ -97,6 +97,19 @@ export function isAgentRunning(name: string): boolean {
   }
 }
 
+// True if a tmux session with the EXACT given name is alive. Addresses sessions
+// the `agent-<name>` template does not cover -- notably the main orchestrator's
+// `${id}-channels` session (MAIN_CHANNELS_SESSION), which is why isAgentRunning
+// (template-only) cannot be used to gate work on the main agent.
+export function isTmuxSessionAlive(session: string): boolean {
+  try {
+    execFileSync(TMUX, ['has-session', '-t', session], { timeout: 3000, stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function getAgentRunningSince(name: string): number | null {
   try {
     const out = execFileSync(

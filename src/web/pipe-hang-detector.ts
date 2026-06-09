@@ -16,7 +16,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { agentDir, readAgentClaudeConfigDir } from './agent-config.js'
+import { agentConfigRoot, readAgentClaudeConfigDir } from './agent-config.js'
 import { projectsDirFor } from './active-model.js'
 
 // Any Telegram MCP tool (reply / react / edit_message / download_attachment).
@@ -105,7 +105,12 @@ export function parseMcpCallObservation(jsonlContent: string): McpCallObservatio
 
 function latestTranscriptPath(agentName: string): string | null {
   try {
-    const dir = projectsDirFor(agentDir(agentName), readAgentClaudeConfigDir(agentName) ?? undefined)
+    // agentConfigRoot (not agentDir) is the agent's transcript working dir: for a
+    // sub-agent it IS agents/<name>, but for the MAIN orchestrator it is
+    // PROJECT_ROOT (main has no agents/<name> dir -- its claude session runs from
+    // the repo root). Using agentConfigRoot makes this detector correct for the
+    // main agent's wedged-MCP-child case too, not only sub-agents.
+    const dir = projectsDirFor(agentConfigRoot(agentName), readAgentClaudeConfigDir(agentName) ?? undefined)
     if (!existsSync(dir)) return null
     const jsonls = readdirSync(dir)
       .filter(f => f.endsWith('.jsonl'))
