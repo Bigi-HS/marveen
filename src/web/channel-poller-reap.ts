@@ -28,6 +28,7 @@ import { join } from 'node:path'
 import type { ChannelProviderType } from '../channel-provider.js'
 import { channelStateDir } from '../channel-provider.js'
 import { logger } from '../logger.js'
+import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 
 const STATE_ENV_VAR: Record<ChannelProviderType, string> = {
   telegram: 'TELEGRAM_STATE_DIR',
@@ -297,9 +298,15 @@ function snapshotProcs(): ProcRow[] {
   }
 }
 
-function livePanePids(tmuxPath: string): Set<number> {
+// Resolve live tmux pane pids. `session` undefined -> all sessions (`-a`);
+// otherwise just that one session. Returns null when the tmux query FAILS (so
+// the caller can fail-closed) vs an empty/Set on a clean result. A missing
+// session (`-t <gone>`) exits non-zero -> null too, which the caller treats as
+// "no panes from this source", never as a reason to widen the kill set.
+function livePanePids(tmuxPath: string, session?: string): Set<number> | null {
+  const target = session ? ['-t', session] : ['-a']
   try {
-    const out = execSync(`${tmuxPath} list-panes -a -F '#{pane_pid}'`, { timeout: 5000, encoding: 'utf-8' })
+    const out = execFileSync(tmuxPath, ['list-panes', ...target, '-F', '#{pane_pid}'], { timeout: 5000, encoding: 'utf-8' })
     const s = new Set<number>()
     for (const line of out.split('\n')) {
       const n = parseInt(line.trim(), 10)
@@ -307,9 +314,41 @@ function livePanePids(tmuxPath: string): Set<number> {
     }
     return s
   } catch (err) {
-    logger.warn({ err }, 'channel-poller-reap: tmux list-panes failed')
-    return new Set()
+    logger.warn({ err, session: session ?? '(all)' }, 'channel-poller-reap: tmux list-panes failed')
+    return null
   }
+}
+
+export interface DetachedReapDecision {
+  reap: number[]
+  skipped: boolean
+  reason?: 'global-query-failed' | 'no-live-panes'
+}
+
+/**
+ * PURE reap decision. Fail-CLOSED: if the global `list-panes -a` query failed
+ * (`globalPanePids === null`) or resolved zero panes, we cannot tell an orphan
+ * from the live orchestrator, so we reap NOTHING.
+ *
+ * Redundant orchestrator protection: the main channels session's panes
+ * (`mainSessionPanePids`, an independent `list-panes -t` query) are UNIONed into
+ * the protected set. So even a PARTIAL `-a` result that happened to omit the
+ * orchestrator's pane cannot mark it an orphan -- the kill set can never reach
+ * the live orchestrator worker (card bcf10d21). A null/empty main-session set
+ * only adds nothing; it never widens the kill set.
+ */
+export function decideDetachedClaudeReap(input: {
+  procs: ProcRow[]
+  globalPanePids: Set<number> | null
+  mainSessionPanePids: Set<number> | null
+  channelNeedle?: string
+}): DetachedReapDecision {
+  const { procs, globalPanePids, mainSessionPanePids, channelNeedle } = input
+  if (globalPanePids === null) return { reap: [], skipped: true, reason: 'global-query-failed' }
+  if (globalPanePids.size === 0) return { reap: [], skipped: true, reason: 'no-live-panes' }
+  const protectedPids = new Set(globalPanePids)
+  if (mainSessionPanePids) for (const p of mainSessionPanePids) protectedPids.add(p)
+  return { reap: findOrphanChannelClaudes(procs, protectedPids, channelNeedle), skipped: false }
 }
 
 function killBunChildren(claudePid: number): void {
@@ -337,14 +376,19 @@ function killBunChildren(claudePid: number): void {
 export function reapDetachedChannelClaudes(opts: { channelNeedle?: string; tmuxPath?: string } = {}): number[] {
   const tmuxPath = opts.tmuxPath ?? 'tmux'
   const procs = snapshotProcs()
-  const live = livePanePids(tmuxPath)
-  // No live panes resolved (tmux query failed) -> refuse to reap: without the
-  // live set we cannot tell orphans from the active session. Fail safe.
-  if (live.size === 0) {
-    logger.warn('channel-poller-reap: no live panes resolved, skipping detached-claude reap (fail-safe)')
+  // Two independent tmux queries: the global pane set (primary attribution) and
+  // the main channels session's panes (redundant orchestrator protection).
+  const decision = decideDetachedClaudeReap({
+    procs,
+    globalPanePids: livePanePids(tmuxPath),
+    mainSessionPanePids: livePanePids(tmuxPath, MAIN_CHANNELS_SESSION),
+    channelNeedle: opts.channelNeedle,
+  })
+  if (decision.skipped) {
+    logger.warn({ reason: decision.reason }, 'channel-poller-reap: skipping detached-claude reap (fail-closed: cannot attribute panes)')
     return []
   }
-  const orphans = findOrphanChannelClaudes(procs, live, opts.channelNeedle)
+  const orphans = decision.reap
   for (const pid of orphans) {
     killBunChildren(pid)
     try { process.kill(pid, 'SIGTERM') } catch { /* gone */ }
