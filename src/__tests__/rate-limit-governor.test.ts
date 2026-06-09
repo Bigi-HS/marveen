@@ -17,6 +17,7 @@ import {
   type GovernorDeps,
   type GovernorCycleResult,
 } from '../web/rate-limit-governor.js'
+import type { FleetPauseRecord } from '../web/fleet-pause.js'
 
 const NOW = 1_900_000_000
 const snap = (used_percentage: number | null, resets_at?: number | null): Snapshot => ({
@@ -35,18 +36,20 @@ describe('evaluateGovernor', () => {
 
   it('pauses (notifies) when usage crosses the threshold with a known reset', () => {
     const resets = NOW + 3600
-    const d = evaluateGovernor(snap(97, resets), { ...INITIAL_STATE }, NOW)
+    const d = evaluateGovernor(snap(99, resets), { ...INITIAL_STATE }, NOW)
     expect(d.action).toBe('pause')
     expect(d.state.phase).toBe('paused')
     expect(d.state.resetsAt).toBe(resets)
     expect(d.state.pauseNotifiedAt).toBe(NOW)
-    expect(d.message).toContain('97%')
+    expect(d.message).toContain('99%')
     // Resume time = reset + 2 minutes, surfaced in the message.
     expect(d.message).toContain(formatBudapestTime(resets + RESUME_GRACE_SEC))
   })
 
-  it('treats the threshold as inclusive (exactly 96% pauses)', () => {
+  it('treats the threshold as inclusive (exactly 98% pauses) and below stays normal', () => {
     expect(evaluateGovernor(snap(PAUSE_THRESHOLD_PCT, NOW + 10), { ...INITIAL_STATE }, NOW).action).toBe('pause')
+    // 97% is now BELOW the 98% threshold -> no pause.
+    expect(evaluateGovernor(snap(97, NOW + 10), { ...INITIAL_STATE }, NOW).action).toBe('none')
   })
 
   it('does NOT pause when over threshold but resets_at is missing (cannot schedule a resume)', () => {
@@ -106,41 +109,62 @@ describe('runGovernorCycle (injected IO)', () => {
     snapshot: Snapshot | null,
     state: GovernorState,
     nowSec: number,
-  ): { result: GovernorCycleResult; sent: string[]; written: GovernorState | null } {
+  ): {
+    result: GovernorCycleResult
+    sent: string[]
+    written: GovernorState | null
+    paused: FleetPauseRecord[]
+    resumed: number
+  } {
     const sent: string[] = []
     let written: GovernorState | null = null
+    const paused: FleetPauseRecord[] = []
+    let resumed = 0
     const deps: GovernorDeps = {
       readSnapshot: () => snapshot,
       readState: () => state,
       writeState: (s) => { written = s },
       notify: (m) => sent.push(m),
       nowSec: () => nowSec,
+      pauseFleet: (r) => { paused.push(r) },
+      resumeFleet: () => { resumed += 1 },
     }
     const result = runGovernorCycle(deps)
-    return { result, sent, written }
+    return { result, sent, written, paused, resumed }
   }
 
-  it('on pause: notifies once and persists the paused state', () => {
-    const { result, sent, written } = harness(snap(97, NOW + 3600), { ...INITIAL_STATE }, NOW)
+  it('on pause: declares the sentinel, notifies once and persists the paused state', () => {
+    const resets = NOW + 3600
+    const { result, sent, written, paused, resumed } = harness(snap(99, resets), { ...INITIAL_STATE }, NOW)
     expect(result.action).toBe('pause')
-    expect(result.pct).toBe(97)
+    expect(result.pct).toBe(99)
     expect(sent).toHaveLength(1)
     expect(written?.phase).toBe('paused')
+    // The fleet-pause sentinel is declared with resumeAt = reset + grace.
+    expect(paused).toHaveLength(1)
+    expect(paused[0].resumeAt).toBe(resets + RESUME_GRACE_SEC)
+    expect(paused[0].pct).toBe(99)
+    expect(paused[0].pausedAt).toBe(NOW)
+    expect(resumed).toBe(0)
   })
 
-  it('on no-op: neither notifies nor writes state', () => {
-    const { result, sent, written } = harness(snap(40, NOW + 3600), { ...INITIAL_STATE }, NOW)
+  it('on no-op: neither notifies, writes state, nor touches the sentinel', () => {
+    const { result, sent, written, paused, resumed } = harness(snap(40, NOW + 3600), { ...INITIAL_STATE }, NOW)
     expect(result.action).toBe('none')
     expect(sent).toHaveLength(0)
     expect(written).toBeNull()
+    expect(paused).toHaveLength(0)
+    expect(resumed).toBe(0)
   })
 
-  it('on resume: notifies and clears the paused state', () => {
+  it('on resume: clears the sentinel, notifies and clears the paused state', () => {
     const paused: GovernorState = { phase: 'paused', resetsAt: NOW, pauseNotifiedAt: NOW - 3600, resumeNotifiedAt: null }
-    const { result, sent, written } = harness(snap(15, NOW), paused, NOW + RESUME_GRACE_SEC)
-    expect(result.action).toBe('resume')
-    expect(sent).toHaveLength(1)
-    expect(written?.phase).toBe('normal')
+    const r = harness(snap(15, NOW), paused, NOW + RESUME_GRACE_SEC)
+    expect(r.result.action).toBe('resume')
+    expect(r.sent).toHaveLength(1)
+    expect(r.written?.phase).toBe('normal')
+    expect(r.resumed).toBe(1)
+    expect(r.paused).toHaveLength(0)
   })
 })
 

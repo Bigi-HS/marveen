@@ -19,9 +19,12 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { PROJECT_ROOT } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import type { FleetPauseRecord } from './fleet-pause.js'
 
-// Usage at/above this percentage of the five-hour window triggers a pause notice.
-export const PAUSE_THRESHOLD_PCT = 96
+// Usage at/above this percentage of the five-hour window triggers a pause.
+// Boss decision 2026-06-08: auto-pause enabled, threshold 98% (was 96% notify-
+// only) -- a tighter margin now that crossing it actually pauses the fleet.
+export const PAUSE_THRESHOLD_PCT = 98
 // Wait this long PAST resets_at before declaring the window resumed: the reset is
 // not instantaneous and a couple of minutes of slack avoids a resume-then-repause
 // flap right on the boundary.
@@ -167,6 +170,12 @@ export interface GovernorDeps {
   writeState(state: GovernorState): void
   notify(message: string): void
   nowSec(): number
+  // P2 fleet-pause: declare/clear the pause sentinel on a pause/resume transition.
+  // Injected so a cycle is testable without touching the real sentinel file, and
+  // so the CLI can choose a dry (sentinel-only) vs enforcing wiring. Optional for
+  // back-compat with notify-only callers/tests.
+  pauseFleet?(record: FleetPauseRecord): void
+  resumeFleet?(): void
 }
 
 export interface GovernorCycleResult {
@@ -180,11 +189,26 @@ export interface GovernorCycleResult {
 export function runGovernorCycle(deps: GovernorDeps): GovernorCycleResult {
   const snapshot = deps.readSnapshot()
   const state = deps.readState()
-  const decision = evaluateGovernor(snapshot, state, deps.nowSec())
+  const now = deps.nowSec()
+  const decision = evaluateGovernor(snapshot, state, now)
+  const pctVal = snapshot?.rate_limits?.five_hour?.used_percentage
+  const pct = typeof pctVal === 'number' ? pctVal : null
   if (decision.action !== 'none') {
+    // Declare/clear the fleet-pause sentinel BEFORE notifying, so the operator's
+    // "paused" message is never sent ahead of the state it describes. Both are
+    // best-effort in their impls; a sentinel miss only re-acts next cycle.
+    if (decision.action === 'pause' && decision.state.resetsAt !== null) {
+      deps.pauseFleet?.({
+        pausedAt: now,
+        resumeAt: decision.state.resetsAt + RESUME_GRACE_SEC,
+        pct,
+        reason: `five_hour usage >= ${PAUSE_THRESHOLD_PCT}%`,
+      })
+    } else if (decision.action === 'resume') {
+      deps.resumeFleet?.()
+    }
     if (decision.message) deps.notify(decision.message)
     deps.writeState(decision.state)
   }
-  const pct = snapshot?.rate_limits?.five_hour?.used_percentage
-  return { action: decision.action, message: decision.message, pct: typeof pct === 'number' ? pct : null }
+  return { action: decision.action, message: decision.message, pct }
 }
