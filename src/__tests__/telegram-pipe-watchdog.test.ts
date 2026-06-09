@@ -17,14 +17,20 @@ import {
 // ---------------------------------------------------------------------------
 
 describe('assessPipeLiveness', () => {
-  it('a 409 conflict is authoritative -> healthy (even if presence is unknown)', () => {
+  it('a 409 conflict means healthy when the child is present (or presence unknown)', () => {
     expect(assessPipeLiveness({ present: null, conflicted: true, probeStatus: 409 })).toBe('healthy')
+    expect(assessPipeLiveness({ present: true, conflicted: true, probeStatus: 409 })).toBe('healthy')
   })
 
-  it('a 409 conflict wins even when the presence probe says absent (race window)', () => {
-    // conflicted proves a poller holds the slot RIGHT NOW; trust it over a
-    // momentarily-stale presence read.
-    expect(assessPipeLiveness({ present: false, conflicted: true, probeStatus: 409 })).toBe('healthy')
+  it('a CONFIRMED-absent child is dead even with a 409 (the slot-holder is not ours)', () => {
+    // Card 8b07e17b: a 409 only proves *some* poller holds the token's
+    // getUpdates slot -- e.g. the dashboard coordinator polling the SAME token.
+    // It is NOT proof the orchestrator's own plugin child is alive. When the
+    // presence probe (botPid + ps env-scan) confirms the child is gone, that
+    // direct signal must outrank the perturbable 409, else a coordinator poll
+    // masks a dead orchestrator and it stays mute forever. A false-dead here
+    // only costs one harmless idempotent /mcp reconnect drive.
+    expect(assessPipeLiveness({ present: false, conflicted: true, probeStatus: 409 })).toBe('dead')
   })
 
   it('process certainly gone (present=false) with no conflict -> dead', () => {

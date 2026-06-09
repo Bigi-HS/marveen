@@ -52,19 +52,24 @@ export interface PipeLivenessFacts {
 
 /**
  * Pure liveness verdict. Authority order:
- *   - a 409 conflict is AUTHORITATIVE proof the native poller is alive,
- *     overriding everything else (the dashboard's coordinator relies on the
- *     same fact).
- *   - a process that is CERTAINLY gone (present === false) is dead.
+ *   - a process that is CERTAINLY gone (present === false) is dead -- this is
+ *     the DIRECT signal and it OUTRANKS a 409. A 409 only proves that *some*
+ *     poller holds the token's getUpdates slot, NOT that the orchestrator's own
+ *     plugin child specifically is alive: the dashboard coordinator polls the
+ *     same token and its 409 would otherwise mask a confirmed-dead orchestrator
+ *     child (card 8b07e17b -- "409 inference is perturbable by a same-token
+ *     coordinator poll"). Process absence cannot be perturbed that way.
+ *   - a 409 with the child still present (or presence unknown) is proof the
+ *     native poller is alive and actively polling.
  *   - a clean 200 from the probe means the getUpdates slot was free while we
  *     expected a poller -> the pipe is dead (the child may linger but is not
- *     polling).
+ *     polling) -- the DIRECT slot-free death signal, not a 409 inference.
  *   - anything else (network error, inconclusive presence) is 'inconclusive'
  *     and must never trigger recovery on the live orchestrator.
  */
 export function assessPipeLiveness(facts: PipeLivenessFacts): PipeLiveness {
-  if (facts.conflicted) return 'healthy'
   if (facts.present === false) return 'dead'
+  if (facts.conflicted) return 'healthy'
   if (facts.probeStatus === 200) return 'dead'
   return 'inconclusive'
 }
