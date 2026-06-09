@@ -174,8 +174,14 @@ launch_dashboard() {
     return 1
   fi
   "$TMUX_BIN" kill-session -t "$DASH_SESSION" 2>/dev/null || true
+  # 9>&- closes the single-instance flock fd so it never leaks into the tmux
+  # server (and thus the long-lived node dashboard). Without it, a tmux server
+  # first started by this launch inherits fd 9 and every pane keeps the lock
+  # held, so a later supervisor restart fails "lock held" until the lock inode
+  # is rm'd. Every other launch site in this file already does this; this was
+  # the one gap (card 09fa76f2).
   run "$TMUX_BIN" new-session -d -s "$DASH_SESSION" -c "$INSTALL_DIR" \
-      "export PATH=\"$PATH\" && exec $NODE dist/index.js"
+      "export PATH=\"$PATH\" && exec $NODE dist/index.js" 9>&-
   backoff_note_launch dashboard
   log "dashboard: launched (tmux $DASH_SESSION -> node dist/index.js)"
 }
