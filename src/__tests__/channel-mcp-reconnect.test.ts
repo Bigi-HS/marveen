@@ -31,9 +31,11 @@ vi.mock('../web/agent-config.js', () => ({
 }))
 
 const mockCapturePane = vi.fn<(session: string) => string | null>()
+const mockReady = vi.fn<(session: string) => boolean>(() => true)
 vi.mock('../web/agent-process.js', () => ({
   agentSessionName: (name: string) => `agent-${name}`,
   capturePane: (session: string) => mockCapturePane(session),
+  isSessionReadyForPrompt: (session: string) => mockReady(session),
 }))
 
 vi.mock('../web/main-agent.js', () => ({
@@ -234,6 +236,23 @@ const ENABLE_RX = /\benable\b/i
 describe('attemptChannelMcpReconnect', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockReady.mockReturnValue(true) // pane idle by default; the gate tests override
+  })
+
+  it('wedge-safe gate: aborts WITHOUT sending any keys when the pane is not idle', () => {
+    mockReady.mockReturnValue(false) // agent is mid-generation / busy
+    // Provide submenu captures that WOULD succeed -- proving the abort is the
+    // gate's doing, not a downstream failure.
+    mockCapturePane.mockReturnValue(SUBMENU_FAILED_TOP)
+
+    const result = attemptChannelMcpReconnect('marveen')
+
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('not idle')
+    // The whole point: NO tmux keys are sent into a busy pane (no Escape, no
+    // /mcp, no Enter) -- so the agent's turn can never be interrupted/wedged.
+    // (The idle-gate=true path is exercised by every other test below.)
+    expect(mockExecFileSync).not.toHaveBeenCalled()
   })
 
   it('connected state: steps Down onto Reconnect, then activates it', () => {

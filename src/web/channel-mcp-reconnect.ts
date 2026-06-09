@@ -3,7 +3,7 @@ import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, CHANNEL_PROVIDER } from '../config.js'
 import { readAgentChannelProvider } from './agent-config.js'
-import { agentSessionName, capturePane } from './agent-process.js'
+import { agentSessionName, capturePane, isSessionReadyForPrompt } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { getProvider, type ChannelProviderType } from '../channel-provider.js'
 
@@ -147,6 +147,27 @@ export function attemptChannelMcpReconnect(agentName: string): ReconnectResult {
   const pluginPattern = getPluginPattern(providerType)
 
   try {
+    // Pane-idle pre-flight gate. Two purposes:
+    //   1. SERIALISE concurrent drivers (the strong guarantee): a driver that
+    //      arrives while another is already mid-/mcp-nav sees the open menu --
+    //      NOT the idle footer -- so it backs off. This is what lets the
+    //      dashboard-boot recovery (recoverOrchestratorPipeOnce) and the
+    //      standalone 5-min watchdog coexist without ever double-driving the
+    //      same pane (itself a wedge cause).
+    //   2. Avoid driving keys while the agent is ACTIVELY generating, where an
+    //      Escape would interrupt its turn.
+    // Honest scope: detectPaneState reliably flags active streaming but can read
+    // 'idle' during the brief pre-stream "thinking" phase (verified on Buster,
+    // CC 2.1.160). Empirically that same CC absorbs stray /mcp keystrokes
+    // without wedging (the nav just fails gracefully), so this gate is
+    // defense-in-depth + serialisation, not an absolute interrupt-prevention.
+    // A dead pipe does not need INSTANT recovery: if not idle, abort and let the
+    // next cycle retry once the pane has settled.
+    if (!isSessionReadyForPrompt(session)) {
+      logger.warn({ agentName, session }, 'channel-mcp-reconnect: pane not idle -- deferring /mcp drive to next cycle')
+      return { ok: false, message: 'Pane not idle (busy/unknown) -- deferred /mcp drive' }
+    }
+
     execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
     execFileSync('/bin/sleep', ['1'], { timeout: 2000 })
 
