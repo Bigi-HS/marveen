@@ -69,7 +69,68 @@ got="$(FLEET_ROOT="$R" CLAUDE_CODE_OAUTH_TOKEN="$FAKE" \
   || bad "no-op preserves a pre-existing env value (it was altered)"
 rm -rf "$R"
 
-# 7) SECURITY: this harness never emitted the token value on stdout/stderr. We
+# 7) STRICT-PARSE SECURITY: a command substitution on the token line must NOT
+#    execute (the old `set -a; . file` would have run it). Value is rejected by
+#    the shape gate, and the side-effect marker must be absent.
+R="$(mkroot)"
+printf 'CLAUDE_CODE_OAUTH_TOKEN=$(touch "%s/PWNED")\n' "$R" > "$R/store/fleet-oauth.env"
+check "$R" EMPTY "hostile cmd-subst on token line is rejected (not exported)"
+[ ! -e "$R/PWNED" ] && ok "hostile cmd-subst created no side effect (not executed)" \
+  || bad "hostile cmd-subst EXECUTED (PWNED marker created)"
+rm -rf "$R"
+
+# 8) STRICT-PARSE SECURITY: an extra shell line in the env-file must NOT execute;
+#    the valid token line is still parsed.
+R="$(mkroot)"
+{ printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$FAKE"; printf 'touch "%s/PWNED2"\n' "$R"; } > "$R/store/fleet-oauth.env"
+check "$R" FAKE "valid token parsed even when env-file has extra lines"
+[ ! -e "$R/PWNED2" ] && ok "extra shell line in env-file is not executed" \
+  || bad "extra shell line EXECUTED (PWNED2 marker created)"
+rm -rf "$R"
+
+# 9) malformed env-file token is rejected by the shape gate AND, being an
+#    authoritative token line, does NOT fall through to the raw token file
+#    (mirrors src/fleet-oauth-token.ts).
+R="$(mkroot)"
+printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "not-a-valid-token" > "$R/store/fleet-oauth.env"
+printf '%s\n' "$FAKE" > "$R/store/.claude-oauth-token"
+check "$R" EMPTY "malformed env-file token rejected, no fall-through to raw token"
+rm -rf "$R"
+
+# 10) double-quoted env-file value is unquoted and exported.
+R="$(mkroot)"
+printf 'CLAUDE_CODE_OAUTH_TOKEN="%s"\n' "$FAKE" > "$R/store/fleet-oauth.env"
+check "$R" FAKE "double-quoted env-file value is unquoted and exported"
+rm -rf "$R"
+
+# 11) single-quoted env-file value is unquoted and exported.
+R="$(mkroot)"
+printf "CLAUDE_CODE_OAUTH_TOKEN='%s'\n" "$FAKE" > "$R/store/fleet-oauth.env"
+check "$R" FAKE "single-quoted env-file value is unquoted and exported"
+rm -rf "$R"
+
+# 12) env-file with NO token line (other keys only) falls through to the raw
+#     token file.
+R="$(mkroot)"
+printf 'SOME_OTHER_KEY=1\n' > "$R/store/fleet-oauth.env"
+printf '%s\n' "$FAKE" > "$R/store/.claude-oauth-token"
+check "$R" FAKE "env-file without a token line falls through to raw token"
+rm -rf "$R"
+
+# 13) leading whitespace before the key is tolerated.
+R="$(mkroot)"
+printf '   CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$FAKE" > "$R/store/fleet-oauth.env"
+check "$R" FAKE "leading whitespace before the key is tolerated"
+rm -rf "$R"
+
+# 14) malformed RAW token file is rejected by the shape gate (the TS reader
+#     shape-validates the raw file too).
+R="$(mkroot)"
+printf '%s\n' "garbage-not-a-bearer" > "$R/store/.claude-oauth-token"
+check "$R" EMPTY "malformed raw token is rejected by the shape gate"
+rm -rf "$R"
+
+# 15) SECURITY: this harness never emitted the token value on stdout/stderr. We
 #    re-run all checks capturing combined output and grep for the fake value.
 leak="$(
   R="$(mkroot)"; printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$FAKE" > "$R/store/fleet-oauth.env"
