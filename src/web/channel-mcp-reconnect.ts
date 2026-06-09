@@ -57,11 +57,36 @@ const FAILED_STATUS_RX = /Status:\s*[✗x×]\s*failed/i
 // the input prompt uses -- see pane-state.ts). capture-pane -p strips colour,
 // so this textual marker is our only selection signal.
 const POINTER_RX = /❯/
+// A numbered submenu OPTION row under the cursor: `❯ 1. View tools`. This is
+// the unambiguous shape Claude Code renders for every action row (1.View tools
+// 2.Reconnect 3.Disable / 1.Reconnect / 1.Enable). The `N.` is what separates a
+// real menu cursor from a stray `❯` in the scrollback -- see selectedSubmenuLine.
+const MENU_OPTION_CURSOR_RX = /❯\s*\d+\.\s/
 
-/** The submenu row currently marked with the `❯` cursor, or null. */
+/**
+ * The submenu row currently marked with the `❯` cursor, or null.
+ *
+ * `capture-pane -p` includes the scrollback ABOVE the open menu, and the
+ * agent's own input line (`❯ <queued text>`) plus transcript prompts carry the
+ * SAME `❯` glyph. Returning the FIRST `❯` therefore grabbed that scrollback
+ * line instead of the menu cursor, so the step-loop never saw the cursor reach
+ * Reconnect/Enable and exhausted its budget ("Could not select reconnect within
+ * N steps" -- card 8b07e17b, observed once the /mcp menu started rendering the
+ * status inline on the top-level row and pushed the prompt into the capture).
+ *
+ * Resolution order:
+ *   1. The numbered option cursor (`❯ 1. ...`) -- unambiguous in current Claude
+ *      Code; a scrollback/input `❯` never carries the `N.` prefix.
+ *   2. Fallback (unnumbered menus / older CC): the menu renders at the BOTTOM
+ *      of the pane, below any scrollback, so the LAST `❯` line is the cursor.
+ */
 export function selectedSubmenuLine(pane: string): string | null {
-  for (const raw of pane.split('\n')) {
-    if (POINTER_RX.test(raw)) return raw
+  const lines = pane.split('\n')
+  for (const raw of lines) {
+    if (MENU_OPTION_CURSOR_RX.test(raw)) return raw
+  }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (POINTER_RX.test(lines[i])) return lines[i]
   }
   return null
 }
