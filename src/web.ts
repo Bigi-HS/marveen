@@ -21,6 +21,7 @@ import { startStuckToolCallWatcher } from './web/stuck-tool-call-watcher.js'
 import { startReauthHealer } from './web/reauth-healer.js'
 import { startAutoRestartRunner } from './web/auto-restart-runner.js'
 import { startSessionSizeWatcher } from './web/session-size-watcher.js'
+import { startSupervisorSentinel } from './web/supervisor-sentinel.js'
 import { logger } from './logger.js'
 import { tryHandleProfiles } from './web/routes/profiles.js'
 import { tryHandleMessages } from './web/routes/messages.js'
@@ -348,6 +349,9 @@ export function startWebServer(port = 3420): http.Server {
 
   const sessionSizeInterval = startSessionSizeWatcher()
   logger.info('Session-size watcher started (10min poll, 5min offset)')
+
+  const supervisorSentinelInterval = startSupervisorSentinel()
+  logger.info('Supervisor sentinel started (60s poll, 60s offset) -- who-watches-the-watcher')
 
   const updateCheckerInterval = startUpdateChecker()
   logger.info('Update checker started (15min poll)')
