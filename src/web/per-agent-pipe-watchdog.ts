@@ -34,7 +34,8 @@ import { probeTelegramConflict } from './channel-conflict-probe.js'
 import { probeChannelPollerPresence } from './channel-poller-reap.js'
 import { attemptChannelMcpReconnect, resolveAgentProviderType } from './channel-mcp-reconnect.js'
 import { listAgentNames, agentDir } from './agent-config.js'
-import { isAgentRunning, agentHasChannel, isAgentChannelIntentionallyEnabled } from './agent-process.js'
+import { isAgentRunning, agentHasChannel, isAgentChannelIntentionallyEnabled, isTmuxSessionAlive } from './agent-process.js'
+import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { readAgentHangState, type HangVerdict } from './pipe-hang-detector.js'
 import {
   assessPipeLiveness,
@@ -285,6 +286,14 @@ export async function runSubAgentSweep(
 // state: a hang is neither a pane-✘ nor a missing poller nor a 409=200, so the
 // in-process monitor and the 409 probe both miss it -- there is no overlap to
 // double-drive. The recovery is the same tested /mcp navigation.
+//
+// Scope INCLUDES the main orchestrator (fold-in): the original telegram-pipe
+// death symptom is exactly this -- main's own `reply` call wedges and never
+// returns. The orchestrator watchdog (#27/#36) and the in-process monitor are
+// both liveness/409-based and blind to it, so main's hung call would otherwise
+// recover only on a reboot/manual /mcp. The detector reads main's transcript
+// (agentConfigRoot -> PROJECT_ROOT) and recovery drives /mcp on the main
+// channels session, the exact session attemptChannelMcpReconnect(main) targets.
 // ---------------------------------------------------------------------------
 
 // A real Telegram reply returns in well under this; a wedged call never returns.
@@ -303,14 +312,36 @@ export interface HangSweepResult {
 }
 
 export interface HangSweepDeps {
-  listChannelSubAgents: () => string[]
+  listAgents: () => string[]
   readHangState: (name: string, nowMs: number, thresholdMs: number) => HangVerdict
   reconnect: (name: string) => { ok: boolean; message: string }
   thresholdMs: number
 }
 
+// Pure fold-in decision (unit-tested): the hang sweep covers every channel
+// sub-agent PLUS the main orchestrator -- but include main only when its
+// channels session is actually alive (else /mcp would target a dead session)
+// and the operator has not opted out via HANG_SWEEP_EXCLUDE_MAIN. Main is swept
+// first so its (higher-stakes) recovery is not starved behind a long sub list.
+export function withMainFolded(subAgents: string[], mainAlive: boolean, excludeMain: boolean): string[] {
+  const others = subAgents.filter((n) => n !== MAIN_AGENT_ID)
+  if (mainAlive && !excludeMain) return [MAIN_AGENT_ID, ...others]
+  return others
+}
+
+// The agent set the hang sweep walks: sub-agents + the main orchestrator. Kept
+// separate from listChannelSubAgents (which the liveness sweep uses and must
+// stay main-excluded, since the orchestrator watchdog owns main's liveness).
+export function listHangSweepAgents(): string[] {
+  return withMainFolded(
+    listChannelSubAgents(),
+    isTmuxSessionAlive(MAIN_CHANNELS_SESSION),
+    process.env.HANG_SWEEP_EXCLUDE_MAIN === '1',
+  )
+}
+
 const DEFAULT_HANG_DEPS: HangSweepDeps = {
-  listChannelSubAgents,
+  listAgents: listHangSweepAgents,
   readHangState: readAgentHangState,
   reconnect: attemptChannelMcpReconnect,
   thresholdMs: HANG_THRESHOLD_MS,
@@ -320,7 +351,7 @@ export function runHangSweep(now: number = Date.now(), deps: HangSweepDeps = DEF
   const swept: string[] = []
   const recovered: string[] = []
   const results: Record<string, HangVerdict> = {}
-  for (const name of deps.listChannelSubAgents()) {
+  for (const name of deps.listAgents()) {
     swept.push(name)
     let verdict: HangVerdict
     try {
