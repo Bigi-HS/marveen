@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 // Contract tests for the dashboard-launch half of the fleet OAuth migration
@@ -46,4 +46,38 @@ describe('startAgentProcess -- fleet OAuth env injection (dashboard launch path)
     expect(PROCESS_SRC).not.toMatch(/logger\.[a-z]+\([^)]*\bcmd\b/)
     expect(PROCESS_SRC).not.toMatch(/logger\.[a-z]+\([^)]*fleetOauthEnv/)
   })
+})
+
+// Invariant guard for the silent-fallback bug class: an agent config that
+// carries an authMode OUTSIDE VALID_AUTH_MODES (e.g. the legacy "oauth") is
+// read by readAgentAuthMode as the default 'shared' -- the value is inert but
+// MISLEADING (it reads as "this agent authenticates via OAuth" when the loader
+// ignores it). The heartbeat agent shipped that exact "oauth" value; this
+// pins that every committed agent config now uses a real, recognised mode so
+// the misleading value cannot creep back in fleet-wide.
+const VALID_AUTH_MODES = new Set(['shared', 'own_team', 'api'])
+const AGENTS_DIR = join(__dirname, '../../agents')
+
+describe('agent configs -- authMode invariant (no misleading silent-fallback values)', () => {
+  const agentConfigs = existsSync(AGENTS_DIR)
+    ? readdirSync(AGENTS_DIR, { withFileTypes: true })
+        .filter(d => d.isDirectory())
+        .map(d => ({ name: d.name, path: join(AGENTS_DIR, d.name, 'agent-config.json') }))
+        .filter(c => existsSync(c.path))
+    : []
+
+  it('finds the committed agent configs to check', () => {
+    // Guards against the glob silently matching nothing (which would make the
+    // per-config assertions vacuously pass).
+    expect(agentConfigs.length).toBeGreaterThan(0)
+  })
+
+  for (const { name, path } of agentConfigs) {
+    it(`${name}: authMode, if set, is a recognised mode (not a silent-fallback value)`, () => {
+      const cfg = JSON.parse(readFileSync(path, 'utf-8'))
+      if (cfg.authMode !== undefined) {
+        expect(VALID_AUTH_MODES.has(cfg.authMode)).toBe(true)
+      }
+    })
+  }
 })
