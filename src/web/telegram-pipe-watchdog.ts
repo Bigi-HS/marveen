@@ -273,17 +273,13 @@ export interface CycleResult {
 }
 
 /**
- * Run one watchdog cycle. Reads persisted state, probes the orchestrator pipe,
- * acts (recover / escalate), persists the new state, and logs every event.
- * Designed to be invoked once per process by the 5-minute shell driver.
+ * Probe the orchestrator pipe's liveness facts: cheap local process presence
+ * plus the authoritative Telegram conflict probe, retried across the native
+ * long-poll's brief inter-cycle gap (a one-off 200 is not death). Shared by
+ * runCycle and the dashboard-boot one-shot recovery so both apply identical
+ * liveness logic.
  */
-export async function runCycle(now: number = Date.now()): Promise<CycleResult> {
-  const prev = readState()
-  const token = readMainToken()
-
-  // Probe presence (cheap, local) + conflict (authoritative liveness). Probe
-  // the conflict several times so the native long-poll's brief inter-cycle gap
-  // cannot masquerade as a dead pipe (a one-off 200 is not death).
+export async function probeOrchestratorPipe(token: string | null): Promise<PipeLivenessFacts> {
   const present = probeChannelPollerPresence(PROVIDER, undefined)
   let conflicted = false
   let probeStatus = 0
@@ -299,7 +295,19 @@ export async function runCycle(now: number = Date.now()): Promise<CycleResult> {
     conflicted = agg.conflicted
     probeStatus = agg.status
   }
+  return { present, conflicted, probeStatus }
+}
 
+/**
+ * Run one watchdog cycle. Reads persisted state, probes the orchestrator pipe,
+ * acts (recover / escalate), persists the new state, and logs every event.
+ * Designed to be invoked once per process by the 5-minute shell driver.
+ */
+export async function runCycle(now: number = Date.now()): Promise<CycleResult> {
+  const prev = readState()
+  const token = readMainToken()
+
+  const { present, conflicted, probeStatus } = await probeOrchestratorPipe(token)
   const verdict = assessPipeLiveness({ present, conflicted, probeStatus })
   let recovered = false
   let escalated = false
@@ -353,4 +361,39 @@ export async function runCycle(now: number = Date.now()): Promise<CycleResult> {
 
   writeState(state)
   return { verdict, recovered, escalated, state }
+}
+
+/**
+ * One-shot orchestrator pipe check + immediate recovery, for the dashboard-boot
+ * path. The in-process channel-health-monitor's first tick is ~45s out and the
+ * standalone watchdog runs on a 5-min cadence, so a dashboard restart that
+ * killed the orchestrator's Telegram MCP stdio child leaves Genesis mute for up
+ * to those windows (Boss had to run /mcp by hand after the 2026-06-09 deploy).
+ *
+ * This closes that gap: probe once at boot and, ONLY if the pipe is already
+ * dead, drive a single recovery. It is deliberately NARROW:
+ *   - it does NOT touch the standalone watchdog's persisted state or its
+ *     escalation/alert path (those stay owned by the 5-min loop) -- it is purely
+ *     a latency fix, not a second escalation owner;
+ *   - it relies on the same #95 liveness logic (assessPipeLiveness: a confirmed-
+ *     absent child outranks a coordinator's 409), so a dead pipe is seen as dead
+ *     even while another same-token poller holds the slot;
+ *   - the wedge-safe idle gate inside attemptChannelMcpReconnect serialises it
+ *     against the standalone watchdog, so the two can never double-drive the
+ *     pane.
+ * Idempotent and safe on a healthy boot (no-op when the pipe is alive). Intended
+ * to be fired-and-forgotten (not awaited) from the dashboard boot sequence.
+ */
+export async function recoverOrchestratorPipeOnce(
+  now: number = Date.now(),
+): Promise<{ verdict: PipeLiveness; recovered: boolean }> {
+  const token = readMainToken()
+  const facts = await probeOrchestratorPipe(token)
+  const verdict = assessPipeLiveness(facts)
+  if (!needsRecovery(verdict)) return { verdict, recovered: false }
+
+  logRecoveryEvent({ ts: now, kind: 'drop-detected', detail: `boot-recovery present=${facts.present} status=${facts.probeStatus}` })
+  const rc = attemptChannelMcpReconnect(MAIN_AGENT_ID)
+  logRecoveryEvent({ ts: now, kind: 'recovery-attempt', detail: `boot-recovery result: ${rc.ok ? 'ok' : 'failed'}: ${rc.message}` })
+  return { verdict, recovered: rc.ok }
 }

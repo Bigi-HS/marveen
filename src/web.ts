@@ -17,6 +17,7 @@ import { startScheduleRunner } from './web/schedule-runner.js'
 import { startChannelPluginMonitor } from './web/channel-monitor.js'
 import { startInboundProber } from './web/inbound-probe.js'
 import { startChannelHealthMonitor } from './web/channel-health-monitor.js'
+import { recoverOrchestratorPipeOnce } from './web/telegram-pipe-watchdog.js'
 import { startStuckInputWatcher } from './web/stuck-input-watcher.js'
 import { startStuckToolCallWatcher } from './web/stuck-tool-call-watcher.js'
 import { startReauthHealer } from './web/reauth-healer.js'
@@ -341,6 +342,24 @@ export function startWebServer(port = 3420): http.Server {
 
   const channelHealthInterval = startChannelHealthMonitor()
   logger.info('Channel MCP health monitor started (60s poll, 45s offset)')
+
+  // Close the post-restart mute window: the health monitor's first tick is ~45s
+  // out and the standalone watchdog is on a 5-min cadence, so a dashboard
+  // restart that killed the orchestrator's Telegram MCP stdio child would leave
+  // Genesis mute until then (Boss had to run /mcp by hand after the 2026-06-09
+  // deploy). Fire ONE immediate orchestrator recovery shortly after boot --
+  // idempotent (no-op when the pipe is healthy), fire-and-forget, and serialised
+  // against the standalone watchdog by the wedge-safe idle gate. unref() so it
+  // never holds the process open during a fast shutdown.
+  const bootRecoveryTimer = setTimeout(() => {
+    recoverOrchestratorPipeOnce().then(
+      ({ verdict, recovered }) => {
+        if (verdict === 'dead') logger.info({ recovered }, 'Boot orchestrator pipe-recovery: dead pipe, drove recovery')
+      },
+      (err) => logger.warn({ err }, 'Boot orchestrator pipe-recovery failed'),
+    )
+  }, 10_000)
+  bootRecoveryTimer.unref()
 
   const stuckInputInterval = startStuckInputWatcher()
   logger.info('Stuck-input watcher started (15s poll, 20s offset)')
