@@ -24,8 +24,12 @@ const SESSION_SECRET_PATH = join(PROJECT_ROOT, 'store', '.dashboard-session-secr
 // daily. We default to ONE YEAR -- mirroring the 1-year OAuth setup-token policy:
 // paste the token once, stay logged in for a year. Override via
 // DASHBOARD_SESSION_MAX_AGE_SECONDS (positive integer seconds) if a shorter
-// window is ever wanted. Revocation (logout) still works instantly and the
-// bearer token can still be rotated to kill all sessions.
+// window is ever wanted. Per-session logout (revokeSession) still works
+// instantly. NOTE: rotating the bearer token does NOT invalidate live sessions
+// -- sessions are signed with the separate session secret (see above), not the
+// bearer token. To mass-invalidate EVERY session at once (e.g. an incident),
+// delete store/.dashboard-session-secret and restart: a fresh secret makes
+// every existing cookie signature fail verification.
 function resolveSessionMaxAge(): number {
   const ONE_YEAR = 365 * 24 * 60 * 60
   const raw = process.env.DASHBOARD_SESSION_MAX_AGE_SECONDS?.trim()
