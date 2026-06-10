@@ -37,6 +37,18 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp__plugin_telegram_telegram__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/guardrail-telegram-chat.py",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

@@ -17,6 +17,12 @@ function resolveTemplatePlaceholders(content: string): string {
 // template and detect whether an agent already carries it.
 const MEMORY_HOOK_MARKER = 'memory-replay.py'
 
+// Same idea for the PreToolUse Telegram broadcast/injection guardrail (item 2b):
+// uniquely identifies its hook command so the targeted merge can backfill it
+// into agents that already have a hooks block (and would otherwise be skipped
+// by the all-or-nothing seed forever).
+const GUARDRAIL_HOOK_MARKER = 'guardrail-telegram-chat.py'
+
 type HookCommand = { type?: string; command?: string; prompt?: string }
 type HookEntry = { matcher?: string; hooks?: HookCommand[] }
 type HooksBlock = Record<string, HookEntry[]>
@@ -38,6 +44,20 @@ export function ensureMemoryHook(target: HooksBlock, template: HooksBlock): bool
   const existingStart = target.SessionStart ?? []
   if (existingStart.some(e => entryReferences(e, MEMORY_HOOK_MARKER))) return false  // already present
   target.SessionStart = [...existingStart, ...memoryEntries]
+  return true
+}
+
+// Targeted idempotent merge of the PreToolUse Telegram guardrail, mirroring
+// ensureMemoryHook. ADD-only: appends the template's guardrail entry to the
+// agent's PreToolUse list iff absent; never removes or rewrites an agent's own
+// PreToolUse hooks. This is what makes the guard drift-proof -- every existing
+// agent picks it up at the next boot backfill without a profile rewrite.
+export function ensureGuardrailHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.PreToolUse ?? []).filter(e => entryReferences(e, GUARDRAIL_HOOK_MARKER))
+  if (entries.length === 0) return false  // template has no guardrail hook -> nothing to merge
+  const existing = target.PreToolUse ?? []
+  if (existing.some(e => entryReferences(e, GUARDRAIL_HOOK_MARKER))) return false  // already present
+  target.PreToolUse = [...existing, ...entries]
   return true
 }
 
@@ -71,8 +91,11 @@ export function ensureAgentHooks(name: string): boolean {
     changed = true
   } else {
     // Agent already has hooks: leave them alone, but additively backfill the
-    // memory auto-inject hook if the template defines one and it is missing.
-    changed = ensureMemoryHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    // hooks added to the template after the agent was scaffolded -- the memory
+    // auto-inject (SessionStart) and the Telegram guardrail (PreToolUse).
+    const memChanged = ensureMemoryHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    const guardChanged = ensureGuardrailHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    changed = memChanged || guardChanged
   }
   if (!changed) return false
   mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
