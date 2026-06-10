@@ -23,7 +23,7 @@ Fleet reference for local LLM model selection on the Genesis host.
 
 | Model | VRAM | Role |
 |-------|------|------|
-| qwen3:4b | 2.5 GB | marveen-local + claudia-local (parallel) |
+| qwen3:4b × 2 | 5.0 GB | marveen-local + claudia-local (parallel instances) |
 | nomic-embed-text | 0.27 GB | embedding pipeline |
 | **Total** | **5.27 GB / 7.7 GB (68%)** | comfortable headroom |
 
@@ -40,10 +40,12 @@ Download size ≈ VRAM footprint at Q4_K_M. Add ~0.5 GB runtime overhead.
 | qwen3:0.6b | 523 MB | 40K | minimal, edge only |
 | qwen3:1.7b | 1.4 GB | 40K | lightweight assistant |
 | **qwen3:4b** | **2.5 GB** | **256K** | **fleet standard (deployed)** |
-| qwen3:8b | 5.2 GB | 40K | solo only on RTX 3060 |
+| qwen3:8b | 5.2 GB | 40K | solo only on RTX 3060 [¹] |
 | qwen3:14b | 9.3 GB | 40K | exceeds 7.7 GB free -- NO |
 | qwen3:30b-a3b (MoE) | 19 GB | 256K | multi-GPU only |
 | qwen3:235b-a22b (MoE) | 142 GB | 256K | datacenter only |
+
+[¹] Context asymmetry: qwen3:4b ships with 256K context in the Ollama package while qwen3:8b defaults to 40K. This is an Ollama packaging quirk, not a model capability difference -- the underlying qwen3:8b supports longer context but the default Ollama tag caps it at 40K.
 
 Source: ollama.com/library/qwen3
 
