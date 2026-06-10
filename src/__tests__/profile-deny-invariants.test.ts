@@ -25,9 +25,13 @@ const profiles: Profile[] = readdirSync(PROFILES_DIR)
 //    stays allowed -- only the name-matching variants are denied).
 //  - access.json write/edit: Telegram allowlist tampering must never happen
 //    programmatically (the /telegram:access skill is the only sanctioned path).
+//  - npm publish: no fleet agent publishes packages; an accidental/injected
+//    publish is irreversible (a version cannot be unpublished after 72h, and the
+//    name is burned). Denied everywhere as a never-do floor (item 2b Bash side).
 const UNIVERSAL_DENY = [
   'Bash(pkill:*)',
   'Bash(killall:*)',
+  'Bash(npm publish:*)',
   'Write(**/access.json)',
   'Edit(**/access.json)',
 ]

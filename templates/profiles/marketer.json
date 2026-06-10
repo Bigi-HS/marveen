@@ -25,6 +25,7 @@
       "Bash(curl -X POST:*)",
       "Bash(pkill:*)",
       "Bash(killall:*)",
+      "Bash(npm publish:*)",
       "Write(**/access.json)",
       "Edit(**/access.json)"
     ]
