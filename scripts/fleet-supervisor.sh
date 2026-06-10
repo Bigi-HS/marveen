@@ -292,6 +292,44 @@ ensure_medic_watchdog() {
   fi
 }
 
+# Local-Ollama hybrid agents (marveen-local / claudia-local, card ollama-hybrid).
+# Gated behind a deploy flag so merging the wiring is INERT: the local agents and
+# their Ollama daemon are only brought up once an operator (Genesis) has validated
+# the build on c12 and touched store/ollama-hybrid.enabled. Without the flag this
+# is a pure no-op, so a stock box never starts Ollama or a local agent.
+#
+# ensure_ollama: best-effort start of the Ollama daemon when the flag is set and
+# the daemon is down. The local-agent watchdogs do their own pre-launch health
+# check and refuse to launch a session until an allowlisted model is served, so a
+# slow/failed Ollama start can never produce a token-burning cloud-model launch.
+ollama_hybrid_enabled() { [ -f "$INSTALL_DIR/store/ollama-hybrid.enabled" ]; }
+ensure_ollama() {
+  ollama_hybrid_enabled || return 0
+  curl -sf --max-time 3 http://localhost:11434/api/tags >/dev/null 2>&1 && return 0
+  command -v ollama >/dev/null 2>&1 || { log "ensure_ollama: ollama binary not found -- skipping"; return 0; }
+  if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start ollama serve"; return 0; fi
+  nohup ollama serve >> "$STORE/ollama-serve.log" 2>&1 9>&- &
+  disown 2>/dev/null || true
+  log "ensure_ollama: started ollama serve"
+}
+# Each local agent is kept alive by scripts/local-agent-watchdog.sh <name> (FATAL
+# dual-check, pre-launch Ollama health check, Ollama launch env, adaptive
+# context-saturation restart). Reboot-persistent via pgrep-skip like every other
+# watchdog. Gated by the same deploy flag.
+ensure_local_agent_watchdogs() {
+  ollama_hybrid_enabled || return 0
+  for n in marveen-local claudia-local; do
+    [ -f "$INSTALL_DIR/agents/$n/agent-config.json" ] || continue
+    pgrep -f "scripts/local-agent-watchdog.sh $n\$" >/dev/null 2>&1 && continue
+    if [ -x "$INSTALL_DIR/scripts/local-agent-watchdog.sh" ]; then
+      if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start local-agent-watchdog.sh $n"; continue; fi
+      nohup bash "$INSTALL_DIR/scripts/local-agent-watchdog.sh" "$n" >> "$STORE/${n}-watchdog.log" 2>&1 9>&- &
+      disown 2>/dev/null || true
+      log "local-agent-watchdog $n: started"
+    fi
+  done
+}
+
 # Hibiki token-free daily push (spec B-AC2). WSL has no systemd, so a real cron
 # daemon needs `sudo service cron start` after every boot -- too fragile for a
 # token-free guarantee. The supervisor is already always-on (started reboot-safe
@@ -446,6 +484,9 @@ tick() {
   ensure_hibiki_push
   # 8) MEDIC BREAK-GLASS OPERATOR BOT (token-free recovery bot -- always-on, reboot-persistent)
   ensure_medic_watchdog
+  # 9) LOCAL-OLLAMA HYBRID AGENTS (marveen-local/claudia-local -- gated by store/ollama-hybrid.enabled)
+  ensure_ollama
+  ensure_local_agent_watchdogs
 }
 
 # --- main ------------------------------------------------------------------
