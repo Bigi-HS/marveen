@@ -75,7 +75,7 @@ Channel-less (no Telegram bot): quill, gauge, applegate, scout, heartbeat
 ## Maintenance Notes
 
 - **Owner**: Applegate maintains this file via event-trigger on `agents/*/agent-config.json` changes.
-- **Commit policy**: Roster updates (model change, new agent, trust-tier change) = direct commit to develop, no full gate needed. Structural changes (new columns, trust-tier definitions) = PR through Thor+Dave gate.
+- **Commit policy**: Roster updates (model change, new agent) = direct commit to develop, no full gate needed. Trust-tier changes and structural changes (new columns, trust-tier definitions) = PR through Thor+Dave gate.
 - **Scout cross-check**: During model-upgrade migration assessments, Scout reads this file to enumerate fleet scope -- verify it reflects live config before publishing migration plans.
 - **Model field**: reflects `agent-config.json` model value at last update. For live model verification use the `/api/agents` dashboard endpoint.
 - **Do not edit manually** unless Applegate is unavailable. Flag discrepancies to Applegate via inter-agent message.
