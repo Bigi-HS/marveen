@@ -1,0 +1,12 @@
+{
+  "model": "qwen3:4b",
+  "displayName": "GenesisLocal",
+  "securityProfile": "worker-local",
+  "team": {
+    "role": "worker",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": []
+  }
+}
