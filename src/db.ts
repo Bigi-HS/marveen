@@ -31,6 +31,71 @@ export function tightenDbPermissions(dbPath: string): void {
   }
 }
 
+// Migration: widen the kanban_cards status CHECK to include 'someday' (the
+// "Valamikor" / far-future column). Older installs created the table with the
+// narrower CHECK(status IN ('planned','in_progress','waiting','done')) and
+// CREATE TABLE IF NOT EXISTS is a no-op on the next boot, so inserting or moving
+// a card to 'someday' hits a CHECK-constraint failure. SQLite can't ALTER a
+// CHECK in place, so rebuild the table whenever its schema lacks 'someday'.
+//
+// kanban_cards has a self-referential FK (parent_id REFERENCES kanban_cards(id)),
+// and better-sqlite3 enables foreign_keys by DEFAULT. A CREATE/INSERT/DROP/RENAME
+// rebuild under FK enforcement throws "FOREIGN KEY constraint failed" on the swap,
+// which is exactly why this migration silently failed in production and the
+// 'someday' column never accepted a card. Per SQLite's official 12-step table-
+// rebuild procedure, foreign_keys MUST be toggled OUTSIDE the transaction (the
+// pragma is a no-op inside one), and integrity re-verified with foreign_key_check
+// before COMMIT. We restore the prior FK state in finally. Idempotent on fresh
+// (already-widened) DBs via the hasSomeday guard, and rowid is carried explicitly
+// so each card's display number (seq = rowid) survives rebuilds with rowid gaps.
+export function migrateKanbanCardsSomeday(db: Database.Database): void {
+  const current = db.prepare("SELECT sql FROM sqlite_master WHERE name='kanban_cards'").get() as { sql: string } | undefined
+  const hasSomeday = !!current?.sql?.match(/CHECK\s*\(\s*status\s+IN\s*\([^)]*'someday'[^)]*\)\s*\)/i)
+  if (!current?.sql || hasSomeday) return
+
+  const prevForeignKeys = db.pragma('foreign_keys', { simple: true })
+  db.pragma('foreign_keys = OFF')
+  try {
+    const rebuild = db.transaction(() => {
+      db.exec('DROP TABLE IF EXISTS kanban_cards_new')
+      db.exec(`
+        CREATE TABLE kanban_cards_new (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          description TEXT,
+          status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','in_progress','waiting','done','someday')),
+          assignee TEXT,
+          priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
+          project TEXT,
+          parent_id TEXT REFERENCES kanban_cards(id),
+          due_date INTEGER,
+          sort_order REAL NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          archived_at INTEGER,
+          dispatched_at INTEGER
+        );
+        INSERT INTO kanban_cards_new (rowid, id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, archived_at, dispatched_at)
+          SELECT rowid, id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, archived_at, dispatched_at FROM kanban_cards;
+        DROP TABLE kanban_cards;
+        ALTER TABLE kanban_cards_new RENAME TO kanban_cards;
+      `)
+      db.exec('CREATE INDEX IF NOT EXISTS idx_kanban_parent ON kanban_cards(parent_id)')
+      db.exec('CREATE INDEX IF NOT EXISTS idx_kanban_status ON kanban_cards(status, archived_at)')
+      // Re-verify referential integrity BEFORE commit. With enforcement off
+      // during the swap an orphaned parent_id would otherwise slip through;
+      // a non-empty result aborts the transaction and rolls the rebuild back.
+      const violations = db.pragma('foreign_key_check') as unknown[]
+      if (violations.length > 0) {
+        throw new Error('foreign_key_check failed during kanban_cards someday rebuild: ' + JSON.stringify(violations))
+      }
+    })
+    rebuild()
+  } finally {
+    db.pragma(`foreign_keys = ${prevForeignKeys ? 'ON' : 'OFF'}`)
+  }
+}
+
 // dbPathOverride is for tests: pass ':memory:' (or a temp path) to open an
 // isolated database instead of the real store/claudeclaw.db. The file-precreate
 // (openSync 'wx') and tightenDbPermissions steps are SKIPPED for an override --
@@ -175,52 +240,12 @@ export function initDatabase(dbPathOverride?: string): void {
   } catch {
     // column already exists
   }
-  // Migration: widen the kanban_cards status CHECK to include 'someday'
-  // (the "Valamikor" / far-future column). Older installs created the table
-  // with the narrower CHECK(status IN ('planned','in_progress','waiting','done'))
-  // and CREATE TABLE IF NOT EXISTS is a no-op on the next boot, so inserting or
-  // moving a card to 'someday' would hit a CHECK-constraint failure. SQLite
-  // can't ALTER a CHECK in place, so rebuild the table whenever its current
-  // schema lacks 'someday' in the status CHECK. Idempotent on fresh DBs.
+  // Widen the kanban_cards status CHECK to admit 'someday'. Extracted to a
+  // dedicated, unit-tested function (migrateKanbanCardsSomeday) because the
+  // in-place version silently failed under better-sqlite3's default FK
+  // enforcement. Kept defensive: a migration failure logs but never bricks boot.
   try {
-    const current = db.prepare("SELECT sql FROM sqlite_master WHERE name='kanban_cards'").get() as { sql: string } | undefined
-    const hasSomeday = !!current?.sql?.match(/CHECK\s*\(\s*status\s+IN\s*\([^)]*'someday'[^)]*\)\s*\)/i)
-    if (current?.sql && !hasSomeday) {
-      // Wrap the whole rebuild in a transaction so the CREATE/INSERT/DROP/RENAME
-      // either all commit or all roll back -- a mid-way crash never leaves a
-      // half-migrated table. DROP IF EXISTS first so a prior aborted run can't
-      // wedge it on "table kanban_cards_new already exists". rowid is carried
-      // explicitly in the INSERT so each card's display number (seq = rowid) is
-      // preserved across the rebuild even when the old table has rowid gaps.
-      const rebuild = db.transaction(() => {
-        db.exec('DROP TABLE IF EXISTS kanban_cards_new')
-        db.exec(`
-          CREATE TABLE kanban_cards_new (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            description TEXT,
-            status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','in_progress','waiting','done','someday')),
-            assignee TEXT,
-            priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
-            project TEXT,
-            parent_id TEXT REFERENCES kanban_cards(id),
-            due_date INTEGER,
-            sort_order REAL NOT NULL DEFAULT 0,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            archived_at INTEGER,
-            dispatched_at INTEGER
-          );
-          INSERT INTO kanban_cards_new (rowid, id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, archived_at, dispatched_at)
-            SELECT rowid, id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, archived_at, dispatched_at FROM kanban_cards;
-          DROP TABLE kanban_cards;
-          ALTER TABLE kanban_cards_new RENAME TO kanban_cards;
-        `)
-        db.exec('CREATE INDEX IF NOT EXISTS idx_kanban_parent ON kanban_cards(parent_id)')
-        db.exec('CREATE INDEX IF NOT EXISTS idx_kanban_status ON kanban_cards(status, archived_at)')
-      })
-      rebuild()
-    }
+    migrateKanbanCardsSomeday(db)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (!/already exists/i.test(msg)) {
