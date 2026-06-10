@@ -18,8 +18,24 @@ const DASHBOARD_TOKEN_PATH = join(PROJECT_ROOT, 'store', '.dashboard-token')
 const SESSION_SECRET_PATH = join(PROJECT_ROOT, 'store', '.dashboard-session-secret')
 
 // Session lifetime. The signed cookie carries an absolute expiry; after this
-// the operator re-enters the access token once. 12h keeps a workday logged in.
-export const SESSION_MAX_AGE_SECONDS = 12 * 60 * 60
+// the operator re-enters the access token once. This is a single-operator,
+// localhost/tailnet-only dashboard, so a short 12h "workday" session just meant
+// the operator (and every fleet-facing kanban tab) was re-prompted for the token
+// daily. We default to ONE YEAR -- mirroring the 1-year OAuth setup-token policy:
+// paste the token once, stay logged in for a year. Override via
+// DASHBOARD_SESSION_MAX_AGE_SECONDS (positive integer seconds) if a shorter
+// window is ever wanted. Revocation (logout) still works instantly and the
+// bearer token can still be rotated to kill all sessions.
+function resolveSessionMaxAge(): number {
+  const ONE_YEAR = 365 * 24 * 60 * 60
+  const raw = process.env.DASHBOARD_SESSION_MAX_AGE_SECONDS?.trim()
+  if (raw) {
+    const n = Number(raw)
+    if (Number.isInteger(n) && n > 0) return n
+  }
+  return ONE_YEAR
+}
+export const SESSION_MAX_AGE_SECONDS = resolveSessionMaxAge()
 
 export function loadOrCreateDashboardToken(): string {
   const fromEnv = process.env.DASHBOARD_TOKEN?.trim()
