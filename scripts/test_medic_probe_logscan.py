@@ -161,5 +161,58 @@ class LogScanProbeTests(unittest.TestCase):
         self.assertLessEqual(len(ex.reads), probe_logscan.MAX_LOGS)
 
 
+class LogScanSymlinkContainmentTests(unittest.TestCase):
+    """Chad PR#84 low-finding (card eac0423a): glob.glob follows symlinks, so a
+    symlinked *.log under store/ could leak content from OUTSIDE store/. The probe
+    must skip any symlink whose real target escapes store/, while still reading
+    legitimate in-store logs."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        self._orig_glob = probe_logscan.glob.glob
+        self._orig_store = probe_logscan.STORE_DIR
+        self.tmp = tempfile.mkdtemp()
+        self.store = os.path.join(self.tmp, "store")
+        os.makedirs(self.store)
+        probe_logscan.STORE_DIR = self.store
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.addCleanup(setattr, probe_logscan, "STORE_DIR", self._orig_store)
+        self.addCleanup(setattr, probe_logscan.glob, "glob", self._orig_glob)
+
+    def test_symlink_escaping_store_is_skipped(self):
+        # A secret file OUTSIDE store/, surfaced via a symlinked *.log inside store/.
+        outside = os.path.join(self.tmp, "secret.txt")
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write("connection closed\n")  # would match pipe_closed if read
+        link = os.path.join(self.store, "evil.log")
+        os.symlink(outside, link)
+        real_log = os.path.join(self.store, "real.log")
+        with open(real_log, "w", encoding="utf-8") as fh:
+            fh.write("usage limit\n")
+
+        probe_logscan.glob.glob = lambda pattern: [real_log, link]
+        # FakeExecutor would happily return the symlink's text -- prove the probe
+        # filters it BEFORE the read, so the leak never reaches read_text.
+        ex = FakeExecutor({real_log: "usage limit\n", link: "connection closed\n"})
+        out = probe_logscan.collect(ex)
+        self.assertNotIn(link, ex.reads)              # escaping symlink never read
+        self.assertIn(real_log, ex.reads)             # in-store log still read
+        self.assertEqual(out["log_errors"], ["usage_limit"])  # no leaked pipe_closed
+
+    def test_symlink_within_store_is_read(self):
+        # A symlink that stays inside store/ is benign and must still be scanned.
+        target = os.path.join(self.store, "target.log")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write("usage limit\n")
+        link = os.path.join(self.store, "alias.log")
+        os.symlink(target, link)
+        probe_logscan.glob.glob = lambda pattern: [link]
+        ex = FakeExecutor({link: "usage limit\n"})
+        out = probe_logscan.collect(ex)
+        self.assertIn(link, ex.reads)
+        self.assertEqual(out["log_errors"], ["usage_limit"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -28,6 +28,7 @@ metacharacter could matter even if the enum changed.
 from __future__ import annotations
 
 import os
+from typing import Optional
 
 from medic.types import HandlerContext, Reply
 
@@ -42,6 +43,31 @@ DEEP_REPULL_SCRIPT = None
 _INSTALL_DIR = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
+
+
+def _resolve_repull_script() -> Optional[str]:
+    """Validate DEEP_REPULL_SCRIPT and return its absolute path, or None if unset
+    or unsafe.
+
+    DEEP_REPULL_SCRIPT is a developer-set constant rather than user input, but this
+    is recovery code that drives a subprocess, so it validates anyway (defence in
+    depth, Chad PR#84 low-finding, card eac0423a): the value MUST be a repo-relative
+    path under scripts/ with no '..' segment, and the resolved absolute path MUST
+    still live under <root>/scripts/. A misconfigured constant can therefore never
+    compose a path-traversal that runs a binary outside the repo's scripts/ dir.
+    """
+    rel = DEEP_REPULL_SCRIPT
+    if not rel:
+        return None
+    if os.path.isabs(rel) or not rel.startswith("scripts/"):
+        return None
+    if ".." in rel.split("/"):
+        return None
+    abs_path = os.path.normpath(os.path.join(_INSTALL_DIR, rel))
+    scripts_root = os.path.join(_INSTALL_DIR, "scripts") + os.sep
+    if not abs_path.startswith(scripts_root):
+        return None
+    return abs_path
 
 
 def _session(arg: str) -> str:
@@ -90,7 +116,17 @@ def handle_restart_telegram(ctx: HandlerContext) -> Reply:
             f"a(z) {session} sessionben."
         )
 
-    script_path = os.path.join(_INSTALL_DIR, DEEP_REPULL_SCRIPT)
+    script_path = _resolve_repull_script()
+    if script_path is None:
+        # Configured but failed the path-safety check (not under scripts/, or a
+        # traversal attempt). Refuse to run it; stop at level 1.
+        return Reply(
+            f"restart-telegram: {level1}. L2 KIHAGYVA: a DEEP_REPULL_SCRIPT "
+            f"({DEEP_REPULL_SCRIPT!r}) nem biztonsagos path (csak scripts/ alatti, "
+            f"'..' nelkuli relativ path engedett). Ha L1 nem elegendo, kezi /mcp "
+            f"a(z) {session} sessionben."
+        )
+
     res = ctx.ex.run([script_path, session])
     level2_ok = res.code == 0
     level2 = (

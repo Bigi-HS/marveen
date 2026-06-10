@@ -153,5 +153,48 @@ class RestartTelegramHandlerTests(unittest.TestCase):
             handlers_telegram.DEEP_REPULL_SCRIPT = original
 
 
+class RepullPathSafetyTests(unittest.TestCase):
+    """Chad PR#84 low-finding (card eac0423a): DEEP_REPULL_SCRIPT must not compose
+    a path that escapes <root>/scripts/. _resolve_repull_script validates it."""
+
+    def _with_script(self, value):
+        original = handlers_telegram.DEEP_REPULL_SCRIPT
+        handlers_telegram.DEEP_REPULL_SCRIPT = value
+        self.addCleanup(setattr, handlers_telegram, "DEEP_REPULL_SCRIPT", original)
+
+    def test_none_resolves_to_none(self):
+        self._with_script(None)
+        self.assertIsNone(handlers_telegram._resolve_repull_script())
+
+    def test_valid_under_scripts_resolves_to_abs_path(self):
+        self._with_script("scripts/agent-mcp-reconnect.sh")
+        got = handlers_telegram._resolve_repull_script()
+        self.assertIsNotNone(got)
+        self.assertTrue(os.path.isabs(got))
+        self.assertTrue(got.endswith("scripts/agent-mcp-reconnect.sh"))
+
+    def test_absolute_path_rejected(self):
+        self._with_script("/etc/cron.d/evil.sh")
+        self.assertIsNone(handlers_telegram._resolve_repull_script())
+
+    def test_traversal_rejected(self):
+        # Even prefixed with scripts/, a '..' segment that climbs out is refused.
+        self._with_script("scripts/../../../etc/passwd")
+        self.assertIsNone(handlers_telegram._resolve_repull_script())
+
+    def test_outside_scripts_prefix_rejected(self):
+        self._with_script("store/secret.sh")
+        self.assertIsNone(handlers_telegram._resolve_repull_script())
+
+    def test_handler_skips_l2_when_path_unsafe(self):
+        # A configured-but-unsafe script must NOT be executed: only the L1
+        # send-keys call fires, and the reply says L2 was skipped.
+        self._with_script("scripts/../outside/evil.sh")
+        ctx, ex = ctx_for("dave")
+        reply = handlers_telegram.handle_restart_telegram(ctx)
+        self.assertEqual(len(ex.calls), 1)  # L1 only; the unsafe L2 never ran
+        self.assertIn("KIHAGYVA", reply.text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
