@@ -16,10 +16,21 @@ set -euo pipefail
 
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MARKER="# genesis-token-expiry-monitor (card 1493e3e8)"
+LOG="${INSTALL_DIR}/store/token-expiry-monitor.log"
 # Daily at 08:30 local. A 21-day warning window makes once-a-day ample.
 SCHEDULE="30 8 * * *"
-CMD="cd ${INSTALL_DIR} && /usr/bin/python3 scripts/token-expiry-monitor.py --once >> ${INSTALL_DIR}/store/token-expiry-monitor.log 2>&1"
+# Quote the paths in the emitted cron line so a space-bearing install dir can't break
+# the `cd` (Chad gate finding, PR #106 -- not an issue on the current deployment, but
+# correct hygiene).
+CMD="cd \"${INSTALL_DIR}\" && /usr/bin/python3 scripts/token-expiry-monitor.py --once >> \"${LOG}\" 2>&1"
 LINE="${SCHEDULE} ${CMD} ${MARKER}"
+
+# Pre-create the log 0600 so cron's `>>` (which opens under the daemon umask) appends
+# to an already-restricted file. The log carries no token value, but 0600 keeps the
+# store/ hygiene uniform.
+mkdir -p "${INSTALL_DIR}/store"
+touch "${LOG}"
+chmod 600 "${LOG}"
 
 current="$(crontab -l 2>/dev/null || true)"
 # Drop any prior copy of our line (match the marker), keep everything else.
