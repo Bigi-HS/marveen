@@ -78,6 +78,7 @@ pgb_json() {
   PGB_NAMES="$(printf '%s\n' "${CHECK_NAMES[@]}")" \
   PGB_STATUSES="$(printf '%s\n' "${CHECK_STATUSES[@]}")" \
   PGB_DETAILS="$(printf '%s\n' "${CHECK_DETAILS[@]}")" \
+  PGB_CROSS_MODEL="$CROSS_MODEL_JSON" \
   python3 - <<'PY'
 import json, os
 names = os.environ["PGB_NAMES"].splitlines()
@@ -92,6 +93,12 @@ out = {
     "checks": checks,
     "diff_additions": int(os.environ["PGB_ADDITIONS"]),
 }
+cm = os.environ.get("PGB_CROSS_MODEL", "")
+if cm:
+    try:
+        out["cross_model"] = json.loads(cm)
+    except Exception:
+        pass
 print(json.dumps(out, indent=2))
 PY
 }
@@ -108,6 +115,10 @@ record() {  # name status detail
   CHECK_STATUSES+=("$2")
   CHECK_DETAILS+=("$3")
 }
+
+# Cross-model advisory (populated by check_cross_model; never changes verdict/exit code)
+CROSS_MODEL_LINES=()   # printed after main checks in text mode
+CROSS_MODEL_JSON=""    # injected into pgb_json output when non-empty
 
 # --------------------------------------------------------------------------- #
 # The four checks                                                              #
@@ -213,6 +224,190 @@ check_static() {
   fi
 }
 
+# Optional cross-model critic (--cross-model flag). Calls a local Ollama model to
+# surface same-model blind spots. Result is ADVISORY ONLY: FLAG lines must be
+# addressed by the gate reviewer in their APPROVE comment, but they never change
+# the PASS/WARN/BLOCK verdict or exit code. Fail-open: any API/parse error emits
+# a WARN line and continues.
+# Policy: store/cross-model-verdict-policy.md (local working doc, gitignored).
+#
+# Config (gitignored store/cross-model.env) is overridable via env vars for tests:
+#   CROSS_MODEL_BASE  -- Ollama base URL  (default http://localhost:11434)
+#   CROSS_MODEL_MODEL -- model tag        (default deepseek-r1:7b)
+check_cross_model() {
+  # Read config: env var > env file > hardcoded default
+  local cm_base="${CROSS_MODEL_BASE:-}"
+  local cm_model="${CROSS_MODEL_MODEL:-}"
+  local env_file="$INSTALL_DIR/store/cross-model.env"
+  if [ -f "$env_file" ]; then
+    local _v
+    [ -z "$cm_base"  ] && { _v="$(grep -E '^CROSS_MODEL_BASE='  "$env_file" 2>/dev/null | head -1 | cut -d= -f2-)"; [ -n "$_v" ] && cm_base="$_v";  }
+    [ -z "$cm_model" ] && { _v="$(grep -E '^CROSS_MODEL_MODEL=' "$env_file" 2>/dev/null | head -1 | cut -d= -f2-)"; [ -n "$_v" ] && cm_model="$_v"; }
+  fi
+  [ -z "$cm_base"  ] && cm_base="http://localhost:11434"
+  [ -z "$cm_model" ] && cm_model="deepseek-r1:7b"
+
+  # Health check (fail-open: Ollama might not be running)
+  if ! curl -sf --max-time 5 "$cm_base/api/tags" >/dev/null 2>&1; then
+    CROSS_MODEL_LINES=("[WARN] cross-model critic unavailable: Ollama not reachable at ${cm_base}; skipping")
+    CROSS_MODEL_JSON='{"status":"unavailable","model":null,"flags":[]}'
+    return 0
+  fi
+
+  # Collect PR context from git (no fleet-internal data -- only diff/title/desc)
+  local diff title desc
+  diff="$(git -C "$INSTALL_DIR" diff "${BASE}...${HEAD}" -- . \
+          ":(exclude)${VITEST_EXCLUDE}" 2>/dev/null | head -c 40000)"
+  title="$(git -C "$INSTALL_DIR" log --format='%s' "${BASE}...${HEAD}" 2>/dev/null | head -1)"
+  desc="$(git -C "$INSTALL_DIR" log --format='%b' "${BASE}...${HEAD}" 2>/dev/null | head -c 3000)"
+  [ -z "$title" ] && title="(no commit message)"
+
+  if [ -z "$diff" ]; then
+    CROSS_MODEL_LINES=("[WARN] cross-model: empty diff; skipping")
+    CROSS_MODEL_JSON='{"status":"skipped","model":null,"flags":[]}'
+    return 0
+  fi
+
+  local prompt_tmpl="$INSTALL_DIR/scripts/cross-model-audit-prompt.txt"
+  if [ ! -f "$prompt_tmpl" ]; then
+    CROSS_MODEL_LINES=("[WARN] cross-model: prompt template missing (scripts/cross-model-audit-prompt.txt); skipping")
+    CROSS_MODEL_JSON='{"status":"unavailable","model":null,"flags":[]}'
+    return 0
+  fi
+
+  # Call Ollama and parse response. Pure Python/urllib -- no external dependencies.
+  # The assembled prompt contains ONLY title/description/diff (no fleet config/tokens).
+  local cm_out cm_rc
+  cm_out="$(CM_BASE="$cm_base" CM_MODEL="$cm_model" \
+    CM_TITLE="$title" CM_DESC="$desc" CM_DIFF="$diff" \
+    CM_PROMPT="$prompt_tmpl" \
+    python3 - <<'PYEOF'
+import json, os, re, sys, urllib.request
+
+base  = os.environ["CM_BASE"]
+model = os.environ["CM_MODEL"]
+diff  = os.environ["CM_DIFF"]
+title = os.environ["CM_TITLE"]
+desc  = os.environ["CM_DESC"]
+
+# Build prompt from template; substitute only the three documented placeholders
+tmpl = open(os.environ["CM_PROMPT"], encoding="utf-8").read()
+prompt = tmpl.replace("{{TITLE}}", title).replace("{{DESCRIPTION}}", desc).replace("{{DIFF}}", diff)
+
+# Runtime guard (AC#10): prompt must not leak fleet-internal config (check outside diff only)
+FORBIDDEN = ("DASHBOARD_TOKEN", "bearer", "agent_id", "vault", "allowFrom")
+prompt_without_diff = prompt.replace(diff, "<<DIFF_REDACTED>>")
+leaks = [k for k in FORBIDDEN if k in prompt_without_diff]
+if leaks:
+    print("PROMPT_LEAK:" + ",".join(leaks), file=sys.stderr); sys.exit(3)
+
+payload = {
+    "model": model,
+    "messages": [{"role": "user", "content": prompt}],
+    "stream": False,
+}
+req = urllib.request.Request(
+    base + "/v1/chat/completions",
+    data=json.dumps(payload).encode(),
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=120) as r:
+        body = r.read().decode()
+except Exception as e:
+    print(f"API_ERROR:{e}", file=sys.stderr); sys.exit(1)
+
+try:
+    resp = json.loads(body)
+    content = resp["choices"][0]["message"]["content"]
+except Exception as e:
+    print(f"PARSE_ERROR:{e}", file=sys.stderr); sys.exit(1)
+
+# Strip deepseek-r1 thinking chain if present, extract JSON from optional code fences
+content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+if m:
+    content = m.group(1)
+
+try:
+    result = json.loads(content)
+except Exception as e:
+    print(f"JSON_ERROR:{e}\nraw:{content[:300]}", file=sys.stderr); sys.exit(1)
+
+required = {"model", "findings", "overall", "overall_rationale"}
+missing = required - result.keys()
+if missing:
+    print(f"SCHEMA_ERROR:missing {missing}", file=sys.stderr); sys.exit(2)
+
+print(json.dumps(result))
+PYEOF
+  )"; cm_rc=$?
+
+  if [ "$cm_rc" -eq 3 ]; then
+    CROSS_MODEL_LINES=("[FLAG] cross-model: prompt leak detected -- internal config keyword in assembled prompt; gate must address this FLAG before merge")
+    CROSS_MODEL_JSON='{"status":"prompt_leak","model":null,"flags":["prompt-leak-detected"]}'
+    return 0
+  elif [ "$cm_rc" -ne 0 ]; then
+    CROSS_MODEL_LINES=("[WARN] cross-model critic unavailable: API/parse error (rc=${cm_rc}); skipping")
+    CROSS_MODEL_JSON='{"status":"unavailable","model":null,"flags":[]}'
+    return 0
+  fi
+
+  # Classify: AGREEMENT / PARTIAL / CONTRADICTORY
+  # AGREEMENT  = no findings at all   (empty list)
+  # PARTIAL    = findings present but none at medium+
+  # CONTRADICTORY = at least one medium/high/critical finding
+  local overall cm_model_id medium_plus any_findings
+  overall="$(printf '%s' "$cm_out" | python3 -c \
+    'import json,sys; print(json.load(sys.stdin).get("overall","pass"))' 2>/dev/null || echo "pass")"
+  cm_model_id="$(printf '%s' "$cm_out" | python3 -c \
+    'import json,sys; print(json.load(sys.stdin).get("model","unknown"))' 2>/dev/null || echo "unknown")"
+  any_findings="$(printf '%s' "$cm_out" | python3 -c \
+    'import json,sys; print(len(json.load(sys.stdin).get("findings",[])))' 2>/dev/null || echo 0)"
+  medium_plus="$(printf '%s' "$cm_out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+sev = ("critical","high","medium")
+for f in d.get("findings", []):
+    if f.get("severity") in sev:
+        print(f["id"] + " (" + f.get("severity","?") + ") -- " + f.get("summary","")[:100])
+' 2>/dev/null || true)"
+
+  local flags=()
+  if [ -z "$medium_plus" ] && [ "${any_findings:-0}" -eq 0 ]; then
+    CROSS_MODEL_LINES=("[cross-model] AGREEMENT: no additional findings (model: ${cm_model_id})")
+    CROSS_MODEL_JSON="$(printf '%s' "$cm_out" | python3 -c \
+      'import json,sys; d=json.load(sys.stdin); print(json.dumps({"status":"agreement","model":d.get("model"),"flags":[]}))' 2>/dev/null \
+      || echo '{"status":"agreement","model":null,"flags":[]}')"
+  elif [ -z "$medium_plus" ]; then
+    local low_count="${any_findings:-0}"
+    CROSS_MODEL_LINES=("[cross-model] PARTIAL: ${low_count} low/info finding(s) noted (no FLAG required; see detail)")
+    CROSS_MODEL_JSON="$(printf '%s' "$cm_out" | python3 -c \
+      'import json,sys; d=json.load(sys.stdin)
+lf=[f for f in d.get("findings",[]) if f.get("severity") in ("low","info")]
+print(json.dumps({"status":"partial","model":d.get("model"),"flags":[],"low_findings":[f.get("id") for f in lf]}))' 2>/dev/null \
+      || echo '{"status":"partial","model":null,"flags":[]}')"
+  else
+    # CONTRADICTORY -- emit a [FLAG] line per medium+ finding
+    while IFS= read -r fline; do
+      [ -n "$fline" ] || continue
+      CROSS_MODEL_LINES+=("[FLAG] cross-model raised: ${fline}")
+      flags+=("$fline")
+    done <<< "$medium_plus"
+    local flags_json
+    flags_json="$(printf '%s\n' "${flags[@]}" | python3 -c \
+      'import json,sys; print(json.dumps([l for l in sys.stdin.read().splitlines() if l]))' 2>/dev/null \
+      || echo '[]')"
+    CROSS_MODEL_JSON="$(CM_OUT="$cm_out" CM_FLAGS="$flags_json" python3 -c '
+import json, os
+d = json.loads(os.environ["CM_OUT"])
+flags = json.loads(os.environ["CM_FLAGS"])
+print(json.dumps({"status":"contradictory","model":d.get("model"),"flags":flags}))
+' 2>/dev/null || echo "{\"status\":\"contradictory\",\"model\":null,\"flags\":${flags_json}}")"
+  fi
+}
+
 # --------------------------------------------------------------------------- #
 # Notify (inter-agent message; never affects the verdict/exit code)            #
 # --------------------------------------------------------------------------- #
@@ -245,20 +440,21 @@ print(json.dumps({
 # main                                                                         #
 # --------------------------------------------------------------------------- #
 usage() {
-  echo "usage: pre-gate-bundle.sh <base-branch> <head-sha> [--json] [--notify[=agent]]" >&2
+  echo "usage: pre-gate-bundle.sh <base-branch> <head-sha> [--json] [--notify[=agent]] [--cross-model]" >&2
   exit 64
 }
 
 main() {
-  local json=0 notify="" base="" head=""
+  local json=0 notify="" base="" head="" cross_model=0
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --json)        json=1 ;;
-      --notify)      notify="marveen" ;;
-      --notify=*)    notify="${arg#--notify=}" ;;
-      -h|--help)     usage ;;
-      --*)           echo "unknown flag: $arg" >&2; usage ;;
+      --json)          json=1 ;;
+      --notify)        notify="marveen" ;;
+      --notify=*)      notify="${arg#--notify=}" ;;
+      --cross-model)   cross_model=1 ;;
+      -h|--help)       usage ;;
+      --*)             echo "unknown flag: $arg" >&2; usage ;;
       *)
         if [ -z "$base" ]; then base="$arg"
         elif [ -z "$head" ]; then head="$arg"
@@ -274,6 +470,7 @@ main() {
   check_tests
   check_diff_size
   check_static
+  [ "$cross_model" -eq 1 ] && check_cross_model
 
   local verdict; verdict="$(pgb_verdict "${CHECK_STATUSES[@]}")"
   local summary
@@ -290,6 +487,9 @@ print(", ".join("%s:%s" % (n, s) for n, s in zip(names, st)))
     local i
     for i in "${!CHECK_NAMES[@]}"; do
       printf '  [%-5s] %-10s %s\n' "${CHECK_STATUSES[$i]}" "${CHECK_NAMES[$i]}" "${CHECK_DETAILS[$i]}"
+    done
+    for line in "${CROSS_MODEL_LINES[@]}"; do
+      echo "  ${line}"
     done
     echo "  verdict: ${verdict}"
   fi
