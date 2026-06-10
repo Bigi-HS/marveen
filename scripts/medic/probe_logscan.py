@@ -27,7 +27,8 @@ from medic.types import Executor
 # This module lives at <repo>/scripts/medic/probe_logscan.py; the logs are under
 # <repo>/store/*.log. Derive the repo root the same way bot.py's INSTALL_DIR does.
 _INSTALL_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-STORE_GLOB = os.path.join(_INSTALL_DIR, "store", "*.log")
+STORE_DIR = os.path.join(_INSTALL_DIR, "store")
+STORE_GLOB = os.path.join(STORE_DIR, "*.log")
 
 # Bounds: never read more than this many bytes from the end of a log, and never
 # scan more than this many log files -- a runaway log must not block triage.
@@ -102,7 +103,17 @@ def collect(ex: Executor) -> dict:
     except OSError:
         return {"log_errors": []}
 
+    store_root = os.path.realpath(STORE_DIR)
     for path in paths[:MAX_LOGS]:
+        # glob.glob follows symlinks, so a symlinked *.log under store/ could point
+        # at content OUTSIDE store/ and leak it through this read-only probe. Drop
+        # any symlink whose real target escapes store/ (a real, non-symlink log
+        # matched by store/*.log is inherently inside store/, so this never excludes
+        # a legitimate log). Chad PR#84 low-finding (card eac0423a).
+        if os.path.islink(path):
+            real = os.path.realpath(path)
+            if real != store_root and not real.startswith(store_root + os.sep):
+                continue
         content = ex.read_text(path)
         if not content:
             continue
