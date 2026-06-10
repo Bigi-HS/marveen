@@ -36,7 +36,7 @@
 | developer-senior | Full codebase read/write, PR open+merge-gate, security-flag authority | dave, thor, chad, claudia, forge, hibiki |
 | merge-gate | PR approval required to merge to develop/main | dave, thor |
 | security-gate | Required reviewers for security/credential PRs | thor, dave, chad |
-| developer-junior | Read + limited write, no merge-gate authority | applegate, gauge, bigben, buster |
+| developer-junior | Read + limited write, no merge-gate authority | applegate, gauge, bigben |
 | researcher | External search/fetch, read codebase, no direct code write | scout, quill, radar |
 | standard | Monitor/check only, minimal write (kanban/memory) | heartbeat, buster |
 
