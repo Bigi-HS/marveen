@@ -48,6 +48,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/guardrail-ask-first.py",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }

@@ -23,6 +23,10 @@ const MEMORY_HOOK_MARKER = 'memory-replay.py'
 // by the all-or-nothing seed forever).
 const GUARDRAIL_HOOK_MARKER = 'guardrail-telegram-chat.py'
 
+// And the PreToolUse ask-first approval gate (item 2b, "ask first" bucket):
+// gates irreversible/external-effect MCP tools behind the confirm-channel.
+const ASK_FIRST_HOOK_MARKER = 'guardrail-ask-first.py'
+
 type HookCommand = { type?: string; command?: string; prompt?: string }
 type HookEntry = { matcher?: string; hooks?: HookCommand[] }
 type HooksBlock = Record<string, HookEntry[]>
@@ -61,6 +65,18 @@ export function ensureGuardrailHook(target: HooksBlock, template: HooksBlock): b
   return true
 }
 
+// Targeted idempotent merge of the PreToolUse ask-first approval gate, mirroring
+// ensureGuardrailHook. ADD-only, drift-proof: backfilled into every existing
+// agent at the next boot, never removing or rewriting an agent's own hooks.
+export function ensureAskFirstHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.PreToolUse ?? []).filter(e => entryReferences(e, ASK_FIRST_HOOK_MARKER))
+  if (entries.length === 0) return false  // template has no ask-first hook -> nothing to merge
+  const existing = target.PreToolUse ?? []
+  if (existing.some(e => entryReferences(e, ASK_FIRST_HOOK_MARKER))) return false  // already present
+  target.PreToolUse = [...existing, ...entries]
+  return true
+}
+
 // Idempotent migration: every agent's settings.json should carry the shared
 // hooks (PreCompact memory-save/skill-reflection + the SessionStart taskstate
 // and memory auto-inject replays). Two cases:
@@ -95,7 +111,8 @@ export function ensureAgentHooks(name: string): boolean {
     // auto-inject (SessionStart) and the Telegram guardrail (PreToolUse).
     const memChanged = ensureMemoryHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const guardChanged = ensureGuardrailHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
-    changed = memChanged || guardChanged
+    const askFirstChanged = ensureAskFirstHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    changed = memChanged || guardChanged || askFirstChanged
   }
   if (!changed) return false
   mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
