@@ -499,8 +499,16 @@ function createCardEl(card) {
   // Display the persona displayName (falling back to the id) per #216, while
   // keeping the robust match above and the raw-name fallback chip below.
   const assigneeLabel = assignee ? (assignee.displayName || assignee.name) : ''
+  // Render the real agent avatar in the chip when one exists; fall back to the
+  // letter dot otherwise (avatarUrl is backend-built + URL-encoded, hasImage
+  // guards against the per-agent avatar endpoint's 404-on-missing). #6de93bd6.
+  const assigneeDot = assignee && assignee.hasImage && assignee.avatarUrl
+    ? `<span class="assignee-dot ${assignee.type} has-img"><img src="${assignee.avatarUrl}" alt="${escapeHtml(assigneeLabel)}" loading="lazy"></span>`
+    : assignee
+      ? `<span class="assignee-dot ${assignee.type}">${escapeHtml(assigneeLabel[0] || '')}</span>`
+      : ''
   const assigneeHtml = assignee
-    ? `<span class="kanban-card-assignee"><span class="assignee-dot ${assignee.type}">${escapeHtml(assigneeLabel[0])}</span>${escapeHtml(assigneeLabel)}</span>`
+    ? `<span class="kanban-card-assignee">${assigneeDot}${escapeHtml(assigneeLabel)}</span>`
     : rawAssignee
       ? `<span class="kanban-card-assignee"><span class="assignee-dot unknown">${escapeHtml(rawAssignee[0])}</span>${escapeHtml(rawAssignee)}</span>`
       : ''

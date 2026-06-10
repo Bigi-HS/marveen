@@ -7,7 +7,7 @@ import {
   createAgentMessage, markKanbanCardDispatched,
 } from '../../db.js'
 import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID } from '../../config.js'
-import { listAgentNames, readAgentDisplayName } from '../agent-config.js'
+import { listAgentNames, readAgentDisplayName, findAvatarForAgent } from '../agent-config.js'
 import { isAgentRunning } from '../agent-process.js'
 import { resolveKanbanDispatchTarget } from '../../kanban-dispatch.js'
 import { generateBreakdown } from '../llm-breakdown.js'
@@ -41,6 +41,50 @@ function fireKanbanDispatch(id: string): void {
   }
 }
 
+export interface AssigneeEntry {
+  name: string
+  type: 'owner' | 'bot' | 'agent'
+  displayName?: string
+  /** True when the chip should render an avatar image instead of a letter dot. */
+  hasImage?: boolean
+  /** Avatar endpoint to use when hasImage is true. */
+  avatarUrl?: string
+}
+
+/**
+ * Build the kanban assignee list with per-entry avatar metadata. Pure +
+ * dependency-injected so the avatar-flag wiring is unit-testable without the real
+ * agents/ filesystem (mirrors the buildAgentConfigDir DI pattern). The card chip
+ * (web/app.js) renders an <img> when hasImage is set, else the letter dot.
+ *
+ * - owner: the human owner has no avatar endpoint -> letter dot (no hasImage).
+ * - bot: the orchestrator's avatar endpoint always serves an image (its own or a
+ *   built-in fallback), so its chip can always render an image.
+ * - agents: hasImage iff an avatar file exists; avatarUrl points at the
+ *   per-agent avatar endpoint (404s when no file, hence the hasImage guard).
+ */
+export function buildAssigneeList(opts: {
+  ownerName: string
+  botName: string
+  botAvatarUrl: string
+  agentNames: string[]
+  agentDisplayName: (name: string) => string | null
+  agentHasAvatar: (name: string) => boolean
+}): AssigneeEntry[] {
+  const agents: AssigneeEntry[] = opts.agentNames.map((name) => ({
+    name,
+    type: 'agent',
+    displayName: opts.agentDisplayName(name) || name,
+    hasImage: opts.agentHasAvatar(name),
+    avatarUrl: `/api/agents/${encodeURIComponent(name)}/avatar`,
+  }))
+  return [
+    { name: opts.ownerName, type: 'owner' },
+    { name: opts.botName, type: 'bot', hasImage: true, avatarUrl: opts.botAvatarUrl },
+    ...agents,
+  ]
+}
+
 export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method } = ctx
 
@@ -60,12 +104,16 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   }
 
   if (path === '/api/kanban/assignees' && method === 'GET') {
-    const agents = listAgentNames().map((name) => ({ name, type: 'agent', displayName: readAgentDisplayName(name) || name }))
-    json(res, [
-      { name: OWNER_NAME, type: 'owner' },
-      { name: BOT_NAME, type: 'bot' },
-      ...agents,
-    ])
+    json(res, buildAssigneeList({
+      ownerName: OWNER_NAME,
+      botName: BOT_NAME,
+      // The orchestrator avatar is served at this fixed route (see marveen.ts),
+      // which the frontend already uses for the bot/orchestrator everywhere.
+      botAvatarUrl: '/api/marveen/avatar',
+      agentNames: listAgentNames(),
+      agentDisplayName: readAgentDisplayName,
+      agentHasAvatar: (name) => findAvatarForAgent(name) !== null,
+    }))
     return true
   }
 

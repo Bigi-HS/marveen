@@ -692,6 +692,9 @@ main {
 .assignee-dot.bot { background: var(--info); }
 .assignee-dot.agent { background: var(--success); }
 .assignee-dot.unknown { background: var(--text-muted); }
+/* Avatar-image variant: drop the color fill, let the rounded image fill the dot. */
+.assignee-dot.has-img { background: none; overflow: hidden; }
+.assignee-dot.has-img img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block; }
 
 .kanban-card-due {
   font-size: 10px;
