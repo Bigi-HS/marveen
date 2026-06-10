@@ -1,7 +1,7 @@
 {
   "id": "developer-senior",
   "label": "Fejlesztő (senior, bizalmi)",
-  "description": "Bizalmi profil: permissive módban fut, minden parancs engedélyezve, kivéve a deny-listát (sudo, SSH/AWS/GnuPG kulcsok olvasása, force-push, rm -rf $HOME). Csak olyan ágensnek add, amit ugyanannyira megbízol mint magadat. Nem sandbox. Sandboxolt profilért lásd developer-junior.",
+  "description": "Bizalmi profil: permissive módban fut, minden parancs engedélyezve, kivéve a deny-listát (sudo, SSH/AWS/GnuPG kulcsok olvasása, force-push, main-push, rm -rf $HOME, pkill, access.json hamisítás). Csak olyan ágensnek add, amit ugyanannyira megbízol mint magadat. Nem sandbox. Sandboxolt profilért lásd developer-junior.",
   "permissionMode": "permissive",
   "filesystem": {
     "allow": [],
@@ -13,7 +13,12 @@
       "Bash(rm -rf ${HOME}:*)",
       "Bash(rm -rf /:*)",
       "Bash(git push --force:*)",
-      "Bash(git push -f:*)"
+      "Bash(git push -f:*)",
+      "Bash(git push origin main:*)",
+      "Bash(git push origin master:*)",
+      "Bash(pkill:*)",
+      "Write(**/access.json)",
+      "Edit(**/access.json)"
     ]
   }
 }

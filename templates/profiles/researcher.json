@@ -1,7 +1,7 @@
 {
   "id": "researcher",
   "label": "Kutató",
-  "description": "Piackutatás, versenytárs-elemzés, webes források olvasása. Prompt injection szempontból ugyanúgy kiemelt mint a marketinges. Draft-only: riportot ír a mappájába, nem küld magától kifelé.",
+  "description": "Piackutatás, versenytárs-elemzés, webes források olvasása. Prompt injection szempontból ugyanúgy kiemelt mint a marketinges. Draft-only: riportot ír a mappájába, nem küld magától kifelé. pkill és access.json hamisítás tiltva.",
   "permissionMode": "strict",
   "filesystem": {
     "allow": [
@@ -23,7 +23,10 @@
       "Bash(sudo:*)",
       "Bash(rm:*)",
       "Bash(curl -X POST:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(pkill:*)",
+      "Write(**/access.json)",
+      "Edit(**/access.json)"
     ]
   }
 }

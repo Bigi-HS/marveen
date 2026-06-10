@@ -1,10 +1,14 @@
 {
   "id": "default",
   "label": "Alapértelmezett (kompatibilitási)",
-  "description": "Régi, skip-permission módú ágensekhez. Új ágenshez inkább válassz szerep-specifikus profilt.",
+  "description": "Régi, skip-permission módú ágensekhez. Új ágenshez inkább válassz szerep-specifikus profilt. A deny-lista a fleet-kritikus visszafordíthatatlan műveleteket tiltja (pkill = session-gyilkos, Telegram access.json hamisítás) még permissive módban is.",
   "permissionMode": "permissive",
   "filesystem": {
     "allow": [],
-    "deny": []
+    "deny": [
+      "Bash(pkill:*)",
+      "Write(**/access.json)",
+      "Edit(**/access.json)"
+    ]
   }
 }
