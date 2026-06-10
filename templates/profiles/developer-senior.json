@@ -17,6 +17,7 @@
       "Bash(git push origin main:*)",
       "Bash(git push origin master:*)",
       "Bash(pkill:*)",
+      "Bash(killall:*)",
       "Write(**/access.json)",
       "Edit(**/access.json)"
     ]

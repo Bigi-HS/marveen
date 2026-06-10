@@ -20,11 +20,17 @@ const profiles: Profile[] = readdirSync(PROFILES_DIR)
   .map((f) => JSON.parse(readFileSync(join(PROFILES_DIR, f), 'utf-8')) as Profile)
 
 // Denials that EVERY profile must carry, regardless of role:
-//  - pkill: kills fleet tmux sessions; the fleet rule is PID/session-scoped
-//    kills only (`kill <pid>` stays allowed -- only pkill is denied).
+//  - pkill / killall: name-matching process kills can take down fleet tmux
+//    sessions; the fleet rule is PID/session-scoped kills only (`kill <pid>`
+//    stays allowed -- only the name-matching variants are denied).
 //  - access.json write/edit: Telegram allowlist tampering must never happen
 //    programmatically (the /telegram:access skill is the only sanctioned path).
-const UNIVERSAL_DENY = ['Bash(pkill:*)', 'Write(**/access.json)', 'Edit(**/access.json)']
+const UNIVERSAL_DENY = [
+  'Bash(pkill:*)',
+  'Bash(killall:*)',
+  'Write(**/access.json)',
+  'Edit(**/access.json)',
+]
 
 describe('profile permissions.deny -- fleet-critical floor (item 2a)', () => {
   it('finds the committed profiles', () => {
