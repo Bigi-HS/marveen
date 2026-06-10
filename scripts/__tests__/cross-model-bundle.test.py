@@ -381,6 +381,30 @@ class PromptContentTests(unittest.TestCase):
             "cross_model key must be absent when --cross-model flag not passed")
 
 
+class PromptLeakTests(unittest.TestCase):
+    """LOW-1: PROMPT_LEAK (sys.exit 3) emits [FLAG], not a generic [WARN]."""
+
+    def test_prompt_leak_emits_flag_not_warn(self):
+        """When the PR title contains a forbidden fleet-internal keyword, the guard
+        fires before the API call and emits [FLAG] (advisory, exit 0)."""
+        server, port = _start_mock_server()
+        _MockOllamaHandler.RESPONSE = _AGREEMENT
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                # Title contains "DASHBOARD_TOKEN" -- triggers the prompt leak guard
+                _make_git_stub(d, title="chore: expose DASHBOARD_TOKEN in log")
+                _make_npx_stub(d)
+                r = _run_bundle(d, port)
+            self.assertEqual(r.returncode, 0, "prompt-leak FLAG must be advisory (exit 0)")
+            self.assertIn("[FLAG]", r.stdout)
+            self.assertIn("prompt leak", r.stdout.lower())
+            # Must NOT be a plain WARN (the old, silent path)
+            combined = r.stdout + r.stderr
+            self.assertNotIn("API/parse error", combined)
+        finally:
+            server.shutdown()
+
+
 class ThinkTagStripTests(unittest.TestCase):
     """Deepseek-r1 wraps its reasoning in <think>...</think>; strip before parsing."""
 

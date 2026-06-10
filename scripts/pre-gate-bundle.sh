@@ -228,7 +228,8 @@ check_static() {
 # surface same-model blind spots. Result is ADVISORY ONLY: FLAG lines must be
 # addressed by the gate reviewer in their APPROVE comment, but they never change
 # the PASS/WARN/BLOCK verdict or exit code. Fail-open: any API/parse error emits
-# a WARN line and continues. Policy: store/cross-model-verdict-policy.md.
+# a WARN line and continues.
+# Policy: store/cross-model-verdict-policy.md (local working doc, gitignored).
 #
 # Config (gitignored store/cross-model.env) is overridable via env vars for tests:
 #   CROSS_MODEL_BASE  -- Ollama base URL  (default http://localhost:11434)
@@ -293,11 +294,8 @@ desc  = os.environ["CM_DESC"]
 tmpl = open(os.environ["CM_PROMPT"], encoding="utf-8").read()
 prompt = tmpl.replace("{{TITLE}}", title).replace("{{DESCRIPTION}}", desc).replace("{{DIFF}}", diff)
 
-# Runtime guard (AC#10): prompt must not leak fleet-internal config
+# Runtime guard (AC#10): prompt must not leak fleet-internal config (check outside diff only)
 FORBIDDEN = ("DASHBOARD_TOKEN", "bearer", "agent_id", "vault", "allowFrom")
-leaks = [k for k in FORBIDDEN if k in prompt and k not in ("{{TITLE}}", "{{DESCRIPTION}}", "{{DIFF}}")]
-# Only flag if the forbidden term appears OUTSIDE the diff itself
-diff_region = prompt[prompt.find(diff):] if diff in prompt else ""
 prompt_without_diff = prompt.replace(diff, "<<DIFF_REDACTED>>")
 leaks = [k for k in FORBIDDEN if k in prompt_without_diff]
 if leaks:
@@ -346,7 +344,11 @@ print(json.dumps(result))
 PYEOF
   )"; cm_rc=$?
 
-  if [ "$cm_rc" -ne 0 ]; then
+  if [ "$cm_rc" -eq 3 ]; then
+    CROSS_MODEL_LINES=("[FLAG] cross-model: prompt leak detected -- internal config keyword in assembled prompt; gate must address this FLAG before merge")
+    CROSS_MODEL_JSON='{"status":"prompt_leak","model":null,"flags":["prompt-leak-detected"]}'
+    return 0
+  elif [ "$cm_rc" -ne 0 ]; then
     CROSS_MODEL_LINES=("[WARN] cross-model critic unavailable: API/parse error (rc=${cm_rc}); skipping")
     CROSS_MODEL_JSON='{"status":"unavailable","model":null,"flags":[]}'
     return 0
@@ -395,9 +397,14 @@ print(json.dumps({"status":"partial","model":d.get("model"),"flags":[],"low_find
     done <<< "$medium_plus"
     local flags_json
     flags_json="$(printf '%s\n' "${flags[@]}" | python3 -c \
-      'import json,sys; print(json.dumps(sys.stdin.read().splitlines()))' 2>/dev/null \
+      'import json,sys; print(json.dumps([l for l in sys.stdin.read().splitlines() if l]))' 2>/dev/null \
       || echo '[]')"
-    CROSS_MODEL_JSON="{\"status\":\"contradictory\",\"model\":\"${cm_model_id}\",\"flags\":${flags_json}}"
+    CROSS_MODEL_JSON="$(CM_OUT="$cm_out" CM_FLAGS="$flags_json" python3 -c '
+import json, os
+d = json.loads(os.environ["CM_OUT"])
+flags = json.loads(os.environ["CM_FLAGS"])
+print(json.dumps({"status":"contradictory","model":d.get("model"),"flags":flags}))
+' 2>/dev/null || echo "{\"status\":\"contradictory\",\"model\":null,\"flags\":${flags_json}}")"
   fi
 }
 
