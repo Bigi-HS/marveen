@@ -274,6 +274,24 @@ ensure_token_outage_watch() {
   fi
 }
 
+# Medic break-glass operator bot watchdog (scripts/medic-watchdog.sh, card fc252db2).
+# Medic is the token-free, model-free Telegram recovery bot (pure-Python stdlib, like
+# hibiki-daily-push) -- it must be ALWAYS-ON so the Boss can command the fleet back up
+# even when the OAuth token is dead. Reboot-persistent like the pipe watchdog: pgrep-skip
+# keeps a running watchdog, otherwise relaunch. The pattern matches only the .sh daemon,
+# not the python "scripts/medic/bot.py" process (which the watchdog itself owns), so there
+# is exactly one match -- no double-launch. 9>&- so it never inherits the supervisor flock
+# fd. 2026-06-10.
+ensure_medic_watchdog() {
+  pgrep -f "scripts/medic-watchdog.sh" >/dev/null 2>&1 && return 0
+  if [ -x "$INSTALL_DIR/scripts/medic-watchdog.sh" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start medic-watchdog.sh"; return 0; fi
+    nohup bash "$INSTALL_DIR/scripts/medic-watchdog.sh" >> "$STORE/medic-watchdog.log" 2>&1 9>&- &
+    disown 2>/dev/null || true
+    log "medic-watchdog: started"
+  fi
+}
+
 # Hibiki token-free daily push (spec B-AC2). WSL has no systemd, so a real cron
 # daemon needs `sudo service cron start` after every boot -- too fragile for a
 # token-free guarantee. The supervisor is already always-on (started reboot-safe
@@ -426,6 +444,8 @@ tick() {
   ensure_token_outage_watch
   # 7) HIBIKI TOKEN-FREE DAILY PUSH (throttled; reboot-safe replacement for WSL cron)
   ensure_hibiki_push
+  # 8) MEDIC BREAK-GLASS OPERATOR BOT (token-free recovery bot -- always-on, reboot-persistent)
+  ensure_medic_watchdog
 }
 
 # --- main ------------------------------------------------------------------
