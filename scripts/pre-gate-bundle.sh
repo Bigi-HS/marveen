@@ -408,6 +408,27 @@ print(json.dumps({"status":"contradictory","model":d.get("model"),"flags":flags}
   fi
 }
 
+# Optional skill regression check (--skill-check flag). Runs scripts/skill-regression.sh
+# against the live ~/.claude/skills/ path and adds SKILL_CHECK section to the bundle.
+# Advisory: result is included in the evidence but does NOT change PASS/WARN/BLOCK verdict
+# (skill regressions are separate from PR code quality). Fail-open: missing script = WARN.
+check_skill_regression() {
+  local script="$INSTALL_DIR/scripts/skill-regression.sh"
+  if [ ! -x "$script" ]; then
+    record skill-check WARN "skill-regression.sh not found or not executable; skipping"
+    return 0
+  fi
+  local sr_out sr_rc
+  sr_out="$(bash "$script" 2>&1)"; sr_rc=$?
+  local last_line; last_line="$(printf '%s\n' "$sr_out" | grep '^SKILL-REGRESSION:' | tail -1)"
+  [ -z "$last_line" ] && last_line="SKILL-REGRESSION: (no output)"
+  case "$sr_rc" in
+    0) record skill-check PASS "$last_line" ;;
+    2) record skill-check WARN "$last_line" ;;
+    *) record skill-check WARN "SKILL-REGRESSION returned rc=$sr_rc -- $last_line" ;;
+  esac
+}
+
 # --------------------------------------------------------------------------- #
 # Notify (inter-agent message; never affects the verdict/exit code)            #
 # --------------------------------------------------------------------------- #
@@ -440,12 +461,12 @@ print(json.dumps({
 # main                                                                         #
 # --------------------------------------------------------------------------- #
 usage() {
-  echo "usage: pre-gate-bundle.sh <base-branch> <head-sha> [--json] [--notify[=agent]] [--cross-model]" >&2
+  echo "usage: pre-gate-bundle.sh <base-branch> <head-sha> [--json] [--notify[=agent]] [--cross-model] [--skill-check]" >&2
   exit 64
 }
 
 main() {
-  local json=0 notify="" base="" head="" cross_model=0
+  local json=0 notify="" base="" head="" cross_model=0 skill_check=0
   local arg
   for arg in "$@"; do
     case "$arg" in
@@ -453,6 +474,7 @@ main() {
       --notify)        notify="marveen" ;;
       --notify=*)      notify="${arg#--notify=}" ;;
       --cross-model)   cross_model=1 ;;
+      --skill-check)   skill_check=1 ;;
       -h|--help)       usage ;;
       --*)             echo "unknown flag: $arg" >&2; usage ;;
       *)
@@ -471,6 +493,7 @@ main() {
   check_diff_size
   check_static
   [ "$cross_model" -eq 1 ] && check_cross_model
+  [ "$skill_check" -eq 1 ] && check_skill_regression
 
   local verdict; verdict="$(pgb_verdict "${CHECK_STATUSES[@]}")"
   local summary
