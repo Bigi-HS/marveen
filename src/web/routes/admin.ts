@@ -1,4 +1,4 @@
-import { rotateDashboardToken } from '../dashboard-auth.js'
+import { rotateDashboardToken, rotateSessionSecret } from '../dashboard-auth.js'
 import { logger } from '../../logger.js'
 import { json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
@@ -21,6 +21,22 @@ export async function tryHandleAdmin(ctx: RouteContext): Promise<boolean> {
     const fresh = rotateDashboardToken()
     logger.warn('Dashboard token rotated via admin API')
     json(res, { ok: true, token: fresh })
+    return true
+  }
+
+  // Log EVERY active session out in one call. Rotates the server-side session
+  // signing secret, which immediately fails the signature check on every cookie
+  // that was issued under the old secret -- the clean, one-click equivalent of
+  // the old manual "rm store/.dashboard-session-secret + restart" recovery.
+  // Sessions now have a 1-year TTL (PR #114), so this is the only fast way to
+  // mass-revoke (e.g. a leaked-cookie incident). The operator who calls this
+  // (themselves authenticated by the current bearer token) keeps API access; only
+  // browser SESSION cookies are invalidated, so the next UI request re-prompts
+  // for the token. No token is returned -- nothing secret to surface.
+  if (path === '/api/admin/logout-all' && method === 'POST') {
+    rotateSessionSecret()
+    logger.warn('All dashboard sessions revoked via admin API (session secret rotated)')
+    json(res, { ok: true })
     return true
   }
 
