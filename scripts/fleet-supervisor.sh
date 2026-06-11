@@ -330,6 +330,19 @@ ensure_local_agent_watchdogs() {
   done
 }
 
+# Tailnet-only dashboard reboot-persistence (card c2de413f). WSL has no systemd, so
+# neither tailscaled nor the `tailscale serve` config survives a reboot; the always-on
+# supervisor brings both back. Gated by store/tailscale-serve.enabled (inert until
+# Genesis-GO), and the hook NEVER performs an interactive login -- the one-time
+# `tailscale up` is the operator's. All logic + tests live in ensure-tailscaled.sh.
+tailscale_serve_enabled() { [ -f "$STORE/tailscale-serve.enabled" ]; }
+ensure_tailscaled() {
+  tailscale_serve_enabled || return 0
+  if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: run ensure-tailscaled.sh"; return 0; fi
+  [ -x "$INSTALL_DIR/scripts/ensure-tailscaled.sh" ] || return 0
+  bash "$INSTALL_DIR/scripts/ensure-tailscaled.sh" >> "$STORE/tailscaled.log" 2>&1 || true
+}
+
 # Hibiki token-free daily push (spec B-AC2). WSL has no systemd, so a real cron
 # daemon needs `sudo service cron start` after every boot -- too fragile for a
 # token-free guarantee. The supervisor is already always-on (started reboot-safe
@@ -487,6 +500,8 @@ tick() {
   # 9) LOCAL-OLLAMA HYBRID AGENTS (marveen-local/claudia-local -- gated by store/ollama-hybrid.enabled)
   ensure_ollama
   ensure_local_agent_watchdogs
+  # 10) TAILNET-ONLY DASHBOARD REMOTE ACCESS (tailscaled + serve config reboot-persistence -- gated by store/tailscale-serve.enabled)
+  ensure_tailscaled
 }
 
 # --- main ------------------------------------------------------------------
