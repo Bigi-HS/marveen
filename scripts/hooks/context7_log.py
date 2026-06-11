@@ -69,11 +69,18 @@ def extract_entry(payload, now):
 
 def _append(entry, log_path):
     """Append one JSONL line. Best-effort: a write failure is swallowed so the
-    tool call is never blocked by a logging problem."""
+    tool call is never blocked by a logging problem. A freshly created log is
+    chmod'd to 0600 to match the store/ convention (owner-only)."""
     try:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        is_new = not os.path.exists(log_path)
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        if is_new:
+            try:
+                os.chmod(log_path, 0o600)
+            except Exception:
+                pass
     except Exception:
         pass
 

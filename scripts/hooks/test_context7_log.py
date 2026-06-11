@@ -128,6 +128,11 @@ class HookSubprocessTests(unittest.TestCase):
             self.assertEqual(rc, 0)
         self.assertEqual(_read_lines(self.log), [])
 
+    def test_created_log_is_owner_only_0600(self):
+        _run({"tool_name": "mcp__context7__resolve-library-id",
+              "tool_input": {"libraryName": "react"}}, self.log)
+        self.assertEqual(os.stat(self.log).st_mode & 0o777, 0o600)
+
     def test_appends_across_calls(self):
         _run({"tool_name": "mcp__context7__resolve-library-id",
               "tool_input": {"libraryName": "a"}}, self.log)
