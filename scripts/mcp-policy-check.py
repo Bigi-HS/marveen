@@ -51,6 +51,10 @@ _EXIT = {PASS: 0, CONDITIONAL: 1, BLOCK: 2}
 
 _TRUST_LEVELS = ("trusted", "community", "unknown")
 
+# Privileged agent contexts whose prompts must never ingest attacker-controllable
+# external content: a prompt-injection sink here can pivot the whole fleet.
+BANNED_CONTEXTS = {"chad", "claudia", "marveen", "applegate"}
+
 
 def _as_bool(value):
     """Coerce JSON-ish truthy values to bool, conservatively."""
@@ -69,11 +73,19 @@ def _normalize(attrs):
     if trust not in _TRUST_LEVELS:
         trust = "unknown"
     requested_by = attrs.get("requested_by")
+    external_egress = _as_bool(attrs.get("external_egress", False))
+    # Q2 of the policy: does the server inject external content into the model's
+    # prompt? If not stated, assume it can whenever it egresses off-box
+    # (conservative -- an egressing server usually returns content we then read).
+    injects_into_prompt = _as_bool(
+        attrs.get("injects_into_prompt", external_egress)
+    )
     return {
         "maintainer_trust": trust,
         "has_pretooluse_hook": _as_bool(attrs.get("has_pretooluse_hook", False)),
         "reads_secrets": _as_bool(attrs.get("reads_secrets", False)),
-        "external_egress": _as_bool(attrs.get("external_egress", False)),
+        "external_egress": external_egress,
+        "injects_into_prompt": injects_into_prompt,
         "requested_by": str(requested_by).strip() if requested_by else "",
     }
 
@@ -115,6 +127,15 @@ def evaluate(name, attrs):
             "(supply-chain + data-egress risk)"
         )
 
+    # A prompt-injection sink wired into a privileged agent context is a
+    # fleet-pivot risk; hard stop regardless of trust/hook.
+    if a["injects_into_prompt"] and a["requested_by"].lower() in BANNED_CONTEXTS:
+        downgrade(BLOCK)
+        reasons.append(
+            "injects external content into a privileged context "
+            f"'{a['requested_by']}' (banned: {sorted(BANNED_CONTEXTS)})"
+        )
+
     # --- CONDITIONAL rules (proceed only with conditions) -------------
     # Hook-first precondition: no PreToolUse hook means no observability,
     # so it can never auto-PASS.
@@ -131,6 +152,15 @@ def evaluate(name, attrs):
         )
         conditions.append(
             "scope credentials to least-privilege + log all egress destinations"
+        )
+
+    if a["injects_into_prompt"]:
+        downgrade(CONDITIONAL)
+        reasons.append(
+            "injects external content into the prompt (injection surface)"
+        )
+        conditions.append(
+            "restrict to a named agent scope + mandatory PreToolUse hook"
         )
 
     if a["maintainer_trust"] == "community" and not a["external_egress"]:

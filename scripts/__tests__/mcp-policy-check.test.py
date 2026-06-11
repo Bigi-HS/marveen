@@ -98,7 +98,9 @@ class EvaluateConditionalTests(unittest.TestCase):
 
     def test_secrets_plus_egress_but_justified_is_conditional(self):
         """reads_secrets + external_egress WITH a requester is downgraded to
-        CONDITIONAL (scoped creds + egress logging), never an auto-PASS."""
+        CONDITIONAL (scoped creds + egress logging), never an auto-PASS.
+        Requester is a non-banned context ('dave') so the injection->banned
+        BLOCK rule does not apply -- this isolates the secrets+egress path."""
         r = mpc.evaluate(
             "vault-bridge",
             {
@@ -106,7 +108,7 @@ class EvaluateConditionalTests(unittest.TestCase):
                 "has_pretooluse_hook": True,
                 "reads_secrets": True,
                 "external_egress": True,
-                "requested_by": "chad",
+                "requested_by": "dave",
             },
         )
         self.assertEqual(r["verdict"], mpc.CONDITIONAL)
@@ -198,6 +200,78 @@ class InputHandlingTests(unittest.TestCase):
         r = _run_cli([], stdin="{not json")
         self.assertEqual(r.returncode, 3)
         self.assertIn("invalid descriptor", r.stderr)
+
+
+class PromptInjectionTests(unittest.TestCase):
+    """Q2 of the policy: external content injected into the prompt (Chad FLAGs)."""
+
+    def test_context7_egress_defaults_injection_conditional(self):
+        # trusted + hooked + egress but no explicit injects flag => the
+        # conservative default makes it an injection surface => CONDITIONAL,
+        # never an auto-PASS (Chad FLAG #1).
+        r = mpc.evaluate(
+            "context7",
+            {
+                "maintainer_trust": "trusted",
+                "has_pretooluse_hook": True,
+                "reads_secrets": False,
+                "external_egress": True,
+                "requested_by": "scout",
+            },
+        )
+        self.assertEqual(r["verdict"], mpc.CONDITIONAL)
+        self.assertTrue(any("injection" in s.lower() for s in r["reasons"]))
+
+    def test_explicit_no_injection_overrides_egress_default(self):
+        r = mpc.evaluate(
+            "edge-fn",
+            {
+                "maintainer_trust": "trusted",
+                "has_pretooluse_hook": True,
+                "external_egress": True,
+                "injects_into_prompt": False,
+                "requested_by": "scout",
+            },
+        )
+        self.assertEqual(r["verdict"], mpc.PASS)
+
+    def test_injection_into_banned_context_blocks(self):
+        # injection sink requested for a privileged context => BLOCK (Chad FLAG #2).
+        for ctx in ("chad", "claudia", "marveen", "applegate"):
+            r = mpc.evaluate(
+                "summarizer",
+                {
+                    "maintainer_trust": "trusted",
+                    "has_pretooluse_hook": True,
+                    "injects_into_prompt": True,
+                    "requested_by": ctx,
+                },
+            )
+            self.assertEqual(r["verdict"], mpc.BLOCK, ctx)
+
+    def test_injection_banned_context_case_insensitive(self):
+        r = mpc.evaluate(
+            "summarizer",
+            {
+                "maintainer_trust": "trusted",
+                "has_pretooluse_hook": True,
+                "injects_into_prompt": True,
+                "requested_by": "Marveen",
+            },
+        )
+        self.assertEqual(r["verdict"], mpc.BLOCK)
+
+    def test_injection_into_normal_context_conditional_not_block(self):
+        r = mpc.evaluate(
+            "summarizer",
+            {
+                "maintainer_trust": "trusted",
+                "has_pretooluse_hook": True,
+                "injects_into_prompt": True,
+                "requested_by": "scout",
+            },
+        )
+        self.assertEqual(r["verdict"], mpc.CONDITIONAL)
 
 
 if __name__ == "__main__":
