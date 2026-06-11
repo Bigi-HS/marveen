@@ -1,0 +1,7 @@
+{
+  "inputFolder": "C:\\Users\\YOURNAME\\bigben\\in",
+  "outputFolder": "C:\\Users\\YOURNAME\\bigben\\out",
+  "actionSet": "Genesis",
+  "actionName": "WebExport",
+  "jpegQuality": 10
+}
