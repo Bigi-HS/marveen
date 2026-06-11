@@ -45,6 +45,15 @@ Meglévő skillnél célzott csere (régi szöveg → új), nem teljes újraír�
 
 A `SKILL.md` 500 sor alatt; nagyobb anyag a `references/`-be.
 
+### Skill-regression badge (QA tooling)
+
+`scripts/skill-regression.sh` deterministic checks on the live `~/.claude/skills` (top 10 fleet skills). Each run rewrites two artifacts under `store/`:
+
+- `skill-regression-last.json` -- full last-run summary.
+- `skill-regression-badge.json` -- shields.io endpoint badge (`schemaVersion`/`label`/`message`/`color`) plus explicit `counts.{pass,warn,block}`, `verdict`, and an ISO-8601 `timestamp_iso`.
+
+Daily refresh is a **deploy step, not auto-installed on merge**. Install the cron with one command (Genesis-GO / operator only): `bash scripts/install-skill-regression-cron.sh` (idempotent, runs 07:45 local, marker-matched so re-runs never duplicate). Verify: `crontab -l | grep skill-regression`.
+
 ### Reflexió + szinkronizálás
 
 A rendszer rendszeresen (heartbeat / kontextus-tömörítés előtt) megvizsgálja: van-e a session-ben újrahasznosítható minta? A flotta-szintű skill-ek a `seed-skills/` mappából install/update-kor terjednek minden telepítésre — **sanitálva** (nincs személyes adat, nincs konkrét ügynök-név, mert máshol más néven futhatnak az ügynökök).

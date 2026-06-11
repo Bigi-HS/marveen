@@ -21,6 +21,10 @@ set -uo pipefail
 SKILLS_DIR="${SKILL_REGRESSION_DIR:-$HOME/.claude/skills}"
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAST_JSON="$INSTALL_DIR/store/skill-regression-last.json"
+# AC: status badge written after every run (shields.io endpoint-compatible +
+# explicit PASS/WARN/BLOCK counts and an ISO-8601 timestamp). Consumed by the
+# daily cron (scripts/install-skill-regression-cron.sh) and any dashboard chip.
+BADGE_JSON="$INSTALL_DIR/store/skill-regression-badge.json"
 
 TOP10=(
   fleet-ops
@@ -326,6 +330,40 @@ data = {
 }
 os.makedirs(os.path.dirname("$LAST_JSON"), exist_ok=True)
 open("$LAST_JSON", "w").write(json.dumps(data, indent=2))
+PY
+
+# Per-skill verdict tallies for the badge (distinct from the result-LINE counters,
+# which can exceed 10 because one skill can emit several lines).
+PASS_SKILLS=0; WARN_SKILLS=0; BLOCK_SKILLS=0
+for skill in "${TOP10[@]}"; do
+  case "${SKILL_STATUS[$skill]:-BLOCK}" in
+    PASS)  PASS_SKILLS=$((PASS_SKILLS+1)) ;;
+    WARN)  WARN_SKILLS=$((WARN_SKILLS+1)) ;;
+    *)     BLOCK_SKILLS=$((BLOCK_SKILLS+1)) ;;
+  esac
+done
+
+# Status badge (shields.io endpoint schema: schemaVersion/label/message/color)
+# plus explicit pass/warn/block skill counts and an ISO-8601 timestamp. Always
+# rewritten so a stale badge can never outlive a fresh run.
+python3 - <<PY 2>/dev/null || echo "[WARN] could not write $BADGE_JSON" >&2
+import json, os, time
+verdict = "$VERDICT"
+color = {"PASS": "brightgreen", "WARN": "yellow", "BLOCK": "red"}.get(verdict, "lightgrey")
+now = time.time()
+badge = {
+    "schemaVersion": 1,
+    "label": "skill-regression",
+    "message": "%s (%d/%d ok)" % (verdict, $ok_count, ${#TOP10[@]}),
+    "color": color,
+    "verdict": verdict,
+    "counts": {"pass": $PASS_SKILLS, "warn": $WARN_SKILLS, "block": $BLOCK_SKILLS},
+    "total": ${#TOP10[@]},
+    "timestamp": int(now),
+    "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)),
+}
+os.makedirs(os.path.dirname("$BADGE_JSON"), exist_ok=True)
+open("$BADGE_JSON", "w").write(json.dumps(badge, indent=2) + "\n")
 PY
 
 exit "$EXIT_CODE"
