@@ -185,6 +185,27 @@ function loadOrCreateSessionSecret(): Buffer {
   return fresh
 }
 
+// Mass-invalidate EVERY active session in one call ("log everyone out"). Every
+// existing cookie is signed with the current session secret, so generating a
+// fresh secret (and swapping the in-memory copy) makes every previously issued
+// cookie's signature fail verifySession() immediately -- no restart required.
+// This is the clean, server-side equivalent of the old manual recovery
+// (rm store/.dashboard-session-secret + restart). It is auth-gated by the global
+// /api/* bearer-token check, like every admin route. The revocation list is also
+// cleared: those per-session entries only existed to reject cookies signed with
+// the now-defunct secret, so they are dead weight after a rotation.
+export function rotateSessionSecret(): void {
+  const fresh = randomBytes(32)
+  mkdirSync(join(PROJECT_ROOT, 'store'), { recursive: true })
+  atomicWriteFileSync(SESSION_SECRET_PATH, fresh.toString('hex'), { mode: 0o600 })
+  sessionSecret = fresh
+  // Drop the now-obsolete revocation list: every cookie it named is already
+  // signature-rejected under the new secret. Persist the empty list so a restart
+  // doesn't reload stale entries.
+  revokedSessions = new Map()
+  persistRevoked(revokedSessions)
+}
+
 function b64url(buf: Buffer): string {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
