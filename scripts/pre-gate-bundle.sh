@@ -79,6 +79,7 @@ pgb_json() {
   PGB_STATUSES="$(printf '%s\n' "${CHECK_STATUSES[@]}")" \
   PGB_DETAILS="$(printf '%s\n' "${CHECK_DETAILS[@]}")" \
   PGB_CROSS_MODEL="$CROSS_MODEL_JSON" \
+  PGB_SKILL_CHECK="$SKILL_CHECK_JSON" \
   python3 - <<'PY'
 import json, os
 names = os.environ["PGB_NAMES"].splitlines()
@@ -97,6 +98,12 @@ cm = os.environ.get("PGB_CROSS_MODEL", "")
 if cm:
     try:
         out["cross_model"] = json.loads(cm)
+    except Exception:
+        pass
+sc = os.environ.get("PGB_SKILL_CHECK", "")
+if sc:
+    try:
+        out["skill_check"] = json.loads(sc)
     except Exception:
         pass
 print(json.dumps(out, indent=2))
@@ -119,6 +126,10 @@ record() {  # name status detail
 # Cross-model advisory (populated by check_cross_model; never changes verdict/exit code)
 CROSS_MODEL_LINES=()   # printed after main checks in text mode
 CROSS_MODEL_JSON=""    # injected into pgb_json output when non-empty
+
+# Skill-check advisory (populated by check_skill_regression; never changes verdict/exit code)
+SKILL_CHECK_LINES=()   # printed after main checks in text mode
+SKILL_CHECK_JSON=""    # injected into pgb_json output when non-empty
 
 # --------------------------------------------------------------------------- #
 # The four checks                                                              #
@@ -408,6 +419,35 @@ print(json.dumps({"status":"contradictory","model":d.get("model"),"flags":flags}
   fi
 }
 
+# Optional skill regression check (--skill-check flag). Runs scripts/skill-regression.sh
+# against the live ~/.claude/skills/ path and adds SKILL_CHECK advisory section to the bundle.
+# Advisory: result populates SKILL_CHECK_LINES/JSON but does NOT touch CHECK_STATUSES
+# and therefore does NOT change the PASS/WARN/BLOCK verdict (skill regressions are separate
+# from PR code quality -- same pattern as check_cross_model). Fail-open.
+check_skill_regression() {
+  local script="$INSTALL_DIR/scripts/skill-regression.sh"
+  if [ ! -x "$script" ]; then
+    SKILL_CHECK_LINES+=("[skill-check] skill-regression.sh not found or not executable; skipping [advisory]")
+    SKILL_CHECK_JSON='{"status":"warn","detail":"script not found"}'
+    return 0
+  fi
+  local sr_out sr_rc
+  sr_out="$(bash "$script" 2>&1)"; sr_rc=$?
+  local last_line; last_line="$(printf '%s\n' "$sr_out" | grep '^SKILL-REGRESSION:' | tail -1)"
+  [ -z "$last_line" ] && last_line="SKILL-REGRESSION: (no output)"
+  local status
+  case "$sr_rc" in
+    0) status="pass" ;;
+    2) status="warn" ;;
+    *) status="warn"; last_line="SKILL-REGRESSION returned rc=$sr_rc -- $last_line" ;;
+  esac
+  SKILL_CHECK_LINES+=("[skill-check] ${last_line} [advisory]")
+  SKILL_CHECK_JSON="$(STATUS="$status" DETAIL="$last_line" python3 -c '
+import json, os
+print(json.dumps({"status": os.environ["STATUS"], "detail": os.environ["DETAIL"]}))
+' 2>/dev/null || echo "{\"status\":\"$status\",\"detail\":\"(encode error)\"}")"
+}
+
 # --------------------------------------------------------------------------- #
 # Notify (inter-agent message; never affects the verdict/exit code)            #
 # --------------------------------------------------------------------------- #
@@ -440,12 +480,12 @@ print(json.dumps({
 # main                                                                         #
 # --------------------------------------------------------------------------- #
 usage() {
-  echo "usage: pre-gate-bundle.sh <base-branch> <head-sha> [--json] [--notify[=agent]] [--cross-model]" >&2
+  echo "usage: pre-gate-bundle.sh <base-branch> <head-sha> [--json] [--notify[=agent]] [--cross-model] [--skill-check]" >&2
   exit 64
 }
 
 main() {
-  local json=0 notify="" base="" head="" cross_model=0
+  local json=0 notify="" base="" head="" cross_model=0 skill_check=0
   local arg
   for arg in "$@"; do
     case "$arg" in
@@ -453,6 +493,7 @@ main() {
       --notify)        notify="marveen" ;;
       --notify=*)      notify="${arg#--notify=}" ;;
       --cross-model)   cross_model=1 ;;
+      --skill-check)   skill_check=1 ;;
       -h|--help)       usage ;;
       --*)             echo "unknown flag: $arg" >&2; usage ;;
       *)
@@ -471,6 +512,7 @@ main() {
   check_diff_size
   check_static
   [ "$cross_model" -eq 1 ] && check_cross_model
+  [ "$skill_check" -eq 1 ] && check_skill_regression
 
   local verdict; verdict="$(pgb_verdict "${CHECK_STATUSES[@]}")"
   local summary
@@ -489,6 +531,9 @@ print(", ".join("%s:%s" % (n, s) for n, s in zip(names, st)))
       printf '  [%-5s] %-10s %s\n' "${CHECK_STATUSES[$i]}" "${CHECK_NAMES[$i]}" "${CHECK_DETAILS[$i]}"
     done
     for line in "${CROSS_MODEL_LINES[@]}"; do
+      echo "  ${line}"
+    done
+    for line in "${SKILL_CHECK_LINES[@]}"; do
       echo "  ${line}"
     done
     echo "  verdict: ${verdict}"
