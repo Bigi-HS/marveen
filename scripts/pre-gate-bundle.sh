@@ -37,6 +37,10 @@ PGB_DIFF_WARN="${PGB_DIFF_WARN:-600}"
 # a sibling worktree's *.test.ts under .claude/worktrees/** would pollute the run.
 VITEST_EXCLUDE='.claude/worktrees/**'
 
+# DA T1 sentinel directory (spec: store/specs/devil-advocate-agent.md, M2). Overridable
+# for hermetic tests. The check is "any T1 sentinel present" -- not spec-id specific.
+DA_RUNS_DIR="${DA_RUNS_DIR:-$INSTALL_DIR/store/da-runs}"
+
 # --------------------------------------------------------------------------- #
 # Pure helpers (sourced + unit-tested without running the checks)              #
 # --------------------------------------------------------------------------- #
@@ -80,6 +84,7 @@ pgb_json() {
   PGB_DETAILS="$(printf '%s\n' "${CHECK_DETAILS[@]}")" \
   PGB_CROSS_MODEL="$CROSS_MODEL_JSON" \
   PGB_SKILL_CHECK="$SKILL_CHECK_JSON" \
+  PGB_DA_SENTINEL="$DA_SENTINEL_JSON" \
   python3 - <<'PY'
 import json, os
 names = os.environ["PGB_NAMES"].splitlines()
@@ -106,6 +111,12 @@ if sc:
         out["skill_check"] = json.loads(sc)
     except Exception:
         pass
+ds = os.environ.get("PGB_DA_SENTINEL", "")
+if ds:
+    try:
+        out["da_sentinel"] = json.loads(ds)
+    except Exception:
+        pass
 print(json.dumps(out, indent=2))
 PY
 }
@@ -130,6 +141,10 @@ CROSS_MODEL_JSON=""    # injected into pgb_json output when non-empty
 # Skill-check advisory (populated by check_skill_regression; never changes verdict/exit code)
 SKILL_CHECK_LINES=()   # printed after main checks in text mode
 SKILL_CHECK_JSON=""    # injected into pgb_json output when non-empty
+
+# DA-trigger advisory (populated by check_da_sentinel; never changes verdict/exit code)
+DA_SENTINEL_LINES=()   # printed after main checks in text mode
+DA_SENTINEL_JSON=""    # injected into pgb_json output when non-empty
 
 # --------------------------------------------------------------------------- #
 # The four checks                                                              #
@@ -448,6 +463,22 @@ print(json.dumps({"status": os.environ["STATUS"], "detail": os.environ["DETAIL"]
 ' 2>/dev/null || echo "{\"status\":\"$status\",\"detail\":\"(encode error)\"}")"
 }
 
+# DA T1 trigger-enforcement advisory (spec: store/specs/devil-advocate-agent.md, M2).
+# Emits a WARN line (advisory -- NEVER changes the verdict/exit code) when no DA T1
+# sentinel exists in DA_RUNS_DIR. This is an "any T1 sentinel present" check, not
+# spec-id specific: once any T1 run has completed fleet-wide the advisory goes quiet.
+# Always-on (no flag) so the nudge cannot be silently opted out of for a gate request.
+# Note: labelled [da-trigger], distinct from the [skill-check] SKILL_CHECK advisory.
+check_da_sentinel() {
+  if [ -n "$(ls "$DA_RUNS_DIR"/T1-*.json 2>/dev/null)" ]; then
+    DA_SENTINEL_LINES+=("[da-trigger] DA T1 sentinel present [advisory]")
+    DA_SENTINEL_JSON='{"status":"present"}'
+  else
+    DA_SENTINEL_LINES+=("[da-trigger] WARN: DA T1 not triggered (no ${DA_RUNS_DIR}/T1-*.json) [advisory]")
+    DA_SENTINEL_JSON='{"status":"warn","detail":"DA T1 not triggered"}'
+  fi
+}
+
 # --------------------------------------------------------------------------- #
 # Notify (inter-agent message; never affects the verdict/exit code)            #
 # --------------------------------------------------------------------------- #
@@ -513,6 +544,7 @@ main() {
   check_static
   [ "$cross_model" -eq 1 ] && check_cross_model
   [ "$skill_check" -eq 1 ] && check_skill_regression
+  check_da_sentinel
 
   local verdict; verdict="$(pgb_verdict "${CHECK_STATUSES[@]}")"
   local summary
@@ -534,6 +566,9 @@ print(", ".join("%s:%s" % (n, s) for n, s in zip(names, st)))
       echo "  ${line}"
     done
     for line in "${SKILL_CHECK_LINES[@]}"; do
+      echo "  ${line}"
+    done
+    for line in "${DA_SENTINEL_LINES[@]}"; do
       echo "  ${line}"
     done
     echo "  verdict: ${verdict}"
