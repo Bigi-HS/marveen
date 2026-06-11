@@ -1,0 +1,12 @@
+{
+  "model": "claude-sonnet-4-6",
+  "securityProfile": "researcher",
+  "displayName": "Devil's Advocate",
+  "team": {
+    "role": "member",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": []
+  }
+}
