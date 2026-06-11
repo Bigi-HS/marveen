@@ -110,7 +110,6 @@ check_bash_syntax() {   # skill md_file -> emits result lines
           # Downgrade to WARN with a hint rather than BLOCK.
           if echo "$block" | grep -qE '<[A-Za-z_][A-Za-z0-9_-]*>'; then
             result WARN "$skill" "AC4: bash block with <placeholder> syntax (pseudocode? add '# skill-regression: skip-syntax')"
-            skill_warn=$((skill_warn+1))
           else
             result BLOCK "$skill" "bash syntax error: $err"
             found=$((found+1))
@@ -204,7 +203,7 @@ check_skill() {
   grep -qiE 'Eljárás|Eljaras|Procedure' "$md" && sections=$((sections+1))
   grep -qiE 'Buktatók|Buktatok|Pitfall' "$md" && sections=$((sections+1))
   grep -qiE 'Ellenőrzés|Ellenorzes|Validation' "$md" && sections=$((sections+1))
-  local h2_count; h2_count="$(grep -cE '^## ' "$md" 2>/dev/null || echo 0)"
+  local h2_count; h2_count="$(grep -cE '^## ' "$md" 2>/dev/null || true)"
   if [ "$sections" -lt 3 ] && [ "$h2_count" -ge 4 ]; then
     # Reference-style skill with non-standard section names but well-structured (>=4 H2 headings).
     result WARN "$skill" "AC1: $sections/4 named sections (non-standard structure, $h2_count H2 headers ok)"
