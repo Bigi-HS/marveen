@@ -27,10 +27,13 @@ function readConfig(path) {
   f.open('r');
   var txt = f.read();
   f.close();
+  // Photoshop 2021+ has native JSON. Parse strictly and NEVER eval() the config text:
+  // the config may be written by an automated (Big Ben) process, so eval would let
+  // prompt-injected content execute arbitrary ExtendScript. A parse failure stops the run.
   try {
-    return JSON.parse(txt);              // Photoshop 2021+ has JSON
+    return JSON.parse(txt);
   } catch (e) {
-    return eval('(' + txt + ')');        // tolerant fallback for older ExtendScript
+    throw new Error('config is not valid JSON (' + path + '): ' + e.toString());
   }
 }
 
