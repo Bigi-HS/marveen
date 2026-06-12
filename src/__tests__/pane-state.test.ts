@@ -344,30 +344,55 @@ describe('detectPaneState', () => {
     expect(detectPaneState(IDLE_BACKGROUND_ONE_SHELL_HIDDEN)).toBe('idle')
   })
 
-  it('does NOT classify a truncated "· N shell" prefix as idle', () => {
-    // Defense in depth: the shells-variant requires either the
-    // "· N shells · ctrl+t" marker or the "· N shells · ↓ to manage"
-    // marker, not just the bare "· N shell(s)" prefix. Two reasons we
-    // pin this down with an explicit negative test:
-    //   1. A malformed or partially rendered footer (terminal
-    //      corruption, mid-render frame) must classify as 'unknown'
-    //      so we do not deliver a prompt into a pane that is not
-    //      really ready.
-    //   2. The "bypass permissions on · 1 shell" substring could
-    //      appear in scrollback as quoted log output or an echoed
-    //      message, and the regex must not be tricked into treating
-    //      that as a live footer.
-    // The fixture is deliberately minimal: no other idle markers
-    // (no "(shift+tab to cycle)", no "? for shortcuts") so the
-    // assertion isolates the truncated-shells path specifically.
-    const truncated = [
+  it('classifies a complete input box as idle even when the footer string is unrecognised', () => {
+    // Structural contract (d3339db9): a pane with a COMPLETE input box (two
+    // box separators framing a ❯ prompt) at the bottom IS a ready Claude
+    // Code surface, regardless of the footer-slot text. The footer rotates
+    // onboarding tips and sometimes drops the "bypass permissions on"
+    // segment, so footer-STRING strictness (the prior gate) silently
+    // dropped messages to idle channel-less agents. A truncated
+    // "· 1 shell" footer over a complete box is one such case: the box is
+    // rendered and empty, so the pane is ready.
+    const truncatedFooter = [
       '',
       SEP,
       '❯ ',
       SEP,
       '  ⏵⏵ bypass permissions on · 1 shell',
     ].join('\n')
-    expect(detectPaneState(truncated)).toBe('unknown')
+    expect(detectPaneState(truncatedFooter)).toBe('idle')
+  })
+
+  it('still classifies a non-surface (footer-looking text, no input box) as unknown', () => {
+    // Conservatism preserved for the genuine negative: a footer-looking
+    // string with NO complete input box is not a promptable surface, so we
+    // must not deliver a prompt into it.
+    const noBox = [
+      '  some log output',
+      '  ⏵⏵ bypass permissions on · 1 shell',
+      '  more scrollback, no box separators here',
+    ].join('\n')
+    expect(detectPaneState(noBox)).toBe('unknown')
+  })
+
+  it('takes the bottom-most box: a quoted box in scrollback cannot spoof readiness', () => {
+    // The prior footer-string concern (a "bypass permissions on · 1 shell"
+    // echo in scrollback faking a live footer) is now handled structurally:
+    // findInputBoxBounds scans from the BOTTOM, so a ─/❯/─ block echoed
+    // higher up in scrollback never wins over the real live box below it.
+    // Here the scrollback box holds parked text but the live box is empty
+    // -> idle (NOT typing), proving the live box is the one inspected.
+    const pane = [
+      SEP,
+      '❯ quoted parked text from an old echoed message',
+      SEP,
+      '  some intervening tool output',
+      SEP,
+      '❯ ',
+      SEP,
+      '  gh auth login · ← for agents',
+    ].join('\n')
+    expect(detectPaneState(pane)).toBe('idle')
   })
 
   it('detects busy when "esc to interrupt" footer marker is present', () => {
@@ -1236,5 +1261,113 @@ describe('decideStuckInputRecovery', () => {
     expect(d.next.firstSeenAt).toBe(500_000)
     expect(d.next.lastRecoverAt).toBe(null)
     expect(d.next.attempts).toBe(0)
+  })
+})
+
+// ===========================================================================
+// Channel-less agents: footer-tip-only idle surface (card d3339db9)
+// ===========================================================================
+//
+// The 2026-06-12 Bond-meeting incident: inter-agent messages to five idle
+// channel-less agents (scout/quill/bigben/applegate/...) were marked
+// "session busy" and silently dropped after the 60-min abandon window.
+// Root cause: those agents render the footer WITHOUT the leading
+// "⏵⏵ bypass permissions on (shift+tab to cycle)" permission-mode segment
+// -- only the rotating onboarding-tip slot "gh auth login · ← for agents"
+// remains. The legacy IDLE_FOOTER_RX knew only the bypass/strict footers,
+// so detectPaneState read 'unknown' and isReadyForPrompt was false forever.
+// The fix recognises the input-box STRUCTURE (two box separators framing a
+// ❯ prompt) independently of the rotating footer text.
+
+// Top separator carries the agent's title suffix, exactly as Claude Code
+// renders it ("─...─ Dr. Stone ──"). BOX_SEP_RX (^─{10,}) still matches the
+// leading run.
+const SEP_TITLED = '─'.repeat(60) + ' Dr. Stone ──'
+
+// Clean idle channel-less agent: empty input box, footer slot shows only
+// the rotating onboarding tip. THIS is the silent-drop repro -- it must be
+// 'idle' so the router/scheduler deliver.
+const IDLE_CHANNELLESS_TIP_FOOTER = [
+  '  a valódi metrika.',
+  '',
+  '✻ Cogitated for 1m 2s',
+  '          ✗ Auto-update failed: no write permission to npm prefix · Run /doctor',
+  SEP_TITLED,
+  '❯ ',
+  SEP,
+  '  gh auth login · ← for agents',
+].join('\n')
+
+// Same footer, but a draft parked in the input box -> 'typing' (NOT ready;
+// a delivered prompt would concatenate onto the draft).
+const PARKED_CHANNELLESS_TIP_FOOTER = [
+  '  a valódi metrika.',
+  '',
+  SEP_TITLED,
+  '❯ Küldd el a Big Ben és Quill választ is',
+  SEP,
+  '  gh auth login · ← for agents',
+].join('\n')
+
+// Busy channel-less agent: the tip footer is present but the turn is mid
+// flight (token counter). BUSY_INDICATORS must win regardless of footer.
+const BUSY_CHANNELLESS_TIP_FOOTER = [
+  '✻ Cogitating… (12s · ↓ 1.2k tokens · thinking)',
+  '',
+  SEP_TITLED,
+  '❯ ',
+  SEP,
+  '  gh auth login · ← for agents',
+].join('\n')
+
+// The full composite footer real agents show: permission-mode segment +
+// the same rotating tips appended. Still idle (regression guard for the
+// agents that were delivering fine).
+const IDLE_BYPASS_WITH_TIPS = [
+  '',
+  SEP,
+  '❯ ',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · gh auth login · ← for agents',
+].join('\n')
+
+// A Claude Code permission dialog (devil-advocate's pane during the
+// incident): a y/n menu, NO box separators at all. Must stay 'unknown' --
+// injecting a prompt here would corrupt the dialog, so it must never be
+// classified idle/ready by the new structural recogniser.
+const PERMISSION_MENU = [
+  ' Contains brace with quote character (expansion obfuscation)',
+  '',
+  ' Do you want to proceed?',
+  ' ❯ 1. Yes',
+  '   2. No',
+  '',
+  ' Esc to cancel · Tab to amend · ctrl+e to explain',
+].join('\n')
+
+describe('channel-less footer-tip idle surface (d3339db9)', () => {
+  it('classifies a clean idle channel-less agent as idle (the silent-drop repro)', () => {
+    expect(detectPaneState(IDLE_CHANNELLESS_TIP_FOOTER)).toBe('idle')
+    expect(isReadyForPrompt(IDLE_CHANNELLESS_TIP_FOOTER)).toBe(true)
+  })
+
+  it('classifies a parked channel-less box as typing, not ready', () => {
+    expect(detectPaneState(PARKED_CHANNELLESS_TIP_FOOTER)).toBe('typing')
+    expect(isReadyForPrompt(PARKED_CHANNELLESS_TIP_FOOTER)).toBe(false)
+  })
+
+  it('still classifies a busy channel-less agent as busy', () => {
+    expect(detectPaneState(BUSY_CHANNELLESS_TIP_FOOTER)).toBe('busy')
+    expect(isReadyForPrompt(BUSY_CHANNELLESS_TIP_FOOTER)).toBe(false)
+  })
+
+  it('still recognises the full composite footer (real delivering agents)', () => {
+    expect(detectPaneState(IDLE_BYPASS_WITH_TIPS)).toBe('idle')
+    expect(isReadyForPrompt(IDLE_BYPASS_WITH_TIPS)).toBe(true)
+  })
+
+  it('does NOT classify a permission dialog (no input box) as idle/ready', () => {
+    expect(detectPaneState(PERMISSION_MENU)).toBe('unknown')
+    expect(isReadyForPrompt(PERMISSION_MENU)).toBe(false)
   })
 })

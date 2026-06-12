@@ -101,6 +101,47 @@ const BOX_SEP_RX = /^─{10,}/
 // ([ \t] not \s) to avoid crossing into the next line.
 const PARKED_INPUT_RX = /❯[ \t]+\S/
 
+/**
+ * Locate the live Claude Code input box from STRUCTURE alone: the two
+ * bottom-most box-separator lines (─{10,}) that frame a ❯ prompt line.
+ *
+ * Footer-text independent on purpose. Claude Code's footer slot rotates
+ * onboarding tips ("gh auth login · ← for agents", "← for agents", …),
+ * and for some sessions the leading "⏵⏵ bypass permissions on
+ * (shift+tab to cycle)" permission-mode segment is absent, leaving only a
+ * tip. Keying idle-surface recognition on the footer text (IDLE_FOOTER_RX)
+ * then misreads those panes as 'unknown', and the message-router/scheduler
+ * treat the agent as permanently busy, so the message is silently dropped
+ * after the abandon window (card d3339db9, 2026-06-12 Bond-meeting
+ * incident). The box structure does not rotate, so it is the reliable
+ * surface signal.
+ *
+ * Returns the {topSep, bottomSep} line indices, or null when the pane has
+ * no live input box (a shell, a permission dialog, raw output): callers
+ * treat null as "not a promptable Claude Code surface".
+ */
+function findInputBoxBounds(lines: string[]): { topSep: number; bottomSep: number } | null {
+  // Bottom-most separator: the box's lower rule. The footer/tip line sits
+  // BELOW it and is plain text (never ─{10,}), so scanning from the end
+  // lands on the box bottom, not the footer.
+  let bottomSep = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (BOX_SEP_RX.test(lines[i])) { bottomSep = i; break }
+  }
+  if (bottomSep <= 0) return null
+  let topSep = -1
+  for (let i = bottomSep - 1; i >= 0; i--) {
+    if (BOX_SEP_RX.test(lines[i])) { topSep = i; break }
+  }
+  if (topSep < 0) return null
+  // The framed region must contain a ❯ prompt, otherwise two unrelated
+  // rule lines (a markdown table, ASCII art) would be misread as a box.
+  for (let i = topSep + 1; i < bottomSep; i++) {
+    if (lines[i].includes('❯')) return { topSep, bottomSep }
+  }
+  return null
+}
+
 // Persistent Anthropic thinking-block API error. When an assistant turn
 // ends with a 400 about thinking/redacted_thinking blocks that "cannot
 // be modified", the session is wedged: every subsequent prompt re-sends
@@ -217,33 +258,27 @@ export function detectPaneState(
     if (rx.test(pane)) return 'busy'
   }
 
-  if (!IDLE_FOOTER_RX.test(pane)) return 'unknown'
+  // Surface recognition: a recognised footer OR a structural input box.
+  // The structural box catches channel-less agents whose footer slot shows
+  // only a rotating onboarding tip (no "bypass permissions on" segment),
+  // which IDLE_FOOTER_RX alone misses -> silent message drop (d3339db9).
+  const lines = pane.split('\n')
+  const box = findInputBoxBounds(lines)
+  if (!IDLE_FOOTER_RX.test(pane) && box === null) return 'unknown'
 
   if (detectsThinkingBlockError(pane)) return 'error'
 
   if (PENDING_PASTE_RX.test(pane)) return 'busy'
 
-  // Find the input box: two BOX_SEP_RX lines framing the current prompt.
-  // Scan UPWARDS from the footer so we stay inside the live box and
-  // don't pick up historical ❯ lines from scrollback.
-  const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
-  if (footerIdx >= 0) {
-    let bottomSep = -1
-    for (let i = footerIdx - 1; i >= 0; i--) {
-      if (BOX_SEP_RX.test(lines[i])) { bottomSep = i; break }
-    }
-    let topSep = -1
-    if (bottomSep > 0) {
-      for (let i = bottomSep - 1; i >= 0; i--) {
-        if (BOX_SEP_RX.test(lines[i])) { topSep = i; break }
-      }
-    }
-    if (topSep >= 0 && bottomSep > topSep) {
-      const inputLines = lines.slice(topSep + 1, bottomSep)
-      if (inputLines.some(l => PARKED_INPUT_RX.test(l))) {
-        return opts.mergeTypingAsBusy ? 'busy' : 'typing'
-      }
+  // Text parked in the live input box -> 'typing'. The box is located
+  // structurally (footer-text independent), so a parked draft is detected
+  // even on the rotating-tip-footer surfaces. Scoped to the region between
+  // the two bottom-most separators, so a historical ❯ in scrollback above
+  // the box is never mistaken for live parked input.
+  if (box !== null) {
+    const inputLines = lines.slice(box.topSep + 1, box.bottomSep)
+    if (inputLines.some(l => PARKED_INPUT_RX.test(l))) {
+      return opts.mergeTypingAsBusy ? 'busy' : 'typing'
     }
   }
 
@@ -269,19 +304,9 @@ export function isReadyForPrompt(pane: string): boolean {
 // "not enough signal to act, do nothing".
 function liveInputBox(pane: string): string | null {
   const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
-  if (footerIdx < 0) return null
-  let bottomSep = -1
-  for (let i = footerIdx - 1; i >= 0; i--) {
-    if (BOX_SEP_RX.test(lines[i])) { bottomSep = i; break }
-  }
-  if (bottomSep <= 0) return null
-  let topSep = -1
-  for (let i = bottomSep - 1; i >= 0; i--) {
-    if (BOX_SEP_RX.test(lines[i])) { topSep = i; break }
-  }
-  if (topSep < 0) return null
-  return lines.slice(topSep + 1, bottomSep).join('\n')
+  const box = findInputBoxBounds(lines)
+  if (box === null) return null
+  return lines.slice(box.topSep + 1, box.bottomSep).join('\n')
 }
 
 // Marker strings from prompt-safety.ts preambles. We do NOT import them
@@ -362,10 +387,10 @@ export function shouldRetrySubmit(
   for (const rx of BUSY_INDICATORS) {
     if (rx.test(pane)) return false
   }
-  // Without an idle footer the pane is either not Claude Code or in an
-  // unknown render state. Be conservative and skip.
-  if (!IDLE_FOOTER_RX.test(pane)) return false
-
+  // Without a live input box the pane is either not Claude Code or in an
+  // unknown render state -- be conservative and skip. The box is located
+  // structurally (footer-text independent) so the retry path also covers
+  // channel-less agents whose footer shows only a rotating tip (d3339db9).
   const inputBox = liveInputBox(pane)
   if (inputBox == null) return false
 
