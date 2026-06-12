@@ -563,6 +563,35 @@ export function initDatabase(dbPathOverride?: string): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tool_log_session ON tool_call_log(session_id, created_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tool_log_ts ON tool_call_log(created_at)`)
 
+  // --- To-Do widget (todo_items) ---
+  // A focused daily-execution surface, separate from the kanban backlog. Two
+  // owner-scoped lists (Claudia general/learning, Hibiki fitness). ALL CHECK
+  // enums are set in this initial CREATE — widening a CHECK after the table
+  // exists silently fails under better-sqlite3's default FK enforcement, so
+  // kind='progress' (learning items) is included from the start (DM-AC1/AC3).
+  // Timestamps are epoch-SECONDS, always server-stamped (DM-AC2).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS todo_items (
+      id            TEXT PRIMARY KEY,
+      owner         TEXT NOT NULL CHECK(owner IN ('claudia','hibiki')),
+      section       TEXT CHECK(section IN ('general','learning','fitness')),
+      kind          TEXT CHECK(kind IN ('task','habit','metric','progress')),
+      title         TEXT NOT NULL,
+      detail        TEXT,
+      done          INTEGER NOT NULL DEFAULT 0,
+      status        TEXT,
+      target_val    REAL,
+      actual_val    REAL,
+      sort_order    REAL,
+      last_progress_at INTEGER,
+      progress_note TEXT,
+      created_at    INTEGER NOT NULL,
+      updated_at    INTEGER NOT NULL,
+      done_at       INTEGER
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_todo_owner ON todo_items(owner, created_at)`)
+
   // One-shot migration from the old JSON file (which had a read-modify-write
   // race). Import rows if they exist, then rename the file so we don't keep
   // re-importing. Wrapped in a transaction so a crash mid-import is safe.
@@ -1070,6 +1099,68 @@ function startOfTodayEpoch(): number {
   return Math.floor(d.getTime() / 1000)
 }
 
+// ===== To-Do widget time helpers =====
+
+// Server-side epoch-seconds stamp. The SINGLE source for every todo_items
+// timestamp so INSERT/UPDATE call-sites can never disagree on units (PR #126
+// lesson: a mixed ms/s column silently breaks the day-boundary comparison).
+export function nowEpochS(): number {
+  return Math.floor(Date.now() / 1000)
+}
+
+// The To-Do widget's daily-reset boundary: 03:00 wall-clock Europe/Budapest.
+// 03:00 is deliberately OUTSIDE the DST-ambiguous 02:00-03:00 window, so the
+// boundary instant is unambiguous on both transition nights.
+const TODO_TZ = 'Europe/Budapest'
+const TODO_DAY_OFFSET_HOURS = 3 // 03:00
+
+// UTC offset (seconds, positive east of UTC) that `tz` has at a given instant,
+// derived via Intl — never a hardcoded constant, so it tracks CET<->CEST.
+function tzOffsetSeconds(tz: string, instant: Date): number {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false, hourCycle: 'h23',
+  })
+  const parts = fmt.formatToParts(instant)
+  const get = (t: string): number => Number(parts.find((p) => p.type === t)!.value)
+  const asIfUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'))
+  return Math.round((asIfUtc - instant.getTime()) / 1000)
+}
+
+// Epoch-seconds of "03:00 wall-clock Budapest" on the given calendar date. The
+// naive 03:00 instant is never in the DST gap, so the offset lookup is unambiguous.
+function budapestBoundaryEpoch(year: number, month: number, day: number): number {
+  const naiveUtcMs = Date.UTC(year, month - 1, day, TODO_DAY_OFFSET_HOURS, 0, 0)
+  const offset = tzOffsetSeconds(TODO_TZ, new Date(naiveUtcMs))
+  return Math.floor(naiveUtcMs / 1000) - offset
+}
+
+// dayBucket(epoch): epoch-seconds of the start of the "day" (the 03:00 Budapest
+// boundary at or before the timestamp) containing the given instant. This is the
+// ONLY definition of the today/carried boundary (DB-AC1). DST-aware (DB-AC3): the
+// UTC instant of "03:00 Budapest" shifts by one hour across CET<->CEST, computed
+// from Intl, NOT a fixed UTC offset. Idempotent: dayBucket(dayBucket(x))==dayBucket(x).
+export function dayBucket(epochSeconds: number): number {
+  const d = new Date(epochSeconds * 1000)
+  // Budapest calendar date of the instant (date only, no hour ambiguity).
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TODO_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+  })
+  const [year, month, day] = fmt.format(d).split('-').map(Number)
+  let boundary = budapestBoundaryEpoch(year, month, day)
+  if (epochSeconds < boundary) {
+    // Before today's 03:00 -> belongs to the previous calendar day's bucket.
+    // Step the date back in pure UTC date arithmetic (no tz, so a "day" is never
+    // stretched/shrunk by DST here).
+    const prev = new Date(Date.UTC(year, month - 1, day))
+    prev.setUTCDate(prev.getUTCDate() - 1)
+    boundary = budapestBoundaryEpoch(prev.getUTCFullYear(), prev.getUTCMonth() + 1, prev.getUTCDate())
+  }
+  return boundary
+}
+
 export function listKanbanCards(): KanbanCard[] {
   // Auto-archive done cards not touched since before today (local calendar day),
   // so the "Kész" column shows only today's completions; older done cards move
@@ -1185,6 +1276,158 @@ export function addKanbanComment(cardId: string, author: string, content: string
   ).run(cardId, author, content, now)
   db.prepare('UPDATE kanban_cards SET updated_at = ? WHERE id = ?').run(now, cardId)
   return { id: Number(info.lastInsertRowid), card_id: cardId, author, content, created_at: now }
+}
+
+// ===== To-Do widget (todo_items) =====
+
+export type TodoOwner = 'claudia' | 'hibiki'
+export type TodoSection = 'general' | 'learning' | 'fitness'
+export type TodoKind = 'task' | 'habit' | 'metric' | 'progress'
+
+export interface TodoItem {
+  id: string
+  owner: TodoOwner
+  section: TodoSection | null
+  kind: TodoKind | null
+  title: string
+  detail: string | null
+  done: number
+  status: string | null
+  target_val: number | null
+  actual_val: number | null
+  sort_order: number | null
+  last_progress_at: number | null
+  progress_note: string | null
+  created_at: number
+  updated_at: number
+  done_at: number | null
+}
+
+// Fields an agent POST may set when creating/editing. Timestamps (created_at,
+// updated_at, done_at) and `done` are server-controlled and never read from the
+// request body (DM-AC2).
+export interface TodoWriteFields {
+  section?: TodoSection | null
+  kind?: TodoKind | null
+  title?: string
+  detail?: string | null
+  status?: string | null
+  target_val?: number | null
+  actual_val?: number | null
+  sort_order?: number | null
+  progress_note?: string | null
+}
+
+export function createTodoItem(item: TodoWriteFields & { id: string; owner: TodoOwner }): void {
+  const now = nowEpochS()
+  db.prepare(
+    `INSERT INTO todo_items
+       (id, owner, section, kind, title, detail, done, status, target_val, actual_val,
+        sort_order, last_progress_at, progress_note, created_at, updated_at, done_at)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, NULL, ?, ?, ?, NULL)`
+  ).run(
+    item.id, item.owner, item.section ?? null, item.kind ?? 'task', item.title ?? '',
+    item.detail ?? null, item.status ?? null, item.target_val ?? null, item.actual_val ?? null,
+    item.sort_order ?? null, item.progress_note ?? null, now, now,
+  )
+}
+
+export function getTodoItem(id: string): TodoItem | undefined {
+  return db.prepare('SELECT * FROM todo_items WHERE id = ?').get(id) as TodoItem | undefined
+}
+
+// Active rows for an owner: everything EXCEPT items completed before today's
+// bucket (TC-AC3 lazy archive — yesterday's done items just stop appearing; there
+// is no archive column). Ordered for stable rendering.
+export function listActiveTodos(owner: TodoOwner): TodoItem[] {
+  const nowBucket = dayBucket(nowEpochS())
+  return db.prepare(
+    `SELECT * FROM todo_items
+       WHERE owner = ? AND NOT (done = 1 AND done_at IS NOT NULL AND done_at < ?)
+       ORDER BY sort_order IS NULL, sort_order ASC, created_at ASC`
+  ).all(owner, nowBucket) as TodoItem[]
+}
+
+// Update agent-writable fields. Server stamps updated_at; ignores timestamp/done
+// fields in the patch.
+export function updateTodoItem(id: string, fields: TodoWriteFields): boolean {
+  const cur = getTodoItem(id)
+  if (!cur) return false
+  const now = nowEpochS()
+  const f = {
+    section: fields.section ?? cur.section,
+    kind: fields.kind ?? cur.kind,
+    title: fields.title ?? cur.title,
+    detail: fields.detail ?? cur.detail,
+    status: fields.status ?? cur.status,
+    target_val: fields.target_val ?? cur.target_val,
+    actual_val: fields.actual_val ?? cur.actual_val,
+    sort_order: fields.sort_order ?? cur.sort_order,
+    progress_note: fields.progress_note ?? cur.progress_note,
+  }
+  return db.prepare(
+    `UPDATE todo_items SET section=?, kind=?, title=?, detail=?, status=?, target_val=?,
+       actual_val=?, sort_order=?, progress_note=?, updated_at=? WHERE id=?`
+  ).run(f.section, f.kind, f.title, f.detail, f.status, f.target_val, f.actual_val,
+    f.sort_order, f.progress_note, now, id).changes > 0
+}
+
+export function markTodoDone(id: string): boolean {
+  const now = nowEpochS()
+  return db.prepare(
+    'UPDATE todo_items SET done=1, done_at=?, updated_at=? WHERE id=?'
+  ).run(now, now, id).changes > 0
+}
+
+export function tickTodoProgress(id: string, progressNote: string | null): boolean {
+  const now = nowEpochS()
+  return db.prepare(
+    'UPDATE todo_items SET last_progress_at=?, progress_note=?, updated_at=? WHERE id=?'
+  ).run(now, progressNote, now, id).changes > 0
+}
+
+export function deleteTodoItem(id: string): boolean {
+  return db.prepare('DELETE FROM todo_items WHERE id = ?').run(id).changes > 0
+}
+
+// Freshness sentinel (FS-AC1): seconds since the owner's most recent write, or
+// null when the owner has no rows.
+export function todoLastWriteAgoSeconds(owner: TodoOwner): number | null {
+  const row = db.prepare(
+    'SELECT MAX(updated_at) AS m FROM todo_items WHERE owner = ?'
+  ).get(owner) as { m: number | null }
+  if (row?.m == null) return null
+  return nowEpochS() - row.m
+}
+
+// The N most recent dayBucket boundaries up to and including the current one,
+// newest first. Steps bucket-by-bucket (NOT now - k*86400), so the 03:00 offset
+// never drifts the window (FIT-AC5).
+export function recentDayBuckets(count: number, now = nowEpochS()): number[] {
+  const buckets: number[] = []
+  let b = dayBucket(now)
+  for (let i = 0; i < count; i++) {
+    buckets.push(b)
+    b = dayBucket(b - 1)
+  }
+  return buckets
+}
+
+// Derived 7-bucket training-adherence (FIT-AC5): count of the last 7 buckets in
+// which Hibiki has at least one kind='habit' training item with status='done'.
+// No stored streak column — computed from daily rows each read.
+export function trainingAdherence(owner: TodoOwner, bucketCount = 7, now = nowEpochS()): { active: number; total: number } {
+  const buckets = recentDayBuckets(bucketCount, now) // newest -> oldest
+  const oldest = buckets[buckets.length - 1]
+  const rows = db.prepare(
+    `SELECT created_at FROM todo_items
+       WHERE owner = ? AND kind = 'habit' AND status = 'done' AND created_at >= ?`
+  ).all(owner, oldest) as Array<{ created_at: number }>
+  const activeBuckets = new Set<number>()
+  for (const r of rows) activeBuckets.add(dayBucket(r.created_at))
+  let active = 0
+  for (const b of buckets) if (activeBuckets.has(b)) active++
+  return { active, total: bucketCount }
 }
 
 // --- Heartbeat helpers ---
