@@ -32,6 +32,10 @@ from pathlib import Path
 DEFAULT_DB = "store/claudeclaw.db"
 DEFAULT_STATE = "store/.todo-freshness-state.json"
 DEFAULT_TOKEN = "store/.dashboard-token"
+# Sender identity for the inter-agent alert. This is an automated ops heartbeat,
+# not a message from Dave the engineer; default to the ops/release agent so the
+# alert is not mis-attributed (overridable at deploy via --from).
+DEFAULT_FROM = "forge"
 OWNERS = ("claudia", "hibiki")
 THRESHOLD_SECONDS = 93600  # 26h (FS-AC4)
 # Suppress a repeat alert for the same ongoing outage within this window.
@@ -77,8 +81,8 @@ def _alert_content(owner: str, ago: int) -> str:
     )
 
 
-def _send_alert(content: str, token: str) -> int:
-    data = json.dumps({"from": "dave", "to": "marveen", "content": content}).encode()
+def _send_alert(content: str, token: str, sender: str = DEFAULT_FROM) -> int:
+    data = json.dumps({"from": sender, "to": "marveen", "content": content}).encode()
     req = urllib.request.Request(
         MESSAGES_URL,
         data=data,
@@ -94,6 +98,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--db", default=DEFAULT_DB)
     p.add_argument("--state", default=DEFAULT_STATE)
     p.add_argument("--token-file", default=DEFAULT_TOKEN)
+    p.add_argument("--from", dest="sender", default=DEFAULT_FROM, help="inter-agent sender id for alerts")
     p.add_argument("--threshold", type=int, default=THRESHOLD_SECONDS)
     p.add_argument("--dry-run", action="store_true", help="report only; never send or persist state")
     p.add_argument("--now", type=int, default=None, help="override current epoch (testing)")
@@ -129,7 +134,7 @@ def main(argv: list[str]) -> int:
             continue
         try:
             token = Path(args.token_file).read_text().strip()
-            status = _send_alert(content, token)
+            status = _send_alert(content, token, args.sender)
             state[owner] = now
             sent_any = True
             print(f"[{owner}] STALE ago={ago}s -> ALERT sent (HTTP {status})")

@@ -30,8 +30,10 @@ command:  python3 scripts/todo-freshness-check.py
 
 It alerts `marveen` via inter-agent message when an owner (claudia/hibiki) has
 not written to `todo_items` in > 26h, and self-suppresses repeat alerts for the
-same ongoing outage (state file `store/.todo-freshness-state.json`). Dry-run to
-verify without sending:
+same ongoing outage (state file `store/.todo-freshness-state.json`). The alert is
+sent from `forge` (it is an automated ops heartbeat, not a message from Dave the
+engineer); override with `--from <agent>` if a different sender is preferred.
+Dry-run to verify without sending:
 
 ```bash
 python3 scripts/todo-freshness-check.py --dry-run

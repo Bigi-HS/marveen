@@ -8,6 +8,7 @@ network call is made (only --dry-run / evaluate() paths are exercised).
 """
 import importlib.util
 import io
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -113,6 +114,38 @@ class DryRunTests(unittest.TestCase):
             mod._alert_content("claudia", 27 * 3600),
             "FRESHNESS ALERT: claudia has not written to todo_items in 27h. Check agent health.",
         )
+
+
+class SenderTests(unittest.TestCase):
+    def test_default_sender_is_not_dave_the_engineer(self):
+        # The alert is an automated ops heartbeat; it must not be attributed to
+        # Dave the engineer (Thor PR #129 INFO finding).
+        self.assertEqual(mod.DEFAULT_FROM, "forge")
+
+    def test_send_alert_uses_sender_in_payload(self):
+        captured = {}
+
+        class _FakeResp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def _fake_urlopen(req):
+            captured["from"] = json.loads(req.data.decode())["from"]
+            return _FakeResp()
+
+        orig = mod.urllib.request.urlopen
+        mod.urllib.request.urlopen = _fake_urlopen
+        try:
+            status = mod._send_alert("x", "tok", "forge")
+        finally:
+            mod.urllib.request.urlopen = orig
+        self.assertEqual(status, 200)
+        self.assertEqual(captured["from"], "forge")
 
 
 if __name__ == "__main__":
