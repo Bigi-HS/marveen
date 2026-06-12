@@ -3,10 +3,16 @@ import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import {
+  createAgentMessage,
   getPendingMessages,
   markMessageDelivered,
   markMessageFailed,
 } from '../db.js'
+import {
+  DELIVERY_MONITOR_AGENT_ID,
+  shouldAlertOnAbandon,
+  abandonAlertContent,
+} from './delivery-alert.js'
 import {
   wrapUntrusted,
   wrapTrustedPeer,
@@ -61,6 +67,17 @@ export function startMessageRouter(): NodeJS.Timeout {
         logger.warn({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ageMs }, 'Agent message abandoned: target never ready within window')
         if (!markMessageFailed(msg.id, 'Abandoned: target session never ready within retry window')) {
           logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
+        }
+        // Never drop silently (card d3339db9): surface the failure to the
+        // main agent so it is always visible, even if a future pane-detector
+        // gap re-introduces a false-busy. Guard against recursion -- a
+        // monitor alert that is itself abandoned does not spawn another.
+        if (shouldAlertOnAbandon(msg.from_agent)) {
+          try {
+            createAgentMessage(DELIVERY_MONITOR_AGENT_ID, MAIN_AGENT_ID, abandonAlertContent(msg, ageMs))
+          } catch (err) {
+            logger.warn({ err, id: msg.id }, 'Failed to enqueue delivery-dropped alert')
+          }
         }
         routerLoggedMisses.delete(msg.id)
         continue
