@@ -50,6 +50,31 @@ describe('dayBucket — normal winter day (CET, UTC+1)', () => {
   })
 })
 
+// Year boundary (DA PR #129 MEDIUM-1): the 03:00 Budapest boundary must roll
+// the calendar year correctly. A pre-03:00 instant on Jan 1 belongs to Dec 31
+// of the PREVIOUS year; a pre-03:00 instant on Dec 31 belongs to Dec 30 of the
+// same year. Both are winter (CET, UTC+1): 03:00 Budapest == 02:00 UTC. This
+// guards a future prev-day refactor from silently mis-bucketing the rollover.
+describe('dayBucket — year boundary (CET, UTC+1)', () => {
+  const cases = [
+    {
+      name: 'Dec 31 01:30 Budapest -> previous bucket (Dec 30 03:00)',
+      at: utc(2025, 12, 31, 0, 30), // 01:30 CET Dec 31 == 00:30 UTC
+      bucket: utc(2025, 12, 30, 2), // 03:00 CET Dec 30 == 02:00 UTC
+    },
+    {
+      name: 'Jan 1 01:30 Budapest -> previous bucket (Dec 31 03:00, prev year)',
+      at: utc(2026, 1, 1, 0, 30), // 01:30 CET Jan 1 == 00:30 UTC
+      bucket: utc(2025, 12, 31, 2), // 03:00 CET Dec 31 == 02:00 UTC
+    },
+  ]
+  for (const c of cases) {
+    it(c.name, () => {
+      expect(dayBucket(c.at)).toBe(c.bucket)
+    })
+  }
+})
+
 describe('dayBucket — DST fall-back night (last Sunday October 2025-10-26)', () => {
   // Transition: 03:00 CEST -> 02:00 CET at 01:00 UTC. 03:00 wall-clock Budapest
   // on Oct 26 is in CET (+1) == 02:00 UTC. The previous bucket (Oct 25 03:00) is

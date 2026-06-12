@@ -59,3 +59,25 @@ Server stamps all timestamps; agents send only
 
 Test the agent-write path on the Buster sandbox, never live Claudia/Hibiki, per
 fleet policy.
+
+## 5. Verify the scheduled tasks registered (post-deploy)
+
+After steps 2-3, confirm via the schedules API that the tasks actually landed.
+Otherwise the freshness detector or an owner's daily write can be silently
+missing and the widget quietly goes stale (the exact silent-skip this step
+guards against):
+
+```bash
+curl -s -H "Authorization: Bearer $(cat store/.dashboard-token)" \
+  http://localhost:3420/api/schedules
+```
+
+Expect these present and `active`:
+
+- the hourly `todo-freshness-check` heartbeat (cron `0 * * * *`),
+- Claudia's daily write-task (`owner=claudia`),
+- Hibiki's daily write-task (`owner=hibiki`).
+
+If the freshness heartbeat is absent, no `>26h`-stale alert will ever fire; if an
+owner write-task is absent, that column never refreshes. Re-run the relevant
+step above before considering the deploy complete.
