@@ -7751,6 +7751,327 @@ async function loadOverview() {
   } catch (err) {
     document.getElementById('overviewActivity').innerHTML = `<div style="color:var(--text-muted);font-size:13px">Hiba: ${err.message || err}</div>`
   }
+  // The To-Do widget lives on the overview page; refresh it alongside.
+  loadTodos()
+}
+
+// ===== To-Do widget (Claudia + Hibiki) =====
+
+const TODO_OWNERS = [
+  { key: 'claudia', label: 'Claudia', sub: 'teendők + tanulás' },
+  { key: 'hibiki', label: 'Hibiki', sub: 'fitnesz' },
+]
+
+async function loadTodos() {
+  try {
+    const res = await fetch('/api/todos')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const data = await res.json()
+    for (const o of TODO_OWNERS) {
+      const col = document.getElementById('todoCol-' + o.key)
+      if (col) renderTodoColumn(col, o, data[o.key] || emptyTodoView(), (data.freshness || {})[o.key])
+    }
+  } catch (err) {
+    for (const o of TODO_OWNERS) {
+      const col = document.getElementById('todoCol-' + o.key)
+      if (col) col.innerHTML = `<div class="todo-error">Hiba: ${escapeHtml(String(err.message || err))}</div>`
+    }
+  }
+}
+
+function emptyTodoView() {
+  return { today: [], carried: [], folyamatban: [], doneToday: [], capCount: 0 }
+}
+
+function todoNowEpoch() { return Math.floor(Date.now() / 1000) }
+
+// Freshness label: "Xp" / "X ó"; amber past 25h; null -> "Nem volt írás" (FS-AC2/3).
+function renderFreshness(fresh) {
+  const span = document.createElement('span')
+  span.className = 'todo-fresh'
+  const ago = fresh ? fresh.last_write_ago_seconds : null
+  if (ago == null) { span.textContent = 'Nem volt írás'; return span }
+  if (ago > 90000) span.classList.add('todo-fresh-amber') // 25h
+  span.textContent = ago < 3600 ? `${Math.max(0, Math.floor(ago / 60))}p` : `${Math.floor(ago / 3600)} ó`
+  return span
+}
+
+function calorieChipClass(actual, target) {
+  if (actual == null || target == null) return 'todo-chip-grey'
+  const diff = actual - target
+  if (Math.abs(diff) <= 150) return 'todo-chip-green'
+  if (diff < 0) return 'todo-chip-green' // under target is never flagged
+  if (diff <= 400) return 'todo-chip-yellow'
+  return 'todo-chip-red'
+}
+
+function trainingChipClass(status) {
+  if (status === 'done') return 'todo-chip-green'
+  if (status === 'skipped') return 'todo-chip-yellow'
+  return 'todo-chip-grey' // rest or unset: never a failure color
+}
+
+function trainingLabel(status) {
+  return status === 'done' ? 'Edzés kész' : status === 'skipped' ? 'Edzés kihagyva' : status === 'rest' ? 'Pihenőnap' : 'Edzés'
+}
+
+// A task item with an instant-feedback checkbox (CO-AC1).
+function renderTaskItem(item) {
+  const row = document.createElement('div')
+  row.className = 'todo-item'
+  row.dataset.id = item.id
+  const box = document.createElement('span')
+  box.className = 'todo-check'
+  box.setAttribute('role', 'checkbox')
+  box.setAttribute('tabindex', '0')
+  box.setAttribute('aria-checked', 'false')
+  const body = document.createElement('div')
+  body.className = 'todo-item-body'
+  const t = document.createElement('div')
+  t.className = 'todo-item-title'
+  t.textContent = item.title
+  body.appendChild(t)
+  if (item.detail) {
+    const d = document.createElement('div')
+    d.className = 'todo-item-detail'
+    d.textContent = item.detail
+    body.appendChild(d)
+  }
+  const check = () => {
+    if (row.classList.contains('todo-item-done')) return
+    row.classList.add('todo-item-done') // instant grey, before the network call
+    box.setAttribute('aria-checked', 'true')
+    fetch(`/api/todos/${encodeURIComponent(item.id)}/done`, { method: 'POST' })
+      .then(() => loadTodos())
+      .catch(() => { showToast('Hiba a pipálásnál'); loadTodos() })
+  }
+  box.addEventListener('click', check)
+  box.addEventListener('keydown', (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); check() } })
+  row.appendChild(box)
+  row.appendChild(body)
+  return row
+}
+
+// A fitness chip (read-only): training 3-state or calorie tri-state (FIT-AC1/2/3).
+function renderFitnessItem(item) {
+  const row = document.createElement('div')
+  row.className = 'todo-item todo-item-fitness'
+  const chip = document.createElement('span')
+  chip.className = 'todo-chip'
+  if (item.kind === 'metric') {
+    chip.classList.add(calorieChipClass(item.actual_val, item.target_val))
+    let txt = item.title || 'Kalória'
+    if (item.actual_val != null && item.target_val != null) {
+      const diff = Math.round(item.actual_val - item.target_val)
+      txt += `  ${diff >= 0 ? '+' : ''}${diff} kcal`
+    }
+    chip.textContent = txt
+  } else {
+    // habit (training)
+    chip.classList.add(trainingChipClass(item.status))
+    chip.textContent = item.title && item.title !== 'training' ? item.title : trainingLabel(item.status)
+  }
+  row.appendChild(chip)
+  return row
+}
+
+// A progress item in "Folyamatban": persistent, never red, with a tick button (LP-AC2/3).
+function renderProgressItem(item) {
+  const row = document.createElement('div')
+  row.className = 'todo-item todo-item-progress'
+  const body = document.createElement('div')
+  body.className = 'todo-item-body'
+  const t = document.createElement('div')
+  t.className = 'todo-item-title'
+  t.textContent = item.title
+  body.appendChild(t)
+  const meta = document.createElement('div')
+  meta.className = 'todo-item-detail'
+  meta.textContent = item.last_progress_at
+    ? `Legutóbb haladtál: ${formatTodoDate(item.last_progress_at)}` + (item.progress_note ? ` — ${item.progress_note}` : '')
+    : 'Még nem indult'
+  body.appendChild(meta)
+  row.appendChild(body)
+  const tick = document.createElement('button')
+  tick.className = 'todo-tick-btn'
+  tick.textContent = '+ haladás'
+  tick.addEventListener('click', () => {
+    const note = prompt('Haladás megjegyzés (opcionális):') // simple v1 tick; NLP not in scope
+    if (note === null) return
+    fetch(`/api/todos/${encodeURIComponent(item.id)}/progress`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ progress_note: note }),
+    }).then(() => loadTodos()).catch(() => showToast('Hiba a haladás rögzítésénél'))
+  })
+  row.appendChild(tick)
+  return row
+}
+
+// A carried-over task: muted, "N napja" neutral chip, dismiss-with-confirm (CAR-AC2/3/4).
+function renderCarriedItem(item) {
+  const row = document.createElement('div')
+  row.className = 'todo-item todo-item-carried'
+  row.dataset.id = item.id
+  const box = document.createElement('span')
+  box.className = 'todo-check'
+  box.setAttribute('role', 'checkbox')
+  box.setAttribute('tabindex', '0')
+  box.addEventListener('click', () => {
+    row.classList.add('todo-item-done')
+    fetch(`/api/todos/${encodeURIComponent(item.id)}/done`, { method: 'POST' })
+      .then(() => loadTodos()).catch(() => { showToast('Hiba a pipálásnál'); loadTodos() })
+  })
+  const body = document.createElement('div')
+  body.className = 'todo-item-body'
+  const t = document.createElement('div')
+  t.className = 'todo-item-title'
+  t.textContent = item.title
+  body.appendChild(t)
+  const days = Math.floor((todoNowEpoch() - item.created_at) / 86400)
+  const ago = document.createElement('span')
+  ago.className = 'todo-ago'
+  ago.textContent = `${days} napja`
+  body.appendChild(ago)
+
+  const actions = document.createElement('div')
+  actions.className = 'todo-carried-actions'
+  const dismiss = document.createElement('button')
+  dismiss.className = 'todo-dismiss-btn'
+  dismiss.textContent = 'Elvet'
+  dismiss.title = 'Végleges törlés'
+  dismiss.addEventListener('click', () => {
+    // Replace the button with a two-click confirmation (CAR-AC4 / M2).
+    actions.innerHTML = ''
+    const q = document.createElement('span')
+    q.className = 'todo-confirm-q'
+    q.textContent = 'Biztosan törlöd?'
+    const yes = document.createElement('button')
+    yes.className = 'todo-confirm-yes'
+    yes.textContent = 'Igen'
+    yes.addEventListener('click', () => {
+      fetch(`/api/todos/${encodeURIComponent(item.id)}`, { method: 'DELETE' })
+        .then(() => loadTodos()).catch(() => showToast('Hiba a törlésnél'))
+    })
+    const no = document.createElement('button')
+    no.className = 'todo-confirm-no'
+    no.textContent = 'Mégsem'
+    no.addEventListener('click', () => { actions.innerHTML = ''; actions.appendChild(dismiss) })
+    actions.appendChild(q); actions.appendChild(yes); actions.appendChild(no)
+  })
+  actions.appendChild(dismiss)
+
+  row.appendChild(box)
+  row.appendChild(body)
+  row.appendChild(actions)
+  return row
+}
+
+function todoSubHeader(text, count) {
+  const h = document.createElement('div')
+  h.className = 'todo-subhead'
+  h.textContent = count == null ? text : `${text} (${count})`
+  return h
+}
+
+function renderTodoColumn(col, owner, view, fresh) {
+  col.innerHTML = ''
+
+  // Header: owner + freshness + adherence (hibiki) + cap cue.
+  const head = document.createElement('div')
+  head.className = 'todo-col-head'
+  const title = document.createElement('div')
+  title.className = 'todo-col-title'
+  title.textContent = owner.label
+  const meta = document.createElement('div')
+  meta.className = 'todo-col-meta'
+  meta.appendChild(renderFreshness(fresh))
+  if (owner.key === 'hibiki' && view.adherence) {
+    const badge = document.createElement('span')
+    badge.className = 'todo-adherence'
+    badge.textContent = `${view.adherence.active}/${view.adherence.total} aktív`
+    meta.appendChild(badge)
+  }
+  head.appendChild(title)
+  head.appendChild(meta)
+  col.appendChild(head)
+
+  // TODAY
+  const todayHead = document.createElement('div')
+  todayHead.className = 'todo-subhead todo-subhead-today'
+  todayHead.innerHTML = `<span>Ma</span><span class="todo-cap${view.capCount > 7 ? ' todo-cap-over' : ''}">${view.capCount}/7 ma</span>`
+  col.appendChild(todayHead)
+  if (view.today.length === 0) {
+    col.appendChild(todoEmpty('Nincs mai tétel'))
+  } else {
+    for (const it of view.today) {
+      if (it.section === 'fitness' || it.kind === 'habit' || it.kind === 'metric') col.appendChild(renderFitnessItem(it))
+      else col.appendChild(renderTaskItem(it))
+    }
+  }
+
+  // FOLYAMATBAN (progress)
+  if (view.folyamatban.length > 0) {
+    col.appendChild(todoSubHeader('Folyamatban', view.folyamatban.length))
+    for (const it of view.folyamatban) col.appendChild(renderProgressItem(it))
+  }
+
+  // CARRIED-OVER — collapsible at 3+, hidden at 0 (CAR-AC1).
+  if (view.carried.length > 0) {
+    const wrap = document.createElement('div')
+    wrap.className = 'todo-carried-wrap'
+    const collapsed = view.carried.length >= 3
+    const toggle = document.createElement('button')
+    toggle.className = 'todo-carried-toggle'
+    const arrow = () => (wrap.classList.contains('collapsed') ? '▸' : '▾')
+    const setLabel = () => { toggle.textContent = `Áthozott (${view.carried.length}) ${arrow()}` }
+    if (collapsed) wrap.classList.add('collapsed')
+    setLabel()
+    toggle.addEventListener('click', () => { wrap.classList.toggle('collapsed'); setLabel() })
+    const list = document.createElement('div')
+    list.className = 'todo-carried-list'
+    for (const it of view.carried) list.appendChild(renderCarriedItem(it))
+    wrap.appendChild(toggle)
+    wrap.appendChild(list)
+    col.appendChild(wrap)
+  }
+
+  // KÉSZ MA tail — collapsed, expandable (CO-AC3).
+  if (view.doneToday.length > 0) {
+    const wrap = document.createElement('div')
+    wrap.className = 'todo-done-wrap collapsed'
+    const toggle = document.createElement('button')
+    toggle.className = 'todo-done-toggle'
+    const setLabel = () => { toggle.textContent = `Kész ma (${view.doneToday.length}) ${wrap.classList.contains('collapsed') ? '▸' : '▾'}` }
+    setLabel()
+    toggle.addEventListener('click', () => { wrap.classList.toggle('collapsed'); setLabel() })
+    const list = document.createElement('div')
+    list.className = 'todo-done-list'
+    for (const it of view.doneToday) {
+      const r = document.createElement('div')
+      r.className = 'todo-item todo-item-done'
+      const t = document.createElement('div')
+      t.className = 'todo-item-title'
+      t.textContent = it.title
+      r.appendChild(t)
+      list.appendChild(r)
+    }
+    wrap.appendChild(toggle)
+    wrap.appendChild(list)
+    col.appendChild(wrap)
+  }
+}
+
+function todoEmpty(text) {
+  const d = document.createElement('div')
+  d.className = 'todo-empty'
+  d.textContent = text
+  return d
+}
+
+function formatTodoDate(epoch) {
+  try {
+    return new Date(epoch * 1000).toLocaleDateString('hu-HU', { month: 'short', day: 'numeric' })
+  } catch { return '' }
 }
 
 // Brand mark: use main agent's avatar if available
