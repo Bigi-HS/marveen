@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   detectPaneState,
   detectsThinkingBlockError,
+  detectsUsageLimitMenu,
   isReadyForPrompt,
   shouldRetrySubmit,
   shouldClearTruncatedPreamble,
@@ -344,30 +345,55 @@ describe('detectPaneState', () => {
     expect(detectPaneState(IDLE_BACKGROUND_ONE_SHELL_HIDDEN)).toBe('idle')
   })
 
-  it('does NOT classify a truncated "· N shell" prefix as idle', () => {
-    // Defense in depth: the shells-variant requires either the
-    // "· N shells · ctrl+t" marker or the "· N shells · ↓ to manage"
-    // marker, not just the bare "· N shell(s)" prefix. Two reasons we
-    // pin this down with an explicit negative test:
-    //   1. A malformed or partially rendered footer (terminal
-    //      corruption, mid-render frame) must classify as 'unknown'
-    //      so we do not deliver a prompt into a pane that is not
-    //      really ready.
-    //   2. The "bypass permissions on · 1 shell" substring could
-    //      appear in scrollback as quoted log output or an echoed
-    //      message, and the regex must not be tricked into treating
-    //      that as a live footer.
-    // The fixture is deliberately minimal: no other idle markers
-    // (no "(shift+tab to cycle)", no "? for shortcuts") so the
-    // assertion isolates the truncated-shells path specifically.
-    const truncated = [
+  it('classifies a complete input box as idle even when the footer string is unrecognised', () => {
+    // Structural contract (d3339db9): a pane with a COMPLETE input box (two
+    // box separators framing a ❯ prompt) at the bottom IS a ready Claude
+    // Code surface, regardless of the footer-slot text. The footer rotates
+    // onboarding tips and sometimes drops the "bypass permissions on"
+    // segment, so footer-STRING strictness (the prior gate) silently
+    // dropped messages to idle channel-less agents. A truncated
+    // "· 1 shell" footer over a complete box is one such case: the box is
+    // rendered and empty, so the pane is ready.
+    const truncatedFooter = [
       '',
       SEP,
       '❯ ',
       SEP,
       '  ⏵⏵ bypass permissions on · 1 shell',
     ].join('\n')
-    expect(detectPaneState(truncated)).toBe('unknown')
+    expect(detectPaneState(truncatedFooter)).toBe('idle')
+  })
+
+  it('still classifies a non-surface (footer-looking text, no input box) as unknown', () => {
+    // Conservatism preserved for the genuine negative: a footer-looking
+    // string with NO complete input box is not a promptable surface, so we
+    // must not deliver a prompt into it.
+    const noBox = [
+      '  some log output',
+      '  ⏵⏵ bypass permissions on · 1 shell',
+      '  more scrollback, no box separators here',
+    ].join('\n')
+    expect(detectPaneState(noBox)).toBe('unknown')
+  })
+
+  it('takes the bottom-most box: a quoted box in scrollback cannot spoof readiness', () => {
+    // The prior footer-string concern (a "bypass permissions on · 1 shell"
+    // echo in scrollback faking a live footer) is now handled structurally:
+    // findInputBoxBounds scans from the BOTTOM, so a ─/❯/─ block echoed
+    // higher up in scrollback never wins over the real live box below it.
+    // Here the scrollback box holds parked text but the live box is empty
+    // -> idle (NOT typing), proving the live box is the one inspected.
+    const pane = [
+      SEP,
+      '❯ quoted parked text from an old echoed message',
+      SEP,
+      '  some intervening tool output',
+      SEP,
+      '❯ ',
+      SEP,
+      '  gh auth login · ← for agents',
+    ].join('\n')
+    expect(detectPaneState(pane)).toBe('idle')
   })
 
   it('detects busy when "esc to interrupt" footer marker is present', () => {
@@ -1236,5 +1262,221 @@ describe('decideStuckInputRecovery', () => {
     expect(d.next.firstSeenAt).toBe(500_000)
     expect(d.next.lastRecoverAt).toBe(null)
     expect(d.next.attempts).toBe(0)
+  })
+})
+
+// ===========================================================================
+// Channel-less agents: footer-tip-only idle surface (card d3339db9)
+// ===========================================================================
+//
+// The 2026-06-12 Bond-meeting incident: inter-agent messages to five idle
+// channel-less agents (scout/quill/bigben/applegate/...) were marked
+// "session busy" and silently dropped after the 60-min abandon window.
+// Root cause: those agents render the footer WITHOUT the leading
+// "⏵⏵ bypass permissions on (shift+tab to cycle)" permission-mode segment
+// -- only the rotating onboarding-tip slot "gh auth login · ← for agents"
+// remains. The legacy IDLE_FOOTER_RX knew only the bypass/strict footers,
+// so detectPaneState read 'unknown' and isReadyForPrompt was false forever.
+// The fix recognises the input-box STRUCTURE (two box separators framing a
+// ❯ prompt) independently of the rotating footer text.
+
+// Top separator carries the agent's title suffix, exactly as Claude Code
+// renders it ("─...─ Dr. Stone ──"). BOX_SEP_RX (^─{10,}) still matches the
+// leading run.
+const SEP_TITLED = '─'.repeat(60) + ' Dr. Stone ──'
+
+// Clean idle channel-less agent: empty input box, footer slot shows only
+// the rotating onboarding tip. THIS is the silent-drop repro -- it must be
+// 'idle' so the router/scheduler deliver.
+const IDLE_CHANNELLESS_TIP_FOOTER = [
+  '  a valódi metrika.',
+  '',
+  '✻ Cogitated for 1m 2s',
+  '          ✗ Auto-update failed: no write permission to npm prefix · Run /doctor',
+  SEP_TITLED,
+  '❯ ',
+  SEP,
+  '  gh auth login · ← for agents',
+].join('\n')
+
+// Same footer, but a draft parked in the input box -> 'typing' (NOT ready;
+// a delivered prompt would concatenate onto the draft).
+const PARKED_CHANNELLESS_TIP_FOOTER = [
+  '  a valódi metrika.',
+  '',
+  SEP_TITLED,
+  '❯ Küldd el a Big Ben és Quill választ is',
+  SEP,
+  '  gh auth login · ← for agents',
+].join('\n')
+
+// Busy channel-less agent: the tip footer is present but the turn is mid
+// flight (token counter). BUSY_INDICATORS must win regardless of footer.
+const BUSY_CHANNELLESS_TIP_FOOTER = [
+  '✻ Cogitating… (12s · ↓ 1.2k tokens · thinking)',
+  '',
+  SEP_TITLED,
+  '❯ ',
+  SEP,
+  '  gh auth login · ← for agents',
+].join('\n')
+
+// The full composite footer real agents show: permission-mode segment +
+// the same rotating tips appended. Still idle (regression guard for the
+// agents that were delivering fine).
+const IDLE_BYPASS_WITH_TIPS = [
+  '',
+  SEP,
+  '❯ ',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · gh auth login · ← for agents',
+].join('\n')
+
+// A Claude Code permission dialog (devil-advocate's pane during the
+// incident): a y/n menu, NO box separators at all. Must stay 'unknown' --
+// injecting a prompt here would corrupt the dialog, so it must never be
+// classified idle/ready by the new structural recogniser.
+const PERMISSION_MENU = [
+  ' Contains brace with quote character (expansion obfuscation)',
+  '',
+  ' Do you want to proceed?',
+  ' ❯ 1. Yes',
+  '   2. No',
+  '',
+  ' Esc to cancel · Tab to amend · ctrl+e to explain',
+].join('\n')
+
+describe('channel-less footer-tip idle surface (d3339db9)', () => {
+  it('classifies a clean idle channel-less agent as idle (the silent-drop repro)', () => {
+    expect(detectPaneState(IDLE_CHANNELLESS_TIP_FOOTER)).toBe('idle')
+    expect(isReadyForPrompt(IDLE_CHANNELLESS_TIP_FOOTER)).toBe(true)
+  })
+
+  it('classifies a parked channel-less box as typing, not ready', () => {
+    expect(detectPaneState(PARKED_CHANNELLESS_TIP_FOOTER)).toBe('typing')
+    expect(isReadyForPrompt(PARKED_CHANNELLESS_TIP_FOOTER)).toBe(false)
+  })
+
+  it('still classifies a busy channel-less agent as busy', () => {
+    expect(detectPaneState(BUSY_CHANNELLESS_TIP_FOOTER)).toBe('busy')
+    expect(isReadyForPrompt(BUSY_CHANNELLESS_TIP_FOOTER)).toBe(false)
+  })
+
+  it('still recognises the full composite footer (real delivering agents)', () => {
+    expect(detectPaneState(IDLE_BYPASS_WITH_TIPS)).toBe('idle')
+    expect(isReadyForPrompt(IDLE_BYPASS_WITH_TIPS)).toBe(true)
+  })
+
+  it('does NOT classify a permission dialog (no input box) as idle/ready', () => {
+    expect(detectPaneState(PERMISSION_MENU)).toBe('unknown')
+    expect(isReadyForPrompt(PERMISSION_MENU)).toBe(false)
+  })
+})
+
+// ===========================================================================
+// Usage/session-limit menu (PR #130 DA review, HIGH)
+// ===========================================================================
+//
+// The structural input-box recogniser (d3339db9) keys idle on box STRUCTURE,
+// not footer text. The DA flagged a real edge: when the shared Claude account
+// hits its usage limit the session renders a blocking limit modal. One render
+// (an empty input box plus a "... usage limit · resets at 3pm" footer) has a
+// structural box but no parked text, so WITHOUT an explicit guard it would
+// fall through to 'idle' = READY, and the message-router/scheduler would
+// inject a prompt INTO a limited session (it never processes; on reset it may
+// auto-submit stale). The guard classifies any usage-limit surface as 'busy'.
+//
+// Limit-phrase fixtures use the verbatim captures from the 2026-06-07
+// Dave+Thor freezes (see token-outage-bridge.ts LIMIT_PATTERNS), which is the
+// authoritative matcher used by the separate token-outage auto-ACK bridge.
+
+// Realistic blocking modal: rounded-corner box (no ─{10,} rule, no idle
+// footer). Already 'unknown' pre-guard; the guard makes it the more accurate
+// 'busy'.
+const LIMIT_MENU_MODAL = [
+  '  (prior turn output)',
+  '',
+  '╭────────────────────────────────────────────────────────────╮',
+  "│ You've hit your session limit · resets 7:40pm (Europe/Budapest)",
+  '│',
+  '│ What do you want to do?',
+  '│ ❯ 1. Stop and wait for limit to reset',
+  '│   2. Upgrade your plan',
+  '╰────────────────────────────────────────────────────────────╯',
+].join('\n')
+
+// Worst case for the structural detector: the limit option sits inside a flat
+// ─ input box (would otherwise read 'typing'). The guard must win -> 'busy'.
+const LIMIT_IN_BOX = [
+  SEP,
+  '❯ 1. Stop and wait for limit to reset',
+  SEP,
+  "  You've hit your session limit · resets 7:40pm (Europe/Budapest)",
+].join('\n')
+
+// THE false-ready gap: empty input box + a limit footer with a reset time.
+// Pre-guard this is 'idle' (box present, no parked ❯ text, footer ignored) =
+// READY = the router injects into a limited session. Must be 'busy'.
+const LIMIT_SOFT_EMPTY_BOX = [
+  SEP,
+  '❯ ',
+  SEP,
+  "  You've reached your usage limit · resets at 3pm",
+].join('\n')
+
+// Prose false-positive guard: an idle agent whose reply merely MENTIONS one
+// limit phrase (e.g. reviewing token-outage-bridge.ts) with NO corroborating
+// signal must stay 'idle'. Co-occurrence (phrase AND reset-time/wait-option)
+// is required, mirroring the thinking-block-error AND-combine discipline.
+const PROSE_MENTIONS_LIMIT = [
+  '  I checked token-outage-bridge.ts: it matches the phrase',
+  "  \"you've reached your usage limit\" as one of its limit signals.",
+  '',
+  SEP,
+  '❯ ',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · gh auth login · ← for agents',
+].join('\n')
+
+describe('usage/session-limit menu (PR #130 DA HIGH)', () => {
+  it('classifies the blocking limit modal as busy, not ready', () => {
+    expect(detectPaneState(LIMIT_MENU_MODAL)).toBe('busy')
+    expect(isReadyForPrompt(LIMIT_MENU_MODAL)).toBe(false)
+  })
+
+  it('classifies a limit option parked in a box as busy (guard beats typing)', () => {
+    expect(detectPaneState(LIMIT_IN_BOX)).toBe('busy')
+    expect(isReadyForPrompt(LIMIT_IN_BOX)).toBe(false)
+  })
+
+  it('classifies the empty-box limit footer as busy, closing the false-ready gap', () => {
+    expect(detectPaneState(LIMIT_SOFT_EMPTY_BOX)).toBe('busy')
+    expect(isReadyForPrompt(LIMIT_SOFT_EMPTY_BOX)).toBe(false)
+  })
+
+  it('does NOT trip on prose that mentions a single limit phrase', () => {
+    expect(detectsUsageLimitMenu(PROSE_MENTIONS_LIMIT)).toBe(false)
+    expect(detectPaneState(PROSE_MENTIONS_LIMIT)).toBe('idle')
+  })
+
+  it('requires a corroborating signal: phrase alone is not a menu', () => {
+    expect(detectsUsageLimitMenu("You've hit your session limit")).toBe(false)
+  })
+
+  it('detects phrase + reset-time, and phrase + wait-option', () => {
+    expect(
+      detectsUsageLimitMenu("You've hit your session limit · resets 7:40pm (Europe/Budapest)"),
+    ).toBe(true)
+    expect(
+      detectsUsageLimitMenu('usage limit reached\nStop and wait for limit to reset'),
+    ).toBe(true)
+  })
+
+  it('ignores a limit menu that scrolled out of the live tail', () => {
+    const deepScrollback = [
+      LIMIT_MENU_MODAL,
+      ...Array(22).fill('  later idle output line'),
+    ].join('\n')
+    expect(detectsUsageLimitMenu(deepScrollback)).toBe(false)
   })
 })

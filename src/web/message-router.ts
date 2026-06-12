@@ -1,12 +1,26 @@
 import { execSync } from 'node:child_process'
+import { appendFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import {
+  createAgentMessage,
   getPendingMessages,
   markMessageDelivered,
   markMessageFailed,
 } from '../db.js'
+import {
+  DELIVERY_MONITOR_AGENT_ID,
+  DELIVERY_ABANDONMENT_SENTINEL,
+  shouldAlertOnAbandon,
+  abandonAlertContent,
+  abandonmentRecord,
+} from './delivery-alert.js'
+
+// Project root for resolving the gitignored sentinel file. Mirrors
+// token-outage-bridge.ts's resolution so both write under the same store/.
+const MARVEEN_ROOT = process.env.MARVEEN_ROOT ?? process.cwd()
 import {
   wrapUntrusted,
   wrapTrustedPeer,
@@ -61,6 +75,28 @@ export function startMessageRouter(): NodeJS.Timeout {
         logger.warn({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ageMs }, 'Agent message abandoned: target never ready within window')
         if (!markMessageFailed(msg.id, 'Abandoned: target session never ready within retry window')) {
           logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
+        }
+        // Never drop silently (card d3339db9): surface the failure to the
+        // main agent so it is always visible, even if a future pane-detector
+        // gap re-introduces a false-busy. Guard against recursion -- a
+        // monitor alert that is itself abandoned does not spawn another.
+        if (shouldAlertOnAbandon(msg.from_agent)) {
+          try {
+            createAgentMessage(DELIVERY_MONITOR_AGENT_ID, MAIN_AGENT_ID, abandonAlertContent(msg, ageMs))
+          } catch (err) {
+            logger.warn({ err, id: msg.id }, 'Failed to enqueue delivery-dropped alert')
+          }
+        }
+        // Durable last-resort trail (PR #130 DA review, MEDIUM): the alert
+        // above is itself an inter-agent message and can also go undelivered
+        // (acutely when the recipient IS the wedged main agent). Append every
+        // abandonment -- including an abandoned monitor alert -- to a sentinel
+        // JSONL a token-free supervisor can tail, so the safety net cannot
+        // itself fall silent.
+        try {
+          appendFileSync(join(MARVEEN_ROOT, DELIVERY_ABANDONMENT_SENTINEL), abandonmentRecord(msg, ageMs, now) + '\n')
+        } catch (err) {
+          logger.warn({ err, id: msg.id }, 'Failed to append delivery-abandonment sentinel')
         }
         routerLoggedMisses.delete(msg.id)
         continue
