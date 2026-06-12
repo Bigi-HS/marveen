@@ -1,4 +1,6 @@
 import { execSync } from 'node:child_process'
+import { appendFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
@@ -10,9 +12,15 @@ import {
 } from '../db.js'
 import {
   DELIVERY_MONITOR_AGENT_ID,
+  DELIVERY_ABANDONMENT_SENTINEL,
   shouldAlertOnAbandon,
   abandonAlertContent,
+  abandonmentRecord,
 } from './delivery-alert.js'
+
+// Project root for resolving the gitignored sentinel file. Mirrors
+// token-outage-bridge.ts's resolution so both write under the same store/.
+const MARVEEN_ROOT = process.env.MARVEEN_ROOT ?? process.cwd()
 import {
   wrapUntrusted,
   wrapTrustedPeer,
@@ -78,6 +86,17 @@ export function startMessageRouter(): NodeJS.Timeout {
           } catch (err) {
             logger.warn({ err, id: msg.id }, 'Failed to enqueue delivery-dropped alert')
           }
+        }
+        // Durable last-resort trail (PR #130 DA review, MEDIUM): the alert
+        // above is itself an inter-agent message and can also go undelivered
+        // (acutely when the recipient IS the wedged main agent). Append every
+        // abandonment -- including an abandoned monitor alert -- to a sentinel
+        // JSONL a token-free supervisor can tail, so the safety net cannot
+        // itself fall silent.
+        try {
+          appendFileSync(join(MARVEEN_ROOT, DELIVERY_ABANDONMENT_SENTINEL), abandonmentRecord(msg, ageMs, now) + '\n')
+        } catch (err) {
+          logger.warn({ err, id: msg.id }, 'Failed to append delivery-abandonment sentinel')
         }
         routerLoggedMisses.delete(msg.id)
         continue

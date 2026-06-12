@@ -39,3 +39,35 @@ export function abandonAlertContent(
     `"${msg.to_agent}"'s session health and re-send if it still matters.`
   )
 }
+
+// Durable, delivery-independent sentinel for abandoned messages (PR #130 DA
+// review, MEDIUM). The inter-agent alert above is itself an inter-agent
+// message, so it can also go undelivered -- most acutely when the abandoned
+// message's recipient IS the wedged main agent, leaving the "never drop
+// silently" net silent. Every abandonment is ALSO appended as one JSONL line
+// to this file (under the gitignored store/), which a token-free always-on
+// watcher (fleet-supervisor) can tail and escalate out-of-band.
+export const DELIVERY_ABANDONMENT_SENTINEL = 'store/.delivery-abandonment-alerts.jsonl'
+
+/**
+ * One JSON-object line describing an abandoned-message event for the sentinel
+ * file. Pure (clock injected) so it is unit-testable; the fs append lives in
+ * the router. Unlike abandonAlertContent this is emitted for EVERY abandonment
+ * -- including an abandoned monitor alert -- because the durable trail is the
+ * last line of defence and must capture exactly the "alert itself was lost"
+ * case.
+ */
+export function abandonmentRecord(
+  msg: { id: number; from_agent: string; to_agent: string },
+  ageMs: number,
+  nowMs: number,
+): string {
+  return JSON.stringify({
+    ts: new Date(nowMs).toISOString(),
+    event: 'delivery-abandoned',
+    id: msg.id,
+    from: msg.from_agent,
+    to: msg.to_agent,
+    age_min: Math.round(ageMs / 60000),
+  })
+}

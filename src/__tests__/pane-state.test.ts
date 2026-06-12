@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   detectPaneState,
   detectsThinkingBlockError,
+  detectsUsageLimitMenu,
   isReadyForPrompt,
   shouldRetrySubmit,
   shouldClearTruncatedPreamble,
@@ -1369,5 +1370,113 @@ describe('channel-less footer-tip idle surface (d3339db9)', () => {
   it('does NOT classify a permission dialog (no input box) as idle/ready', () => {
     expect(detectPaneState(PERMISSION_MENU)).toBe('unknown')
     expect(isReadyForPrompt(PERMISSION_MENU)).toBe(false)
+  })
+})
+
+// ===========================================================================
+// Usage/session-limit menu (PR #130 DA review, HIGH)
+// ===========================================================================
+//
+// The structural input-box recogniser (d3339db9) keys idle on box STRUCTURE,
+// not footer text. The DA flagged a real edge: when the shared Claude account
+// hits its usage limit the session renders a blocking limit modal. One render
+// (an empty input box plus a "... usage limit · resets at 3pm" footer) has a
+// structural box but no parked text, so WITHOUT an explicit guard it would
+// fall through to 'idle' = READY, and the message-router/scheduler would
+// inject a prompt INTO a limited session (it never processes; on reset it may
+// auto-submit stale). The guard classifies any usage-limit surface as 'busy'.
+//
+// Limit-phrase fixtures use the verbatim captures from the 2026-06-07
+// Dave+Thor freezes (see token-outage-bridge.ts LIMIT_PATTERNS), which is the
+// authoritative matcher used by the separate token-outage auto-ACK bridge.
+
+// Realistic blocking modal: rounded-corner box (no ─{10,} rule, no idle
+// footer). Already 'unknown' pre-guard; the guard makes it the more accurate
+// 'busy'.
+const LIMIT_MENU_MODAL = [
+  '  (prior turn output)',
+  '',
+  '╭────────────────────────────────────────────────────────────╮',
+  "│ You've hit your session limit · resets 7:40pm (Europe/Budapest)",
+  '│',
+  '│ What do you want to do?',
+  '│ ❯ 1. Stop and wait for limit to reset',
+  '│   2. Upgrade your plan',
+  '╰────────────────────────────────────────────────────────────╯',
+].join('\n')
+
+// Worst case for the structural detector: the limit option sits inside a flat
+// ─ input box (would otherwise read 'typing'). The guard must win -> 'busy'.
+const LIMIT_IN_BOX = [
+  SEP,
+  '❯ 1. Stop and wait for limit to reset',
+  SEP,
+  "  You've hit your session limit · resets 7:40pm (Europe/Budapest)",
+].join('\n')
+
+// THE false-ready gap: empty input box + a limit footer with a reset time.
+// Pre-guard this is 'idle' (box present, no parked ❯ text, footer ignored) =
+// READY = the router injects into a limited session. Must be 'busy'.
+const LIMIT_SOFT_EMPTY_BOX = [
+  SEP,
+  '❯ ',
+  SEP,
+  "  You've reached your usage limit · resets at 3pm",
+].join('\n')
+
+// Prose false-positive guard: an idle agent whose reply merely MENTIONS one
+// limit phrase (e.g. reviewing token-outage-bridge.ts) with NO corroborating
+// signal must stay 'idle'. Co-occurrence (phrase AND reset-time/wait-option)
+// is required, mirroring the thinking-block-error AND-combine discipline.
+const PROSE_MENTIONS_LIMIT = [
+  '  I checked token-outage-bridge.ts: it matches the phrase',
+  "  \"you've reached your usage limit\" as one of its limit signals.",
+  '',
+  SEP,
+  '❯ ',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · gh auth login · ← for agents',
+].join('\n')
+
+describe('usage/session-limit menu (PR #130 DA HIGH)', () => {
+  it('classifies the blocking limit modal as busy, not ready', () => {
+    expect(detectPaneState(LIMIT_MENU_MODAL)).toBe('busy')
+    expect(isReadyForPrompt(LIMIT_MENU_MODAL)).toBe(false)
+  })
+
+  it('classifies a limit option parked in a box as busy (guard beats typing)', () => {
+    expect(detectPaneState(LIMIT_IN_BOX)).toBe('busy')
+    expect(isReadyForPrompt(LIMIT_IN_BOX)).toBe(false)
+  })
+
+  it('classifies the empty-box limit footer as busy, closing the false-ready gap', () => {
+    expect(detectPaneState(LIMIT_SOFT_EMPTY_BOX)).toBe('busy')
+    expect(isReadyForPrompt(LIMIT_SOFT_EMPTY_BOX)).toBe(false)
+  })
+
+  it('does NOT trip on prose that mentions a single limit phrase', () => {
+    expect(detectsUsageLimitMenu(PROSE_MENTIONS_LIMIT)).toBe(false)
+    expect(detectPaneState(PROSE_MENTIONS_LIMIT)).toBe('idle')
+  })
+
+  it('requires a corroborating signal: phrase alone is not a menu', () => {
+    expect(detectsUsageLimitMenu("You've hit your session limit")).toBe(false)
+  })
+
+  it('detects phrase + reset-time, and phrase + wait-option', () => {
+    expect(
+      detectsUsageLimitMenu("You've hit your session limit · resets 7:40pm (Europe/Budapest)"),
+    ).toBe(true)
+    expect(
+      detectsUsageLimitMenu('usage limit reached\nStop and wait for limit to reset'),
+    ).toBe(true)
+  })
+
+  it('ignores a limit menu that scrolled out of the live tail', () => {
+    const deepScrollback = [
+      LIMIT_MENU_MODAL,
+      ...Array(22).fill('  later idle output line'),
+    ].join('\n')
+    expect(detectsUsageLimitMenu(deepScrollback)).toBe(false)
   })
 })

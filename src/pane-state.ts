@@ -91,6 +91,31 @@ const BUSY_INDICATORS: RegExp[] = [
 // a second prompt on top.
 const PENDING_PASTE_RX = /\[Pasted text #\d+/
 
+// Usage/session-limit modal (PR #130 DA review, HIGH). When the shared Claude
+// account hits its limit the session renders a blocking "What do you want to
+// do? / Stop and wait for limit to reset / Upgrade your plan" menu. Some
+// renders of that surface (notably an empty input box plus a "... usage limit
+// · resets at 3pm" footer) present a structural input box with no parked text,
+// so the d3339db9 structural recogniser would otherwise read them as 'idle' =
+// READY and the message-router/scheduler would inject a prompt INTO a limited
+// session (it never processes; on reset it may auto-submit stale). The guard
+// below classifies any usage-limit surface as 'busy' regardless of box/footer.
+//
+// Prose false-positive guard: an agent working on token-outage code can print
+// a single limit phrase in its reply. We therefore require TWO co-occurring
+// signals in the live tail -- the limit phrase AND a corroborating signal (a
+// reset time or the wait-for-reset option line) -- mirroring the thinking-
+// block error's AND-combine discipline. Scoped to the bottom lines (the menu
+// renders there), never deep scrollback.
+//
+// The authoritative, fuller pattern list lives in token-outage-bridge.ts
+// (LIMIT_PATTERNS), used by the separate token-free auto-ACK bridge. It is
+// kept INLINE here to preserve this module's zero-import, unit-testable design;
+// both derive from the verbatim 2026-06-07 Dave+Thor freeze captures.
+const LIMIT_PHRASE_RX = /you've (?:hit|reached) your (?:usage|session) limit|(?:usage|session) limit reached|claude usage limit|limit will reset/i
+const LIMIT_CORROBORATION_RX = /stop and wait for limit to reset|resets?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)/i
+const LIMIT_MENU_TAIL_LINES = 18
+
 // Input-box separator lines are made of U+2500 BOX DRAWINGS LIGHT
 // HORIZONTAL. At least 10 in a run to ignore stray `-` glyphs.
 const BOX_SEP_RX = /^─{10,}/
@@ -224,6 +249,24 @@ export function detectsThinkingBlockError(pane: string): boolean {
   return false
 }
 
+/**
+ * True when the live tail shows the Claude Code usage/session-limit menu.
+ * Requires the limit phrase AND a corroborating signal (a reset time or the
+ * wait-for-reset option line) co-occurring within the bottom
+ * LIMIT_MENU_TAIL_LINES, so an agent that merely prints one limit phrase in
+ * its reply prose is not misclassified. Scoped to the tail because the menu
+ * renders at the bottom, never in deep scrollback.
+ *
+ * See token-outage-bridge.ts (LIMIT_PATTERNS) for the authoritative, fuller
+ * matcher used by the separate token-free auto-ACK bridge; this inline copy
+ * keeps pane-state.ts dependency-free.
+ */
+export function detectsUsageLimitMenu(pane: string): boolean {
+  if (!pane) return false
+  const tail = pane.split('\n').slice(-LIMIT_MENU_TAIL_LINES).join('\n')
+  return LIMIT_PHRASE_RX.test(tail) && LIMIT_CORROBORATION_RX.test(tail)
+}
+
 export interface DetectPaneStateOptions {
   /** If true, the 'typing' state (text parked in input box) is
    * merged into 'busy'. Default false -- callers that care about
@@ -239,6 +282,9 @@ export interface DetectPaneStateOptions {
  *   2. Any BUSY_INDICATOR matches anywhere -> 'busy'. This includes the
  *      wider spinner/token-count fallbacks that catch the frame-level
  *      footer gap.
+ *   2b. Usage/session-limit modal in the live tail -> 'busy'. Checked before
+ *      the surface/idle returns so a limited session (which can render a box
+ *      or idle-looking footer) is never treated as promptable.
  *   3. No idle footer visible -> 'unknown' (pane is not Claude Code).
  *   4. Wedged thinking-block API error in the live tail -> 'error'.
  *      Checked after the busy guard (a live turn is never 'error') and
@@ -257,6 +303,12 @@ export function detectPaneState(
   for (const rx of BUSY_INDICATORS) {
     if (rx.test(pane)) return 'busy'
   }
+
+  // Usage/session-limit modal: never a promptable surface, even when it shows
+  // a structural input box or an idle-looking footer. Checked before the
+  // surface/idle/typing returns so the message-router and scheduler never
+  // inject a prompt into a limited session (PR #130 DA review, HIGH).
+  if (detectsUsageLimitMenu(pane)) return 'busy'
 
   // Surface recognition: a recognised footer OR a structural input box.
   // The structural box catches channel-less agents whose footer slot shows
