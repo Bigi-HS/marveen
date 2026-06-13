@@ -72,6 +72,9 @@ HIBIKI_PUSH_THROTTLE_SECONDS="${HIBIKI_PUSH_THROTTLE_SECONDS:-300}"
 # file dedupes already-escalated drops); this only bounds how often we spawn
 # node. 60s keeps the silent-drop -> operator-ping latency to about a minute.
 DELIVERY_SENTINEL_THROTTLE_SECONDS="${DELIVERY_SENTINEL_THROTTLE_SECONDS:-60}"
+# Same throttle for the delivery ACK-overdue consumer (card 1a99b7e2). Its CLI
+# is idempotent (own cursor + first-run baseline), so this only bounds node spawns.
+DELIVERY_ACK_THROTTLE_SECONDS="${DELIVERY_ACK_THROTTLE_SECONDS:-60}"
 
 DRY_RUN=0
 ONCE=0
@@ -400,6 +403,33 @@ ensure_delivery_sentinel_watch() {
     || log "delivery-sentinel: tick invocation failed (non-fatal, retries next window)"
 }
 
+# Delivery ACK-overdue consumer (card 1a99b7e2). PR #133 writes a pending-ack
+# trail on inject of an ack_expected message; the in-process observer clears one
+# once the recipient engages. This reads what stays OUTSTANDING (pending minus
+# cleared) and escalates the ones overdue past the 15-min window OUT OF BAND
+# (Telegram Bot API fallback), so an ack_expected delegation that never reached
+# a turn no longer fails silently. Gated behind store/delivery-ack-watch.enabled
+# so MERGING the wiring is INERT until an operator (Genesis/Forge) validates the
+# build on c12 and touches the flag -- same pattern as the abandonment consumer.
+delivery_ack_watch_enabled() { [ -f "$STORE/delivery-ack-watch.enabled" ]; }
+delivery_ack_due() {             # -> 0 if the throttle window has elapsed, 1 if not
+  local nextf="$STATE_DIR/delivery-ack.next" now next
+  now=$(date +%s)
+  [ -f "$nextf" ] || return 0
+  next=$(cat "$nextf" 2>/dev/null || echo 0); case "$next" in (*[!0-9]*|'') next=0;; esac
+  [ "$now" -ge "$next" ]
+}
+ensure_delivery_ack_watch() {
+  delivery_ack_watch_enabled || return 0        # inert until operator-enabled
+  local cli="$INSTALL_DIR/dist/delivery-ack-cli.js"
+  [ -f "$cli" ] || { log "delivery-ack: dist/delivery-ack-cli.js missing -- run build; skipping"; return 0; }
+  delivery_ack_due || return 0                  # throttled this tick
+  echo $(( $(date +%s) + DELIVERY_ACK_THROTTLE_SECONDS )) > "$STATE_DIR/delivery-ack.next"
+  if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: node dist/delivery-ack-cli.js"; return 0; fi
+  run env -u TMUX MARVEEN_ROOT="$INSTALL_DIR" "$NODE" "$cli" >> "$STORE/delivery-ack.log" 2>&1 \
+    || log "delivery-ack: tick invocation failed (non-fatal, retries next window)"
+}
+
 # --- one supervision pass --------------------------------------------------
 # Credential locations, env-overridable so the reconcile unit test can isolate
 # them into a temp dir (same pattern as FLEET_SUPERVISOR_STORE) without touching
@@ -538,6 +568,9 @@ tick() {
   ensure_tailscaled
   # 11) DELIVERY-ABANDONMENT SENTINEL CONSUMER (out-of-band escalation of dropped inter-agent msgs -- gated by store/delivery-sentinel-watch.enabled)
   ensure_delivery_sentinel_watch
+
+  # 12) DELIVERY ACK-OVERDUE CONSUMER (out-of-band escalation of unconfirmed ack_expected msgs -- gated by store/delivery-ack-watch.enabled)
+  ensure_delivery_ack_watch
 }
 
 # --- main ------------------------------------------------------------------

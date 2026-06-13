@@ -11,6 +11,7 @@ import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
 import { ensureAgentHooks, ensureDefaultScheduledTasks } from './web/agent-scaffold.js'
 import { refreshMarveenBotUsername } from './web/telegram.js'
 import { startMessageRouter } from './web/message-router.js'
+import { startAckClearObserver } from './web/delivery-ack-observer.js'
 import { startUpdateChecker } from './web/update-checker.js'
 import { startMcpListChecker } from './web/mcp-list.js'
 import { startScheduleRunner } from './web/schedule-runner.js'
@@ -327,6 +328,13 @@ export function startWebServer(port = 3420): http.Server {
   const routerInterval = startMessageRouter()
   logger.info('Agent message router started (5s poll)')
 
+  // Delivery ACK clear-observer (card 1a99b7e2): watches recipient panes and
+  // clears a pending-ack once the recipient engages (busy = our injected turn
+  // started). Naturally inert until a sender opts into ack_expected (the trail
+  // file is absent otherwise); the out-of-band escalation is the gated part.
+  const ackObserverInterval = startAckClearObserver()
+  logger.info('Delivery ACK clear-observer started (5s poll)')
+
   const scheduleInterval = startScheduleRunner()
   logger.info('Schedule runner started (60s poll)')
 
@@ -433,6 +441,7 @@ export function startWebServer(port = 3420): http.Server {
   const origClose = server.close.bind(server)
   server.close = (cb?: (err?: Error) => void) => {
     clearInterval(routerInterval)
+    clearInterval(ackObserverInterval)
     clearInterval(scheduleInterval)
     if (pluginMonitorInterval) clearInterval(pluginMonitorInterval)
     clearInterval(channelHealthInterval)
