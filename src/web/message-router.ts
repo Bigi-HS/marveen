@@ -26,6 +26,7 @@ import {
 import {
   classifyPendingMessage,
   pruneEscalationState,
+  shouldAlertInBand,
 } from './delivery-retry.js'
 
 // Project root for resolving the gitignored sentinel file. Mirrors
@@ -137,11 +138,19 @@ export function startMessageRouter(): NodeJS.Timeout {
       if (action === 'escalate') {
         // Overdue but still pending: nag, do NOT drop, and fall through to the
         // delivery attempt below (the recipient may have just freed up).
-        const firstEscalation = !escalationState.has(msg.id)
-        // In-band alert ONCE, on the first crossing only -- repeating it every
-        // round would pile up new pending messages to the (often deaf) main
+        //
+        // In-band alert ONCE, on the genuine first crossing only -- repeating it
+        // every round would pile up new pending messages to the (often deaf) main
         // agent and amplify the very backlog we are escalating. The periodic
         // re-alert is carried purely out-of-band by the sentinel below.
+        //
+        // shouldAlertInBand (not a bare !state.has(id)) is load-bearing here:
+        // escalationState is in-process only, but pending rows survive a restart
+        // in SQLite, so after a restart EVERY still-overdue message would look
+        // like a first crossing and re-fire in-band on a fleet that restarts
+        // daily. It treats a no-record message whose age is well past the
+        // threshold as a restart rediscovery (already alerted) -> sentinel-only.
+        const firstEscalation = shouldAlertInBand(ageMs, escalationState.has(msg.id))
         if (firstEscalation && shouldAlertOnAbandon(msg.from_agent)) {
           try {
             createAgentMessage(DELIVERY_MONITOR_AGENT_ID, MAIN_AGENT_ID, abandonAlertContent(msg, ageMs, 'overdue'))
