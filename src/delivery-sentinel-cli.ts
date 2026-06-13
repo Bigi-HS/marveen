@@ -22,9 +22,9 @@ import {
   parseAbandonmentSentinel,
 } from './web/delivery-alert.js'
 import {
-  EMPTY_SENTINEL_CURSOR,
   selectSentinelEscalations,
   sentinelAlertText,
+  normalizeCursor,
   type SentinelCursor,
 } from './web/delivery-sentinel-consumer.js'
 
@@ -45,15 +45,14 @@ function readMainToken(): string | null {
 
 function readCursor(): SentinelCursor {
   try {
-    if (!existsSync(CURSOR_PATH)) return { ...EMPTY_SENTINEL_CURSOR }
-    const parsed = JSON.parse(readFileSync(CURSOR_PATH, 'utf-8'))
-    const id = parsed && typeof parsed.lastEscalatedId === 'number' && Number.isFinite(parsed.lastEscalatedId)
-      ? parsed.lastEscalatedId
-      : 0
-    return { lastEscalatedId: id }
+    if (!existsSync(CURSOR_PATH)) return { lastEscalatedTs: {} }
+    // normalizeCursor migrates a pre-7557a98d scalar { lastEscalatedId } cursor
+    // (and any malformed value) to an empty per-id cursor, so the next run
+    // baselines instead of replaying history.
+    return normalizeCursor(JSON.parse(readFileSync(CURSOR_PATH, 'utf-8')))
   } catch (err) {
-    logger.debug({ err }, 'delivery-sentinel: cursor read failed, starting from 0')
-    return { ...EMPTY_SENTINEL_CURSOR }
+    logger.debug({ err }, 'delivery-sentinel: cursor read failed, starting fresh')
+    return { lastEscalatedTs: {} }
   }
 }
 
@@ -88,7 +87,7 @@ async function main(): Promise<void> {
     // nothing (a deploy must not replay historical drops).
     writeCursor(plan.nextCursor)
     logger.info(
-      { through: plan.nextCursor.lastEscalatedId },
+      { tracked: Object.keys(plan.nextCursor.lastEscalatedTs).length },
       'delivery-sentinel: baselined cursor past existing history',
     )
     return
@@ -112,7 +111,7 @@ async function main(): Promise<void> {
   if (sent) {
     writeCursor(plan.nextCursor)
     logger.info(
-      { count: plan.escalations.length, through: plan.nextCursor.lastEscalatedId },
+      { count: plan.escalations.length, ids: plan.escalations.map((e) => e.id) },
       'delivery-sentinel: escalated abandoned deliveries out-of-band',
     )
   } else {
