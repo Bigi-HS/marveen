@@ -67,6 +67,11 @@ RETRY_MAX_SECONDS=$((30*60))  # cap: token-exhaustion long-wait
 # tick loop (the push script is itself idempotent; this only bounds how often we
 # spawn python). Matches the old cron cadence. Env-overridable for tests.
 HIBIKI_PUSH_THROTTLE_SECONDS="${HIBIKI_PUSH_THROTTLE_SECONDS:-300}"
+# Delivery-abandonment sentinel consumer (card d37df625): minimum seconds
+# between reader invocations from the tick loop. The CLI is idempotent (a cursor
+# file dedupes already-escalated drops); this only bounds how often we spawn
+# node. 60s keeps the silent-drop -> operator-ping latency to about a minute.
+DELIVERY_SENTINEL_THROTTLE_SECONDS="${DELIVERY_SENTINEL_THROTTLE_SECONDS:-60}"
 
 DRY_RUN=0
 ONCE=0
@@ -366,6 +371,35 @@ ensure_hibiki_push() {
     || log "hibiki-push: tick invocation failed (non-fatal, retries next window)"
 }
 
+# Delivery-abandonment sentinel consumer (card d37df625). PR #130 writes a
+# durable JSONL trail of every abandoned inter-agent message; this reads NEW
+# lines each tick and escalates them OUT OF BAND (Telegram Bot API fallback),
+# so a drop whose in-band alert was also lost no longer means a silent
+# multi-hour gap. Gated behind store/delivery-sentinel-watch.enabled so MERGING
+# the wiring is INERT -- the consumer only runs once an operator (Genesis/Forge)
+# has validated the build on c12 and touched the flag, mirroring the
+# ollama/tailscale deploy-flag pattern. The CLI itself is idempotent (a cursor
+# file dedupes already-escalated drops + baselines history on first run), so the
+# throttle below only bounds how often we spawn node.
+delivery_sentinel_watch_enabled() { [ -f "$STORE/delivery-sentinel-watch.enabled" ]; }
+delivery_sentinel_due() {        # -> 0 if the throttle window has elapsed, 1 if not
+  local nextf="$STATE_DIR/delivery-sentinel.next" now next
+  now=$(date +%s)
+  [ -f "$nextf" ] || return 0
+  next=$(cat "$nextf" 2>/dev/null || echo 0); case "$next" in (*[!0-9]*|'') next=0;; esac
+  [ "$now" -ge "$next" ]
+}
+ensure_delivery_sentinel_watch() {
+  delivery_sentinel_watch_enabled || return 0   # inert until operator-enabled
+  local cli="$INSTALL_DIR/dist/delivery-sentinel-cli.js"
+  [ -f "$cli" ] || { log "delivery-sentinel: dist/delivery-sentinel-cli.js missing -- run build; skipping"; return 0; }
+  delivery_sentinel_due || return 0             # throttled this tick
+  echo $(( $(date +%s) + DELIVERY_SENTINEL_THROTTLE_SECONDS )) > "$STATE_DIR/delivery-sentinel.next"
+  if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: node dist/delivery-sentinel-cli.js"; return 0; fi
+  run env -u TMUX MARVEEN_ROOT="$INSTALL_DIR" "$NODE" "$cli" >> "$STORE/delivery-sentinel.log" 2>&1 \
+    || log "delivery-sentinel: tick invocation failed (non-fatal, retries next window)"
+}
+
 # --- one supervision pass --------------------------------------------------
 # Credential locations, env-overridable so the reconcile unit test can isolate
 # them into a temp dir (same pattern as FLEET_SUPERVISOR_STORE) without touching
@@ -502,6 +536,8 @@ tick() {
   ensure_local_agent_watchdogs
   # 10) TAILNET-ONLY DASHBOARD REMOTE ACCESS (tailscaled + serve config reboot-persistence -- gated by store/tailscale-serve.enabled)
   ensure_tailscaled
+  # 11) DELIVERY-ABANDONMENT SENTINEL CONSUMER (out-of-band escalation of dropped inter-agent msgs -- gated by store/delivery-sentinel-watch.enabled)
+  ensure_delivery_sentinel_watch
 }
 
 # --- main ------------------------------------------------------------------
