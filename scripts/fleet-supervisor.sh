@@ -75,6 +75,16 @@ DELIVERY_SENTINEL_THROTTLE_SECONDS="${DELIVERY_SENTINEL_THROTTLE_SECONDS:-60}"
 # Same throttle for the delivery ACK-overdue consumer (card 1a99b7e2). Its CLI
 # is idempotent (own cursor + first-run baseline), so this only bounds node spawns.
 DELIVERY_ACK_THROTTLE_SECONDS="${DELIVERY_ACK_THROTTLE_SECONDS:-60}"
+# Idle-nudge watchdog (card 5899286b): sweep interval + grace period (env-overridable for tests).
+# GATED: file absent = fully inert. Activate only after Thor's fixture harness (845750ad) proves
+# the pane-state detector does not false-positive on thinking/done agents.
+IDLE_NUDGE_THROTTLE_SECONDS="${IDLE_NUDGE_THROTTLE_SECONDS:-300}"   # 5 min between sweeps
+IDLE_NUDGE_GRACE_SECONDS="${IDLE_NUDGE_GRACE_SECONDS:-300}"          # idle for 5 min before nudge
+IDLE_NUDGE_LOOKBACK_SECONDS="${IDLE_NUDGE_LOOKBACK_SECONDS:-21600}"  # 6 h obligation window
+# STATIC nudge text -- content MUST be a hard-coded constant; never derived from DB/user
+# data (Chad security requirement: send-keys is an injection surface; a static string
+# eliminates dynamic content as an attack vector).
+IDLE_NUDGE_TEXT="Please continue your current task."
 
 DRY_RUN=0
 ONCE=0
@@ -430,6 +440,123 @@ ensure_delivery_ack_watch() {
     || log "delivery-ack: tick invocation failed (non-fatal, retries next window)"
 }
 
+# --- IDLE-NUDGE WATCHDOG (card 5899286b) -----------------------------------
+# Obligation-driven idle detector: if a running agent has an open delegated
+# task in agent_messages AND its tmux pane has been idle at the empty prompt
+# for IDLE_NUDGE_GRACE_SECONDS, send a static resume nudge via send-keys.
+#
+# The two-predicate gate (pane idle + open obligation) ensures:
+#   * A legitimately done agent (no open obligation) is never nudged.
+#   * An agent mid-thinking/working (pane shows spinner/esc bar) is never
+#     nudged even if an old obligation row exists from a prior turn.
+#
+# GATED: store/idle-nudge-watch.enabled must exist. MERGE IS INERT.
+# Activate only after Thor's negative-fixture harness (845750ad) has proven
+# the pane predicate does not false-positive on thinking/done panes.
+idle_nudge_watch_enabled() { [ -f "$STORE/idle-nudge-watch.enabled" ]; }
+idle_nudge_due() {
+  local nextf="$STATE_DIR/idle-nudge.next" now next
+  now=$(date +%s)
+  [ -f "$nextf" ] || return 0
+  next=$(cat "$nextf" 2>/dev/null || echo 0); case "$next" in (*[!0-9]*|'') next=0;; esac
+  [ "$now" -ge "$next" ]
+}
+
+# Returns 0 (true) when the pane looks idle at the empty shell prompt.
+# Returns 1 when the pane shows any working indicator.
+# Accepts the tmux session name as $1.
+pane_is_idle_at_prompt() {
+  local session="$1" pane_tail
+  pane_tail=$("$TMUX_BIN" capture-pane -t "$session" -p 2>/dev/null | tail -6)
+  # Working indicators: "esc to interrupt" bar, Thinking text, braille spinner
+  echo "$pane_tail" | grep -qE "esc to interrupt|Thinking|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]" && return 1
+  # Idle indicator: clean ❯ prompt present in the last few lines
+  echo "$pane_tail" | grep -qE "^❯[[:space:]]*$" && return 0
+  return 1
+}
+
+# Returns 0 (true) when agent has at least one open obligation: a delivered/
+# pending agent_messages row to this agent with no completed_at, within the
+# IDLE_NUDGE_LOOKBACK_SECONDS window.
+agent_has_open_obligation() {
+  local agent="$1" db count
+  db="$STORE/claudeclaw.db"
+  [ -f "$db" ] || return 1
+  count=$(python3 -c "
+import sqlite3, sys, time
+try:
+    db = sqlite3.connect('$db')
+    since = int(time.time()) - $IDLE_NUDGE_LOOKBACK_SECONDS
+    row = db.execute(\"\"\"SELECT COUNT(*) FROM agent_messages
+        WHERE to_agent=? AND status IN ('delivered','pending')
+        AND completed_at IS NULL AND created_at > ?\"\"\", ('$agent', since)).fetchone()
+    print(row[0] if row else 0)
+    db.close()
+except Exception:
+    print(0)
+" 2>/dev/null)
+  [ -n "$count" ] && [ "$count" -gt 0 ]
+}
+
+ensure_idle_nudge_watch() {
+  idle_nudge_watch_enabled || return 0   # inert until operator-enabled (+ Thor 845750ad harness green)
+  idle_nudge_due || return 0
+  echo $(( $(date +%s) + IDLE_NUDGE_THROTTLE_SECONDS )) > "$STATE_DIR/idle-nudge.next"
+  if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: idle-nudge sweep all running agents"; return 0; fi
+
+  local now agent idle_since_f idle_since idle_age
+  now=$(date +%s)
+
+  # Enumerate running agents via the dashboard API
+  local running_agents
+  running_agents=$(curl -sf --max-time 3 \
+    -H "Authorization: Bearer $(cat "$STORE/.dashboard-token" 2>/dev/null)" \
+    "http://127.0.0.1:$DASH_PORT/api/agents" 2>/dev/null \
+    | python3 -c "import sys,json; [print(a['name']) for a in json.load(sys.stdin) if a.get('isRunning')]" 2>/dev/null \
+    || true)
+
+  for agent in $running_agents; do
+    # Sanitize: agent names must be alphanumeric/dash/underscore only
+    # (defence-in-depth: blocks code injection into python3 -c and path traversal in idle-since-$agent)
+    [[ "$agent" =~ ^[a-zA-Z0-9_-]+$ ]] || { log "skip agent: invalid name '$agent'"; continue; }
+    local session="agent-$agent"
+    # Skip non-existent sessions
+    session_alive "$session" || { rm -f "$STATE_DIR/idle-since-$agent"; continue; }
+
+    # Reset idle timer if pane is actively working
+    if ! pane_is_idle_at_prompt "$session"; then
+      rm -f "$STATE_DIR/idle-since-$agent"
+      continue
+    fi
+
+    # Idle pane: only nudge if there is an open obligation
+    if ! agent_has_open_obligation "$agent"; then
+      rm -f "$STATE_DIR/idle-since-$agent"
+      continue
+    fi
+
+    # Track how long this agent has been idle with an open obligation
+    idle_since_f="$STATE_DIR/idle-since-$agent"
+    if [ ! -f "$idle_since_f" ]; then
+      echo "$now" > "$idle_since_f"
+      continue  # Grace period starts now
+    fi
+    idle_since=$(cat "$idle_since_f" 2>/dev/null || echo "$now")
+    case "$idle_since" in (*[!0-9]*|'') idle_since="$now";; esac
+    idle_age=$(( now - idle_since ))
+    if [ "$idle_age" -lt "$IDLE_NUDGE_GRACE_SECONDS" ]; then
+      continue  # Still within grace period -- do not nudge yet
+    fi
+
+    # Grace period elapsed with an open obligation and idle pane: nudge
+    log "idle-nudge: $agent idle ${idle_age}s with open obligation -- sending resume nudge"
+    "$TMUX_BIN" send-keys -t "$session" -l "$IDLE_NUDGE_TEXT"
+    sleep 0.4
+    "$TMUX_BIN" send-keys -t "$session" Enter
+    rm -f "$idle_since_f"
+  done
+}
+
 # --- one supervision pass --------------------------------------------------
 # Credential locations, env-overridable so the reconcile unit test can isolate
 # them into a temp dir (same pattern as FLEET_SUPERVISOR_STORE) without touching
@@ -571,6 +698,8 @@ tick() {
 
   # 12) DELIVERY ACK-OVERDUE CONSUMER (out-of-band escalation of unconfirmed ack_expected msgs -- gated by store/delivery-ack-watch.enabled)
   ensure_delivery_ack_watch
+  # 13) IDLE-NUDGE WATCHDOG (obligation-driven resume nudge for stalled agents -- gated by store/idle-nudge-watch.enabled + Thor 845750ad)
+  ensure_idle_nudge_watch
 }
 
 # --- main ------------------------------------------------------------------
