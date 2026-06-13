@@ -1480,3 +1480,79 @@ describe('usage/session-limit menu (PR #130 DA HIGH)', () => {
     expect(detectsUsageLimitMenu(deepScrollback)).toBe(false)
   })
 })
+
+// =============================================================================
+// RETRO #130 follow-up (card 732bb084): truncated-viewport + over-block.
+//
+// Two delivery-reliability gaps that PR #130 left untested, each the SAME
+// false-classification bug from opposite directions:
+//
+//   (b) TRUNCATED VIEWPORT -> false-READY. A short pane scrolls the limit
+//       PHRASE off the top of the visible capture, leaving only the menu
+//       action line + input box + footer. The phrase-AND-corroboration rule
+//       then misses the menu and the router injects a prompt INTO a limited
+//       session -- the exact false-busy bug class, opposite direction.
+//
+//   (a) OVER-BLOCK -> false-BUSY. Usage-adjacent text scrolling by during
+//       normal work (a bare reset time, a single quoted limit phrase) must
+//       NOT be read as the limit menu, otherwise a healthy idle agent is
+//       treated as busy and its inbound messages silently queue/abandon --
+//       the same silent-drop symptom from the other side.
+// =============================================================================
+
+// (b) Truncated viewport: only the bottom of a tall limit modal is captured.
+// The "You've hit your session limit" phrase scrolled above the visible
+// region; the menu ACTION line, the input box and the footer remain. The
+// standalone menu-option signal must still classify this 'busy'.
+const LIMIT_TRUNCATED_PHRASE_OFFSCREEN = [
+  '│ ❯ 1. Stop and wait for limit to reset',
+  '│   2. Upgrade your plan',
+  '╰────────────────────────────────────────────────────────────╯',
+  '',
+  SEP,
+  '❯ ',
+  SEP,
+  '  ? for shortcuts',
+].join('\n')
+
+// (a) Over-block: an idle agent whose reply prose mentions a bare reset time
+// with NO limit phrase ("the nightly cron resets at 3am"). The reset time is
+// only weak corroboration and must NOT trip the menu on its own.
+const PROSE_RESET_TIME_ONLY = [
+  '  The backfill job is scheduled nightly and resets at 3am, so the',
+  '  counters you saw are expected to clear by morning.',
+  '',
+  SEP,
+  '❯ ',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+].join('\n')
+
+describe('truncated-viewport limit menu (card 732bb084 (b))', () => {
+  it('detects the menu when the limit phrase scrolled off-screen (closes false-READY)', () => {
+    expect(detectsUsageLimitMenu(LIMIT_TRUNCATED_PHRASE_OFFSCREEN)).toBe(true)
+    expect(detectPaneState(LIMIT_TRUNCATED_PHRASE_OFFSCREEN)).toBe('busy')
+    expect(isReadyForPrompt(LIMIT_TRUNCATED_PHRASE_OFFSCREEN)).toBe(false)
+  })
+
+  it('treats the menu action line as a standalone signal (no phrase needed)', () => {
+    expect(detectsUsageLimitMenu('❯ 1. Stop and wait for limit to reset')).toBe(true)
+  })
+})
+
+describe('over-block guard: usage-adjacent prose stays idle (card 732bb084 (a))', () => {
+  it('does NOT trip on a bare reset time without a limit phrase', () => {
+    expect(detectsUsageLimitMenu(PROSE_RESET_TIME_ONLY)).toBe(false)
+    expect(detectPaneState(PROSE_RESET_TIME_ONLY)).toBe('idle')
+    expect(isReadyForPrompt(PROSE_RESET_TIME_ONLY)).toBe(true)
+  })
+
+  it('does NOT trip on a single limit phrase in reply prose', () => {
+    expect(detectPaneState(PROSE_MENTIONS_LIMIT)).toBe('idle')
+    expect(isReadyForPrompt(PROSE_MENTIONS_LIMIT)).toBe(true)
+  })
+
+  it('does NOT trip on a reset time alone even without any input-box surface', () => {
+    expect(detectsUsageLimitMenu('the deploy window resets at 9pm tonight')).toBe(false)
+  })
+})
