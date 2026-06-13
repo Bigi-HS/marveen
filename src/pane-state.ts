@@ -101,19 +101,32 @@ const PENDING_PASTE_RX = /\[Pasted text #\d+/
 // session (it never processes; on reset it may auto-submit stale). The guard
 // below classifies any usage-limit surface as 'busy' regardless of box/footer.
 //
-// Prose false-positive guard: an agent working on token-outage code can print
-// a single limit phrase in its reply. We therefore require TWO co-occurring
-// signals in the live tail -- the limit phrase AND a corroborating signal (a
-// reset time or the wait-for-reset option line) -- mirroring the thinking-
-// block error's AND-combine discipline. Scoped to the bottom lines (the menu
-// renders there), never deep scrollback.
+// Two-tier signal model (PR #130 + card 732bb084):
 //
-// The authoritative, fuller pattern list lives in token-outage-bridge.ts
-// (LIMIT_PATTERNS), used by the separate token-free auto-ACK bridge. It is
-// kept INLINE here to preserve this module's zero-import, unit-testable design;
-// both derive from the verbatim 2026-06-07 Dave+Thor freeze captures.
+//   STRONG -- the menu action line "Stop and wait for limit to reset". This is
+//     unambiguous Claude Code UI chrome, not natural reply prose, so it is
+//     sufficient ALONE to recognise the menu (matching token-outage-bridge.ts's
+//     authoritative LIMIT_PATTERNS). Required to close the truncated-viewport
+//     gap: a short pane scrolls the limit PHRASE off the top of the visible
+//     capture, leaving only this option line + input box + footer; a phrase-AND-
+//     corroboration rule would miss it -> 'idle' = READY = a prompt injected
+//     INTO a limited session (the false-busy bug class, opposite direction).
+//
+//   WEAK -- a bare reset time ("resets at 3pm"). It can legitimately appear in
+//     reply prose ("the nightly cron resets at 3am"), so it counts only TOGETHER
+//     with a limit phrase. On its own it must NOT trip the menu, otherwise a
+//     healthy idle agent is read as busy and its inbound queues/abandons (the
+//     over-block direction). A lone limit phrase is likewise insufficient: an
+//     agent reviewing token-outage code can print one in its reply.
+//
+// All signals are scoped to the bottom lines (the menu renders there), never
+// deep scrollback. The authoritative, fuller pattern list lives in
+// token-outage-bridge.ts (LIMIT_PATTERNS); both derive from the verbatim
+// 2026-06-07 Dave+Thor freeze captures and are kept INLINE here to preserve
+// this module's zero-import, unit-testable design.
 const LIMIT_PHRASE_RX = /you've (?:hit|reached) your (?:usage|session) limit|(?:usage|session) limit reached|claude usage limit|limit will reset/i
-const LIMIT_CORROBORATION_RX = /stop and wait for limit to reset|resets?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)/i
+const LIMIT_MENU_OPTION_RX = /stop and wait for limit to reset/i
+const LIMIT_RESET_TIME_RX = /resets?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)/i
 const LIMIT_MENU_TAIL_LINES = 18
 
 // Input-box separator lines are made of U+2500 BOX DRAWINGS LIGHT
@@ -251,20 +264,26 @@ export function detectsThinkingBlockError(pane: string): boolean {
 
 /**
  * True when the live tail shows the Claude Code usage/session-limit menu.
- * Requires the limit phrase AND a corroborating signal (a reset time or the
- * wait-for-reset option line) co-occurring within the bottom
- * LIMIT_MENU_TAIL_LINES, so an agent that merely prints one limit phrase in
- * its reply prose is not misclassified. Scoped to the tail because the menu
- * renders at the bottom, never in deep scrollback.
  *
- * See token-outage-bridge.ts (LIMIT_PATTERNS) for the authoritative, fuller
- * matcher used by the separate token-free auto-ACK bridge; this inline copy
- * keeps pane-state.ts dependency-free.
+ * Two-tier match within the bottom LIMIT_MENU_TAIL_LINES:
+ *   - the STRONG menu action line ("Stop and wait for limit to reset") alone,
+ *     since it is UI chrome that cannot appear in natural reply prose -- this
+ *     catches the truncated-viewport render where the limit phrase scrolled
+ *     off-screen (card 732bb084); OR
+ *   - a limit PHRASE together with a WEAK reset-time corroboration, so an agent
+ *     that merely prints one limit phrase (or a bare reset time) in its reply
+ *     prose is not misclassified.
+ *
+ * Scoped to the tail because the menu renders at the bottom, never in deep
+ * scrollback. See token-outage-bridge.ts (LIMIT_PATTERNS) for the authoritative,
+ * fuller matcher used by the separate token-free auto-ACK bridge; this inline
+ * copy keeps pane-state.ts dependency-free.
  */
 export function detectsUsageLimitMenu(pane: string): boolean {
   if (!pane) return false
   const tail = pane.split('\n').slice(-LIMIT_MENU_TAIL_LINES).join('\n')
-  return LIMIT_PHRASE_RX.test(tail) && LIMIT_CORROBORATION_RX.test(tail)
+  if (LIMIT_MENU_OPTION_RX.test(tail)) return true
+  return LIMIT_PHRASE_RX.test(tail) && LIMIT_RESET_TIME_RX.test(tail)
 }
 
 export interface DetectPaneStateOptions {

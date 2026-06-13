@@ -5,6 +5,8 @@ import {
   shouldAlertOnAbandon,
   abandonAlertContent,
   abandonmentRecord,
+  parseAbandonmentSentinel,
+  abandonmentRate,
 } from '../web/delivery-alert.js'
 
 // Defense-in-depth for d3339db9: an abandoned inter-agent message must
@@ -91,5 +93,77 @@ describe('abandonment sentinel record (d3339db9 MEDIUM)', () => {
       ),
     )
     expect(rec.from).toBe(DELIVERY_MONITOR_AGENT_ID)
+  })
+})
+
+// Abandon-rate metric (card 732bb084). The default-flip (fail-safe state
+// machine, separate card) trades false-READY for false-BUSY, which surfaces as
+// a RISE in abandonments. This metric is the safety net: a baseline measured
+// from the durable sentinel lets that change be validated, not guessed.
+
+describe('parseAbandonmentSentinel', () => {
+  it('parses well-formed delivery-abandoned lines and skips blanks/garbage', () => {
+    const raw = [
+      abandonmentRecord({ id: 1, from_agent: 'a', to_agent: 'b' }, 60 * 60 * 1000, 1000),
+      '',
+      'not json at all',
+      '{"event":"something-else","ts":"2026-06-13T00:00:00.000Z"}',
+      abandonmentRecord({ id: 2, from_agent: 'c', to_agent: 'b' }, 60 * 60 * 1000, 2000),
+      '   ',
+    ].join('\n')
+    const events = parseAbandonmentSentinel(raw)
+    expect(events.map((e) => e.id)).toEqual([1, 2])
+    expect(events.every((e) => e.event === 'delivery-abandoned')).toBe(true)
+  })
+
+  it('returns an empty array for empty input', () => {
+    expect(parseAbandonmentSentinel('')).toEqual([])
+  })
+})
+
+describe('abandonmentRate', () => {
+  const mkEvent = (id: number, to: string, ts: string) =>
+    JSON.parse(abandonmentRecord({ id, from_agent: 'x', to_agent: to }, 0, Date.parse(ts)))
+
+  it('counts only events within the trailing window', () => {
+    const now = Date.parse('2026-06-13T12:00:00.000Z')
+    const events = [
+      mkEvent(1, 'marveen', '2026-06-13T11:30:00.000Z'), // 30 min ago -> in
+      mkEvent(2, 'marveen', '2026-06-13T11:10:00.000Z'), // 50 min ago -> in
+      mkEvent(3, 'thor', '2026-06-13T10:00:00.000Z'), //   2 h ago   -> out
+    ]
+    const rate = abandonmentRate(events, 60 * 60 * 1000, now)
+    expect(rate.count).toBe(2)
+    expect(rate.windowMs).toBe(60 * 60 * 1000)
+    expect(rate.byRecipient).toEqual({ marveen: 2 })
+  })
+
+  it('groups by recipient to surface a single wedged target', () => {
+    const now = Date.parse('2026-06-13T12:00:00.000Z')
+    const events = [
+      mkEvent(1, 'marveen', '2026-06-13T11:55:00.000Z'),
+      mkEvent(2, 'thor', '2026-06-13T11:50:00.000Z'),
+      mkEvent(3, 'marveen', '2026-06-13T11:45:00.000Z'),
+    ]
+    const rate = abandonmentRate(events, 60 * 60 * 1000, now)
+    expect(rate.count).toBe(3)
+    expect(rate.byRecipient).toEqual({ marveen: 2, thor: 1 })
+  })
+
+  it('excludes future-dated or unparseable timestamps (clock skew)', () => {
+    const now = Date.parse('2026-06-13T12:00:00.000Z')
+    const events = [
+      mkEvent(1, 'marveen', '2026-06-13T11:00:00.000Z'), // in
+      mkEvent(2, 'marveen', '2026-06-13T13:00:00.000Z'), // future -> out
+      { ts: 'not-a-date', event: 'delivery-abandoned', id: 3, from: 'x', to: 'marveen', age_min: 0 },
+    ]
+    const rate = abandonmentRate(events, 2 * 60 * 60 * 1000, now)
+    expect(rate.count).toBe(1)
+  })
+
+  it('is zero over a window with no events', () => {
+    const rate = abandonmentRate([], 60 * 60 * 1000, Date.parse('2026-06-13T12:00:00.000Z'))
+    expect(rate.count).toBe(0)
+    expect(rate.byRecipient).toEqual({})
   })
 })

@@ -71,3 +71,73 @@ export function abandonmentRecord(
     age_min: Math.round(ageMs / 60000),
   })
 }
+
+// One parsed delivery-abandoned event from the sentinel file.
+export interface AbandonmentEvent {
+  ts: string
+  event: string
+  id: number
+  from: string
+  to: string
+  age_min: number
+}
+
+/**
+ * Parse the delivery-abandonment sentinel (one JSON object per line, as written
+ * by abandonmentRecord) into AbandonmentEvent records. Blank lines, malformed
+ * JSON and non-"delivery-abandoned" rows are skipped, so a torn final write or
+ * a hand-edit never throws. Pure: takes the raw file text.
+ */
+export function parseAbandonmentSentinel(raw: string): AbandonmentEvent[] {
+  const out: AbandonmentEvent[] = []
+  for (const line of raw.split('\n')) {
+    const t = line.trim()
+    if (!t) continue
+    try {
+      const o = JSON.parse(t)
+      if (o && o.event === 'delivery-abandoned' && typeof o.ts === 'string') {
+        out.push(o as AbandonmentEvent)
+      }
+    } catch {
+      // skip a malformed / partially-written line
+    }
+  }
+  return out
+}
+
+export interface AbandonmentRate {
+  /** Abandonments whose ts falls within [nowMs - windowMs, nowMs]. */
+  count: number
+  /** The trailing window width (ms) the count was taken over. */
+  windowMs: number
+  /** Abandonments grouped by recipient, to surface a single wedged target. */
+  byRecipient: Record<string, number>
+}
+
+/**
+ * Abandon-rate over a trailing window, from parsed sentinel events. This is the
+ * observability the default-flip (fail-safe state machine, separate card) needs
+ * as its safety net: flipping the pane-state default toward not-ready trades
+ * false-READY for false-BUSY, which surfaces as a RISE in abandonments. A
+ * baseline measured here lets that change be validated rather than guessed.
+ *
+ * Events with an unparseable timestamp, or one dated in the future relative to
+ * `nowMs` (clock skew / NTP correction), are excluded so a bad timestamp cannot
+ * inflate the rate. Pure: the clock is injected.
+ */
+export function abandonmentRate(
+  events: AbandonmentEvent[],
+  windowMs: number,
+  nowMs: number,
+): AbandonmentRate {
+  const since = nowMs - windowMs
+  const byRecipient: Record<string, number> = {}
+  let count = 0
+  for (const e of events) {
+    const t = Date.parse(e.ts)
+    if (!Number.isFinite(t) || t < since || t > nowMs) continue
+    count++
+    byRecipient[e.to] = (byRecipient[e.to] ?? 0) + 1
+  }
+  return { count, windowMs, byRecipient }
+}
