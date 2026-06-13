@@ -54,6 +54,16 @@ const TMUX = resolveFromPath('tmux')
 // before each Telegram send and clears the stamp on delivery failure,
 // giving exactly-one stamp per attempt and at-least-once delivery until
 // success. See sendPendingRetryAlert below.
+//
+// skipIfBusy re-queue (card 92f763a2): short-cadence tasks that were
+// previously silently dropped when the target was busy now get a bounded
+// retry: up to SKIP_IF_BUSY_MAX_RETRIES attempts, one per
+// SKIP_IF_BUSY_RETRY_INTERVAL_MS. If all retries are exhausted without
+// the session freeing up, an out-of-band HTTPS alert goes to the operator
+// (same dead-pipe-proof path as the delivery-sentinel) so the 10h silence
+// gap is bounded to ~30 minutes.
+export const SKIP_IF_BUSY_MAX_RETRIES = 3
+export const SKIP_IF_BUSY_RETRY_INTERVAL_MS = 10 * 60 * 1000 // 10 min
 
 // When a task fires we record its time here so the catch-up window (30 min on
 // the first tick after a restart) does not re-run it. This map is in-memory, so
@@ -254,6 +264,39 @@ function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
   })()
 }
 
+// Send an out-of-band HTTPS alert when a skipIfBusy task has exhausted all
+// bounded retries without the target session freeing up (card 92f763a2).
+// Uses the same direct HTTPS path as sendPendingRetryAlert so it is immune
+// to MCP-pipe death. Fire-and-forget with structured logging on failure --
+// the retry row is deleted regardless (the bounded contract is fulfilled).
+function sendSkipIfBusyExhaustedAlert(taskName: string, agentName: string, firstAttemptMs: number): void {
+  const envPath = join(PROJECT_ROOT, '.env')
+  const envContent = readFileOr(envPath, '')
+  const tokenMatch = envContent.match(/TELEGRAM_BOT_TOKEN=(.+)/)
+  const token = tokenMatch?.[1]?.trim()
+  if (!token) {
+    logger.warn({ task: taskName, agent: agentName }, 'skipIfBusy exhausted alert suppressed: no TELEGRAM_BOT_TOKEN')
+    return
+  }
+  if (!ALLOWED_CHAT_ID.trim()) {
+    logger.warn({ task: taskName, agent: agentName }, 'skipIfBusy exhausted alert suppressed: empty ALLOWED_CHAT_ID')
+    return
+  }
+  const ageMin = Math.floor((Date.now() - firstAttemptMs) / 60000)
+  const text = [
+    `[Marveen scheduler] A(z) "${taskName}" (${agentName}) heartbeat ${SKIP_IF_BUSY_MAX_RETRIES}x@10min utan sem tudott befutni -- a session ${ageMin} perce foglalt/nem valaszol.`,
+    'A task torolve a varakozosi listarol. Ellenorizd a sessiont (tmux capture-pane), majd indits manualis heartbeatet ha szukseges.',
+  ].join('\n')
+  ;(async () => {
+    try {
+      await sendTelegramMessage(token, ALLOWED_CHAT_ID, text)
+      logger.info({ task: taskName, agent: agentName, ageMin }, 'skipIfBusy exhausted: HTTPS fallback alert sent')
+    } catch (err) {
+      logger.warn({ err, task: taskName, agent: agentName }, 'skipIfBusy exhausted: HTTPS fallback alert failed')
+    }
+  })()
+}
+
 export function startScheduleRunner(): NodeJS.Timeout {
   // Reload the persisted last-run times so a restart inside a task's catch-up
   // window does not re-fire an already-run task.
@@ -296,6 +339,28 @@ export function startScheduleRunner(): NodeJS.Timeout {
       const key = `${row.task_name}@${row.agent_name}`
       pendingKeys.add(key)
 
+      // skipIfBusy tasks use a bounded retry: max SKIP_IF_BUSY_MAX_RETRIES
+      // attempts, spaced SKIP_IF_BUSY_RETRY_INTERVAL_MS apart. Exhausted
+      // retries trigger an HTTPS fallback alert and the row is deleted.
+      if (taskDef.skipIfBusy) {
+        if (now - row.last_attempt < SKIP_IF_BUSY_RETRY_INTERVAL_MS) continue // throttle
+        const result = attemptFireTask(taskDef, row.agent_name, now)
+        if (result === 'fired' || result === 'missing') {
+          deletePendingTaskRetry(row.task_name, row.agent_name)
+          continue
+        }
+        const newCount = row.attempt_count + 1
+        if (newCount > SKIP_IF_BUSY_MAX_RETRIES) {
+          sendSkipIfBusyExhaustedAlert(row.task_name, row.agent_name, row.first_attempt)
+          deletePendingTaskRetry(row.task_name, row.agent_name)
+          logger.info({ task: row.task_name, agent: row.agent_name, attempts: newCount }, 'skipIfBusy: retries exhausted, row deleted after HTTPS alert')
+        } else {
+          updatePendingTaskRetry(row.task_name, row.agent_name, now, result)
+          logger.info({ task: row.task_name, agent: row.agent_name, attempt: newCount, maxRetries: SKIP_IF_BUSY_MAX_RETRIES }, 'skipIfBusy: retry queued')
+        }
+        continue
+      }
+
       const view = toPendingRetryView(row, now)
       const result = attemptFireTask(taskDef, row.agent_name, now)
       if (result === 'fired' || result === 'missing') {
@@ -337,14 +402,14 @@ export function startScheduleRunner(): NodeJS.Timeout {
         const result = attemptFireTask(task, agentName, now)
         if (result === 'busy') {
           if (task.skipIfBusy) {
-            // Opt-in skip for short-cadence tasks (e.g. 30-min heartbeats):
-            // a single missed tick is harmless because the next one is
-            // already on the way, and queueing them produces spurious
-            // "60 perce varakozik" Telegram alerts whenever the operator
-            // is having an active conversation in the channels session.
-            // Daily/weekly schedules keep skipIfBusy=false so the queue
-            // + alert path catches a long-running busy state.
-            logger.info({ task: task.name, agent: agentName }, 'Schedule busy, skipIfBusy=true: dropping tick silently')
+            // Bounded re-queue instead of silent drop (card 92f763a2):
+            // a single busy tick on a short-cadence heartbeat is still
+            // retried up to SKIP_IF_BUSY_MAX_RETRIES times at 10-min
+            // intervals. If all retries exhaust, an HTTPS fallback alert
+            // goes to the operator so the silence window is bounded to
+            // ~30 minutes instead of potentially 10 hours.
+            insertPendingTaskRetryIfNew(task.name, agentName, now, 'busy')
+            logger.info({ task: task.name, agent: agentName, maxRetries: SKIP_IF_BUSY_MAX_RETRIES }, 'Schedule busy, skipIfBusy=true: requeued for bounded retry')
             continue
           }
           // First encounter -- insert a new pending row. If somehow a
