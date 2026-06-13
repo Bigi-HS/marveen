@@ -44,6 +44,17 @@ function recipientSession(to: string): string {
 // not launched) or an idle/typing/unknown/error pane is NOT engagement: such an
 // ack stays outstanding and escalates at the 15-min window. Conservative on
 // purpose -- only an unambiguous busy turn clears an ack.
+//
+// CROSS-INJECTOR RESIDUAL (benign): an OUT-of-process injector -- the
+// recipient's own channel plugin handling a real inbound message, or a human
+// operator -- can flip the pane busy in the 5s gap between our inject and this
+// observation, which would clear the ack via a turn that is not ours (a
+// false-clear). This is harmless: our message was already successfully injected
+// into the recipient's input buffer, so ceasing to track it loses nothing, and
+// a genuinely dropped/wedged delivery (recipient never engages at all) is still
+// caught by the d37df625 1h-abandonment net. The in-PROCESS injectors cannot
+// cause this -- they are serialized on the same JS thread as the router (see
+// the idle-only inject gate invariant in message-router.ts).
 function recipientBusy(to: string): boolean {
   const pane = capturePane(recipientSession(to))
   if (pane == null) return false
