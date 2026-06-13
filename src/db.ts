@@ -416,10 +416,19 @@ export function initDatabase(dbPathOverride?: string): void {
       result TEXT,
       created_at INTEGER NOT NULL,
       delivered_at INTEGER,
-      completed_at INTEGER
+      completed_at INTEGER,
+      ack_expected INTEGER NOT NULL DEFAULT 0
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_messages_status ON agent_messages(status, to_agent)`)
+  // Migration: add ack_expected to agent_messages (delivery ACK protocol, card
+  // 1a99b7e2). Older installs created the table without it. Opt-in per message;
+  // default 0 so nothing is tracked until a sender sets it (no cry-wolf).
+  try {
+    db.exec('ALTER TABLE agent_messages ADD COLUMN ack_expected INTEGER NOT NULL DEFAULT 0')
+  } catch {
+    // column already exists
+  }
 
   // --- Pending Channel Requests (Slack channel opt-in workflow) ---
   db.exec(`
@@ -1463,17 +1472,24 @@ export interface AgentMessage {
   created_at: number
   delivered_at: number | null
   completed_at: number | null
+  // 1 when the sender expects a receipt-ack (delegation / opt-in): the message
+  // router records a pending-ack on successful inject so an undelivered/ignored
+  // ACK-expected message is escalated. 0 (default) = best-effort, no tracking
+  // (delivery ACK protocol, card 1a99b7e2).
+  ack_expected: number
 }
 
-export function createAgentMessage(from: string, to: string, content: string): AgentMessage {
+export function createAgentMessage(from: string, to: string, content: string, ackExpected = false): AgentMessage {
   const now = Math.floor(Date.now() / 1000)
+  const ack = ackExpected ? 1 : 0
   const info = db.prepare(
-    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(from, to, content, 'pending', now)
+    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, ack_expected) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(from, to, content, 'pending', now, ack)
   return {
     id: Number(info.lastInsertRowid),
     from_agent: from, to_agent: to, content, status: 'pending',
     result: null, created_at: now, delivered_at: null, completed_at: null,
+    ack_expected: ack,
   }
 }
 
