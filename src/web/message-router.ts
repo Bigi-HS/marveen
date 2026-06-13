@@ -17,6 +17,11 @@ import {
   abandonAlertContent,
   abandonmentRecord,
 } from './delivery-alert.js'
+import {
+  DELIVERY_PENDING_ACK_SENTINEL,
+  shouldWritePendingAck,
+  pendingAckRecord,
+} from './delivery-ack.js'
 
 // Project root for resolving the gitignored sentinel file. Mirrors
 // token-outage-bridge.ts's resolution so both write under the same store/.
@@ -180,8 +185,23 @@ export function startMessageRouter(): NodeJS.Timeout {
         if (!markMessageDelivered(msg.id)) {
           logger.warn({ id: msg.id }, 'markMessageDelivered affected 0 rows (deleted concurrently?)')
         }
+        // Delivery ACK protocol (card 1a99b7e2): for ACK-EXPECTED messages only
+        // (delegation / opt-in), record a durable pending-ack on successful
+        // inject. "Delivered" here is the optimistic signal (the inject did not
+        // throw); the pending-ack lets a separate consumer escalate if the
+        // recipient never confirms receipt within the window. Plain FYI peer
+        // messages set nothing -> no record -> no cry-wolf; they are backstopped
+        // by the d3339db9 1h-abandonment net above. The clear/escalation side is
+        // built separately; this is the WRITE only.
+        if (shouldWritePendingAck(msg)) {
+          try {
+            appendFileSync(join(MARVEEN_ROOT, DELIVERY_PENDING_ACK_SENTINEL), pendingAckRecord(msg, now) + '\n')
+          } catch (err) {
+            logger.warn({ err, id: msg.id }, 'Failed to append delivery-pending-ack record')
+          }
+        }
         routerLoggedMisses.delete(msg.id)
-        logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, category: isChannelInbound ? 'channel-inbound' : trusted ? 'trusted-peer' : 'untrusted' }, 'Agent message delivered')
+        logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, category: isChannelInbound ? 'channel-inbound' : trusted ? 'trusted-peer' : 'untrusted', ackExpected: msg.ack_expected }, 'Agent message delivered')
       } catch (err) {
         logger.warn({ err, id: msg.id }, 'Failed to deliver agent message')
         if (!markMessageFailed(msg.id, 'Failed to inject into tmux session')) {

@@ -17,7 +17,7 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/messages' && method === 'POST') {
     const body = await readBody(req)
-    const { from, to, content } = JSON.parse(body.toString()) as { from: string; to: string; content: string }
+    const { from, to, content, ack_expected } = JSON.parse(body.toString()) as { from: string; to: string; content: string; ack_expected?: boolean }
     if (!from?.trim() || !to?.trim() || !content?.trim()) {
       json(res, { error: 'from, to, and content are required' }, 400)
       return true
@@ -69,8 +69,8 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       json(res, { error: `Unknown recipient: ${to.trim()}` }, 400)
       return true
     }
-    const msg = createAgentMessage(from.trim(), recipient, content.trim())
-    logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent }, 'Agent message created')
+    const msg = createAgentMessage(from.trim(), recipient, content.trim(), ack_expected === true)
+    logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ackExpected: msg.ack_expected }, 'Agent message created')
     json(res, msg)
     return true
   }

@@ -4,6 +4,8 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   initDatabase,
+  createAgentMessage,
+  getPendingMessages,
   getSession,
   setSession,
   clearSession,
@@ -30,6 +32,22 @@ import {
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
   initDatabase(':memory:')
+})
+
+describe('agent_messages ack_expected (card 1a99b7e2)', () => {
+  it('defaults ack_expected to 0 for a plain message', () => {
+    const msg = createAgentMessage('thor', 'dave', 'plain peer note')
+    expect(msg.ack_expected).toBe(0)
+    const pending = getPendingMessages('dave').find((m) => m.id === msg.id)
+    expect(pending?.ack_expected).toBe(0)
+  })
+
+  it('persists ack_expected=1 when the sender opts in', () => {
+    const msg = createAgentMessage('thor', 'dave', 'please ACK this delegation', true)
+    expect(msg.ack_expected).toBe(1)
+    const pending = getPendingMessages('dave').find((m) => m.id === msg.id)
+    expect(pending?.ack_expected).toBe(1)
+  })
 })
 
 describe('sessions', () => {
