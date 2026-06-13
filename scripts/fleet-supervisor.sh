@@ -516,6 +516,9 @@ ensure_idle_nudge_watch() {
     || true)
 
   for agent in $running_agents; do
+    # Sanitize: agent names must be alphanumeric/dash/underscore only
+    # (defence-in-depth: blocks code injection into python3 -c and path traversal in idle-since-$agent)
+    [[ "$agent" =~ ^[a-zA-Z0-9_-]+$ ]] || { log "skip agent: invalid name '$agent'"; continue; }
     local session="agent-$agent"
     # Skip non-existent sessions
     session_alive "$session" || { rm -f "$STATE_DIR/idle-since-$agent"; continue; }
