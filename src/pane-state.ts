@@ -365,6 +365,43 @@ export function isReadyForPrompt(pane: string): boolean {
   return detectPaneState(pane) === 'idle'
 }
 
+// External state for idle-nudge classification. Cannot be derived from the
+// pane string alone -- see detectsStalledIdle for the invariant that makes
+// this external injection load-bearing.
+export interface IdleNudgeContext {
+  /**
+   * True when the agent has at least one open obligation (an open kanban
+   * card or an unacknowledged inter-agent message). This is the ONLY signal
+   * that distinguishes a stalled session (e.g. "API Overloaded -> dropped to
+   * idle without completing the task") from a genuinely done session at the
+   * pane-capture level: both render an identical empty ❯ prompt.
+   */
+  hasOpenTask: boolean
+}
+
+/**
+ * True when the pane is idle but the agent has an open task -- a state
+ * that warrants an idle-nudge from the watchdog (card 845750ad).
+ *
+ * CRITICAL INVARIANT: "API Overloaded -> empty prompt" and "genuinely done
+ * -> idle" are pane-capture IDENTICAL. Neither the busy indicators, the
+ * footer text, nor the input box structure can distinguish them. The
+ * distinguishing signal is entirely external: does the agent have a pending
+ * obligation? The harness MUST inject context.hasOpenTask from the kanban /
+ * message store rather than trying to infer it from the pane string.
+ *
+ * Three boundary cases (card 845750ad fixture corpus):
+ *   [A] idle + hasOpenTask=true  -> true  (stalled, e.g. post-overload)
+ *   [B] busy + hasOpenTask=true  -> false (mid-turn, not stalled)
+ *   [C] idle + hasOpenTask=false -> false (genuinely done, no nudge)
+ *
+ * @param pane    The raw `tmux capture-pane -p` output.
+ * @param context External agent state -- whether the agent has an open task.
+ */
+export function detectsStalledIdle(pane: string, context: IdleNudgeContext): boolean {
+  return detectPaneState(pane) === 'idle' && context.hasOpenTask
+}
+
 // Locate the live Claude Code input box and return its inner content as
 // one string. Bounded strictly to the region between the two most
 // recent BOX_SEP_RX separators above the idle footer, so a parked input

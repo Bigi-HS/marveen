@@ -3,6 +3,7 @@ import {
   detectPaneState,
   detectsThinkingBlockError,
   detectsUsageLimitMenu,
+  detectsStalledIdle,
   isReadyForPrompt,
   shouldRetrySubmit,
   shouldClearTruncatedPreamble,
@@ -1554,5 +1555,138 @@ describe('over-block guard: usage-adjacent prose stays idle (card 732bb084 (a))'
 
   it('does NOT trip on a reset time alone even without any input-box surface', () => {
     expect(detectsUsageLimitMenu('the deploy window resets at 9pm tonight')).toBe(false)
+  })
+})
+
+// =============================================================================
+// Stalled-idle detection (card 845750ad, idle-nudge harness)
+// =============================================================================
+//
+// Background: the 2026-06-13 ~46min stall incident. Dave hit "API Error:
+// Overloaded" mid-task -- the turn ended with an empty prompt (pane-level
+// idle), but the task was NOT complete. The watchdog, seeing 'idle', did not
+// nudge. The agent stayed stalled until operator intervention (stored in
+// store/meeting-self-recovery-context.md, cards 845750ad + 5899286b).
+//
+// The core problem: "API Overloaded -> dropped to idle" and "genuinely done
+// -> idle" are PANE-CAPTURE IDENTICAL. Neither busy indicators, footer text,
+// nor input-box structure can tell them apart. The only distinguishing signal
+// is external: does the agent have an open task (kanban card / pending msg)?
+//
+// detectsStalledIdle() couples the pure pane-state result with an externally
+// injected IdleNudgeContext. The tests below are the mandatory 3-fixture
+// boundary corpus from the card description, plus negative guards.
+//
+// ADVERSARIAL 3-FIXTURE RULE (card 23dac481): every pane-state detector
+// change must include:
+//   - false-positive guard (nudge would fire on a healthy pane)
+//   - false-negative guard (nudge would NOT fire on a stalled pane)
+//   - opposing-combination guard (swap context, prove it flips)
+
+// Fixture A: "API Overloaded -> empty prompt". The session hit a 529
+// overloaded error; the turn ended and the pane dropped to idle. The
+// error chrome (⎿ API Error: 529) appears in the scrollback, but the
+// turn is done: no spinner, no "esc to interrupt", no thinking-block
+// phrase. detectPaneState -> 'idle'. Pane-level identical to Fixture C.
+const STALLED_OVERLOADED_EMPTY = [
+  '  ⎿  API Error: 529 overloaded_error: Anthropic API Overloaded. Please retry after 1 minute.',
+  '',
+  SEP,
+  '❯ ',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n')
+
+// Fixture B: mid-thinking. Active turn in flight: spinner + token counter.
+// Reuses BUSY_FOOTER_FRAME_GAP (spinner visible, footer still in frame-gap
+// idle state -- the hardest positive busy case). detectPaneState -> 'busy'.
+const MID_THINKING_WITH_TASK = BUSY_FOOTER_FRAME_GAP
+
+// Fixture C: genuinely done. Agent completed its task, the pane is idle.
+// Pane-level identical to Fixture A -- the only difference is external state.
+const GENUINELY_DONE_IDLE = IDLE_BYPASS
+
+describe('detectsStalledIdle (card 845750ad, idle-nudge boundary corpus)', () => {
+  // --- The three mandatory boundary fixtures (card description) ---
+
+  it('[A] idle + overloaded-error-in-scrollback + hasOpenTask=true -> nudge=true (stall)', () => {
+    // FALSE-NEGATIVE guard: a stalled post-overload agent MUST be detected.
+    // The ⎿ API Error: 529 is in scrollback (turn ended), so detectPaneState
+    // reads 'idle'. The open task is what confirms this is a stall.
+    // CRITICAL: if hasOpenTask were derived from the pane string this would
+    // always be false -- the invariant requires external injection.
+    expect(detectsStalledIdle(STALLED_OVERLOADED_EMPTY, { hasOpenTask: true })).toBe(true)
+  })
+
+  it('[B] mid-thinking spinner + hasOpenTask=true -> nudge=false (busy, not stalled)', () => {
+    // FALSE-POSITIVE guard: an actively thinking agent must never be nudged.
+    // BUSY_INDICATORS win inside detectPaneState -> 'busy' -> detectsStalledIdle
+    // returns false before even inspecting hasOpenTask.
+    expect(detectsStalledIdle(MID_THINKING_WITH_TASK, { hasOpenTask: true })).toBe(false)
+  })
+
+  it('[C] genuinely-done idle + hasOpenTask=false -> nudge=false (done)', () => {
+    // OVER-NUDGE guard: an idle agent with no open tasks must not receive
+    // a nudge. Without the hasOpenTask gate, every idle pane on every
+    // watchdog tick would be wrongly nudged.
+    expect(detectsStalledIdle(GENUINELY_DONE_IDLE, { hasOpenTask: false })).toBe(false)
+  })
+
+  // --- Opposing-combination: prove external state is the decisive flip ---
+
+  it('[A-flip] same overloaded pane + hasOpenTask=false -> nudge=false (already done)', () => {
+    // The agent happened to finish its task before the overloaded error
+    // surfaced (or it was a one-shot query). No obligation remains -> no nudge.
+    // Proves the flip: SAME pane, opposite context, opposite result.
+    expect(detectsStalledIdle(STALLED_OVERLOADED_EMPTY, { hasOpenTask: false })).toBe(false)
+  })
+
+  it('[C-flip] same done-looking pane + hasOpenTask=true -> nudge=true (unknown stall)', () => {
+    // Pane looks identical to "genuinely done" but the kanban shows an open card.
+    // The watchdog cannot know if this is post-overload or a task abandoned
+    // mid-flight -- it nudges and lets the agent self-determine. Proves flip:
+    // SAME pane, opposite context, opposite result.
+    expect(detectsStalledIdle(GENUINELY_DONE_IDLE, { hasOpenTask: true })).toBe(true)
+  })
+
+  // --- Negative guards: non-idle states must never trigger the nudge ---
+
+  it('does not nudge a typing pane (text parked in input box)', () => {
+    // 'typing' state: the agent is composing or the operator has parked text.
+    // A nudge would concatenate onto the draft.
+    expect(detectsStalledIdle(TYPING_PARKED, { hasOpenTask: true })).toBe(false)
+  })
+
+  it('does not nudge an unknown surface (non-Claude pane)', () => {
+    // A raw shell or build log pane -- no Claude Code input box, no idle surface.
+    // Injecting a nudge prompt here would corrupt the running process.
+    expect(detectsStalledIdle(NON_CLAUDE, { hasOpenTask: true })).toBe(false)
+  })
+
+  it('does not nudge a pane wedged in the thinking-block error', () => {
+    // 'error' state has its own recovery path (decidePaneErrorAlert + alert).
+    // The idle-nudge watchdog must not double-fire on an already-alerted error;
+    // further prompt injection into a wedged session yields another 400.
+    expect(detectsStalledIdle(ERROR_THINKING_BLOCK, { hasOpenTask: true })).toBe(false)
+  })
+
+  it('does not nudge a usage-limit modal pane', () => {
+    // Usage-limit modal -> 'busy'. A nudge prompt would queue stale and
+    // may auto-submit after the reset, corrupting the next turn.
+    expect(detectsStalledIdle(LIMIT_MENU_MODAL, { hasOpenTask: true })).toBe(false)
+  })
+
+  it('does not nudge a channel-less idle agent with no open task', () => {
+    // Channel-less agents (tip-footer) classify as 'idle' via the structural
+    // box recogniser. With hasOpenTask=false they are genuinely done -> no nudge.
+    expect(detectsStalledIdle(IDLE_CHANNELLESS_TIP_FOOTER, { hasOpenTask: false })).toBe(false)
+  })
+
+  it('nudges a channel-less idle agent that has an open task', () => {
+    // Same channel-less surface but with hasOpenTask=true: the agent is expected
+    // to be working but is sitting idle. This covers the 2026-06-13 Dave stall
+    // shape: the incident was on the main agent but channel-less sub-agents are
+    // equally susceptible to post-overload silent stalls.
+    expect(detectsStalledIdle(IDLE_CHANNELLESS_TIP_FOOTER, { hasOpenTask: true })).toBe(true)
   })
 })
