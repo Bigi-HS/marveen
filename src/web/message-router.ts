@@ -126,6 +126,17 @@ export function startMessageRouter(): NodeJS.Timeout {
         continue
       }
 
+      // IDLE-ONLY INJECT GATE -- load-bearing for the ACK protocol (card
+      // 1a99b7e2). We inject ONLY into a pane that isSessionReadyForPrompt
+      // reports IDLE, and (web.ts) the router + every other in-process injector
+      // run on a single synchronous JS thread, so no concurrent inject overlaps
+      // this one. Those two facts are exactly what lets the ACK clear-observer
+      // treat "recipient pane busy on a later tick" as the receipt of OUR
+      // message (it was idle when we injected -> the busy turn started after).
+      // If you EVER loosen this to deliver into a not-idle pane, you break that
+      // correlation: an unrelated pre-existing turn could be misread as receipt
+      // and clear a pending-ack prematurely. Revisit selectAcksToClear's
+      // invariant in delivery-ack.ts before changing this gate.
       if (!isSessionReadyForPrompt(session)) {
         if (!routerLoggedMisses.has(msg.id)) {
           logger.warn({ id: msg.id, to: msg.to_agent, session }, 'Agent message target session busy, will retry')
