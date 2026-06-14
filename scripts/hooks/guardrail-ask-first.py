@@ -67,12 +67,29 @@ import hashlib
 #     src/__tests__/google-mcp-tool-names.test.ts; the deploy doc has a live
 #     `claude mcp`-roster verification step. The sibling `calendar_today` tool is
 #     read-only (calendar.events.readonly) and is intentionally NOT guarded.
+#   - Claudia Google MCP v2 (card 3a95349f): the same server gains 7 catastrophic
+#     / irreversible ops that are HARD ask-first (GP-AC2, non-weakeneable even on
+#     a Dominik Telegram instruction): trash a message, delete a label
+#     definition, create/delete a filter, set/clear vacation auto-reply, delete a
+#     calendar event, and update ALL instances of a recurring event. Each name is
+#     defined once in src/mcp/tool-names.ts (GUARDED_* consts) and cross-pinned by
+#     src/__tests__/google-mcp-tool-names-v2.test.ts (TS) +
+#     scripts/__tests__/guardrail-google-v2.test.py (python). The v2 read tools
+#     and reversible writes (archive, mark-read, label, move) are NOT guarded.
 #   - YouTube/Twitch publish: bigben has no MCP server configured; that guard
 #     should be added in the same change that introduces the publish tool, so
 #     the exact tool name is known and cannot drift.
 GUARDED_TOOLS = frozenset(
     {
         "mcp__claudia_google__gmail_send",
+        # v2 (SEC-AC5) -- hard-guarded catastrophic/irreversible ops
+        "mcp__claudia_google__gmail_trash_message",
+        "mcp__claudia_google__gmail_delete_label",
+        "mcp__claudia_google__gmail_create_filter",
+        "mcp__claudia_google__gmail_delete_filter",
+        "mcp__claudia_google__gmail_update_vacation",
+        "mcp__claudia_google__calendar_delete_event",
+        "mcp__claudia_google__calendar_update_event_all",
     }
 )
 
