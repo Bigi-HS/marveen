@@ -19,6 +19,17 @@ export interface EmailDraft {
   from?: string
 }
 
+// Strip CR/LF and other C0 control chars from a header VALUE before it is placed
+// into the message, then collapse whitespace runs and trim. This blocks CRLF
+// header injection (a value like "a@b.com\r\nBcc: evil@x.com" would otherwise
+// smuggle an extra header). Chad gate PR #144 [medium]. Body is NOT sanitized:
+// it legitimately contains newlines and sits after the header/body separator,
+// so it cannot inject headers.
+function sanitizeHeader(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\x00-\x1F\x7F]+/g, ' ').replace(/ +/g, ' ').trim()
+}
+
 // RFC 2047 encoded-word for a non-ASCII header value; ASCII passes through.
 function encodeHeader(s: string): string {
   // eslint-disable-next-line no-control-regex
@@ -32,12 +43,15 @@ function base64url(buf: Buffer): string {
 
 // Build an RFC 5322 message and base64url-encode it for the Gmail API `raw` field.
 export function buildRawMessage(d: EmailDraft): string {
-  if (!d.to || !d.to.trim()) throw new Error('gmail send: "to" is required')
+  const to = sanitizeHeader(d.to ?? '')
+  if (!to) throw new Error('gmail send: "to" is required')
+  const from = d.from ? sanitizeHeader(d.from) : ''
+  const cc = d.cc ? sanitizeHeader(d.cc) : ''
   const headers: string[] = []
-  if (d.from) headers.push(`From: ${d.from}`)
-  headers.push(`To: ${d.to}`)
-  if (d.cc) headers.push(`Cc: ${d.cc}`)
-  headers.push(`Subject: ${encodeHeader(d.subject ?? '')}`)
+  if (from) headers.push(`From: ${from}`)
+  headers.push(`To: ${to}`)
+  if (cc) headers.push(`Cc: ${cc}`)
+  headers.push(`Subject: ${encodeHeader(sanitizeHeader(d.subject ?? ''))}`)
   headers.push('MIME-Version: 1.0')
   headers.push('Content-Type: text/plain; charset="UTF-8"')
   headers.push('Content-Transfer-Encoding: 8bit')

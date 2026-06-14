@@ -39,6 +39,54 @@ describe('buildRawMessage', () => {
     expect(() => buildRawMessage({ to: '', subject: 's', body: 'b' })).toThrow(/"to" is required/)
     expect(() => buildRawMessage({ to: '   ', subject: 's', body: 'b' })).toThrow()
   })
+
+  // Chad gate PR #144 [medium]: CRLF header injection. A header value carrying a
+  // newline could smuggle extra headers (e.g. a hidden Bcc). Strip CR/LF so the
+  // injected text collapses into the original header value as inert plain text.
+  it('strips CRLF from the recipient to block Bcc injection', () => {
+    const msg = decodeRaw(
+      buildRawMessage({ to: 'a@b.com\r\nBcc: evil@x.com', subject: 's', body: 'b' }),
+    )
+    // The injected text must NOT become its own header line; it is neutralized
+    // as inert plain text inside the To value. No Bcc header, one To header.
+    expect(msg).not.toMatch(/^Bcc:/m)
+    expect(msg.match(/^To:/gm)?.length).toBe(1)
+  })
+
+  it('strips CRLF from cc and subject', () => {
+    const msg = decodeRaw(
+      buildRawMessage({
+        to: 'a@b.com',
+        cc: 'c@d.com\r\nBcc: evil@x.com',
+        subject: 'Hi\r\nX-Injected: 1',
+        body: 'b',
+      }),
+    )
+    expect(msg).not.toMatch(/^Bcc:/m)
+    expect(msg).not.toMatch(/^X-Injected:/m)
+    expect(msg.match(/^Cc:/gm)?.length).toBe(1)
+  })
+
+  it('strips a bare LF and CR too (not just CRLF pairs)', () => {
+    const msg = decodeRaw(
+      buildRawMessage({ to: 'a@b.com\nBcc: x@y.com', subject: 's\rTo: z@z.com', body: 'b' }),
+    )
+    expect(msg).not.toMatch(/^Bcc:/m)
+    expect(msg.match(/^To:/gm)?.length).toBe(1)
+  })
+
+  it('treats a recipient of only control chars as empty', () => {
+    expect(() => buildRawMessage({ to: '\r\n\t', subject: 's', body: 'b' })).toThrow(
+      /"to" is required/,
+    )
+  })
+
+  it('preserves newlines in the body (only headers are sanitized)', () => {
+    const msg = decodeRaw(
+      buildRawMessage({ to: 'a@b.com', subject: 's', body: 'line1\r\nline2\r\nline3' }),
+    )
+    expect(msg).toMatch(/\r\n\r\nline1\r\nline2\r\nline3$/)
+  })
 })
 
 describe('sendEmail', () => {
