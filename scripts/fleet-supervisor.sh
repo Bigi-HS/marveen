@@ -515,7 +515,7 @@ ensure_idle_nudge_watch() {
   running_agents=$(curl -sf --max-time 3 \
     -H "Authorization: Bearer $(cat "$STORE/.dashboard-token" 2>/dev/null)" \
     "http://127.0.0.1:$DASH_PORT/api/agents" 2>/dev/null \
-    | python3 -c "import sys,json; [print(a['name']) for a in json.load(sys.stdin) if a.get('isRunning')]" 2>/dev/null \
+    | python3 -c "import sys,json; [print(a['name']) for a in json.load(sys.stdin) if a.get('running')]" 2>/dev/null \
     || true)
 
   for agent in $running_agents; do
@@ -579,8 +579,12 @@ ensure_cli_version_watch() {
   cli_version_check_due || return 0
   echo $(( $(date +%s) + CLI_VERSION_CHECK_THROTTLE_SECONDS )) > "$STATE_DIR/cli-version-check.next"
   local claude_bin
-  claude_bin=$(command -v claude 2>/dev/null) || return 0
+  # CLAUDE_BIN_OVERRIDE: env-overridable for tests (same pattern as FLEET_SUPERVISOR_STORE).
+  # Single-dash ${VAR-default}: default fires only when UNSET; empty string passes through
+  # so tests can force the not-found path with CLAUDE_BIN_OVERRIDE="".
+  claude_bin="${CLAUDE_BIN_OVERRIDE-$(command -v claude 2>/dev/null)}"
   [ -n "$claude_bin" ] || return 0
+  [ -x "$claude_bin" ] || return 0
   local current_ver
   current_ver=$("$claude_bin" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) || return 0
   [ -n "$current_ver" ] || return 0

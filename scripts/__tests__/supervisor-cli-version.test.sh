@@ -72,6 +72,25 @@ assert_contains "changed -> c12 smoke mentioned" "c12" "$(cat "$CAPTURE")"
 assert_contains "changed -> dry-run alert noted" "DRY-RUN would" "$(cat "$CAPTURE")"
 assert_eq "changed -> version file updated to new" "2.1.200" "$(cat "$VER_FILE" 2>/dev/null)"
 
+# --- claude not on PATH: silent no-op --------------------------------------
+# CLAUDE_BIN_OVERRIDE="" forces the empty-bin path without depending on PATH manipulation
+# (the supervisor sets its own PATH that includes the real claude binary, so PATH tricks
+# are unreliable in tests). Same env-override pattern as FLEET_SUPERVISOR_STORE.
+rm -f "$NEXT_FILE" "$VER_FILE"
+: > "$CAPTURE"
+CLAUDE_BIN_OVERRIDE="" ensure_cli_version_watch
+assert_not_contains "claude not on PATH -> silent no-op" "cli-version-watch" "$(cat "$CAPTURE")"
+assert_eq "claude not on PATH -> version file not created" "" "$(cat "$VER_FILE" 2>/dev/null)"
+
+# --- claude bin exists but exits non-zero (broken install): silent no-op ----
+BROKEN_BIN="$TMP/claude-broken"
+echo '#!/bin/sh
+exit 1' > "$BROKEN_BIN"; chmod +x "$BROKEN_BIN"
+rm -f "$NEXT_FILE" "$VER_FILE"
+: > "$CAPTURE"
+CLAUDE_BIN_OVERRIDE="$BROKEN_BIN" ensure_cli_version_watch
+assert_not_contains "broken claude -> silent no-op" "cli-version-watch" "$(cat "$CAPTURE")"
+
 # --- corrupt stored version: treated as empty / unknown ---------------------
 rm -f "$NEXT_FILE"
 echo "not-a-version!" > "$VER_FILE"
