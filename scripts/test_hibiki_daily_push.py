@@ -64,6 +64,19 @@ class PureLogicTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             push.minutes_of_day("25:00")
 
+    def test_try_minutes_of_day_returns_none_on_bad_input(self):
+        # The defensive wrapper (card 9bf34f76): never raises -- returns None for
+        # anything that is not a valid HH:MM, so a single bad/symbolic intake time
+        # can be skipped instead of crashing the whole daily push.
+        self.assertEqual(push.try_minutes_of_day("06:30"), 390)
+        self.assertEqual(push.try_minutes_of_day("00:00"), 0)
+        self.assertIsNone(push.try_minutes_of_day("morning"))     # symbolic phase
+        self.assertIsNone(push.try_minutes_of_day("pre_workout"))
+        self.assertIsNone(push.try_minutes_of_day(""))
+        self.assertIsNone(push.try_minutes_of_day("25:00"))        # out of range
+        self.assertIsNone(push.try_minutes_of_day("8"))            # no colon
+        self.assertIsNone(push.try_minutes_of_day(None))           # type: ignore[arg-type]
+
     def test_find_today_session(self):
         plan = _plan([_strength_session("monday"), _strength_session("wednesday")])
         self.assertIsNotNone(push.find_today_session(plan, date(2026, 6, 8)))   # mon
@@ -156,6 +169,55 @@ class DueActionsTests(unittest.TestCase):
         self.assertEqual(session_act["kind"], "rest")
 
 
+class UnparseableTimeGuardTests(unittest.TestCase):
+    """Card 9bf34f76: real hibiki-supplements.json uses SYMBOLIC intake phases
+    (morning / pre_workout / post_workout / evening ...), not 'HH:MM'. A single
+    unparseable time used to crash today_supplement_overview -> due_actions -> the
+    entire push, every tick (1468 failures). The guard must SKIP unparseable times,
+    never raise, so the session/nutrition push still goes out and the valid timed
+    reminders still fire.
+    """
+
+    def test_overview_skips_symbolic_times_without_crashing(self):
+        supps = [
+            {"name": "A", "intake_schedule": [{"time": "morning", "days": "daily"}]},
+            {"name": "B", "intake_schedule": [{"time": "post_workout", "days": "daily"}]},
+        ]
+        # All symbolic -> empty overview, NO exception.
+        self.assertEqual(push.today_supplement_overview(supps, date(2026, 6, 8)), [])
+
+    def test_overview_keeps_valid_drops_invalid_sorted(self):
+        supps = [
+            {"name": "Late", "intake_schedule": [{"time": "22:00", "days": "daily"}]},
+            {"name": "Bad", "intake_schedule": [{"time": "evening", "days": "daily"}]},
+            {"name": "Early", "intake_schedule": [{"time": "08:00", "days": "daily"}]},
+        ]
+        out = push.today_supplement_overview(supps, date(2026, 6, 8))
+        # only the two HH:MM entries survive, sorted by time; the symbolic one dropped.
+        self.assertEqual(out, [("Early", "08:00"), ("Late", "22:00")])
+
+    def test_due_actions_survives_symbolic_times_session_still_fires(self):
+        config = {"session_push_time": "06:30", "reminder_tolerance_min": 5}
+        supps = [{"name": "Sym", "intake_schedule": [{"time": "morning", "days": "daily"}]}]
+        plan = _plan([_strength_session("monday")])
+        now = datetime(2026, 6, 8, 6, 35)
+        acts = push.due_actions(now, plan, supps, config, set())   # must not raise
+        self.assertIn("session", {a["key"] for a in acts})
+
+    def test_due_actions_symbolic_reminder_skipped_valid_still_fires(self):
+        config = {"session_push_time": "06:30", "reminder_tolerance_min": 5}
+        supps = [
+            {"name": "Sym", "intake_schedule": [{"time": "morning", "days": "daily"}]},
+            {"name": "Real", "intake_schedule": [{"time": "08:00", "days": "daily"}]},
+        ]
+        plan = _plan([_strength_session("monday")])
+        now = datetime(2026, 6, 8, 8, 2)  # within tolerance of 08:00
+        acts = push.due_actions(now, plan, supps, config, {"session"})
+        keys = {a["key"] for a in acts}
+        self.assertIn("supp:Real:08:00", keys)
+        self.assertNotIn("supp:Sym:morning", keys)  # symbolic can't be timed -> skipped
+
+
 class RunIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="hibiki-store-")
@@ -230,6 +292,20 @@ class RunIntegrationTests(unittest.TestCase):
         self.assertEqual(s1["sent"], 1)
         self.assertEqual(s2["sent"], 0)
         self.assertEqual(len(sent), 1)
+
+    def test_run_survives_all_symbolic_supplement_times(self):
+        # Regression for card 9bf34f76: the live hibiki-supplements.json has only
+        # symbolic intake phases. The whole push used to crash every tick; now the
+        # session push must still go out and run() must not raise.
+        self._write("hibiki-supplements.json", json.dumps([
+            {"name": "A", "intake_schedule": [{"time": "morning", "days": "daily"}]},
+            {"name": "B", "intake_schedule": [{"time": "pre_workout", "days": "daily"}]},
+            {"name": "C", "intake_schedule": [{"time": "evening", "days": "daily"}]},
+        ]))
+        sent, sender = self._collect_sender()
+        summary = push.run(datetime(2026, 6, 8, 6, 35), self.tmp, sender)
+        self.assertEqual(summary["sent"], 1)
+        self.assertIn("session", summary["kinds"])
 
     def test_state_file_is_owner_only(self):
         sent, sender = self._collect_sender()
