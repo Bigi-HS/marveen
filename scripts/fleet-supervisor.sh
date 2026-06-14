@@ -278,6 +278,28 @@ ensure_pipe_watchdog() {
   fi
 }
 
+# Main-agent channels watchdog (scripts/channel-watchdog.sh --loop, card da737e92).
+# The COARSE recovery net for the main agent (<main>-channels): when the DASHBOARD
+# is down its in-process channel-monitor is gone, so a wedged channels session would
+# otherwise never be respawned. channel-watchdog.sh was designed as a systemd --user
+# timer, but systemd --user is OFFLINE on this WSL host, so it never fired (card
+# da737e92). Run it as a reboot-persistent detached loop instead -- a peer to the
+# other *-watchdog.sh loops, parented to init via nohup+disown, so it survives even a
+# supervisor death. It self-gates on dashboard liveness (GATE 0): while the dashboard
+# is up the in-process monitor owns recovery and the loop is a no-op, so keeping it
+# always-on is safe (no double-respawn / pane churn -- the 2026-06-01 protection is
+# intrinsic to the watchdog now). pgrep matches only the --loop daemon, so a running
+# one is kept (no double-launch). 9>&- so it never inherits the supervisor flock fd.
+ensure_main_channel_watchdog() {
+  pgrep -f "channel-watchdog.sh --loop" >/dev/null 2>&1 && return 0
+  if [ -x "$INSTALL_DIR/scripts/channel-watchdog.sh" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start channel-watchdog.sh --loop"; return 0; fi
+    nohup bash "$INSTALL_DIR/scripts/channel-watchdog.sh" --loop >> "$STORE/channel-watchdog.log" 2>&1 9>&- &
+    disown 2>/dev/null || true
+    log "channel-watchdog: started (--loop)"
+  fi
+}
+
 # Token-outage auto-ACK watcher (scripts/token-outage-watch.sh, P3). A self-looping
 # deterministic daemon (~30s cycles) INDEPENDENT of the dashboard, so it keeps the
 # operator informed + captures/re-dispatches the queue even while the Claude account
@@ -709,19 +731,14 @@ tick() {
   # 2) CHANNELS
   if session_alive "$CHAN_SESSION"; then
     backoff_reset channels
-    # Pipe-death recovery (Telegram MCP wedged but session up) is OWNED by the
-    # dashboard's IN-PROCESS channel-monitor whenever the dashboard is up: it
-    # advances store/.channel-keepalive from ingested inbound messages and
-    # respawns the pane on genuine staleness. We must NOT also run the external
-    # channel-watchdog then -- it judges staleness off the same file and would
-    # double-respawn, and worse, if the idle keepalive round-trip is absent the
-    # file ages while the channel is perfectly healthy, looping a respawn on our
-    # own pane (the 2026-06-01 churn outage). So fall back to the external coarse
-    # watchdog ONLY when the dashboard (and thus its monitor) is DOWN.
-    if ! dash_alive && [ -x "$INSTALL_DIR/scripts/channel-watchdog.sh" ]; then
-      log "channels: dashboard down -- running external channel-watchdog as backup"
-      run env -u TMUX bash "$INSTALL_DIR/scripts/channel-watchdog.sh"
-    fi
+    # Pipe-death / wedge recovery for an up-but-deaf channels session is owned by
+    # the dashboard's IN-PROCESS channel-monitor while the dashboard is up, and by
+    # the standalone scripts/channel-watchdog.sh --loop (ensure_main_channel_watchdog
+    # below) when the dashboard is DOWN. The loop self-gates on dashboard liveness
+    # (GATE 0), so the two never both act -- no double-respawn / pane churn (the
+    # 2026-06-01 churn protection is now intrinsic to the watchdog). The supervisor
+    # no longer runs the watchdog inline here (card da737e92): the reboot-persistent
+    # loop owns it, so it survives even a supervisor death.
   else
     # A fully-absent channels session is recreated by nobody else (the dashboard
     # monitor respawns an existing pane; it does not recreate a killed session,
@@ -740,6 +757,8 @@ tick() {
   ensure_agent_watchdogs
   # 5) TELEGRAM MCP-PIPE WATCHDOG (orchestrator pipe recovery -- reboot-persistent)
   ensure_pipe_watchdog
+  # 5b) MAIN-AGENT CHANNELS WATCHDOG (coarse net when dashboard down -- reboot-persistent loop, card da737e92)
+  ensure_main_channel_watchdog
   # 6) TOKEN-OUTAGE AUTO-ACK WATCHER (usage-limit ack + queue capture/re-dispatch)
   ensure_token_outage_watch
   # 7) HIBIKI TOKEN-FREE DAILY PUSH (throttled; reboot-safe replacement for WSL cron)
