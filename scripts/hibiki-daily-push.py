@@ -113,7 +113,10 @@ def find_today_session(plan: dict, d: date) -> dict | None:
 
 
 def supplement_due_today(entry: dict, d: date) -> list[str]:
-    """Intake times ('HH:MM') scheduled for `d` for one supplement entry."""
+    """Raw intake `time` values scheduled for `d` for one supplement entry, honouring
+    days='daily' | a weekday-abbrev list. Legacy helper kept for direct callers/tests;
+    the push pipeline uses resolved_supplement_intakes (which also resolves symbolic
+    phases and handles 'training_days_only')."""
     out: list[str] = []
     today = weekday_name(d)
     for slot in entry.get("intake_schedule", []):
@@ -125,21 +128,138 @@ def supplement_due_today(entry: dict, d: date) -> list[str]:
     return out
 
 
-def today_supplement_overview(supplements: list[dict], d: date) -> list[tuple[str, str]]:
-    """(name, time) pairs scheduled today, sorted by time. No dosage anywhere."""
-    pairs: list[tuple[str, str]] = []
-    skipped = 0
+# --------------------------------------------------------------------------- #
+# Symbolic intake-phase resolver (card 4db2faed)
+# --------------------------------------------------------------------------- #
+# The live inventory expresses intake timing as SYMBOLIC phases (morning /
+# pre_workout / intra_workout / post_workout / pre_meal / evening), not 'HH:MM'.
+# Supplement timing is event-relative, not absolute clock time, so the phases are
+# intentional, not a data bug. This resolver maps each phase to concrete clock
+# time(s) for today so the overview can sort and reminders can fire. Canonical
+# values per Hibiki's domain spec (2026-06-14). An explicit 'HH:MM' time passes
+# through unchanged (back-compat with any literal-time entry).
+FIXED_PHASE_TIME = {
+    "morning": "07:30",   # before the first meal
+    "evening": "21:30",   # ~45-60 min before sleep
+}
+# `timing` values that shift a morning slot off the 07:30 default (data-driven, so
+# no supplement name is hard-coded): with_meal (Asztaxantin) and max_13:00
+# (L-Carnitine / Green Tea, which are also training-days-only) -> 08:00.
+MORNING_TIMING_OVERRIDE = {
+    "with_meal": "08:00",
+    "max_13:00": "08:00",
+}
+PRE_MEAL_TIMES = ("07:30", "12:30", "18:30")  # 30 min before breakfast / lunch / dinner
+
+
+def is_training_day(session: dict | None) -> bool:
+    """True when today has a real (non-rest) training session."""
+    return bool(session) and session.get("session_type") != "rest"
+
+
+def _format_minutes(m: int) -> str | None:
+    """minutes-since-midnight -> 'HH:MM', or None if it falls outside a single day."""
+    return f"{m // 60:02d}:{m % 60:02d}" if 0 <= m < 24 * 60 else None
+
+
+def anchor_to_session(session: dict | None, offset_min: int) -> str | None:
+    """A workout-phase time = the day's session scheduled_time + offset_min. Returns
+    None when there is no usable session time, so the caller SKIPS rather than firing
+    a reminder at a guessed time (spec: never a false reminder on an uncertain time)."""
+    if not session:
+        return None
+    base = try_minutes_of_day(session.get("scheduled_time"))
+    if base is None:
+        return None
+    return _format_minutes(base + offset_min)
+
+
+def resolve_intake_times(phase, timing: str | None, session: dict | None) -> list[str]:
+    """Symbolic intake phase -> concrete 'HH:MM' time(s) for today. Returns [] when the
+    slot cannot be placed on the clock: an unknown phase, or a workout phase with no
+    usable session time (no training today / scheduled_time missing)."""
+    # An explicit clock time passes through unchanged.
+    if try_minutes_of_day(phase) is not None:
+        return [phase]
+    if phase == "pre_workout":
+        t = anchor_to_session(session, -30)
+        return [t] if t else []
+    if phase == "intra_workout":
+        t = anchor_to_session(session, 0)
+        return [t] if t else []
+    if phase == "post_workout":
+        dur = session.get("duration_min") if session else None
+        if not isinstance(dur, (int, float)):
+            return []
+        t = anchor_to_session(session, int(dur))
+        return [t] if t else []
+    if phase == "pre_meal":
+        return list(PRE_MEAL_TIMES)
+    if phase == "morning":
+        return [MORNING_TIMING_OVERRIDE.get(timing or "", FIXED_PHASE_TIME["morning"])]
+    if phase == "evening":
+        return [FIXED_PHASE_TIME["evening"]]
+    return []
+
+
+def slot_due_today(slot: dict, d: date, session: dict | None) -> bool:
+    """Whether one intake slot applies today: days='daily' | 'training_days_only' (only
+    on a real training day) | a weekday-abbrev list."""
+    days = slot.get("days", "daily")
+    if days == "daily":
+        return True
+    if days == "training_days_only":
+        return is_training_day(session)
+    if isinstance(days, list):
+        return weekday_name(d)[:3] in days
+    return False
+
+
+def intake_skip_reason(phase, session: dict | None) -> str:
+    """Why a slot that IS due today still resolved to no time -- so the skip is explicit
+    and auditable, never a silent nothing (DA-HIGH, the original-incident class)."""
+    if phase in ("pre_workout", "intra_workout", "post_workout"):
+        # Due (training day) but the workout time could not be anchored.
+        return "null_session_anchor"
+    return "unknown_phase"
+
+
+def resolved_supplement_intakes(supplements: list[dict], d: date, session: dict | None) -> list[tuple[str, str]]:
+    """All (name, resolved 'HH:MM') intakes due today, after day gating + phase
+    resolution. A multi-time phase (pre_meal) expands to one pair per time.
+
+    A slot that is NOT due today (day gate) is normal flow and silently dropped. A slot
+    that IS due today but cannot be placed on the clock (unknown phase, or a workout
+    phase with no usable session time) is an ABNORMAL skip: it is reason-tagged and
+    logged (count only, no names) so it can never become a silent should-have-fired."""
+    out: list[tuple[str, str]] = []
+    skips: dict[str, int] = {}
     for entry in supplements:
         name = entry.get("name", "?")
-        for t in supplement_due_today(entry, d):
-            if try_minutes_of_day(t) is None:
-                skipped += 1   # symbolic / malformed time: cannot place on the clock
+        for slot in entry.get("intake_schedule", []):
+            if not slot_due_today(slot, d, session):
+                continue   # normal day gate (rest day / wrong weekday) -- not a concern
+            phase = slot.get("time")
+            times = resolve_intake_times(phase, slot.get("timing"), session)
+            if not times:
+                reason = intake_skip_reason(phase, session)
+                skips[reason] = skips.get(reason, 0) + 1
                 continue
-            pairs.append((name, t))
-    if skipped:
-        # Privacy (spec C-AC3): count only, never the name or the value.
-        log.warning("skipped %d supplement intake slot(s) with non-HH:MM time", skipped)
-    pairs.sort(key=lambda p: minutes_of_day(p[1]))
+            for t in times:
+                out.append((name, t))
+    if skips:
+        # Privacy (C-AC3): reasons + counts only, never a supplement name or value.
+        log.warning("resolver: %d due intake(s) could not be placed on the clock, by reason: %s",
+                    sum(skips.values()), dict(sorted(skips.items())))
+    return out
+
+
+def today_supplement_overview(supplements: list[dict], d: date, session: dict | None = None) -> list[tuple[str, str]]:
+    """(name, resolved 'HH:MM') pairs scheduled today, sorted by time then name. No
+    dosage anywhere. Symbolic phases are resolved via resolve_intake_times; `session`
+    (today's plan session, or None) supplies the workout-phase anchor + training-day gate."""
+    pairs = resolved_supplement_intakes(supplements, d, session)
+    pairs.sort(key=lambda p: (minutes_of_day(p[1]), p[0]))
     return pairs
 
 
@@ -198,9 +318,12 @@ def build_rest_message(session: dict, supp_overview: list[tuple[str, str]], sign
     return append_signature("\n".join(lines), signature)
 
 
-def build_reminder_message(name: str, signature: str) -> str:
-    """Single timed intake reminder: name + 'time to take' only. No dosage (B-AC3)."""
-    return append_signature(f"Emlekezteto: ideje bevenni -- {name}.", signature)
+def build_reminder_message(names: list[str], signature: str) -> str:
+    """Timed intake reminder for one resolved time: the supplement name(s) due then,
+    'time to take' only -- no dosage (B-AC3). Multiple supplements that resolve to the
+    same time are listed together (collision bucketing, card 4db2faed)."""
+    listed = ", ".join(names)
+    return append_signature(f"Emlekezteto: ideje bevenni -- {listed}.", signature)
 
 
 def build_plan_error_message(signature: str) -> str:
@@ -213,13 +336,21 @@ def build_plan_error_message(signature: str) -> str:
 def due_actions(now: datetime, plan: dict | None, supplements: list[dict], config: dict, sent: set[str]) -> list[dict]:
     """Decide what to send this tick. Pure: returns action dicts, no IO.
 
-    Each action: {key, kind, name?, build:callable(signature)->str}. `key` dedupes
-    against `sent`. `name` (supplement) is carried for the private state file only,
-    never logged.
+    Each action: {key, kind, build:callable(signature)->str}. `key` dedupes against
+    `sent`. No supplement name enters `key`/`kind`/the summary -- only the reminder
+    TEXT (built on demand, sent to Hibiki's own channel) names them.
+
+    Times are Europe/Budapest WALL-CLOCK: `now` is the local time the caller passes,
+    the resolved phase times (07:30/...) and the plan scheduled_time are wall-clock,
+    and all comparisons are plain minute-of-day arithmetic -- no UTC conversion, so a
+    DST transition shifts nothing (a 07:30 reminder fires at local 07:30 either side).
     """
     d = now.date()
     now_min = now.hour * 60 + now.minute
     actions: list[dict] = []
+    # Today's session (or None) -- the anchor for workout phases + the training-day
+    # gate. Computed once so reminders see it even before the session-push time.
+    session = find_today_session(plan, d) if plan else None
 
     # 1. Daily session / rest push at (or after) the configured push time, once.
     push_min = minutes_of_day(config.get("session_push_time", DEFAULT_SESSION_PUSH_TIME))
@@ -231,9 +362,8 @@ def due_actions(now: datetime, plan: dict | None, supplements: list[dict], confi
             actions.append({"key": "session", "kind": "plan-error",
                             "build": build_plan_error_message})
         else:
-            session = find_today_session(plan, d)
             nutrition = plan.get("nutrition_targets", {})
-            overview = today_supplement_overview(supplements, d)
+            overview = today_supplement_overview(supplements, d, session)
             if session is None:
                 # No session entry for today -> treat as rest.
                 actions.append({"key": "session", "kind": "rest",
@@ -245,20 +375,21 @@ def due_actions(now: datetime, plan: dict | None, supplements: list[dict], confi
                 actions.append({"key": "session", "kind": "session",
                                 "build": lambda sig, s=session: build_session_message(s, nutrition, overview, sig)})
 
-    # 2. Timed intake reminders: fire within tolerance of each scheduled time, once.
+    # 2. Timed intake reminders: bucket every intake due today by its RESOLVED time, so
+    # a single reminder per time lists all supplements due then (collision decision,
+    # card 4db2faed). Names within a bucket are sorted for deterministic text.
     tol = int(config.get("reminder_tolerance_min", DEFAULT_REMINDER_TOLERANCE_MIN))
-    for entry in supplements:
-        name = entry.get("name", "?")
-        for t in supplement_due_today(entry, d):
-            t_min = try_minutes_of_day(t)
-            if t_min is None:
-                continue   # symbolic / malformed time: cannot compute "due now" -- skip
-            key = f"supp:{name}:{t}"
-            if key in sent:
-                continue
-            if abs(now_min - t_min) <= tol:
-                actions.append({"key": key, "kind": "reminder", "name": name,
-                                "build": lambda sig, n=name: build_reminder_message(n, sig)})
+    buckets: dict[str, list[str]] = {}
+    for name, t in resolved_supplement_intakes(supplements, d, session):
+        buckets.setdefault(t, []).append(name)
+    for t in sorted(buckets):
+        key = f"supp:{t}"
+        if key in sent:
+            continue
+        if abs(now_min - minutes_of_day(t)) <= tol:
+            names = sorted(buckets[t])
+            actions.append({"key": key, "kind": "reminder",
+                            "build": lambda sig, ns=names: build_reminder_message(ns, sig)})
     return actions
 
 
@@ -316,6 +447,9 @@ def save_state(store_root: str, d: date, sent: set[str]) -> None:
             json.dump({"sent": sorted(sent)}, fh)
         # 0600 for store-file consistency: the dedup keys carry supplement names,
         # so keep the state file owner-only like the rest of the private store.
+        # 0600 for store-file consistency with the rest of the private store. The
+        # dedup keys are now name-free (session / supp:HH:MM), so the file no longer
+        # carries supplement names, but keep it owner-only regardless.
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except OSError as exc:
