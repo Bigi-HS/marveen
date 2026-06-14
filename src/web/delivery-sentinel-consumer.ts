@@ -18,6 +18,7 @@
 // Telegram IO, which lives in the thin CLI (src/delivery-sentinel-cli.ts).
 
 import type { AbandonmentEvent } from './delivery-alert.js'
+import { shouldAlertOnAbandon } from './delivery-alert.js'
 
 // id (as a string key) -> epoch-ms of the latest sentinel row already escalated
 // (or baselined past) for that id. An empty map means "never run" -- used to
@@ -118,7 +119,16 @@ export function selectSentinelEscalations(
     : DEFAULT_MAX_PER_RUN
   const baselineOnFirstRun = opts.baselineOnFirstRun ?? true
 
-  const latest = latestPerId(events)
+  // Recursion guard (card 6774b3db): the out-of-band path must not escalate the
+  // delivery-monitor's OWN abandoned alerts. When the main agent is busy for the
+  // whole window, the monitor's hourly "X is overdue" alerts pile up undelivered
+  // and would otherwise flood the operator with backstop-about-backstop pings
+  // (47% of the 2026-06-14 overnight flood). The same recognition the in-band
+  // path uses (shouldAlertOnAbandon) excludes them here. The JSONL row is still
+  // written upstream for forensics; the underlying real message is traced and
+  // escalated on its own row, so dropping the monitor row only removes the
+  // double-count -- never a genuine signal.
+  const latest = latestPerId(events.filter((e) => shouldAlertOnAbandon(e.from)))
 
   // First run on a non-empty sentinel: baseline past history.
   if (baselineOnFirstRun && isEmptyCursor(cursor) && latest.size > 0) {
