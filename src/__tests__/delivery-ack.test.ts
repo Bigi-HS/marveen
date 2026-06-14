@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   DELIVERY_PENDING_ACK_SENTINEL,
   shouldWritePendingAck,
+  decidePendingAck,
   pendingAckRecord,
   parsePendingAckSentinel,
   ackClearedRecord,
@@ -19,17 +20,67 @@ import {
 // peer messages are never tracked (no cry-wolf), and the record shape mirrors
 // the abandonment sentinel so the d37df625 supervisor consumer reads both.
 
-describe('shouldWritePendingAck', () => {
-  it('writes only when ack_expected is truthy', () => {
-    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b', ack_expected: true })).toBe(true)
-    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b', ack_expected: 1 })).toBe(true)
+// Card 0978279f adds the RECIPIENT-capability half of the gate: a pending-ack is
+// written ONLY when the sender opted in (ack_expected truthy) AND the recipient
+// is ACK-capable. Both halves are required (AND), and the recipient default is
+// fail-closed (a recipient not flagged ackCapable is not capable). This keeps a
+// cry-wolf out: an ack_expected message to a recipient that can never engage its
+// pane (so the clear-observer can never clear it) writes nothing, and the
+// d37df625 1h-abandonment net remains the backstop.
+describe('shouldWritePendingAck (sender opt-in AND recipient capability)', () => {
+  it('writes only when ack_expected is truthy AND recipient is ack-capable', () => {
+    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b', ack_expected: true }, true)).toBe(true)
+    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b', ack_expected: 1 }, true)).toBe(true)
   })
 
-  it('does not write for a plain peer message (no flag / falsy)', () => {
-    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b' })).toBe(false)
-    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b', ack_expected: false })).toBe(false)
-    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b', ack_expected: 0 })).toBe(false)
-    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b', ack_expected: null })).toBe(false)
+  it('does not write when the recipient is not ack-capable, even with ack_expected', () => {
+    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b', ack_expected: true }, false)).toBe(false)
+    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b', ack_expected: 1 }, false)).toBe(false)
+  })
+
+  it('does not write for a plain peer message (no flag / falsy), regardless of capability', () => {
+    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b' }, true)).toBe(false)
+    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b', ack_expected: false }, true)).toBe(false)
+    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b', ack_expected: 0 }, true)).toBe(false)
+    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b', ack_expected: null }, true)).toBe(false)
+    // and the doubly-negative case
+    expect(shouldWritePendingAck({ id: 1, from_agent: 'a', to_agent: 'b', ack_expected: false }, false)).toBe(false)
+  })
+})
+
+// The three-way decision the router branches on. 'write' appends a pending-ack;
+// 'skip-recipient-not-capable' is the OBSERVABILITY case (point b): the sender
+// expected an ACK but the recipient cannot confirm, so the router emits a debug
+// log rather than leaving a silent expectation gap; 'skip-not-ack-expected' is a
+// plain FYI with no expectation at all (no log, no record).
+describe('decidePendingAck (router three-way branch, card 0978279f)', () => {
+  const msg = { id: 7, from_agent: 'thor', to_agent: 'dave' }
+
+  it('write: ack_expected + capable recipient', () => {
+    expect(decidePendingAck({ ...msg, ack_expected: true }, true)).toBe('write')
+    expect(decidePendingAck({ ...msg, ack_expected: 1 }, true)).toBe('write')
+  })
+
+  it('skip-recipient-not-capable: ack_expected but recipient !capable (observability case)', () => {
+    expect(decidePendingAck({ ...msg, ack_expected: true }, false)).toBe('skip-recipient-not-capable')
+    expect(decidePendingAck({ ...msg, ack_expected: 1 }, false)).toBe('skip-recipient-not-capable')
+  })
+
+  it('skip-not-ack-expected: no opt-in -> no expectation, no log (capability irrelevant)', () => {
+    expect(decidePendingAck({ ...msg }, true)).toBe('skip-not-ack-expected')
+    expect(decidePendingAck({ ...msg, ack_expected: false }, true)).toBe('skip-not-ack-expected')
+    expect(decidePendingAck({ ...msg, ack_expected: 0 }, false)).toBe('skip-not-ack-expected')
+    expect(decidePendingAck({ ...msg, ack_expected: null }, false)).toBe('skip-not-ack-expected')
+  })
+
+  it('shouldWritePendingAck agrees with decidePendingAck === write across the matrix', () => {
+    const acks: Array<boolean | number | null | undefined> = [true, 1, false, 0, null, undefined]
+    for (const ack of acks) {
+      for (const cap of [true, false]) {
+        const m = { ...msg, ack_expected: ack }
+        expect(shouldWritePendingAck(m, cap)).toBe(decidePendingAck(m, cap) === 'write')
+      }
+    }
   })
 })
 
@@ -231,5 +282,49 @@ describe('ackEscalationText', () => {
 
   it('returns empty string for no escalations', () => {
     expect(ackEscalationText([])).toBe('')
+  })
+})
+
+// Card 0978279f point c: the capability gate must not create a SECOND scream
+// alongside the existing nets (d37df625 1h-abandonment, #146 priority windows).
+// The gate only ever REDUCES writes, so it cannot add an escalation path; these
+// pin the three interplay cases so a future change can't regress them.
+describe('ACK gate x escalation interplay (card 0978279f point c)', () => {
+  const NOW_MS = 10_000_000
+  const WINDOW = ACK_ESCALATION_WINDOW_MS
+
+  it('capable-but-legit-busy recipient: cleared by engagement, never escalates (no double-scream)', () => {
+    // A delegation to a capable recipient that is genuinely busy for a long
+    // turn. The pane-engagement observer clears it as soon as it sees busy, so
+    // it never reaches the 15-min ACK window -> only one net ever speaks.
+    const writeDecision = decidePendingAck({ id: 1, from_agent: 'thor', to_agent: 'dave', ack_expected: true }, true)
+    expect(writeDecision).toBe('write')
+    const pending = [ack(1, NOW_MS - 60 * 60 * 1000 /* delivered 60min ago */, 'dave', 'thor')]
+    const cleared = selectAcksToClear(pending, (to) => to === 'dave' /* busy */, NOW_MS)
+    expect(cleared).toEqual([1])
+    // With the clear recorded, the outstanding set is empty -> escalation sees nothing.
+    const stillOutstanding = pending.filter((p) => !cleared.includes(p.id))
+    const plan = selectAckEscalations(stillOutstanding, EMPTY_ACK_CURSOR, NOW_MS, { baselineOnFirstRun: false })
+    expect(plan.escalations).toEqual([])
+  })
+
+  it('capable-but-WEDGED recipient: never engages -> escalates after the window (the feature, a correct scream)', () => {
+    const pending = [ack(2, NOW_MS - (WINDOW + 1000) /* overdue */, 'dave', 'thor')]
+    // Wedged: pane never goes busy -> nothing cleared.
+    expect(selectAcksToClear(pending, () => false, NOW_MS)).toEqual([])
+    const plan = selectAckEscalations(pending, EMPTY_ACK_CURSOR, NOW_MS, { baselineOnFirstRun: false })
+    expect(plan.escalations.map((e) => e.id)).toEqual([2])
+  })
+
+  it('non-capable recipient: gate skips the write -> never in the pending set -> only the 1h net (single scream possible)', () => {
+    // The structural guarantee: a not-capable recipient produces no pending-ack
+    // at all, so the ACK escalation path is unreachable for it -- the 15-min
+    // ACK net and the 1h abandonment net cannot both fire on the same message.
+    const decision = decidePendingAck({ id: 3, from_agent: 'thor', to_agent: 'channelless', ack_expected: true }, false)
+    expect(decision).toBe('skip-recipient-not-capable')
+    expect(shouldWritePendingAck({ id: 3, from_agent: 'thor', to_agent: 'channelless', ack_expected: true }, false)).toBe(false)
+    // Nothing was written, so the escalation consumer has nothing to escalate.
+    const plan = selectAckEscalations([], EMPTY_ACK_CURSOR, NOW_MS, { baselineOnFirstRun: false })
+    expect(plan.escalations).toEqual([])
   })
 })

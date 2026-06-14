@@ -198,6 +198,35 @@ export function writeAgentDisplayName(name: string, displayName: string): void {
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
 }
 
+// Pure: resolve the optional per-agent `ackCapable` flag (card 0978279f).
+// FAIL-CLOSED -- a recipient is ACK-capable only when its config explicitly opts
+// in with the boolean `true` (or the string "true", case-insensitive, for a
+// hand-edit / dashboard form). Anything else (absent, false, a number, a typo,
+// null) -> not capable. This is the no-cry-wolf gate: an ack_expected message to
+// a non-capable recipient writes no pending-ack, so a misconfigured value can
+// never cause a 15-min false escalation -- the worst case is the protocol stays
+// inert and the d37df625 1h-abandonment net backstops the message.
+export function resolveAckCapableFromConfig(config: { ackCapable?: unknown }): boolean {
+  const v = config.ackCapable
+  if (v === true) return true
+  if (typeof v === 'string' && v.trim().toLowerCase() === 'true') return true
+  return false
+}
+
+// The recipient's ACK-capability, read FRESH from agent-config.json on every
+// call (no module cache) so a live flag edit takes effect at router time, not at
+// boot (card 0978279f, live-config requirement). Default false (fail-closed) on
+// a missing file / parse error / absent flag. Mirrors the other readers' fresh
+// readFileOr + try/catch shape.
+export function readAgentAckCapable(name: string): boolean {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  try {
+    return resolveAckCapableFromConfig(JSON.parse(readFileOr(configPath, '{}')))
+  } catch {
+    return false
+  }
+}
+
 export function readAgentSecurityProfile(name: string): string {
   const configPath = join(agentDir(name), 'agent-config.json')
   try {

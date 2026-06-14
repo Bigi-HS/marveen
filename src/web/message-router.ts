@@ -20,7 +20,7 @@ import {
 } from './delivery-alert.js'
 import {
   DELIVERY_PENDING_ACK_SENTINEL,
-  shouldWritePendingAck,
+  decidePendingAck,
   pendingAckRecord,
 } from './delivery-ack.js'
 import {
@@ -44,7 +44,7 @@ import {
 } from '../prompt-safety.js'
 import { isTrustedPeer } from '../team-trust.js'
 import { COORDINATOR_AGENT_ID } from '../channel-coordinator/ingest.js'
-import { isKnownAgent } from './agent-config.js'
+import { isKnownAgent, readAgentAckCapable } from './agent-config.js'
 import { readAgentTeam } from './agent-team.js'
 import {
   agentSessionName,
@@ -256,20 +256,32 @@ export function startMessageRouter(): NodeJS.Timeout {
         if (!markMessageDelivered(msg.id)) {
           logger.warn({ id: msg.id }, 'markMessageDelivered affected 0 rows (deleted concurrently?)')
         }
-        // Delivery ACK protocol (card 1a99b7e2): for ACK-EXPECTED messages only
-        // (delegation / opt-in), record a durable pending-ack on successful
-        // inject. "Delivered" here is the optimistic signal (the inject did not
-        // throw); the pending-ack lets a separate consumer escalate if the
-        // recipient never confirms receipt within the window. Plain FYI peer
-        // messages set nothing -> no record -> no cry-wolf; they are backstopped
-        // by the d3339db9 1h-abandonment net above. The clear/escalation side is
-        // built separately; this is the WRITE only.
-        if (shouldWritePendingAck(msg)) {
+        // Delivery ACK protocol (card 1a99b7e2 WRITE + 0978279f capability gate):
+        // record a durable pending-ack on successful inject ONLY when the sender
+        // opted in (ack_expected) AND the recipient is ACK-capable. Capability is
+        // read FRESH from the recipient's live agent-config here (no boot cache),
+        // so flagging an agent ackCapable takes effect without a restart.
+        //   - 'write': append the pending-ack; a separate consumer escalates if
+        //     the recipient never confirms receipt within the window.
+        //   - 'skip-recipient-not-capable' (point b): the sender expected an ACK
+        //     but the recipient cannot confirm (its pane can't engage in a way
+        //     the clear-observer reads). We deliberately write NOTHING (writing
+        //     would cry-wolf at 15 min, never clearing), but LOG it so an
+        //     ack_expected that is silently not tracked is never an invisible
+        //     expectation gap. The d3339db9 1h-abandonment net still backstops it.
+        //   - 'skip-not-ack-expected': a plain FYI -> nothing to track, no log.
+        const ackDecision = decidePendingAck(msg, readAgentAckCapable(msg.to_agent))
+        if (ackDecision === 'write') {
           try {
             appendFileSync(join(MARVEEN_ROOT, DELIVERY_PENDING_ACK_SENTINEL), pendingAckRecord(msg, now) + '\n')
           } catch (err) {
             logger.warn({ err, id: msg.id }, 'Failed to append delivery-pending-ack record')
           }
+        } else if (ackDecision === 'skip-recipient-not-capable') {
+          logger.info(
+            { id: msg.id, from: msg.from_agent, to: msg.to_agent },
+            'ack_expected set but recipient not ackCapable -> no pending-ack written (d3339db9 1h backstop applies)',
+          )
         }
         routerLoggedMisses.delete(msg.id)
         escalationState.delete(msg.id)
