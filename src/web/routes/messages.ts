@@ -17,9 +17,16 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/messages' && method === 'POST') {
     const body = await readBody(req)
-    const { from, to, content, ack_expected } = JSON.parse(body.toString()) as { from: string; to: string; content: string; ack_expected?: boolean }
+    const { from, to, content, ack_expected, priority } = JSON.parse(body.toString()) as { from: string; to: string; content: string; ack_expected?: boolean; priority?: string }
     if (!from?.trim() || !to?.trim() || !content?.trim()) {
       json(res, { error: 'from, to, and content are required' }, 400)
+      return true
+    }
+    // Optional escalation priority (card 28d2179f). Default 'normal'. Validate
+    // against the enum here so a bad value is a clean 400, not a DB CHECK 500.
+    const VALID_PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const
+    if (priority !== undefined && !VALID_PRIORITIES.includes(priority as (typeof VALID_PRIORITIES)[number])) {
+      json(res, { error: `priority must be one of ${VALID_PRIORITIES.join(', ')}` }, 400)
       return true
     }
     // Security: the channel-coordinator id grants channel-inbound delivery
@@ -69,8 +76,8 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       json(res, { error: `Unknown recipient: ${to.trim()}` }, 400)
       return true
     }
-    const msg = createAgentMessage(from.trim(), recipient, content.trim(), ack_expected === true)
-    logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ackExpected: msg.ack_expected }, 'Agent message created')
+    const msg = createAgentMessage(from.trim(), recipient, content.trim(), ack_expected === true, (priority as AgentMessage['priority']) ?? 'normal')
+    logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ackExpected: msg.ack_expected, priority: msg.priority }, 'Agent message created')
     json(res, msg)
     return true
   }

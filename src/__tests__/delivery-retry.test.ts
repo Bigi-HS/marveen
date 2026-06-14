@@ -3,6 +3,7 @@ import {
   classifyPendingMessage,
   pruneEscalationState,
   shouldAlertInBand,
+  thresholdsForPriority,
   DEFAULT_RETRY_THRESHOLDS,
   MESSAGE_ESCALATE_AFTER_MS,
   MESSAGE_HARD_TTL_MS,
@@ -114,6 +115,81 @@ describe('shouldAlertInBand (restart-amplification guard)', () => {
 
   it('grace is small relative to the re-alert interval (a restart cannot masquerade as a first crossing for long)', () => {
     expect(FIRST_CROSSING_GRACE_MS).toBeLessThan(T.reAlertIntervalMs)
+  })
+})
+
+// Card 28d2179f (DA verdict on PR #130): a flat 60-min escalate-after means
+// time-sensitive inter-agent messages (T3 triggers, deploy-GO, gate requests)
+// sit silently for an hour before anyone is alerted. Fix: derive the escalation
+// timing from the message's priority. CRUCIAL INVARIANT -- only the ESCALATION
+// (alert) timing accelerates; the 6 h hard-TTL stays constant for EVERY priority
+// so we never DROP a still-valid message earlier than before. Priority only ever
+// makes us shout sooner, never give up sooner.
+describe('thresholdsForPriority (card 28d2179f)', () => {
+  const FIFTEEN_MIN = 15 * 60 * 1000
+  const THIRTY_MIN = 30 * 60 * 1000
+  const SIXTY_MIN = 60 * 60 * 1000
+
+  it('urgent escalates at 15 min (and re-nags at 15 min)', () => {
+    const t = thresholdsForPriority('urgent')
+    expect(t.escalateAfterMs).toBe(FIFTEEN_MIN)
+    expect(t.reAlertIntervalMs).toBe(FIFTEEN_MIN)
+  })
+
+  it('high escalates at 30 min (monotone middle between urgent and normal)', () => {
+    const t = thresholdsForPriority('high')
+    expect(t.escalateAfterMs).toBe(THIRTY_MIN)
+    expect(t.reAlertIntervalMs).toBe(THIRTY_MIN)
+  })
+
+  it('normal keeps the legacy 60-min behaviour (== DEFAULT_RETRY_THRESHOLDS)', () => {
+    expect(thresholdsForPriority('normal')).toEqual(DEFAULT_RETRY_THRESHOLDS)
+    expect(thresholdsForPriority('normal').escalateAfterMs).toBe(SIXTY_MIN)
+  })
+
+  it('low is no more urgent than normal (low != "low latency")', () => {
+    expect(thresholdsForPriority('low')).toEqual(DEFAULT_RETRY_THRESHOLDS)
+  })
+
+  it('hard-TTL is a constant 6 h for EVERY priority (never drop a valid msg earlier)', () => {
+    for (const p of ['low', 'normal', 'high', 'urgent'] as const) {
+      expect(thresholdsForPriority(p).hardTtlMs).toBe(MESSAGE_HARD_TTL_MS)
+    }
+  })
+
+  it('escalate-after is monotone non-increasing with urgency (urgent <= high <= normal)', () => {
+    expect(thresholdsForPriority('urgent').escalateAfterMs)
+      .toBeLessThanOrEqual(thresholdsForPriority('high').escalateAfterMs)
+    expect(thresholdsForPriority('high').escalateAfterMs)
+      .toBeLessThanOrEqual(thresholdsForPriority('normal').escalateAfterMs)
+  })
+
+  it('every priority keeps a non-empty retry window (escalateAfter < hardTTL)', () => {
+    for (const p of ['low', 'normal', 'high', 'urgent'] as const) {
+      const t = thresholdsForPriority(p)
+      expect(t.escalateAfterMs).toBeLessThan(t.hardTtlMs)
+    }
+  })
+
+  it('the first-crossing grace stays well under even the urgent re-alert interval', () => {
+    // shouldAlertInBand uses escalateAfter + grace as the first-crossing boundary;
+    // for the restart-rediscovery guard to hold for urgent too, grace must be
+    // smaller than the tightest re-alert interval.
+    expect(FIRST_CROSSING_GRACE_MS).toBeLessThan(thresholdsForPriority('urgent').reAlertIntervalMs)
+  })
+
+  it('falls back to DEFAULT for an unknown / undefined priority (defensive)', () => {
+    expect(thresholdsForPriority(undefined)).toEqual(DEFAULT_RETRY_THRESHOLDS)
+    // @ts-expect-error -- exercise the runtime guard against a bad DB value
+    expect(thresholdsForPriority('bogus')).toEqual(DEFAULT_RETRY_THRESHOLDS)
+  })
+
+  it('composes with classifyPendingMessage: an urgent msg escalates at 15 min, a normal one still waits', () => {
+    const urgentT = thresholdsForPriority('urgent')
+    const normalT = thresholdsForPriority('normal')
+    const age = 16 * 60 * 1000 // 16 min old
+    expect(classifyPendingMessage(age, undefined, NOW, urgentT)).toBe('escalate')
+    expect(classifyPendingMessage(age, undefined, NOW, normalT)).toBe('wait')
   })
 })
 
