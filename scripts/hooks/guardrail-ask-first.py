@@ -58,16 +58,23 @@ import hashlib
 # outside the reviewed code.
 #
 # REGISTRATION: add a tool name here when (and only when) a real, live MCP tool
-# with irreversible external effect is wired into the fleet. As of this commit
-# the two intended targets are NOT live MCP tools on this host:
-#   - email send: the claude.ai Gmail connector exposes only create_draft /
-#     labels / read here -- no send tool surfaces -- so there is nothing to bind
-#     yet (the draft-only connector is itself the "no blind send" control).
+# with irreversible external effect is wired into the fleet.
+#   - email send (LIVE, card 5bd18a7e): Claudia's local Google MCP server
+#     (src/mcp/google-mcp-server.ts) exposes a `gmail_send` tool under the
+#     mcpServers key `claudia_google`, so its namespaced name is
+#     `mcp__claudia_google__gmail_send`. The exact string is defined once in
+#     src/mcp/tool-names.ts (GUARDED_GMAIL_SEND) and cross-pinned by
+#     src/__tests__/google-mcp-tool-names.test.ts; the deploy doc has a live
+#     `claude mcp`-roster verification step. The sibling `calendar_today` tool is
+#     read-only (calendar.events.readonly) and is intentionally NOT guarded.
 #   - YouTube/Twitch publish: bigben has no MCP server configured; that guard
 #     should be added in the same change that introduces the publish tool, so
 #     the exact tool name is known and cannot drift.
-# Until a name is registered the hook is a deliberate no-op (every call passes).
-GUARDED_TOOLS = frozenset()
+GUARDED_TOOLS = frozenset(
+    {
+        "mcp__claudia_google__gmail_send",
+    }
+)
 
 # How long an approval marker is honored after it is created. Bounds replay: a
 # stale marker is ignored and the action must be re-approved.
