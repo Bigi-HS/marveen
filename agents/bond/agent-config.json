@@ -1,0 +1,15 @@
+{
+  "model": "claude-sonnet-4-6",
+  "securityProfile": "default",
+  "displayName": "Bond",
+  "channelProvider": "telegram",
+  "claudeConfigDir": "/home/domin/marveen/agents/bond/.claude-config",
+  "voice": "en-GB-RyanNeural",
+  "team": {
+    "role": "member",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": ["marveen", "claudia"]
+  }
+}
