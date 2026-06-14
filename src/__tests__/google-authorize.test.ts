@@ -40,11 +40,22 @@ describe('buildAuthUrl', () => {
     expect(u.searchParams.get('scope')).toBe(SCOPES.join(' '))
   })
 
-  it('scopes are exactly calendar-readonly + gmail-send (no broader grant)', () => {
+  it('scopes are exactly the 5 bounded v2 scopes (SEC-AC3 / F-AC9)', () => {
     expect(SCOPES).toEqual([
-      'https://www.googleapis.com/auth/calendar.events.readonly',
+      'https://www.googleapis.com/auth/gmail.modify',
       'https://www.googleapis.com/auth/gmail.send',
+      'https://www.googleapis.com/auth/gmail.labels',
+      'https://www.googleapis.com/auth/gmail.settings.basic',
+      'https://www.googleapis.com/auth/calendar',
     ])
+  })
+
+  it('NEVER requests the DENY-listed scopes (SEC-AC3)', () => {
+    const joined = SCOPES.join(' ')
+    expect(joined).not.toContain('gmail.settings.sharing')
+    expect(joined).not.toContain('mail.google.com')
+    // calendar.events.readonly is dropped (superseded by full calendar)
+    expect(joined).not.toContain('calendar.events.readonly')
   })
 })
 
