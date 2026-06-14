@@ -10,10 +10,19 @@ import { OAUTH_TOKEN_URL, type FetchLike } from './google-oauth.js'
 
 export const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth'
 
-// Minimal scopes (Chad spec): read-only calendar events + send-only gmail.
+// Bounded scope set (SEC-AC3 / F-AC9). v2 grants Claudia full PA capability
+// within a hard boundary: read+triage gmail, manage labels/filters/vacation,
+// send mail, and full calendar. calendar.events.readonly is DROPPED (superseded
+// by the broader `calendar` scope). DENY-listed and intentionally absent:
+// the Gmail sharing-settings scope (forwarding/delegation) and the legacy
+// full-mail scope (permanent purge). This array is the single hardcoded source;
+// no runtime configuration can widen it.
 export const SCOPES = [
-  'https://www.googleapis.com/auth/calendar.events.readonly',
+  'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/gmail.labels',
+  'https://www.googleapis.com/auth/gmail.settings.basic',
+  'https://www.googleapis.com/auth/calendar',
 ]
 
 const realFetch = fetch as unknown as FetchLike

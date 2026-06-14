@@ -2,10 +2,10 @@
 // Scope: gmail.settings.basic. list_filters / get_vacation are unguarded reads;
 // create_filter, delete_filter and update_vacation are hard-guarded (ask-first).
 //
-// Forwarding (F-AC5 edge): a filter that sets a forwarding address needs
-// gmail.settings.sharing, which is DELIBERATELY out of scope (SEC-AC3). Such a
-// create therefore fails at the API with 403; we surface that as a clear error
-// rather than letting it pass silently.
+// Forwarding (F-AC5 edge): a filter that sets a forwarding address needs the
+// Gmail sharing-settings scope (forwarding/delegation), which is DELIBERATELY
+// out of scope (SEC-AC3). Such a create therefore fails at the API with 403; we
+// surface that as a clear error rather than letting it pass silently.
 //
 // Egress: this module talks ONLY to gmail.googleapis.com.
 import type { FetchLike } from './google-oauth.js'
