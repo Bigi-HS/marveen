@@ -46,6 +46,24 @@ describe('delivery-dropped alert (d3339db9 defense-in-depth)', () => {
   })
 })
 
+// Card 7557a98d: a busy recipient = defer, never drop. The 60-min overdue alert
+// must read as "still retrying" (no re-send), distinct from the 6h hard drop.
+describe('abandonAlertContent phase (card 7557a98d)', () => {
+  it('overdue: states it is NOT dropped and is still being retried', () => {
+    const content = abandonAlertContent({ id: 9, from_agent: 'dave', to_agent: 'marveen' }, 60 * 60 * 1000, 'overdue')
+    expect(content).toContain('#9')
+    expect(content).toContain('OVERDUE')
+    expect(content).toContain('NOT dropped')
+    expect(content.toLowerCase()).toContain('retrying')
+  })
+
+  it('dropped (default): keeps the original "NOT delivered / re-send" wording', () => {
+    const content = abandonAlertContent({ id: 9, from_agent: 'dave', to_agent: 'marveen' }, 6 * 60 * 60 * 1000, 'dropped')
+    expect(content).toContain('DROPPED')
+    expect(content).toContain('NOT delivered')
+  })
+})
+
 // MEDIUM (PR #130 DA review): the inter-agent abandonment alert can itself go
 // undelivered -- e.g. when the abandoned message's recipient IS the wedged
 // main agent, the alert queued to main also never lands. A durable JSONL
@@ -78,6 +96,13 @@ describe('abandonment sentinel record (d3339db9 MEDIUM)', () => {
       abandonmentRecord({ id: 1, from_agent: 'a', to_agent: 'b' }, 90 * 1000, 0),
     )
     expect(rec.age_min).toBe(2)
+  })
+
+  it('records the phase, defaulting to "dropped" for back-compat', () => {
+    const dflt = JSON.parse(abandonmentRecord({ id: 1, from_agent: 'a', to_agent: 'b' }, 0, 0))
+    expect(dflt.phase).toBe('dropped')
+    const overdue = JSON.parse(abandonmentRecord({ id: 1, from_agent: 'a', to_agent: 'b' }, 0, 0, 'overdue'))
+    expect(overdue.phase).toBe('overdue')
   })
 
   it('records even a monitor alert that is itself abandoned (no recursion guard here)', () => {
@@ -118,6 +143,16 @@ describe('parseAbandonmentSentinel', () => {
 
   it('returns an empty array for empty input', () => {
     expect(parseAbandonmentSentinel('')).toEqual([])
+  })
+
+  it('reads the phase, defaulting a legacy (phase-less) row to "dropped"', () => {
+    const raw = [
+      '{"event":"delivery-abandoned","ts":"2026-06-13T00:00:00.000Z","id":1,"from":"a","to":"b","age_min":65}', // legacy
+      abandonmentRecord({ id: 2, from_agent: 'a', to_agent: 'b' }, 60 * 60 * 1000, 2000, 'overdue'),
+    ].join('\n')
+    const events = parseAbandonmentSentinel(raw)
+    expect(events.find((e) => e.id === 1)!.phase).toBe('dropped')
+    expect(events.find((e) => e.id === 2)!.phase).toBe('overdue')
   })
 })
 

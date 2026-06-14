@@ -16,12 +16,18 @@ import {
   shouldAlertOnAbandon,
   abandonAlertContent,
   abandonmentRecord,
+  type AbandonmentPhase,
 } from './delivery-alert.js'
 import {
   DELIVERY_PENDING_ACK_SENTINEL,
   shouldWritePendingAck,
   pendingAckRecord,
 } from './delivery-ack.js'
+import {
+  classifyPendingMessage,
+  pruneEscalationState,
+  shouldAlertInBand,
+} from './delivery-retry.js'
 
 // Project root for resolving the gitignored sentinel file. Mirrors
 // token-outage-bridge.ts's resolution so both write under the same store/.
@@ -59,14 +65,39 @@ const TMUX = resolveFromPath('tmux')
 // rejected with 403 (see routes/messages.ts).
 const CHANNEL_COORDINATOR_AGENTS = new Set<string>([COORDINATOR_AGENT_ID])
 
-// A message that cannot be delivered within this window (target session never
-// exists / stays busy) is marked failed so it stops clogging the pending
-// queue and we stop re-scanning it forever. Matches the scheduled-task retry
-// window so a long turn that ate one also eats the other.
-const MESSAGE_ABANDON_WINDOW_MS = 60 * 60 * 1000
+// A busy recipient means DEFER, never DROP (card 7557a98d): a pane is frequently
+// just mid-turn, not dead -- most acutely the main agent, which can legitimately
+// work for hours. So we keep RETRYING delivery until a long hard-TTL (the only
+// true give-up) and, while a message is overdue, escalate on a throttled cadence
+// instead of dropping it. classifyPendingMessage (delivery-retry.ts) is the pure
+// decision; this map is the in-process escalation throttle: id -> epoch-ms of
+// the last escalation emitted for it.
+const escalationState: Map<number, number> = new Map()
 // Log "skipping, target not ready" at most once per message id so a busy
 // receiver over many 5s ticks does not spam the log.
 const routerLoggedMisses: Set<number> = new Set()
+
+// Durable, delivery-independent trail (PR #130 DA review, MEDIUM): the in-band
+// alert is itself an inter-agent message and can also be lost -- acutely when
+// the recipient IS the wedged main agent. Every overdue/dropped event is
+// appended here so the token-free supervisor (d37df625) can escalate it
+// out-of-band, the only channel that reaches a human when main is deaf. The
+// periodic re-alert rides entirely on this trail.
+function appendAbandonmentSentinel(
+  msg: { id: number; from_agent: string; to_agent: string },
+  ageMs: number,
+  nowMs: number,
+  phase: AbandonmentPhase,
+): void {
+  try {
+    appendFileSync(
+      join(MARVEEN_ROOT, DELIVERY_ABANDONMENT_SENTINEL),
+      abandonmentRecord(msg, ageMs, nowMs, phase) + '\n',
+    )
+  } catch (err) {
+    logger.warn({ err, id: msg.id }, 'Failed to append delivery-abandonment sentinel')
+  }
+}
 
 // Checks for pending messages every 5 seconds and injects them into target
 // agent tmux sessions.
@@ -74,37 +105,61 @@ export function startMessageRouter(): NodeJS.Timeout {
   return setInterval(() => {
     const pending = getPendingMessages()
     const now = Date.now()
+    // Forget throttle state for ids no longer pending (delivered / hard-failed)
+    // so the map cannot grow without bound.
+    pruneEscalationState(escalationState, new Set(pending.map((m) => m.id)))
     for (const msg of pending) {
       const ageMs = now - msg.created_at * 1000
-      if (ageMs > MESSAGE_ABANDON_WINDOW_MS) {
-        logger.warn({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ageMs }, 'Agent message abandoned: target never ready within window')
-        if (!markMessageFailed(msg.id, 'Abandoned: target session never ready within retry window')) {
+      const action = classifyPendingMessage(ageMs, escalationState.get(msg.id), now)
+
+      if (action === 'hard-fail') {
+        // Past the hard-TTL: give up for real. A rare last resort (recipient
+        // unreachable for 6h), no longer the old 60-min drop of a still-valid
+        // message to a merely-busy recipient.
+        logger.warn({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ageMs }, 'Agent message abandoned: recipient never ready within hard-TTL')
+        if (!markMessageFailed(msg.id, 'Abandoned: recipient session never ready within hard-TTL')) {
           logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
         }
-        // Never drop silently (card d3339db9): surface the failure to the
-        // main agent so it is always visible, even if a future pane-detector
-        // gap re-introduces a false-busy. Guard against recursion -- a
-        // monitor alert that is itself abandoned does not spawn another.
+        // Never drop silently (card d3339db9): surface to the main agent.
+        // Recursion-guarded so an abandoned monitor alert does not spawn another.
         if (shouldAlertOnAbandon(msg.from_agent)) {
           try {
-            createAgentMessage(DELIVERY_MONITOR_AGENT_ID, MAIN_AGENT_ID, abandonAlertContent(msg, ageMs))
+            createAgentMessage(DELIVERY_MONITOR_AGENT_ID, MAIN_AGENT_ID, abandonAlertContent(msg, ageMs, 'dropped'))
           } catch (err) {
             logger.warn({ err, id: msg.id }, 'Failed to enqueue delivery-dropped alert')
           }
         }
-        // Durable last-resort trail (PR #130 DA review, MEDIUM): the alert
-        // above is itself an inter-agent message and can also go undelivered
-        // (acutely when the recipient IS the wedged main agent). Append every
-        // abandonment -- including an abandoned monitor alert -- to a sentinel
-        // JSONL a token-free supervisor can tail, so the safety net cannot
-        // itself fall silent.
-        try {
-          appendFileSync(join(MARVEEN_ROOT, DELIVERY_ABANDONMENT_SENTINEL), abandonmentRecord(msg, ageMs, now) + '\n')
-        } catch (err) {
-          logger.warn({ err, id: msg.id }, 'Failed to append delivery-abandonment sentinel')
-        }
+        appendAbandonmentSentinel(msg, ageMs, now, 'dropped')
+        escalationState.delete(msg.id)
         routerLoggedMisses.delete(msg.id)
         continue
+      }
+
+      if (action === 'escalate') {
+        // Overdue but still pending: nag, do NOT drop, and fall through to the
+        // delivery attempt below (the recipient may have just freed up).
+        //
+        // In-band alert ONCE, on the genuine first crossing only -- repeating it
+        // every round would pile up new pending messages to the (often deaf) main
+        // agent and amplify the very backlog we are escalating. The periodic
+        // re-alert is carried purely out-of-band by the sentinel below.
+        //
+        // shouldAlertInBand (not a bare !state.has(id)) is load-bearing here:
+        // escalationState is in-process only, but pending rows survive a restart
+        // in SQLite, so after a restart EVERY still-overdue message would look
+        // like a first crossing and re-fire in-band on a fleet that restarts
+        // daily. It treats a no-record message whose age is well past the
+        // threshold as a restart rediscovery (already alerted) -> sentinel-only.
+        const firstEscalation = shouldAlertInBand(ageMs, escalationState.has(msg.id))
+        if (firstEscalation && shouldAlertOnAbandon(msg.from_agent)) {
+          try {
+            createAgentMessage(DELIVERY_MONITOR_AGENT_ID, MAIN_AGENT_ID, abandonAlertContent(msg, ageMs, 'overdue'))
+          } catch (err) {
+            logger.warn({ err, id: msg.id }, 'Failed to enqueue delivery-overdue alert')
+          }
+        }
+        appendAbandonmentSentinel(msg, ageMs, now, 'overdue')
+        escalationState.set(msg.id, now)
       }
       // The main agent runs in `${MAIN_AGENT_ID}-channels`, not `agent-${name}`,
       // so agentSessionName() would miss it and strand every sub-agent → main
@@ -212,6 +267,7 @@ export function startMessageRouter(): NodeJS.Timeout {
           }
         }
         routerLoggedMisses.delete(msg.id)
+        escalationState.delete(msg.id)
         logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, category: isChannelInbound ? 'channel-inbound' : trusted ? 'trusted-peer' : 'untrusted', ackExpected: msg.ack_expected }, 'Agent message delivered')
       } catch (err) {
         logger.warn({ err, id: msg.id }, 'Failed to deliver agent message')

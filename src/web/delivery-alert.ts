@@ -21,17 +21,36 @@ export function shouldAlertOnAbandon(fromAgent: string): boolean {
   return fromAgent !== DELIVERY_MONITOR_AGENT_ID
 }
 
+// An abandonment alert has two phases (card 7557a98d). 'overdue': the message
+// is still pending and the router keeps retrying (recipient merely busy) -- a
+// throttled "this is taking a while" nag. 'dropped': the hard-TTL was reached
+// and the message was given up on for real. They read differently because the
+// operator action differs: an overdue delivery needs no re-send, a dropped one
+// does.
+export type AbandonmentPhase = 'overdue' | 'dropped'
+
 /**
- * Human-readable alert body for a dropped inter-agent message. Names the
- * id, the parties, and the age so the main agent can investigate the
- * target's session and re-send. States plainly that the message was NOT
- * delivered -- the d3339db9 pain was that the drop was invisible.
+ * Human-readable alert body for an abandoned/overdue inter-agent message. Names
+ * the id, the parties, and the age so the main agent can investigate the
+ * target's session. For 'dropped' it states plainly the message was NOT
+ * delivered (the d3339db9 pain was that the drop was invisible); for 'overdue'
+ * it makes clear the message is still being retried and needs no manual re-send.
  */
 export function abandonAlertContent(
   msg: { id: number; from_agent: string; to_agent: string },
   ageMs: number,
+  phase: AbandonmentPhase = 'dropped',
 ): string {
   const mins = Math.round(ageMs / 60000)
+  if (phase === 'overdue') {
+    return (
+      `DELIVERY OVERDUE: inter-agent message #${msg.id} from "${msg.from_agent}" ` +
+      `to "${msg.to_agent}" is still undelivered after ${mins} min (recipient session ` +
+      `busy). It is NOT dropped -- the router keeps retrying and will deliver as soon ` +
+      `as "${msg.to_agent}" is free, giving up only after a 6h hard limit. No re-send ` +
+      `needed unless it persists.`
+    )
+  }
   return (
     `DELIVERY DROPPED: inter-agent message #${msg.id} from "${msg.from_agent}" ` +
     `to "${msg.to_agent}" was abandoned after ${mins} min (target session never ` +
@@ -61,6 +80,7 @@ export function abandonmentRecord(
   msg: { id: number; from_agent: string; to_agent: string },
   ageMs: number,
   nowMs: number,
+  phase: AbandonmentPhase = 'dropped',
 ): string {
   return JSON.stringify({
     ts: new Date(nowMs).toISOString(),
@@ -69,6 +89,7 @@ export function abandonmentRecord(
     from: msg.from_agent,
     to: msg.to_agent,
     age_min: Math.round(ageMs / 60000),
+    phase,
   })
 }
 
@@ -80,6 +101,9 @@ export interface AbandonmentEvent {
   from: string
   to: string
   age_min: number
+  // 'overdue' (still retrying) or 'dropped' (hard-TTL give-up). Rows written
+  // before card 7557a98d have no phase field and are read as 'dropped'.
+  phase: AbandonmentPhase
 }
 
 /**
@@ -96,7 +120,7 @@ export function parseAbandonmentSentinel(raw: string): AbandonmentEvent[] {
     try {
       const o = JSON.parse(t)
       if (o && o.event === 'delivery-abandoned' && typeof o.ts === 'string') {
-        out.push(o as AbandonmentEvent)
+        out.push({ ...o, phase: o.phase === 'overdue' ? 'overdue' : 'dropped' } as AbandonmentEvent)
       }
     } catch {
       // skip a malformed / partially-written line
