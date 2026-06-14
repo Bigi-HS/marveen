@@ -417,7 +417,8 @@ export function initDatabase(dbPathOverride?: string): void {
       created_at INTEGER NOT NULL,
       delivered_at INTEGER,
       completed_at INTEGER,
-      ack_expected INTEGER NOT NULL DEFAULT 0
+      ack_expected INTEGER NOT NULL DEFAULT 0,
+      priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent'))
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_messages_status ON agent_messages(status, to_agent)`)
@@ -426,6 +427,15 @@ export function initDatabase(dbPathOverride?: string): void {
   // default 0 so nothing is tracked until a sender sets it (no cry-wolf).
   try {
     db.exec('ALTER TABLE agent_messages ADD COLUMN ack_expected INTEGER NOT NULL DEFAULT 0')
+  } catch {
+    // column already exists
+  }
+  // Migration: add priority to agent_messages (priority-based abandonment, card
+  // 28d2179f). Default 'normal' keeps the legacy 60-min escalation for every
+  // pre-existing row; only 'urgent'/'high' messages escalate sooner. The CHECK
+  // references only its own column, so SQLite permits it in ADD COLUMN.
+  try {
+    db.exec("ALTER TABLE agent_messages ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent'))")
   } catch {
     // column already exists
   }
@@ -1477,19 +1487,30 @@ export interface AgentMessage {
   // ACK-expected message is escalated. 0 (default) = best-effort, no tracking
   // (delivery ACK protocol, card 1a99b7e2).
   ack_expected: number
+  // Escalation urgency for the delivery retry/abandonment policy (card 28d2179f).
+  // Same enum as kanban_cards; 'normal' is the default and keeps the legacy 60-min
+  // escalate-after. Higher urgency only shortens the ALERT timing, never the 6 h
+  // hard-TTL -- see thresholdsForPriority in web/delivery-retry.ts.
+  priority: 'low' | 'normal' | 'high' | 'urgent'
 }
 
-export function createAgentMessage(from: string, to: string, content: string, ackExpected = false): AgentMessage {
+export function createAgentMessage(
+  from: string,
+  to: string,
+  content: string,
+  ackExpected = false,
+  priority: AgentMessage['priority'] = 'normal',
+): AgentMessage {
   const now = Math.floor(Date.now() / 1000)
   const ack = ackExpected ? 1 : 0
   const info = db.prepare(
-    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, ack_expected) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(from, to, content, 'pending', now, ack)
+    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, ack_expected, priority) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(from, to, content, 'pending', now, ack, priority)
   return {
     id: Number(info.lastInsertRowid),
     from_agent: from, to_agent: to, content, status: 'pending',
     result: null, created_at: now, delivered_at: null, completed_at: null,
-    ack_expected: ack,
+    ack_expected: ack, priority,
   }
 }
 

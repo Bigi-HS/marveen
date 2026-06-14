@@ -27,6 +27,7 @@ import {
   classifyPendingMessage,
   pruneEscalationState,
   shouldAlertInBand,
+  thresholdsForPriority,
 } from './delivery-retry.js'
 
 // Project root for resolving the gitignored sentinel file. Mirrors
@@ -110,7 +111,11 @@ export function startMessageRouter(): NodeJS.Timeout {
     pruneEscalationState(escalationState, new Set(pending.map((m) => m.id)))
     for (const msg of pending) {
       const ageMs = now - msg.created_at * 1000
-      const action = classifyPendingMessage(ageMs, escalationState.get(msg.id), now)
+      // Priority-derived escalation timing (card 28d2179f): urgent/high messages
+      // escalate sooner than the 60-min default. The hard-TTL is invariant across
+      // priorities, so this never drops a still-valid message earlier.
+      const thresholds = thresholdsForPriority(msg.priority)
+      const action = classifyPendingMessage(ageMs, escalationState.get(msg.id), now, thresholds)
 
       if (action === 'hard-fail') {
         // Past the hard-TTL: give up for real. A rare last resort (recipient
@@ -150,7 +155,7 @@ export function startMessageRouter(): NodeJS.Timeout {
         // like a first crossing and re-fire in-band on a fleet that restarts
         // daily. It treats a no-record message whose age is well past the
         // threshold as a restart rediscovery (already alerted) -> sentinel-only.
-        const firstEscalation = shouldAlertInBand(ageMs, escalationState.has(msg.id))
+        const firstEscalation = shouldAlertInBand(ageMs, escalationState.has(msg.id), thresholds)
         if (firstEscalation && shouldAlertOnAbandon(msg.from_agent)) {
           try {
             createAgentMessage(DELIVERY_MONITOR_AGENT_ID, MAIN_AGENT_ID, abandonAlertContent(msg, ageMs, 'overdue'))

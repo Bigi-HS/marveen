@@ -50,6 +50,28 @@ describe('agent_messages ack_expected (card 1a99b7e2)', () => {
   })
 })
 
+describe('agent_messages priority (card 28d2179f)', () => {
+  it('defaults priority to "normal" for a plain message', () => {
+    const msg = createAgentMessage('thor', 'dave', 'no explicit priority')
+    expect(msg.priority).toBe('normal')
+    const pending = getPendingMessages('dave').find((m) => m.id === msg.id)
+    expect(pending?.priority).toBe('normal')
+  })
+
+  it('persists an explicit urgent priority through the pending queue', () => {
+    const msg = createAgentMessage('thor', 'dave', 'gate-req, time-sensitive', false, 'urgent')
+    expect(msg.priority).toBe('urgent')
+    const pending = getPendingMessages('dave').find((m) => m.id === msg.id)
+    expect(pending?.priority).toBe('urgent')
+  })
+
+  it('priority is independent of ack_expected (both can be set)', () => {
+    const msg = createAgentMessage('thor', 'dave', 'urgent delegation', true, 'high')
+    expect(msg.ack_expected).toBe(1)
+    expect(msg.priority).toBe('high')
+  })
+})
+
 describe('sessions', () => {
   it('munkamenetet ment es visszaolvas', () => {
     setSession('test-chat-1', 'session-abc')

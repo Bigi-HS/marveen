@@ -39,6 +39,44 @@ export const DEFAULT_RETRY_THRESHOLDS: RetryThresholds = {
   hardTtlMs: MESSAGE_HARD_TTL_MS,
 }
 
+// Priority-derived escalation timing (card 28d2179f, DA verdict on PR #130). The
+// flat 60-min escalate-after let time-sensitive inter-agent messages (T3 triggers,
+// deploy-GO, gate requests) sit silently for an hour. We now shout sooner for more
+// urgent messages -- but ONLY the alert timing moves. The hard-TTL (true give-up)
+// stays MESSAGE_HARD_TTL_MS for EVERY priority, so priority can never DROP a still-
+// valid message earlier than before; it can only surface it earlier. The message
+// priority comes from agent_messages.priority (same enum as kanban_cards).
+export type MessagePriority = 'low' | 'normal' | 'high' | 'urgent'
+
+const PRIORITY_ESCALATE_AFTER_MS: Record<MessagePriority, number> = {
+  urgent: 15 * 60 * 1000,
+  high: 30 * 60 * 1000,
+  normal: MESSAGE_ESCALATE_AFTER_MS, // 60 min -- legacy behaviour
+  low: MESSAGE_ESCALATE_AFTER_MS, // "low" is not "low latency" -- same as normal
+}
+
+/**
+ * The retry thresholds for a message of the given priority. Unknown or undefined
+ * priorities (e.g. a row from before the column existed) fall back to the default
+ * 60-min behaviour. The re-alert interval mirrors escalate-after so a more urgent
+ * message also re-nags more often; the hard-TTL is invariant across priorities.
+ */
+export function thresholdsForPriority(priority: MessagePriority | undefined | null): RetryThresholds {
+  // `in`-guard rather than `(x && map[x]) || fallback`: the latter would also
+  // fall back if a mapped value were ever 0 (Thor gate, PR #146). Membership is
+  // explicit, so a future 0-valued threshold maps correctly and a bad DB string
+  // still falls through to the default.
+  const escalateAfterMs =
+    priority != null && priority in PRIORITY_ESCALATE_AFTER_MS
+      ? PRIORITY_ESCALATE_AFTER_MS[priority]
+      : MESSAGE_ESCALATE_AFTER_MS
+  return {
+    escalateAfterMs,
+    reAlertIntervalMs: escalateAfterMs,
+    hardTtlMs: MESSAGE_HARD_TTL_MS,
+  }
+}
+
 // What the router should do with one pending message this tick:
 //   'wait'      -> still within a retry window; attempt delivery, do not escalate.
 //   'escalate'  -> overdue and due for an alert; emit the escalation, then STILL
