@@ -12,7 +12,10 @@
 // within. The wrapper Claudia sees is therefore always exactly one enclosing
 // pair we emit.
 
-export type UntrustedSource = 'gmail'
+// 'gmail' covers message bodies/snippets (SEC-AC1). 'calendar' covers event
+// summary/description/location, which can be attacker-controlled via an external
+// invite -- the same injection vector, wrapped as defense-in-depth.
+export type UntrustedSource = 'gmail' | 'calendar'
 
 // Remove the angle brackets from any literal <untrusted ...> / </untrusted>
 // sequence in the payload so it cannot close or re-open the wrapper.
