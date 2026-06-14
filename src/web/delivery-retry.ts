@@ -62,7 +62,14 @@ const PRIORITY_ESCALATE_AFTER_MS: Record<MessagePriority, number> = {
  * message also re-nags more often; the hard-TTL is invariant across priorities.
  */
 export function thresholdsForPriority(priority: MessagePriority | undefined | null): RetryThresholds {
-  const escalateAfterMs = (priority && PRIORITY_ESCALATE_AFTER_MS[priority]) || MESSAGE_ESCALATE_AFTER_MS
+  // `in`-guard rather than `(x && map[x]) || fallback`: the latter would also
+  // fall back if a mapped value were ever 0 (Thor gate, PR #146). Membership is
+  // explicit, so a future 0-valued threshold maps correctly and a bad DB string
+  // still falls through to the default.
+  const escalateAfterMs =
+    priority != null && priority in PRIORITY_ESCALATE_AFTER_MS
+      ? PRIORITY_ESCALATE_AFTER_MS[priority]
+      : MESSAGE_ESCALATE_AFTER_MS
   return {
     escalateAfterMs,
     reAlertIntervalMs: escalateAfterMs,
