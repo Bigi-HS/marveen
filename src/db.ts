@@ -418,7 +418,8 @@ export function initDatabase(dbPathOverride?: string): void {
       delivered_at INTEGER,
       completed_at INTEGER,
       ack_expected INTEGER NOT NULL DEFAULT 0,
-      priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent'))
+      priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
+      in_reply_to INTEGER
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_messages_status ON agent_messages(status, to_agent)`)
@@ -436,6 +437,17 @@ export function initDatabase(dbPathOverride?: string): void {
   // references only its own column, so SQLite permits it in ADD COLUMN.
   try {
     db.exec("ALTER TABLE agent_messages ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent'))")
+  } catch {
+    // column already exists
+  }
+  // Migration: add in_reply_to to agent_messages (ACK auto-correlation enabler,
+  // card d4fe794f). Nullable, no default -> a plain message stays unthreaded
+  // (NULL); only a reply carries the parent message id. Additive + fail-open so
+  // pre-existing rows and senders that never set it keep working. The router /
+  // ACK protocol (card 1a99b7e2) consumes it to auto-correlate a reply without
+  // an explicit mark-done.
+  try {
+    db.exec('ALTER TABLE agent_messages ADD COLUMN in_reply_to INTEGER')
   } catch {
     // column already exists
   }
@@ -1492,6 +1504,10 @@ export interface AgentMessage {
   // escalate-after. Higher urgency only shortens the ALERT timing, never the 6 h
   // hard-TTL -- see thresholdsForPriority in web/delivery-retry.ts.
   priority: 'low' | 'normal' | 'high' | 'urgent'
+  // Sender-side parent: the id of the message this one replies to, or null for
+  // an unthreaded message. Lets the router auto-correlate a reply to its ask
+  // (ACK auto-correlation enabler, card d4fe794f). Additive + fail-open.
+  in_reply_to: number | null
 }
 
 export function createAgentMessage(
@@ -1500,17 +1516,18 @@ export function createAgentMessage(
   content: string,
   ackExpected = false,
   priority: AgentMessage['priority'] = 'normal',
+  inReplyTo: number | null = null,
 ): AgentMessage {
   const now = Math.floor(Date.now() / 1000)
   const ack = ackExpected ? 1 : 0
   const info = db.prepare(
-    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, ack_expected, priority) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(from, to, content, 'pending', now, ack, priority)
+    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, ack_expected, priority, in_reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(from, to, content, 'pending', now, ack, priority, inReplyTo)
   return {
     id: Number(info.lastInsertRowid),
     from_agent: from, to_agent: to, content, status: 'pending',
     result: null, created_at: now, delivered_at: null, completed_at: null,
-    ack_expected: ack, priority,
+    ack_expected: ack, priority, in_reply_to: inReplyTo,
   }
 }
 

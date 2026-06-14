@@ -72,6 +72,35 @@ describe('agent_messages priority (card 28d2179f)', () => {
   })
 })
 
+// Card d4fe794f: additive nullable in_reply_to column -- the sender-side parent
+// id that lets the router auto-correlate "C's reply to A" (the substrate the
+// ACK protocol, card 1a99b7e2, can later build explicit threading on). Additive
+// + fail-open: a plain message stays unthreaded (NULL), so old rows / old
+// senders never break.
+describe('agent_messages in_reply_to (card d4fe794f)', () => {
+  it('defaults in_reply_to to null for a plain (unthreaded) message', () => {
+    const msg = createAgentMessage('thor', 'dave', 'unthreaded note')
+    expect(msg.in_reply_to).toBeNull()
+    const pending = getPendingMessages('dave').find((m) => m.id === msg.id)
+    expect(pending?.in_reply_to).toBeNull()
+  })
+
+  it('persists the parent message id through the pending queue', () => {
+    const parent = createAgentMessage('dave', 'thor', 'original ask')
+    const reply = createAgentMessage('thor', 'dave', 'my answer', false, 'normal', parent.id)
+    expect(reply.in_reply_to).toBe(parent.id)
+    const pending = getPendingMessages('dave').find((m) => m.id === reply.id)
+    expect(pending?.in_reply_to).toBe(parent.id)
+  })
+
+  it('in_reply_to is independent of priority and ack_expected (all three compose)', () => {
+    const msg = createAgentMessage('thor', 'dave', 'threaded + urgent + ack', true, 'urgent', 7)
+    expect(msg.ack_expected).toBe(1)
+    expect(msg.priority).toBe('urgent')
+    expect(msg.in_reply_to).toBe(7)
+  })
+})
+
 describe('sessions', () => {
   it('munkamenetet ment es visszaolvas', () => {
     setSession('test-chat-1', 'session-abc')
