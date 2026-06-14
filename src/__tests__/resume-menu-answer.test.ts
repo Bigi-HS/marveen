@@ -14,8 +14,16 @@ const RESUME_MODAL = [
   'Enter to confirm',
 ].join('\n')
 
+// A realistic idle pane: a COMPLETE structural input box (two ─ separators
+// framing a ❯ prompt) over the footer. Card d978f8bd makes the box the positive
+// proof of a promptable surface, so the fixture must render it -- the earlier
+// footer-string-only model ('> ' + footer, no box) no longer reads as idle, which
+// is correct: a real active prompt always renders the box.
+const SEP = '─'.repeat(60)
 const IDLE_FOOTER = [
-  '> ',
+  SEP,
+  '❯ ',
+  SEP,
   '⏵⏵ bypass permissions on (shift+tab to cycle)',
 ].join('\n')
 

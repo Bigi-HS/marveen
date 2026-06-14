@@ -329,13 +329,21 @@ export function detectPaneState(
   // inject a prompt into a limited session (PR #130 DA review, HIGH).
   if (detectsUsageLimitMenu(pane)) return 'busy'
 
-  // Surface recognition: a recognised footer OR a structural input box.
-  // The structural box catches channel-less agents whose footer slot shows
-  // only a rotating onboarding tip (no "bypass permissions on" segment),
-  // which IDLE_FOOTER_RX alone misses -> silent message drop (d3339db9).
+  // Surface recognition by POSITIVE input-affordance (card d978f8bd). 'idle'
+  // (promptable) must be PROVEN by a live structural input box -- the two
+  // box-separators framing a ❯ prompt, the affordance into which a prompt can
+  // actually be typed. A recognised footer is NOT sufficient on its own: a
+  // truncated viewport (box scrolled off), a mid-render frame, or a non-
+  // promptable surface can carry an idle-looking footer with no live box, and
+  // treating those as idle was the optimistic fall-through that let the
+  // scheduler/router inject into a non-ready pane (RETRO #130 root finding).
+  // A missing box -> 'unknown' (not-ready); the never-drop retry (#136) defers
+  // rather than drops, and the abandon-rate metric (732bb084) watches the
+  // false-BUSY cost. The box is also the footer-text-independent signal that
+  // keeps channel-less rotating-tip-footer agents promptable (d3339db9).
   const lines = pane.split('\n')
   const box = findInputBoxBounds(lines)
-  if (!IDLE_FOOTER_RX.test(pane) && box === null) return 'unknown'
+  if (box === null) return 'unknown'
 
   if (detectsThinkingBlockError(pane)) return 'error'
 

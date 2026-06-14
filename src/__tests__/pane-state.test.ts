@@ -589,21 +589,24 @@ describe('detectPaneState', () => {
     expect(detectPaneState(snap)).toBe('idle')
   })
 
-  it('handles pane without any separators gracefully', () => {
+  it('footer alone with no input box -> unknown (card d978f8bd: positive affordance required)', () => {
     const snap = '  ⏵⏵ bypass permissions on (shift+tab to cycle)'
-    // Footer alone (no box) -> treat as idle. No parked input to detect.
-    expect(detectPaneState(snap)).toBe('idle')
+    // RE-POINTED by the default-flip (was 'idle'): a recognised footer with NO
+    // structural input box is no longer promptable. The box scrolled off / never
+    // rendered, so there is no proven affordance to inject into -> 'unknown'.
+    expect(detectPaneState(snap)).toBe('unknown')
   })
 
-  it('handles footer with missing bottom separator', () => {
-    // Defensive: only one separator visible -- no input box detection,
-    // but footer + no busy indicators still means idle.
+  it('footer with only one separator (incomplete box) -> unknown (card d978f8bd)', () => {
+    // RE-POINTED (was 'idle'): one separator is not a complete input box
+    // (findInputBoxBounds needs two framing a ❯). Without the proven affordance
+    // the fail-safe default is not-ready, not the optimistic idle fall-through.
     const snap = [
       '❯ ',
       SEP,
       '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
     ].join('\n')
-    expect(detectPaneState(snap)).toBe('idle')
+    expect(detectPaneState(snap)).toBe('unknown')
   })
 })
 
@@ -1688,5 +1691,65 @@ describe('detectsStalledIdle (card 845750ad, idle-nudge boundary corpus)', () =>
     // shape: the incident was on the main agent but channel-less sub-agents are
     // equally susceptible to post-overload silent stalls.
     expect(detectsStalledIdle(IDLE_CHANNELLESS_TIP_FOOTER, { hasOpenTask: true })).toBe(true)
+  })
+})
+
+// Card d978f8bd (RETRO #130 follow-up, Dave #2): fail-safe default-flip.
+// 'idle' must be POSITIVELY proven by an editable input-affordance (the
+// structural input box: two box-separators framing a ❯ prompt), NOT merely
+// inferred from a recognised footer. The root finding: 'idle' was the optimistic
+// fall-through, so a render that carried an idle-looking footer but NO live input
+// box (a truncated viewport that scrolled the box off, a mid-render frame, a
+// non-promptable surface) was read as READY and the scheduler/router injected
+// into it. The flip makes a missing box -> 'unknown' (not-ready), trading the
+// worse false-READY for a deferrable false-BUSY (never-drop retry #136 + the
+// abandon-rate metric 732bb084 are the safety net). All genuine idle surfaces
+// already render the box, so they stay 'idle'.
+describe('positive input-affordance required for idle (card d978f8bd)', () => {
+  // THE FLIP: a fully-recognised idle footer with NO structural input box is no
+  // longer 'idle'. Previously this fell through to 'idle' (footer was a
+  // sufficient surface signal); now the absent affordance makes it 'unknown'.
+  it('footer matches but NO input box -> unknown (was the optimistic idle fall-through)', () => {
+    const footerNoBox = [
+      '  some prior tool output, then the box scrolled out of the viewport',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    // sanity: the footer string itself IS the recognised idle footer
+    expect(/bypass permissions on \(shift\+tab to cycle\)/.test(footerNoBox)).toBe(true)
+    expect(detectPaneState(footerNoBox)).toBe('unknown')
+  })
+
+  // OVER-BLOCK GUARD (false-negative): a real idle pane WITH a complete input box
+  // must stay 'idle'. The flip must not start dropping genuine idle surfaces.
+  it('complete input box -> idle (no over-block regression)', () => {
+    expect(detectPaneState(IDLE_BYPASS)).toBe('idle')
+    expect(detectPaneState(IDLE_STRICT)).toBe('idle')
+  })
+
+  // BOX SUFFICIENT (d3339db9 stays fixed): a box with only a rotating-tip footer
+  // (no "bypass permissions on" segment, so IDLE_FOOTER_RX misses) is STILL idle,
+  // because the box is the positive affordance. The flip must not regress the
+  // channel-less tip-footer fix into a silent drop.
+  it('input box with an unrecognised tip-only footer -> idle (box is sufficient)', () => {
+    expect(detectPaneState(IDLE_CHANNELLESS_TIP_FOOTER)).toBe('idle')
+  })
+
+  // OPPOSING-COMBINATION: a live busy indicator present alongside a complete box
+  // -> 'busy' wins. Ordering (busy short-circuits before the affordance check) is
+  // preserved by the flip.
+  it('busy indicator + complete box -> busy (busy short-circuits the affordance check)', () => {
+    const busyWithBox = [
+      '  Synthesizing… (12s · ↓ 1.2k tokens)',
+      SEP,
+      '❯ ',
+      SEP,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    expect(detectPaneState(busyWithBox)).toBe('busy')
+  })
+
+  // No box AND no footer -> still unknown (unchanged baseline negative).
+  it('no box and no footer -> unknown (unchanged)', () => {
+    expect(detectPaneState('  just some raw shell output\n  $ ls -la')).toBe('unknown')
   })
 })
