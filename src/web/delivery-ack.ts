@@ -48,13 +48,41 @@ export interface AckCapableMessage {
   ack_expected?: boolean | number | null
 }
 
+// The router's three-way decision for an injected message (card 0978279f).
+// The gate is now BOTH halves: the sender opted in (ack_expected truthy) AND the
+// recipient is ACK-capable. Capability is passed IN as a boolean (resolved by
+// the caller from the live agent-config) so this module stays dependency-free.
+export type PendingAckDecision =
+  | 'write'                       // opted in + capable recipient -> record pending-ack
+  | 'skip-recipient-not-capable'  // opted in but recipient can't confirm -> OBSERVABILITY case
+  | 'skip-not-ack-expected'       // plain FYI, no expectation -> no record, no log
+
 /**
- * Whether a successfully-injected message should get a pending-ack record.
- * True only when the sender opted in via ack_expected (truthy). Accepts the
- * boolean or the SQLite 0/1 integer form transparently.
+ * Decide what the router does with an injected message:
+ *   - 'write': append a pending-ack record.
+ *   - 'skip-recipient-not-capable': the sender expected an ACK but the recipient
+ *     is not ACK-capable (its pane can never engage in a way the clear-observer
+ *     reads), so writing a pending-ack would only cry-wolf at the 15-min window.
+ *     The router LOGS this (point b) so an ack_expected that is silently NOT
+ *     tracked never becomes an invisible expectation gap; the d37df625 1h net
+ *     still backstops the message.
+ *   - 'skip-not-ack-expected': a plain FYI with no opt-in -> nothing to track.
+ * Accepts ack_expected as boolean or the SQLite 0/1 integer form transparently.
+ * Pure / unit-testable.
  */
-export function shouldWritePendingAck(msg: AckCapableMessage): boolean {
-  return !!msg.ack_expected
+export function decidePendingAck(msg: AckCapableMessage, recipientAckCapable: boolean): PendingAckDecision {
+  if (!msg.ack_expected) return 'skip-not-ack-expected'
+  return recipientAckCapable ? 'write' : 'skip-recipient-not-capable'
+}
+
+/**
+ * Whether a successfully-injected message should get a pending-ack record: only
+ * when the sender opted in via ack_expected (truthy) AND the recipient is
+ * ACK-capable. Thin boolean view of decidePendingAck for call sites that only
+ * need the write/no-write answer.
+ */
+export function shouldWritePendingAck(msg: AckCapableMessage, recipientAckCapable: boolean): boolean {
+  return decidePendingAck(msg, recipientAckCapable) === 'write'
 }
 
 /**
