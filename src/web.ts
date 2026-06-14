@@ -21,6 +21,7 @@ import { startChannelHealthMonitor } from './web/channel-health-monitor.js'
 import { recoverOrchestratorPipeOnce } from './web/telegram-pipe-watchdog.js'
 import { startStuckInputWatcher } from './web/stuck-input-watcher.js'
 import { startStuckToolCallWatcher } from './web/stuck-tool-call-watcher.js'
+import { startWedgedQueueWatcher } from './web/wedged-queue-watcher.js'
 import { startReauthHealer } from './web/reauth-healer.js'
 import { startAutoRestartRunner } from './web/auto-restart-runner.js'
 import { startSessionSizeWatcher } from './web/session-size-watcher.js'
@@ -377,6 +378,9 @@ export function startWebServer(port = 3420): http.Server {
   const stuckToolCallInterval = startStuckToolCallWatcher()
   logger.info('Stuck-tool-call watcher started (30s poll, 35s offset)')
 
+  const wedgedQueueInterval = startWedgedQueueWatcher()
+  logger.info('Wedged-queue watcher started (60s poll, 50s offset)')
+
   const reauthHealerInterval = startReauthHealer()
   if (reauthHealerInterval) logger.info('Reauth healer started (3min poll, 90s offset)')
 
@@ -447,6 +451,7 @@ export function startWebServer(port = 3420): http.Server {
     clearInterval(channelHealthInterval)
     clearInterval(stuckInputInterval)
     clearInterval(stuckToolCallInterval)
+    clearInterval(wedgedQueueInterval)
     if (reauthHealerInterval) clearInterval(reauthHealerInterval)
     clearInterval(autoRestartInterval)
     clearInterval(sessionSizeInterval)
