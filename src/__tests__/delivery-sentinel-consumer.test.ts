@@ -7,6 +7,7 @@ import {
   type SentinelCursor,
 } from '../web/delivery-sentinel-consumer.js'
 import type { AbandonmentEvent, AbandonmentPhase } from '../web/delivery-alert.js'
+import { DELIVERY_MONITOR_AGENT_ID } from '../web/delivery-alert.js'
 
 // Card d37df625 + 7557a98d: the CONSUMER for the abandonment sentinel. A
 // token-free reader escalates abandoned/overdue deliveries out-of-band (Telegram
@@ -99,6 +100,53 @@ describe('selectSentinelEscalations', () => {
     const plan = selectSentinelEscalations([ev(10, T0), ev(11, T0)], EMPTY_SENTINEL_CURSOR, { baselineOnFirstRun: false })
     expect(plan.baselined).toBe(false)
     expect(plan.escalations.map((e) => e.id)).toEqual([10, 11])
+  })
+})
+
+// Card 6774b3db: out-of-band recursion guard. The in-band alert path already
+// refuses to alert about an abandoned delivery-monitor alert (shouldAlertOnAbandon
+// returns false for it). But the OUT-OF-BAND sentinel had no such guard, so when
+// the main agent stayed busy, the monitor's own undelivered alerts were escalated
+// to the operator on Telegram -- on 2026-06-14 that was 47% of the overnight
+// backstop flood (the backstop alerting about the backstop). The underlying real
+// message is independently traced and escalated, so a monitor-origin row is pure
+// double-counting: it must be excluded from escalation (the JSONL write stays for
+// forensics, handled on the write side).
+describe('selectSentinelEscalations recursion guard (monitor-origin rows)', () => {
+  const mon = (id: number, ts: string) => ev(id, ts, { from: DELIVERY_MONITOR_AGENT_ID })
+
+  it('never escalates a delivery-monitor-origin row, only real-sender rows', () => {
+    const plan = selectSentinelEscalations(
+      [mon(50, T0), ev(51, T0, { from: 'thor' })],
+      { lastEscalatedTs: {} },
+      { baselineOnFirstRun: false },
+    )
+    expect(plan.escalations.map((e) => e.id)).toEqual([51])
+  })
+
+  it('does not let a monitor-origin row enter the cursor', () => {
+    const plan = selectSentinelEscalations(
+      [mon(50, T0), ev(51, T0, { from: 'thor' })],
+      { lastEscalatedTs: {} },
+      { baselineOnFirstRun: false },
+    )
+    expect(plan.nextCursor.lastEscalatedTs).toEqual({ 51: ms(T0) })
+  })
+
+  it('escalates nothing when every row is monitor-origin (no operator ping at all)', () => {
+    const plan = selectSentinelEscalations(
+      [mon(50, T0), mon(51, T1)],
+      { lastEscalatedTs: {} },
+      { baselineOnFirstRun: false },
+    )
+    expect(plan.escalations).toEqual([])
+    expect(plan.nextCursor.lastEscalatedTs).toEqual({})
+  })
+
+  it('baselines only the real rows on first run, ignoring monitor-origin rows', () => {
+    const plan = selectSentinelEscalations([mon(50, T0), ev(51, T0, { from: 'dave' })], EMPTY_SENTINEL_CURSOR)
+    expect(plan.baselined).toBe(true)
+    expect(plan.nextCursor.lastEscalatedTs).toEqual({ 51: ms(T0) })
   })
 })
 
