@@ -8,8 +8,8 @@ import {
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
 
-const OWNERS: TodoOwner[] = ['claudia', 'hibiki']
-function isOwner(v: unknown): v is TodoOwner { return v === 'claudia' || v === 'hibiki' }
+const OWNERS: TodoOwner[] = ['claudia', 'hibiki', 'bond']
+function isOwner(v: unknown): v is TodoOwner { return v === 'claudia' || v === 'hibiki' || v === 'bond' }
 
 export interface OwnerView {
   today: TodoItem[]
@@ -105,7 +105,7 @@ export async function tryHandleTodos(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/todos' && method === 'POST') {
     const data = JSON.parse((await readBody(req)).toString()) as Record<string, unknown>
-    if (!isOwner(data.owner)) { json(res, { error: 'owner kötelező (claudia|hibiki)' }, 400); return true }
+    if (!isOwner(data.owner)) { json(res, { error: 'owner kötelező (claudia|hibiki|bond)' }, 400); return true }
     if (typeof data.title !== 'string' || data.title.trim() === '') {
       json(res, { error: 'title kötelező' }, 400); return true
     }

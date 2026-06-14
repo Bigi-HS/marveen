@@ -108,6 +108,30 @@ describe('todos route — CRUD + envelope', () => {
     expect((await call('GET', '/api/todos?owner=bogus')).status).toBe(400)
   })
 
+  it('POST creates an item for owner=bond (third To-Do owner, card 2f7cd951)', async () => {
+    const r = await call('POST', '/api/todos', { owner: 'bond', section: 'learning', kind: 'progress', title: 'daily study' })
+    expect(r.status).toBe(200)
+    expect(r.body.ok).toBe(true)
+    const row = getTodoItem(r.body.id)!
+    expect(row.owner).toBe('bond')
+    expect(row.section).toBe('learning')
+  })
+
+  it('GET returns the bond owner section (plain view, no adherence badge)', async () => {
+    await call('POST', '/api/todos', { owner: 'bond', section: 'learning', title: 'study' })
+    const r = await call('GET', '/api/todos')
+    expect(r.body.bond).toBeDefined()
+    expect(r.body.bond.adherence).toBeUndefined()
+    expect(r.body.freshness.bond.last_write_ago_seconds).toBeGreaterThanOrEqual(0)
+  })
+
+  it('GET ?owner=bond returns only that owner', async () => {
+    const r = await call('GET', '/api/todos?owner=bond')
+    expect(r.body.bond).toBeDefined()
+    expect(r.body.claudia).toBeUndefined()
+    expect(r.body.hibiki).toBeUndefined()
+  })
+
   it('POST /:id/done marks done; the item moves to doneToday', async () => {
     const c = await call('POST', '/api/todos', { owner: 'claudia', title: 'finish me' })
     const d = await call('POST', `/api/todos/${c.body.id}/done`)

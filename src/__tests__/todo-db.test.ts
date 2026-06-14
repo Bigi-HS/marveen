@@ -48,6 +48,12 @@ describe('todo_items schema (DM-AC1 / DM-AC3)', () => {
       "INSERT INTO todo_items (id, owner, kind, title, created_at, updated_at) VALUES ('x','claudia','bogus','t',1,1)"
     ).run()).toThrow()
   })
+
+  it('accepts owner=bond on a fresh install (card 2f7cd951 third owner)', () => {
+    createTodoItem({ id: 'b1', owner: 'bond', section: 'learning', kind: 'progress', title: 'ISTQB drill' })
+    expect(getTodoItem('b1')?.owner).toBe('bond')
+    expect(listActiveTodos('bond').map(r => r.id)).toContain('b1')
+  })
 })
 
 describe('todo create/edit server-stamps timestamps (DM-AC2)', () => {
