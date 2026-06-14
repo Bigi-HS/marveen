@@ -17,7 +17,7 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/messages' && method === 'POST') {
     const body = await readBody(req)
-    const { from, to, content, ack_expected, priority } = JSON.parse(body.toString()) as { from: string; to: string; content: string; ack_expected?: boolean; priority?: string }
+    const { from, to, content, ack_expected, priority, in_reply_to } = JSON.parse(body.toString()) as { from: string; to: string; content: string; ack_expected?: boolean; priority?: string; in_reply_to?: number }
     if (!from?.trim() || !to?.trim() || !content?.trim()) {
       json(res, { error: 'from, to, and content are required' }, 400)
       return true
@@ -27,6 +27,14 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     const VALID_PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const
     if (priority !== undefined && !VALID_PRIORITIES.includes(priority as (typeof VALID_PRIORITIES)[number])) {
       json(res, { error: `priority must be one of ${VALID_PRIORITIES.join(', ')}` }, 400)
+      return true
+    }
+    // Optional threading parent (card d4fe794f). When present it must be a
+    // positive integer message id; reject anything else as a clean 400 rather
+    // than letting a bad value reach the INSERT. null/undefined = unthreaded.
+    if (in_reply_to !== undefined && in_reply_to !== null &&
+        !(Number.isInteger(in_reply_to) && in_reply_to > 0)) {
+      json(res, { error: 'in_reply_to must be a positive integer message id' }, 400)
       return true
     }
     // Security: the channel-coordinator id grants channel-inbound delivery
@@ -76,8 +84,8 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       json(res, { error: `Unknown recipient: ${to.trim()}` }, 400)
       return true
     }
-    const msg = createAgentMessage(from.trim(), recipient, content.trim(), ack_expected === true, (priority as AgentMessage['priority']) ?? 'normal')
-    logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ackExpected: msg.ack_expected, priority: msg.priority }, 'Agent message created')
+    const msg = createAgentMessage(from.trim(), recipient, content.trim(), ack_expected === true, (priority as AgentMessage['priority']) ?? 'normal', in_reply_to ?? null)
+    logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ackExpected: msg.ack_expected, priority: msg.priority, inReplyTo: msg.in_reply_to }, 'Agent message created')
     json(res, msg)
     return true
   }
