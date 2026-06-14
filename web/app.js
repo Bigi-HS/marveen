@@ -7755,11 +7755,12 @@ async function loadOverview() {
   loadTodos()
 }
 
-// ===== To-Do widget (Claudia + Hibiki) =====
+// ===== To-Do widget (Claudia + Hibiki + Bond) =====
 
 const TODO_OWNERS = [
   { key: 'claudia', label: 'Claudia', sub: 'teendők + tanulás' },
   { key: 'hibiki', label: 'Hibiki', sub: 'fitnesz' },
+  { key: 'bond', label: 'Bond', sub: 'napi tanulás' },
 ]
 
 async function loadTodos() {

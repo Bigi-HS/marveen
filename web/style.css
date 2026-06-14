@@ -5315,7 +5315,8 @@ main {
 
 /* ===== To-Do widget (Claudia + Hibiki) ===== */
 .todo-widget { margin-top: 16px; }
-.todo-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.todo-columns { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+@media (max-width: 1080px) { .todo-columns { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 720px) { .todo-columns { grid-template-columns: 1fr; } }
 .todo-col { min-width: 0; }
 .todo-col-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); margin-bottom: 8px; }

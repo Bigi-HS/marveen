@@ -600,11 +600,13 @@ export function initDatabase(dbPathOverride?: string): void {
   // enums are set in this initial CREATE — widening a CHECK after the table
   // exists silently fails under better-sqlite3's default FK enforcement, so
   // kind='progress' (learning items) is included from the start (DM-AC1/AC3).
+  // The owner enum carries 'bond' from the start for fresh installs; existing
+  // DBs are widened by migrateTodoOwnerBond below (card 2f7cd951).
   // Timestamps are epoch-SECONDS, always server-stamped (DM-AC2).
   db.exec(`
     CREATE TABLE IF NOT EXISTS todo_items (
       id            TEXT PRIMARY KEY,
-      owner         TEXT NOT NULL CHECK(owner IN ('claudia','hibiki')),
+      owner         TEXT NOT NULL CHECK(owner IN ('claudia','hibiki','bond')),
       section       TEXT CHECK(section IN ('general','learning','fitness')),
       kind          TEXT CHECK(kind IN ('task','habit','metric','progress')),
       title         TEXT NOT NULL,
@@ -623,10 +625,78 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_todo_owner ON todo_items(owner, created_at)`)
 
+  // Widen the owner CHECK on existing DBs to admit 'bond' (card 2f7cd951). The
+  // CREATE above no-ops on an already-existing table, so a live DB keeps the
+  // narrow CHECK and owner='bond' writes would 400 forever; a table rebuild is
+  // required. Dedicated, unit-tested function for the same reason as the kanban
+  // someday migration. Defensive: a failure logs but never bricks boot.
+  try {
+    migrateTodoOwnerBond(db)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[db] todo_items bond-owner migration failed:', msg)
+  }
+
   // One-shot migration from the old JSON file (which had a read-modify-write
   // race). Import rows if they exist, then rename the file so we don't keep
   // re-importing. Wrapped in a transaction so a crash mid-import is safe.
   migrateTaskRunsFromJson()
+}
+
+// Widen todo_items.owner CHECK to include 'bond' via a table rebuild (card
+// 2f7cd951). Modelled on migrateKanbanCardsSomeday: idempotent (skips if the
+// CHECK already admits bond, or the table doesn't exist yet), atomic, with
+// foreign_keys toggled OFF *outside* the transaction (the pragma is a no-op
+// inside one). todo_items has no FK today, but we follow the canonical SQLite
+// recipe and assert row-count parity before COMMIT so a partial copy aborts.
+export function migrateTodoOwnerBond(db: Database.Database): void {
+  const current = db.prepare("SELECT sql FROM sqlite_master WHERE name='todo_items'").get() as { sql: string } | undefined
+  if (!current?.sql) return // fresh install — CREATE already carries 'bond'
+  const hasBond = !!current.sql.match(/CHECK\s*\(\s*owner\s+IN\s*\([^)]*'bond'[^)]*\)\s*\)/i)
+  if (hasBond) return
+
+  const prevForeignKeys = db.pragma('foreign_keys', { simple: true })
+  db.pragma('foreign_keys = OFF')
+  try {
+    const rebuild = db.transaction(() => {
+      const before = (db.prepare('SELECT COUNT(*) AS c FROM todo_items').get() as { c: number }).c
+      db.exec('DROP TABLE IF EXISTS todo_items_new')
+      db.exec(`
+        CREATE TABLE todo_items_new (
+          id            TEXT PRIMARY KEY,
+          owner         TEXT NOT NULL CHECK(owner IN ('claudia','hibiki','bond')),
+          section       TEXT CHECK(section IN ('general','learning','fitness')),
+          kind          TEXT CHECK(kind IN ('task','habit','metric','progress')),
+          title         TEXT NOT NULL,
+          detail        TEXT,
+          done          INTEGER NOT NULL DEFAULT 0,
+          status        TEXT,
+          target_val    REAL,
+          actual_val    REAL,
+          sort_order    REAL,
+          last_progress_at INTEGER,
+          progress_note TEXT,
+          created_at    INTEGER NOT NULL,
+          updated_at    INTEGER NOT NULL,
+          done_at       INTEGER
+        );
+        INSERT INTO todo_items_new (rowid, id, owner, section, kind, title, detail, done, status,
+          target_val, actual_val, sort_order, last_progress_at, progress_note, created_at, updated_at, done_at)
+          SELECT rowid, id, owner, section, kind, title, detail, done, status,
+          target_val, actual_val, sort_order, last_progress_at, progress_note, created_at, updated_at, done_at FROM todo_items;
+        DROP TABLE todo_items;
+        ALTER TABLE todo_items_new RENAME TO todo_items;
+      `)
+      db.exec('CREATE INDEX IF NOT EXISTS idx_todo_owner ON todo_items(owner, created_at)')
+      const after = (db.prepare('SELECT COUNT(*) AS c FROM todo_items').get() as { c: number }).c
+      if (after !== before) {
+        throw new Error(`todo_items bond rebuild row-count mismatch: ${before} -> ${after}`)
+      }
+    })
+    rebuild()
+  } finally {
+    db.pragma(`foreign_keys = ${prevForeignKeys ? 'ON' : 'OFF'}`)
+  }
 }
 
 function migrateTaskRunsFromJson(): void {
@@ -1311,7 +1381,7 @@ export function addKanbanComment(cardId: string, author: string, content: string
 
 // ===== To-Do widget (todo_items) =====
 
-export type TodoOwner = 'claudia' | 'hibiki'
+export type TodoOwner = 'claudia' | 'hibiki' | 'bond'
 export type TodoSection = 'general' | 'learning' | 'fitness'
 export type TodoKind = 'task' | 'habit' | 'metric' | 'progress'
 
