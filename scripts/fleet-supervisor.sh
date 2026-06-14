@@ -85,6 +85,9 @@ IDLE_NUDGE_LOOKBACK_SECONDS="${IDLE_NUDGE_LOOKBACK_SECONDS:-21600}"  # 6 h oblig
 # data (Chad security requirement: send-keys is an injection surface; a static string
 # eliminates dynamic content as an attack vector).
 IDLE_NUDGE_TEXT="Please continue your current task."
+# CLI version watch (card b1739f30): how often to compare `claude --version` against the
+# stored baseline. 1-hour default keeps alert latency short without flooding the API.
+CLI_VERSION_CHECK_THROTTLE_SECONDS="${CLI_VERSION_CHECK_THROTTLE_SECONDS:-3600}"
 
 DRY_RUN=0
 ONCE=0
@@ -512,7 +515,7 @@ ensure_idle_nudge_watch() {
   running_agents=$(curl -sf --max-time 3 \
     -H "Authorization: Bearer $(cat "$STORE/.dashboard-token" 2>/dev/null)" \
     "http://127.0.0.1:$DASH_PORT/api/agents" 2>/dev/null \
-    | python3 -c "import sys,json; [print(a['name']) for a in json.load(sys.stdin) if a.get('isRunning')]" 2>/dev/null \
+    | python3 -c "import sys,json; [print(a['name']) for a in json.load(sys.stdin) if a.get('running')]" 2>/dev/null \
     || true)
 
   for agent in $running_agents; do
@@ -555,6 +558,61 @@ ensure_idle_nudge_watch() {
     "$TMUX_BIN" send-keys -t "$session" Enter
     rm -f "$idle_since_f"
   done
+}
+
+# --- CLI VERSION WATCH (card b1739f30) ------------------------------------
+# pane-state.ts detectors are tied to specific footer/input-box patterns from a
+# known CLI version (PANE_DETECTOR_BASELINE_CLI_VERSION). A Claude Code upgrade
+# that changes those patterns can silently break idle/busy detection -- neither
+# the test suite nor the sentinel catches this because they run against pre-captured
+# fixtures, not live pane output. This function detects the upgrade automatically
+# and fires a dead-pipe-proof HTTPS alert so an operator can run c12 smoke before
+# activating any pane-dependent watchdog (idle-nudge, stuck-input, etc.).
+cli_version_check_due() {
+  local nextf="$STATE_DIR/cli-version-check.next" now next
+  now=$(date +%s)
+  [ -f "$nextf" ] || return 0
+  next=$(cat "$nextf" 2>/dev/null || echo 0); case "$next" in (*[!0-9]*|'') next=0;; esac
+  [ "$now" -ge "$next" ]
+}
+ensure_cli_version_watch() {
+  cli_version_check_due || return 0
+  echo $(( $(date +%s) + CLI_VERSION_CHECK_THROTTLE_SECONDS )) > "$STATE_DIR/cli-version-check.next"
+  local claude_bin
+  # CLAUDE_BIN_OVERRIDE: env-overridable for tests (same pattern as FLEET_SUPERVISOR_STORE).
+  # Single-dash ${VAR-default}: default fires only when UNSET; empty string passes through
+  # so tests can force the not-found path with CLAUDE_BIN_OVERRIDE="".
+  claude_bin="${CLAUDE_BIN_OVERRIDE-$(command -v claude 2>/dev/null)}"
+  [ -n "$claude_bin" ] || return 0
+  [ -x "$claude_bin" ] || return 0
+  local current_ver
+  current_ver=$("$claude_bin" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) || return 0
+  [ -n "$current_ver" ] || return 0
+  local ver_file="$STATE_DIR/claude-cli-version.txt"
+  if [ ! -f "$ver_file" ]; then
+    echo "$current_ver" > "$ver_file"
+    log "cli-version-watch: baseline recorded ($current_ver)"
+    return 0
+  fi
+  local stored_ver
+  stored_ver=$(cat "$ver_file" 2>/dev/null); case "$stored_ver" in (*[!0-9.]*|'') stored_ver="";; esac
+  [ "$current_ver" != "$stored_ver" ] || return 0
+  echo "$current_ver" > "$ver_file"
+  log "cli-version-watch: CLI changed ${stored_ver:-unknown} -> $current_ver -- mandatory c12 pane-detector smoke required"
+  if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: send Telegram HTTPS alert for CLI version change"; return 0; fi
+  local env_file="$INSTALL_DIR/agents/chad/.claude/channels/telegram/.env" token
+  token=$(grep 'TELEGRAM_BOT_TOKEN=' "$env_file" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]') || true
+  if [ -n "$token" ] && [ -n "$CURL" ]; then
+    "$CURL" -sf --max-time 10 \
+      "https://api.telegram.org/bot${token}/sendMessage" \
+      -d "chat_id=8643929442" \
+      --data-urlencode "text=[Chad] Claude Code CLI frissult: ${stored_ver:-ismeretlen} -> ${current_ver}. Kotelezo c12 pane-detektor smoke mielott barmely pane-fuggo watchdog (idle-nudge, stuck-input) aktivalodna. Ha smoke PASS: src/pane-state.ts PANE_DETECTOR_BASELINE_CLI_VERSION = '${current_ver}' frissitendo." \
+      >/dev/null 2>&1 \
+      && log "cli-version-watch: HTTPS alert sent" \
+      || log "cli-version-watch: HTTPS alert failed (non-fatal)"
+  else
+    log "cli-version-watch: no chad telegram token -- alert suppressed"
+  fi
 }
 
 # --- one supervision pass --------------------------------------------------
@@ -700,6 +758,8 @@ tick() {
   ensure_delivery_ack_watch
   # 13) IDLE-NUDGE WATCHDOG (obligation-driven resume nudge for stalled agents -- gated by store/idle-nudge-watch.enabled + Thor 845750ad)
   ensure_idle_nudge_watch
+  # 14) CLI VERSION WATCH (pane-detector baseline alert on Claude Code upgrade -- card b1739f30)
+  ensure_cli_version_watch
 }
 
 # --- main ------------------------------------------------------------------
