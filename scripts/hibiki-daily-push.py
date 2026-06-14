@@ -90,6 +90,19 @@ def minutes_of_day(hhmm: str) -> int:
     return hi * 60 + mi
 
 
+def try_minutes_of_day(hhmm: str) -> int | None:
+    """Lenient minutes_of_day: returns None instead of raising for anything that is
+    not a valid 'HH:MM' (symbolic intake phases like 'morning'/'pre_workout', empty,
+    out of range, or a non-string). Card 9bf34f76: the live supplement inventory uses
+    symbolic phases, and a single bad time must NOT crash the whole daily push -- it is
+    skipped instead. Clock-based timing (overview sort, 'due now' reminders) is only
+    meaningful for HH:MM, so a phase that cannot be placed on the clock is dropped."""
+    try:
+        return minutes_of_day(hhmm)
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
 def find_today_session(plan: dict, d: date) -> dict | None:
     """Return the session object for `d`'s weekday, or None if not present."""
     target = weekday_name(d)
@@ -115,10 +128,17 @@ def supplement_due_today(entry: dict, d: date) -> list[str]:
 def today_supplement_overview(supplements: list[dict], d: date) -> list[tuple[str, str]]:
     """(name, time) pairs scheduled today, sorted by time. No dosage anywhere."""
     pairs: list[tuple[str, str]] = []
+    skipped = 0
     for entry in supplements:
         name = entry.get("name", "?")
         for t in supplement_due_today(entry, d):
+            if try_minutes_of_day(t) is None:
+                skipped += 1   # symbolic / malformed time: cannot place on the clock
+                continue
             pairs.append((name, t))
+    if skipped:
+        # Privacy (spec C-AC3): count only, never the name or the value.
+        log.warning("skipped %d supplement intake slot(s) with non-HH:MM time", skipped)
     pairs.sort(key=lambda p: minutes_of_day(p[1]))
     return pairs
 
@@ -230,10 +250,13 @@ def due_actions(now: datetime, plan: dict | None, supplements: list[dict], confi
     for entry in supplements:
         name = entry.get("name", "?")
         for t in supplement_due_today(entry, d):
+            t_min = try_minutes_of_day(t)
+            if t_min is None:
+                continue   # symbolic / malformed time: cannot compute "due now" -- skip
             key = f"supp:{name}:{t}"
             if key in sent:
                 continue
-            if abs(now_min - minutes_of_day(t)) <= tol:
+            if abs(now_min - t_min) <= tol:
                 actions.append({"key": key, "kind": "reminder", "name": name,
                                 "build": lambda sig, n=name: build_reminder_message(n, sig)})
     return actions
