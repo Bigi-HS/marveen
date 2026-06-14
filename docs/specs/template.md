@@ -112,5 +112,41 @@ Not complete until: [anything that would make the task incomplete despite ACs pa
 ## Open Questions
 
 > Block on these before handing to implementer. If none: write "None."
+>
+> **GATE-BLOCKED pattern**: If an open decision structurally prevents a testable AC (e.g. the answer changes the data model, a delete mechanic, or a boundary constant), mark the spec status GATE-BLOCKED and add a visible header at the top. Dave cannot build; Thor cannot audit. One-word answers unblock instantly.
 
 1. [Question -- owner: Dominik / Dave / Thor]
+
+---
+
+## Closing Block
+
+> Required before marking status FINAL. Key Decisions must have >=1 row. Red-team pre-mortem is mandatory per fleet policy 06-11 (decision-owner runs it; attaches top risks + mitigations before FINAL).
+
+### Key Decisions
+
+| Decision | Chosen | Alternatives considered | Why |
+|---|---|---|---|
+| [decision point] | [chosen option] | [other options considered] | [rationale -- include "boss decision YYYY-MM-DD" if applicable] |
+
+### Red-team pre-mortem ([author], YYYY-MM-DD)
+
+**Core claim**: This spec succeeds iff [single sentence -- what must be true for it to work].
+
+**Top risks identified:**
+1. **[Name] (HIGH/MEDIUM/LOW)**: [what breaks and why] -- Mitigation: [what was done in the spec]
+2. **[Name] (HIGH/MEDIUM/LOW)**: [what breaks and why] -- Mitigation: [what was done in the spec]
+
+**Unverified assumptions (residual)**: [anything not mitigated and why it is accepted]
+
+**Verdict**: PROCEED / PROCEED-WITH-MITIGATIONS / RECONSIDER
+
+> Common pitfalls to check: scheduled-task mechanisms (cron expr, not delay-seconds); 24h auto-close needs hourly heartbeat not a single 86400s timer; DST-sensitive time boundaries need wall-clock tz-aware logic not fixed UTC offsets; hard-delete UX needs confirmation step.
+
+### Retrospective (fill at FINAL handoff)
+
+1. Were all ACs atomic? [yes / no -- if no, what was split post-audit]
+2. Did edge cases surface late? [yes / no -- if yes, which]
+3. Were open questions genuine blockers? [yes / no]
+4. How many Thor audit rounds, and why? [N rounds -- root cause]
+5. Template improvement from this spec? [specific change or "none"]
