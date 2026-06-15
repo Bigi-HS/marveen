@@ -245,6 +245,69 @@ def load_supplement_names(store: str) -> set[str]:
     return {s["name"] for s in supps if "name" in s}
 
 
+def write_dexa(
+    store: str,
+    date_str: str,
+    body_fat_pct: float,
+    fat_mass_kg: float,
+    lean_mass_kg: float,
+    vat_area_cm2: float | None,
+    bone_density: float | None,
+    source: str,
+    notes: str | None = None,
+) -> None:
+    """Write a DEXA scan result to hibiki-progress.json (SEC-AC1/3 enforced)."""
+    if source not in VALID_SOURCES:
+        print(f"ERROR: source must be one of {VALID_SOURCES}, got {source!r}", file=sys.stderr)
+        sys.exit(1)
+
+    values: dict[str, float] = {
+        "body_fat_pct": body_fat_pct,
+        "fat_mass_kg": fat_mass_kg,
+        "lean_mass_kg": lean_mass_kg,
+    }
+    if vat_area_cm2 is not None:
+        values["vat_area_cm2"] = vat_area_cm2
+
+    errors = validate_ranges(values)
+    if errors:
+        print("ERROR: range validation failed (SEC-AC1):", file=sys.stderr)
+        for e in errors:
+            print(f"  {e}", file=sys.stderr)
+        sys.exit(1)
+
+    path = os.path.join(store, "hibiki-progress.json")
+    data = _read_json(path)
+    scans = data.get("dexa_results", [])
+
+    entry: dict[str, Any] = {
+        "date": date_str,
+        "body_fat_pct": body_fat_pct,
+        "fat_mass_kg": fat_mass_kg,
+        "lean_mass_kg": lean_mass_kg,
+        "source": source,
+    }
+    if vat_area_cm2 is not None:
+        entry["vat_area_cm2"] = vat_area_cm2
+    if bone_density is not None:
+        entry["bone_density"] = bone_density
+    if notes:
+        entry["notes"] = notes
+
+    existing = next((i for i, e in enumerate(scans) if e.get("date") == date_str), None)
+    if existing is not None:
+        scans[existing] = entry
+    else:
+        scans.append(entry)
+
+    data["dexa_results"] = sorted(scans, key=lambda e: e.get("date", ""))
+    _write_store_file(path, data)
+    print(
+        f"OK: DEXA entry written for {date_str} "
+        f"(body_fat_pct={body_fat_pct}%, fat={fat_mass_kg}kg, lean={lean_mass_kg}kg, source={source})"
+    )
+
+
 def init_store(store: str) -> None:
     """Create empty store files with 0600 if they don't exist (SEC-AC4b)."""
     for filename in ("nutrition_log.json", "supplement_adherence_log.json"):
@@ -313,6 +376,18 @@ def main() -> None:
     a.add_argument("--skipped", default="", help="'Name::reason,Name2'")
     a.add_argument("--store", default=DEFAULT_STORE)
 
+    # dexa subcommand
+    d = sub.add_parser("dexa", help="Write DEXA scan result to progress store (SEC-AC1/3)")
+    d.add_argument("--date", default=str(date.today()))
+    d.add_argument("--body-fat-pct", type=float, required=True)
+    d.add_argument("--fat-mass-kg", type=float, required=True)
+    d.add_argument("--lean-mass-kg", type=float, required=True)
+    d.add_argument("--vat-area-cm2", type=float, default=None)
+    d.add_argument("--bone-density", type=float, default=None)
+    d.add_argument("--source", required=True, choices=list(VALID_SOURCES))
+    d.add_argument("--notes", default=None)
+    d.add_argument("--store", default=DEFAULT_STORE)
+
     # init-store subcommand
     i = sub.add_parser("init-store", help="Create store files with 0600 (SEC-AC4b)")
     i.add_argument("--store", default=DEFAULT_STORE)
@@ -343,6 +418,18 @@ def main() -> None:
             taken=taken,
             skipped=skipped,
             supplement_names=names,
+        )
+    elif args.cmd == "dexa":
+        write_dexa(
+            store=os.path.abspath(args.store),
+            date_str=args.date,
+            body_fat_pct=args.body_fat_pct,
+            fat_mass_kg=args.fat_mass_kg,
+            lean_mass_kg=args.lean_mass_kg,
+            vat_area_cm2=args.vat_area_cm2,
+            bone_density=args.bone_density,
+            source=args.source,
+            notes=args.notes,
         )
     elif args.cmd == "init-store":
         init_store(os.path.abspath(args.store))
