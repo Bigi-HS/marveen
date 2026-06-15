@@ -380,6 +380,18 @@ export function initDatabase(dbPathOverride?: string): void {
     // column already exists
   }
 
+  // Migration: access_scope column for per-agent memory visibility (PII
+  // governance, card 1dd349bd). Additive + nullable -> low-risk, NO table
+  // rebuild. NULL/'' = unscoped (follows the pre-existing own+shared SQL
+  // selection); an agent-id value = visible ONLY to that agent, overriding the
+  // 'shared' tier. Every pre-existing row stays NULL: no retroactive
+  // restriction. See applyScopeFilter for the advisory-boundary caveat.
+  try {
+    db.exec('ALTER TABLE memories ADD COLUMN access_scope TEXT')
+  } catch {
+    // column already exists
+  }
+
   // Daily logs table
   db.exec(`
     CREATE TABLE IF NOT EXISTS daily_logs (
@@ -773,6 +785,37 @@ export interface Memory {
   auto_generated: number
   keywords: string | null
   embedding: string | null
+  access_scope: string | null  // NULL/'' = unscoped (own+shared rules apply); an agent-id = that-agent-only (PII governance, card 1dd349bd)
+}
+
+// --- Memory visibility (PII governance, card 1dd349bd) ---
+//
+// ADVISORY BOUNDARY -- read carefully. The `requester` here is the
+// caller-supplied `?agent=` query param. Under the fleet's single shared Bearer
+// token (store/.dashboard-token) that param is NOT cryptographically
+// authenticated: the token authenticates the OPERATOR (Dominik), not an
+// individual agent. So access_scope is a default-deny-leak privacy HYGIENE
+// control that prevents ACCIDENTAL cross-agent PII recall. It is NOT a hard
+// boundary and does NOT defend against:
+//   - a malicious/compromised caller forging ?agent=target (spoofable identity)
+//   - FS-direct reads of store/claudeclaw.db (bypasses every API-layer filter)
+//   - any host process holding the shared Bearer token
+//   - the curator bypass (Applegate reads across all scopes -- see saveAgentMemory callers)
+// The hard fix is OS-user isolation (card 8dac7f1d). Mental model: a label on a
+// shared filing cabinet ("this is Dave's, please don't read it"), not a lock.
+//
+// Predicate (PM-AC1): a row is visible to a requester iff it is unscoped
+// (access_scope NULL/'') OR its access_scope names the requester. This is a
+// SUBTRACTIVE refinement applied on top of each path's existing own+shared SQL
+// selection -- it only HIDES scoped rows, never widens visibility. A NULL
+// requester is the operator/admin context and sees everything.
+export function applyScopeFilter<T extends Pick<Memory, 'access_scope'>>(
+  memories: T[],
+  requester: string | null,
+): T[] {
+  // Operator/admin context (no agent identity supplied): full visibility.
+  if (!requester) return memories
+  return memories.filter((m) => !m.access_scope || m.access_scope === requester)
 }
 
 export function saveMemory(
@@ -854,17 +897,86 @@ export function getMemoriesForChat(chatId: string, limit = 10): Memory[] {
     .all(chatId, limit) as Memory[]
 }
 
+// PII keyword patterns (PM-AC4) for write-time auto-scope. Case-insensitive
+// substring match on the keywords + content fields. v1 heuristic -- false
+// positives are acceptable because auto-scope is OPT-OUT (privacy-by-default;
+// the caller can pass access_scope=null to deliberately keep a row public).
+// The financial + Hungarian-national-id groups extend the spec's v1 list per
+// Chad's earlier MED-1 finding (Claudia handles these in email context).
+const PII_KEYWORDS = [
+  // Health
+  'egészség', 'health', 'orvos', 'doctor', 'betegség', 'illness',
+  'gyógyszer', 'medication', 'diagnózis', 'diagnosis',
+  // Calendar / personal
+  'home address', 'lakcím', 'születésnap', 'birthday', 'személyes', 'personal schedule',
+  // Address
+  'cím', 'address', 'irányítószám', 'zip', 'postal',
+  // Financial (Chad MED-1)
+  'bank', 'bankszámla', 'hitelkártya', 'credit card', 'fizetés', 'iban', 'számlaszám',
+  // Hungarian national identifiers (Chad MED-1)
+  'taj', 'személyi', 'adóazonosító', 'adószám',
+]
+
+// Lowercase + strip diacritics so "hitelkártya" and "hitelkartya" both match
+// (Hungarian users type either form). NFD decomposes accented chars; the
+// combining-marks range is then removed.
+function deaccent(s: string): string {
+  return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+}
+
+// True if the keywords/content look like PII per the v1 heuristic (PM-AC4).
+// Accent-insensitive substring match on keywords + content.
+export function isPotentialPII(keywords: string | null | undefined, content: string): boolean {
+  const hay = deaccent(`${keywords ?? ''}\n${content}`)
+  return PII_KEYWORDS.some((kw) => hay.includes(deaccent(kw)))
+}
+
+// Thrown by the write path when category='shared' is combined with a non-NULL
+// access_scope (PM-AC9). Caught at the route layer -> HTTP 400.
+export class ScopedSharedError extends Error {
+  constructor() {
+    super('scoped+shared is contradictory: a shared memory cannot also be access_scope-restricted')
+    this.name = 'ScopedSharedError'
+  }
+}
+
+// Resolve the effective access_scope for a write (PM-AC4 + PM-AC9):
+//   accessScope === undefined -> apply PII auto-scope (scope to agentId if PII)
+//   accessScope === null      -> explicit opt-out: stored NULL (public)
+//   accessScope === string    -> stored as-is
+// Then enforce PM-AC9: a scoped value combined with category='shared' throws.
+export function resolveAccessScope(
+  agentId: string,
+  category: string,
+  keywords: string | undefined,
+  content: string,
+  accessScope: string | null | undefined,
+): string | null {
+  let effective: string | null
+  if (accessScope === undefined) {
+    effective = isPotentialPII(keywords, content) ? agentId : null
+  } else if (accessScope === null || accessScope === '') {
+    effective = null
+  } else {
+    effective = accessScope
+  }
+  if (category === 'shared' && effective) throw new ScopedSharedError()
+  return effective
+}
+
 export function saveAgentMemory(
   agentId: string,
   content: string,
   category: string,  // hot, warm, cold, shared
   keywords?: string,
-  autoGenerated: boolean = false
+  autoGenerated: boolean = false,
+  accessScope?: string | null,  // undefined = PII auto-scope; null = explicit opt-out (public); string = explicit scope
 ): { id: number } {
+  const scope = resolveAccessScope(agentId, category, keywords, content, accessScope)
   const now = Math.floor(Date.now() / 1000)
   const info = db.prepare(
-    'INSERT INTO memories (chat_id, topic_key, content, sector, salience, created_at, accessed_at, agent_id, category, auto_generated, keywords) VALUES (?, ?, ?, ?, 1.0, ?, ?, ?, ?, ?, ?)'
-  ).run(ALLOWED_CHAT_ID, null, content, 'semantic', now, now, agentId, category, autoGenerated ? 1 : 0, keywords ?? null)
+    'INSERT INTO memories (chat_id, topic_key, content, sector, salience, created_at, accessed_at, agent_id, category, auto_generated, keywords, access_scope) VALUES (?, ?, ?, ?, 1.0, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(ALLOWED_CHAT_ID, null, content, 'semantic', now, now, agentId, category, autoGenerated ? 1 : 0, keywords ?? null, scope)
   const id = Number(info.lastInsertRowid)
 
   // Fire-and-forget: generate embedding asynchronously
@@ -877,26 +989,58 @@ export function saveAgentMemory(
   return { id }
 }
 
-export function getAgentMemories(agentId: string, limit: number = 20): Memory[] {
-  return db.prepare(
-    "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') ORDER BY accessed_at DESC LIMIT ?"
-  ).all(agentId, limit) as Memory[]
+// Server-side curator allowlist (PM-AC5). The ONLY agents whose curation reads
+// may bypass access_scope. This is a code constant, never a caller-supplied
+// parameter -- a `?curator=true` query param MUST NOT exist (escalation vector).
+// A curator bypass does TWO things together: (a) broadens the candidate SQL to
+// ALL rows (not just own+shared) so cross-agent scoped rows are reachable, and
+// (b) skips applyScopeFilter. Both are gated on the agent being on this
+// allowlist, so a stray curator=true for a non-curator agent is inert.
+const CURATOR_AGENTS = new Set(['applegate'])
+
+function isCuratorBypass(agentId: string, curator: boolean): boolean {
+  return curator && CURATOR_AGENTS.has(agentId)
 }
 
-export function searchAgentMemories(agentId: string, query: string, limit: number = 10): Memory[] {
+export function getAgentMemories(agentId: string, limit: number = 20, curator = false): Memory[] {
+  if (isCuratorBypass(agentId, curator)) {
+    return db.prepare(
+      'SELECT * FROM memories ORDER BY accessed_at DESC LIMIT ?'
+    ).all(limit) as Memory[]
+  }
+  const rows = db.prepare(
+    "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') ORDER BY accessed_at DESC LIMIT ?"
+  ).all(agentId, limit) as Memory[]
+  return applyScopeFilter(rows, agentId)
+}
+
+export function searchAgentMemories(agentId: string, query: string, limit: number = 10, curator = false): Memory[] {
   const terms = buildFtsMatchExpression(query)
   if (!terms) return []
+  const bypass = isCuratorBypass(agentId, curator)
   try {
-    return db.prepare(
-      `SELECT m.* FROM memories m
-       JOIN memories_fts f ON m.id = f.rowid
-       WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared')
-       ORDER BY rank LIMIT ?`
-    ).all(terms, agentId, limit) as Memory[]
+    const rows = bypass
+      ? db.prepare(
+          `SELECT m.* FROM memories m
+           JOIN memories_fts f ON m.id = f.rowid
+           WHERE f.memories_fts MATCH ? ORDER BY rank LIMIT ?`
+        ).all(terms, limit) as Memory[]
+      : db.prepare(
+          `SELECT m.* FROM memories m
+           JOIN memories_fts f ON m.id = f.rowid
+           WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared')
+           ORDER BY rank LIMIT ?`
+        ).all(terms, agentId, limit) as Memory[]
+    return bypass ? rows : applyScopeFilter(rows, agentId)
   } catch {
-    return db.prepare(
-      "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?"
-    ).all(agentId, `%${query}%`, `%${query}%`, limit) as Memory[]
+    const rows = bypass
+      ? db.prepare(
+          'SELECT * FROM memories WHERE (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?'
+        ).all(`%${query}%`, `%${query}%`, limit) as Memory[]
+      : db.prepare(
+          "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?"
+        ).all(agentId, `%${query}%`, `%${query}%`, limit) as Memory[]
+    return bypass ? rows : applyScopeFilter(rows, agentId)
   }
 }
 
@@ -982,7 +1126,9 @@ export function recallByDateRange(from: string, to: string, agentId?: string): R
   const memParams = agentId ? [fromTs, toTs, agentId] : [fromTs, toTs]
   const memories = db.prepare(memSql).all(...memParams) as Memory[]
 
-  return { logs, memories, dateRange: { from, to } }
+  // PM-AC3 path 6: close the shared-OR + unscoped-no-agentId leak. A null
+  // agentId is the operator/admin context (sees all); see applyScopeFilter.
+  return { logs, memories: applyScopeFilter(memories, agentId ?? null), dateRange: { from, to } }
 }
 
 export function recallSearch(query: string, agentId?: string, limit = 50): RecallResult {
@@ -1020,7 +1166,8 @@ export function recallSearch(query: string, agentId?: string, limit = 50): Recal
   const from = dates.length ? dates[dates.length - 1] : ''
   const to = dates.length ? dates[0] : ''
 
-  return { logs, memories, dateRange: { from, to } }
+  // PM-AC3 path 7: same shared-OR + unscoped-no-agentId leak as recallByDateRange.
+  return { logs, memories: applyScopeFilter(memories, agentId ?? null), dateRange: { from, to } }
 }
 
 // --- Background tasks ---
@@ -1867,10 +2014,16 @@ export function cosineSimilarity(a: number[], b: number[]): number {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB))
 }
 
-export function vectorSearch(agentId: string, queryEmbedding: number[], limit: number = 10): Memory[] {
-  const rows = db.prepare(
-    "SELECT * FROM memories WHERE embedding IS NOT NULL AND (agent_id = ? OR category = 'shared')"
-  ).all(agentId) as Memory[]
+export function vectorSearch(agentId: string, queryEmbedding: number[], limit: number = 10, curator = false): Memory[] {
+  const bypass = isCuratorBypass(agentId, curator)
+  const candidates = bypass
+    ? db.prepare('SELECT * FROM memories WHERE embedding IS NOT NULL').all() as Memory[]
+    : db.prepare(
+        "SELECT * FROM memories WHERE embedding IS NOT NULL AND (agent_id = ? OR category = 'shared')"
+      ).all(agentId) as Memory[]
+  // PM-AC3 path 5 (vector): apply the scope filter before scoring so a scoped
+  // row never even competes for a result slot. Curator bypass skips it.
+  const rows = bypass ? candidates : applyScopeFilter(candidates, agentId)
 
   const scored = rows.map(m => {
     try {

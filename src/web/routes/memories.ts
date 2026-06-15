@@ -1,7 +1,7 @@
 import {
   saveAgentMemory, getAgentMemories, searchAgentMemories, getMemoryStats, updateMemory,
   hybridSearch, backfillEmbeddings,
-  searchMemories, getMemoriesForChat, getDb,
+  searchMemories, getMemoriesForChat, getDb, applyScopeFilter, ScopedSharedError,
   type Memory,
 } from '../../db.js'
 import { MAIN_AGENT_ID, ALLOWED_CHAT_ID, OLLAMA_URL } from '../../config.js'
@@ -35,7 +35,9 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/memories' && method === 'POST') {
     const body = await readBody(req)
-    const data = JSON.parse(body.toString()) as { agent_id?: string; content: string; tier?: string; category?: string; keywords?: string }
+    // `access_scope` is read with `'access_scope' in data` semantics below so we
+    // can tell "field absent" (=> PII auto-scope) from "explicit null" (opt-out).
+    const data = JSON.parse(body.toString()) as { agent_id?: string; content: string; tier?: string; category?: string; keywords?: string; access_scope?: string | null }
     if (!data.content?.trim()) { json(res, { error: 'Content is required' }, 400); return true }
     if (containsSuspiciousContent(data.content)) {
       logger.warn({ agent: data.agent_id }, 'Memory content rejected: suspicious pattern')
@@ -50,14 +52,25 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
       json(res, { error: `Invalid category "${category}". Allowed: ${[...MEMORY_CATEGORIES].join(', ')}` }, 400)
       return true
     }
-    const result = saveAgentMemory(
-      data.agent_id || MAIN_AGENT_ID,
-      data.content.trim(),
-      category,
-      data.keywords || undefined,
-      true
-    )
-    json(res, { ok: true, id: result.id })
+    // Distinguish absent (auto-scope) from explicit null (opt-out) from a value.
+    const accessScope = 'access_scope' in data ? data.access_scope : undefined
+    try {
+      const result = saveAgentMemory(
+        data.agent_id || MAIN_AGENT_ID,
+        data.content.trim(),
+        category,
+        data.keywords || undefined,
+        true,
+        accessScope,
+      )
+      json(res, { ok: true, id: result.id })
+    } catch (err) {
+      if (err instanceof ScopedSharedError) {
+        json(res, { error: err.message }, 400)
+        return true
+      }
+      throw err
+    }
     return true
   }
 
@@ -89,6 +102,13 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     } else {
       results = getMemoriesForChat(ALLOWED_CHAT_ID, limit)
     }
+
+    // PM-AC3 single enforcement point (covers the q-only/neither leak paths and
+    // the inline LIKE fallbacks above; idempotent for the db-layer-filtered
+    // paths). requester = the advisory ?agent= identity; absent => operator/
+    // admin context (PM-AC6: the dashboard/operator sees all, including scoped).
+    // NOTE: ?agent= is caller-supplied and NOT authenticated -- advisory only.
+    results = applyScopeFilter(results, agentId || null)
 
     if (tier) results = results.filter(m => m.category === tier)
 
