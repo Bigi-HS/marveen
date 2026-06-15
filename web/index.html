@@ -1450,6 +1450,20 @@
               <button class="btn-danger btn-compact" id="marveenRestartBtn" hidden>Channels restart</button>
             </div>
           </div>
+
+          <!-- Operator action layer (card d3fc67f2): nudge + run-skill on the
+               open agent. Both inject a prompt into the agent's live session. -->
+          <div class="agent-action-layer" id="agentActionLayer" style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+            <label class="form-label-sm">Művelet az ügynökön</label>
+            <div style="display:flex;gap:8px;margin-top:6px">
+              <textarea id="agentNudgeText" class="form-input" rows="2" placeholder="Nudge üzenet az ügynöknek..." style="flex:1;resize:vertical"></textarea>
+              <button class="btn-primary btn-compact" id="agentNudgeBtn" style="align-self:flex-start">Nudge</button>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <select id="agentSkillSelect" class="form-input" style="flex:1"></select>
+              <button class="btn-primary btn-compact" id="agentRunSkillBtn">Skill futtatása</button>
+            </div>
+          </div>
         </div>
 
         <!-- Tab: Settings -->

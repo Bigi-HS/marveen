@@ -1959,6 +1959,40 @@ document.getElementById('agentStopBtn').addEventListener('click', async () => {
   }
 })
 
+// === Operator action layer (card d3fc67f2): nudge + run-skill on the open agent ===
+document.getElementById('agentNudgeBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const ta = document.getElementById('agentNudgeText')
+  const text = ta.value.trim()
+  if (!text) { showToast('Írj egy nudge üzenetet'); return }
+  const btn = document.getElementById('agentNudgeBtn')
+  btn.disabled = true
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/nudge`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (res.ok) { showToast(`Nudge elküldve: ${escapeHtml(currentAgent.name)}`); ta.value = '' }
+    else showToast(data.error || 'Nudge sikertelen')
+  } catch { showToast('Hiba a nudge során') } finally { btn.disabled = false }
+})
+
+document.getElementById('agentRunSkillBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const skill = document.getElementById('agentSkillSelect').value
+  if (!skill) { showToast('Nincs választható skill'); return }
+  const btn = document.getElementById('agentRunSkillBtn')
+  btn.disabled = true
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/run-skill`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ skill }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (res.ok) showToast(`Skill elindítva: ${escapeHtml(skill)}`)
+    else showToast(data.error || 'Skill futtatás sikertelen')
+  } catch { showToast('Hiba a skill futtatása során') } finally { btn.disabled = false }
+})
+
 // === Tab switching ===
 document.getElementById('agentTabNav').addEventListener('click', (e) => {
   const btn = e.target.closest('.tab-btn')
@@ -3085,9 +3119,19 @@ async function loadSkills(agentName) {
       }
       listEl.appendChild(item)
     }
+
+    // Populate the action-layer run-skill dropdown from the same list (card d3fc67f2).
+    const sel = document.getElementById('agentSkillSelect')
+    if (sel) {
+      sel.innerHTML = skills.length
+        ? skills.map(s => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}</option>`).join('')
+        : '<option value="">(nincs skill)</option>'
+    }
   } catch {
     emptyEl.hidden = false
     document.getElementById('agentDetailSkillCount').textContent = '0'
+    const sel = document.getElementById('agentSkillSelect')
+    if (sel) sel.innerHTML = '<option value="">(nincs skill)</option>'
   }
 }
 
@@ -3590,6 +3634,9 @@ function renderScheduleList(tasks) {
         </div>
       </div>
       <div class="schedule-actions">
+        <button class="btn-icon" data-action="run" title="Futtatás most">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        </button>
         <button class="btn-icon" data-action="toggle" title="${task.enabled ? 'Szüneteltetés' : 'Folytatás'}">
           ${task.enabled ? pauseIcon() : playIcon()}
         </button>
@@ -3606,6 +3653,20 @@ function renderScheduleList(tasks) {
     })
 
     // Action buttons
+    row.querySelector('[data-action="run"]').addEventListener('click', async (e) => {
+      e.stopPropagation()
+      const btn = e.currentTarget
+      btn.disabled = true
+      try {
+        const res = await fetch(`/api/schedules/${encodeURIComponent(task.name)}/run`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        })
+        const data = await res.json().catch(() => ({}))
+        if (res.ok) showToast(`Feladat elindítva: ${escapeHtml(task.name)}`)
+        else showToast(data.error || 'Nem sikerült elindítani')
+      } catch { showToast('Hiba a futtatás során') } finally { btn.disabled = false }
+    })
+
     row.querySelector('[data-action="toggle"]').addEventListener('click', async (e) => {
       e.stopPropagation()
       try {
