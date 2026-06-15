@@ -313,15 +313,31 @@ def write_nutrition_not_logged(store: str, date_str: str) -> None:
 
     Distinct from a missing entry: missing = unknown; logged:false = confirmed no-log day.
     Trend functions count this as a denominator gap day, not an excluded unknown.
+
+    Aborts with sys.exit(1) if an existing logged:true entry would be silently overwritten.
     """
     path = os.path.join(store, "nutrition_log.json")
     data = _open_store_file(path)
     entries = data.get("entries", [])
 
+    existing_idx = next((i for i, e in enumerate(entries) if e.get("date") == date_str), None)
+    if existing_idx is not None:
+        existing = entries[existing_idx]
+        if existing.get("logged", True):
+            kcal = existing.get("total_calories", "?")
+            src = existing.get("source", "?")
+            print(
+                f"ERROR: a logged:true entry already exists for {date_str} "
+                f"({kcal} kcal, source={src}). "
+                "Writing a not-logged sentinel would permanently delete this data. "
+                "Delete the existing entry manually first if this is intentional.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     sentinel: dict[str, Any] = {"date": date_str, "logged": False}
-    existing = next((i for i, e in enumerate(entries) if e.get("date") == date_str), None)
-    if existing is not None:
-        entries[existing] = sentinel
+    if existing_idx is not None:
+        entries[existing_idx] = sentinel
     else:
         entries.append(sentinel)
 
