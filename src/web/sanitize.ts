@@ -26,6 +26,23 @@ export function sanitizeScheduleName(raw: string): string {
     .replace(/^-|-$/g, '')
 }
 
+// Resolve a raw URL path segment to a safe schedule name for the mutating
+// routes (PUT/DELETE/toggle/run). Decodes percent-encoding, strips it through
+// sanitizeScheduleName, and returns null for anything that sanitizes to empty
+// (e.g. "..", "%2e%2e", "/") so a traversal payload can never resolve to the
+// scheduled-tasks parent dir. A null result must map to 404. Malformed
+// percent-encoding (decodeURIComponent throws) is also rejected.
+export function safeScheduleName(rawSegment: string): string | null {
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(rawSegment)
+  } catch {
+    return null
+  }
+  const name = sanitizeScheduleName(decoded)
+  return name || null
+}
+
 // Joins segments and verifies the resolved path stays inside `base`. Throws on escape.
 export function safeJoin(base: string, ...parts: string[]): string {
   const resolvedBase = resolve(base)

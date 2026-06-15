@@ -10,7 +10,7 @@ import { toPendingRetryView } from '../../pending-retries.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
 import { isValidCronShape } from '../cron.js'
 import { readBody, json, RequestBodyTooLargeError } from '../http-helpers.js'
-import { sanitizeScheduleName } from '../sanitize.js'
+import { sanitizeScheduleName, safeScheduleName } from '../sanitize.js'
 import { listAgentNames } from '../agent-config.js'
 import { readFileOr } from '../agent-config.js'
 import {
@@ -147,7 +147,8 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
 
   const scheduleUpdateMatch = path.match(/^\/api\/schedules\/([^/]+)$/)
   if (scheduleUpdateMatch && method === 'PUT') {
-    const name = decodeURIComponent(scheduleUpdateMatch[1])
+    const name = safeScheduleName(scheduleUpdateMatch[1])
+    if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
     const dir = join(SCHEDULED_TASKS_DIR, name)
     if (!existsSync(dir)) { json(res, { error: 'Schedule not found' }, 404); return true }
 
@@ -181,7 +182,8 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
   }
 
   if (scheduleUpdateMatch && method === 'DELETE') {
-    const name = decodeURIComponent(scheduleUpdateMatch[1])
+    const name = safeScheduleName(scheduleUpdateMatch[1])
+    if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
     const dir = join(SCHEDULED_TASKS_DIR, name)
     if (!existsSync(dir)) { json(res, { error: 'Schedule not found' }, 404); return true }
     rmSync(dir, { recursive: true, force: true })
@@ -192,7 +194,8 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
 
   const scheduleToggleMatch = path.match(/^\/api\/schedules\/([^/]+)\/toggle$/)
   if (scheduleToggleMatch && method === 'POST') {
-    const name = decodeURIComponent(scheduleToggleMatch[1])
+    const name = safeScheduleName(scheduleToggleMatch[1])
+    if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
     const dir = join(SCHEDULED_TASKS_DIR, name)
     if (!existsSync(dir)) { json(res, { error: 'Schedule not found' }, 404); return true }
 
@@ -213,7 +216,8 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
   // manual run is intentional and must not suppress the next scheduled tick.
   const scheduleRunMatch = path.match(/^\/api\/schedules\/([^/]+)\/run$/)
   if (scheduleRunMatch && method === 'POST') {
-    const name = decodeURIComponent(scheduleRunMatch[1])
+    const name = safeScheduleName(scheduleRunMatch[1])
+    if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
     const task = listScheduledTasks().find(t => t.name === name)
     if (!task) { json(res, { error: 'Schedule not found' }, 404); return true }
 
