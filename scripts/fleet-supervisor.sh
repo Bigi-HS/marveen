@@ -505,12 +505,18 @@ pane_is_idle_at_prompt() {
 # API overload and dropped to idle -- NOT legitimately done. Detection-label only:
 # callers may annotate log messages or adjust grace periods; this function never
 # retries or sends any message on its own.
+#
+# Pattern rationale: "API Error.*overload" / "overload.*API Error" cover the TUI
+# error header forms. " is/was (currently )?overloaded" catches the narrative
+# form ("Claude is overloaded", "model is currently overloaded") while requiring
+# the verb "is/was" immediately before "overloaded" to avoid matching benign
+# discussions ("Claude handles overloaded queues", "overloaded_error type").
 pane_has_overloaded_error() {
   local session="$1" pane_scroll
   # Capture more lines than pane_is_idle_at_prompt -- the error may appear above
   # the prompt and then the agent dropped straight to ❯.
   pane_scroll=$("$TMUX_BIN" capture-pane -t "$session" -p 2>/dev/null | tail -20)
-  echo "$pane_scroll" | grep -qiE "API Error.*[Oo]verload|[Oo]verload.*API Error|Claude.*overloaded"
+  echo "$pane_scroll" | grep -qiE "API Error.*[Oo]verload|[Oo]verload.*API Error| (is|was) (currently )?overloaded"
 }
 
 # Returns 0 (true) when agent has at least one open obligation: a delivered/
