@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from 'node:child_process'
-import { existsSync, openSync, closeSync } from 'node:fs'
+import { existsSync, openSync, closeSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { logger } from '../logger.js'
 import { PROJECT_ROOT, MAIN_AGENT_ID } from '../config.js'
@@ -32,6 +32,12 @@ import { notifyChannel } from '../notify.js'
 
 const SUPERVISOR = join(PROJECT_ROOT, 'scripts', 'fleet-supervisor.sh')
 const LOG_FILE = join(PROJECT_ROOT, 'store', 'fleet-supervisor.log')
+// Armorer writes this file before a planned restart and removes it after verify.
+// While it is fresh the single-relaunch alert is suppressed (still relaunched)
+// so a real unexpected crash still stands out. TTL: 30 min; an stale marker is
+// treated as absent so a forgotten file cannot permanently silence alerts.
+export const PLANNED_RESTART_MARKER = join(PROJECT_ROOT, 'store', 'planned-restart.marker')
+const PLANNED_RESTART_MARKER_TTL_MS = 30 * 60 * 1_000
 const INITIAL_DELAY_MS = 60_000
 const INTERVAL_MS = 60_000
 const MIN_RELAUNCH_INTERVAL_MS = 120_000   // floor between relaunch attempts
@@ -80,6 +86,18 @@ let relaunchStamps: number[] = []
 let lastEscalationMs: number | null = null
 
 // --- IO --------------------------------------------------------------------
+
+// True when a fresh planned-restart marker is present (written by Armorer before
+// a deploy restart, deleted after verify). A stale marker (>30 min) is ignored
+// so a forgotten file cannot permanently silence unexpected-death alerts.
+export function isPlannedRestartWindow(): boolean {
+  try {
+    if (!existsSync(PLANNED_RESTART_MARKER)) return false
+    return Date.now() - statSync(PLANNED_RESTART_MARKER).mtimeMs < PLANNED_RESTART_MARKER_TTL_MS
+  } catch {
+    return false
+  }
+}
 
 // True if a fleet-supervisor.sh process is alive. pgrep -f matches process
 // cmdlines; the node dashboard's own cmdline is `node dist/index.js`, so it
@@ -155,13 +173,23 @@ function sweep(): void {
   const action = decideAction(false, relaunchStamps, now)
 
   if (action === 'relaunch') {
+    const planned = isPlannedRestartWindow()
     try {
       relaunchSupervisor()
       relaunchStamps = pruneStamps([...relaunchStamps, now], now, RELAUNCH_WINDOW_MS)
-      logger.warn('supervisor-sentinel: fleet-supervisor.sh was DOWN -- relaunched (setsid-detached)')
-      alertMarveen('FIGYELEM: a fleet-supervisor.sh nem futott -- a dashboard sentinel ujrainditotta (setsid-detached). Nezd meg miert allt le (kulso kill?); a friss indulas a store/fleet-supervisor.log-ban.')
+      if (planned) {
+        // Suppress the inter-agent alert: this is a known Armorer deploy restart.
+        // The relaunch still runs so the supervisor is back fast; the quiet log
+        // line is enough for post-deploy audit. A real crash sets planned=false
+        // (marker absent or expired) and the loud path fires normally.
+        logger.info('supervisor-sentinel: fleet-supervisor.sh briefly down -- planned restart window, relaunched silently')
+      } else {
+        logger.warn('supervisor-sentinel: fleet-supervisor.sh was DOWN -- relaunched (setsid-detached)')
+        alertMarveen('FIGYELEM: a fleet-supervisor.sh nem futott -- a dashboard sentinel ujrainditotta (setsid-detached). Nezd meg miert allt le (kulso kill?); a friss indulas a store/fleet-supervisor.log-ban.')
+      }
     } catch (err) {
-      // A relaunch that throws is severe: shout directly at the operator.
+      // A relaunch that throws is severe: shout directly at the operator regardless
+      // of the planned-restart window -- a failed relaunch always needs human eyes.
       logger.error({ err }, 'supervisor-sentinel: relaunch FAILED')
       relaunchStamps = pruneStamps([...relaunchStamps, now], now, RELAUNCH_WINDOW_MS)
       escalateToDominik('SULYOS: a fleet-supervisor.sh nem futott ES a dashboard sentinel relaunch-a HIBAZOTT. Manualis beavatkozas kell a hoston.')
