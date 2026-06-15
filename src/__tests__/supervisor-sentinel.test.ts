@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { describe, expect, it, afterEach } from 'vitest'
+import { readFileSync, writeFileSync, unlinkSync, utimesSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { decideAction, pruneStamps, supervisorRunning } from '../web/supervisor-sentinel.js'
+import { decideAction, pruneStamps, supervisorRunning, isPlannedRestartWindow, PLANNED_RESTART_MARKER } from '../web/supervisor-sentinel.js'
 
 // The sentinel's behaviour lives in a pure decision (decideAction) so the
 // crash-loop / backoff / escalate logic is testable without spawning processes.
@@ -62,6 +62,36 @@ describe('supervisorRunning (live, value-free)', () => {
   })
 })
 
+describe('isPlannedRestartWindow', () => {
+  afterEach(() => {
+    if (existsSync(PLANNED_RESTART_MARKER)) unlinkSync(PLANNED_RESTART_MARKER)
+  })
+
+  it('returns false when the marker file is absent', () => {
+    if (existsSync(PLANNED_RESTART_MARKER)) unlinkSync(PLANNED_RESTART_MARKER)
+    expect(isPlannedRestartWindow()).toBe(false)
+  })
+
+  // Ensure store/ exists in the worktree before writing the marker.
+  function ensureMarker(content: string): void {
+    const dir = PLANNED_RESTART_MARKER.replace(/\/[^/]+$/, '')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(PLANNED_RESTART_MARKER, content)
+  }
+
+  it('returns true when the marker file is fresh', () => {
+    ensureMarker('planned')
+    expect(isPlannedRestartWindow()).toBe(true)
+  })
+
+  it('returns false when the marker file is older than 30 minutes (TTL expired)', () => {
+    ensureMarker('planned')
+    const stale = new Date(Date.now() - 31 * 60 * 1_000)
+    utimesSync(PLANNED_RESTART_MARKER, stale, stale)
+    expect(isPlannedRestartWindow()).toBe(false)
+  })
+})
+
 describe('safety contract', () => {
   it('relaunches setsid-detached (detached:true) so a dashboard restart cannot orphan it', () => {
     expect(SRC).toMatch(/detached:\s*true/)
@@ -77,6 +107,15 @@ describe('safety contract', () => {
     expect(SRC).toMatch(/notifyChannel\(/)
     // the escalate branch is the one that calls notifyChannel
     expect(SRC).toMatch(/function escalateToDominik/)
+  })
+
+  it('planned restart window suppresses alertMarveen but still relaunches', () => {
+    // The planned path logs quietly (info) and skips alertMarveen; the
+    // relaunchSupervisor() call is not conditional on planned.
+    expect(SRC).toMatch(/isPlannedRestartWindow\(\)/)
+    expect(SRC).toMatch(/planned restart window, relaunched silently/)
+    // Failed relaunch always escalates regardless of planned window
+    expect(SRC).toMatch(/SULYOS:.*relaunch-a HIBAZOTT/)
   })
 
   it('detects the supervisor via a cmdline that the node dashboard cannot self-match', () => {
