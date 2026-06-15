@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
+import { shouldHoldProactiveWork } from './fleet-pause-enforcer.js'
 import {
   createAgentMessage,
   getPendingMessages,
@@ -202,6 +203,15 @@ export function startMessageRouter(): NodeJS.Timeout {
           logger.warn({ id: msg.id, to: msg.to_agent, session }, 'Agent message target session busy, will retry')
           routerLoggedMisses.add(msg.id)
         }
+        continue
+      }
+
+      // Fleet-pause gate (card fd30873b): while the rate-limit governor has paused
+      // the fleet AND enforcement is activated (FLEET_PAUSE_ENFORCE), hold delivery
+      // -- the row stays pending and is delivered once the pause self-clears. No
+      // pending-ack is written (we never reach the inject), so the ACK invariant is
+      // untouched. Inert by default (mode=off => returns false, zero overhead).
+      if (shouldHoldProactiveWork(`message:${msg.id}->${msg.to_agent}`)) {
         continue
       }
 

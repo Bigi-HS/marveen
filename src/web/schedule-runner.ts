@@ -24,6 +24,7 @@ import {
   wrapUntrusted,
 } from '../prompt-safety.js'
 import { cronMatchesNow } from './cron.js'
+import { shouldHoldProactiveWork } from './fleet-pause-enforcer.js'
 import {
   listScheduledTasks,
   type ScheduledTask,
@@ -95,7 +96,7 @@ function persistScheduleLastRun(): void {
 // Try to fire a task at a single target agent. Returns the outcome so the
 // caller can decide whether to queue a retry. Splitting this out means the
 // pendingTaskRetries loop and the normal cron loop share one code path.
-function attemptFireTask(task: ScheduledTask, agentName: string, now: number): 'fired' | 'busy' | 'missing' | 'error' {
+function attemptFireTask(task: ScheduledTask, agentName: string, now: number): 'fired' | 'busy' | 'missing' | 'error' | 'paused' {
   const isMainAgent = agentName === MAIN_AGENT_ID
   // Allow per-task session override via targetSession config field.
   // Falls back to the standard agent session name derivation.
@@ -112,6 +113,15 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
   if (!sessionExists) {
     logger.warn({ task: task.name, agent: agentName, session }, 'Schedule target session not running, skipping')
     return 'missing'
+  }
+
+  // Fleet-pause gate (card fd30873b): when the rate-limit governor has paused the
+  // fleet AND enforcement is activated (FLEET_PAUSE_ENFORCE), hold off firing this
+  // task -- it is retried on a later cycle and fires once the pause self-clears.
+  // Checked BEFORE forceSend: a rate-limit pause must hold even forceSend tasks.
+  // Inert by default (mode=off => this returns false with zero overhead).
+  if (shouldHoldProactiveWork(`schedule:${task.name}@${agentName}`)) {
+    return 'paused'
   }
 
   // When forceSend is true, skip the busy-state check entirely and inject
@@ -345,6 +355,9 @@ export function startScheduleRunner(): NodeJS.Timeout {
       if (taskDef.skipIfBusy) {
         if (now - row.last_attempt < SKIP_IF_BUSY_RETRY_INTERVAL_MS) continue // throttle
         const result = attemptFireTask(taskDef, row.agent_name, now)
+        // Fleet paused: hold without burning a retry attempt or alerting. The
+        // self-expiring pause clears on resume and the row is re-attempted then.
+        if (result === 'paused') continue
         if (result === 'fired' || result === 'missing') {
           deletePendingTaskRetry(row.task_name, row.agent_name)
           continue
@@ -363,6 +376,8 @@ export function startScheduleRunner(): NodeJS.Timeout {
 
       const view = toPendingRetryView(row, now)
       const result = attemptFireTask(taskDef, row.agent_name, now)
+      // Fleet paused: hold this retry without refreshing the row or alerting.
+      if (result === 'paused') continue
       if (result === 'fired' || result === 'missing') {
         deletePendingTaskRetry(row.task_name, row.agent_name)
         continue
@@ -400,6 +415,10 @@ export function startScheduleRunner(): NodeJS.Timeout {
         // the retry handler -- don't re-queue or double-fire.
         if (pendingKeys.has(key)) continue
         const result = attemptFireTask(task, agentName, now)
+        // Fleet paused: skip this tick entirely. Do NOT requeue into the
+        // bounded-retry machinery (that is for genuinely-busy agents) -- the
+        // normal cron + catch-up window re-fires once the pause self-clears.
+        if (result === 'paused') continue
         if (result === 'busy') {
           if (task.skipIfBusy) {
             // Bounded re-queue instead of silent drop (card 92f763a2):
