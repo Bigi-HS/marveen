@@ -308,6 +308,28 @@ def write_dexa(
     )
 
 
+def write_nutrition_not_logged(store: str, date_str: str) -> None:
+    """Write a logged:false sentinel for a day with no food log (NUT-AC1).
+
+    Distinct from a missing entry: missing = unknown; logged:false = confirmed no-log day.
+    Trend functions count this as a denominator gap day, not an excluded unknown.
+    """
+    path = os.path.join(store, "nutrition_log.json")
+    data = _open_store_file(path)
+    entries = data.get("entries", [])
+
+    sentinel: dict[str, Any] = {"date": date_str, "logged": False}
+    existing = next((i for i, e in enumerate(entries) if e.get("date") == date_str), None)
+    if existing is not None:
+        entries[existing] = sentinel
+    else:
+        entries.append(sentinel)
+
+    data["entries"] = sorted(entries, key=lambda e: e.get("date", ""))
+    _write_store_file(path, data)
+    print(f"OK: logged:false sentinel written for {date_str} (confirmed no-log day)")
+
+
 def init_store(store: str) -> None:
     """Create empty store files with 0600 if they don't exist (SEC-AC4b)."""
     for filename in ("nutrition_log.json", "supplement_adherence_log.json"):
@@ -376,6 +398,11 @@ def main() -> None:
     a.add_argument("--skipped", default="", help="'Name::reason,Name2'")
     a.add_argument("--store", default=DEFAULT_STORE)
 
+    # not-logged subcommand
+    nl = sub.add_parser("not-logged", help="Write logged:false sentinel (NUT-AC1 confirmed no-log day)")
+    nl.add_argument("--date", default=str(date.today()))
+    nl.add_argument("--store", default=DEFAULT_STORE)
+
     # dexa subcommand
     d = sub.add_parser("dexa", help="Write DEXA scan result to progress store (SEC-AC1/3)")
     d.add_argument("--date", default=str(date.today()))
@@ -418,6 +445,11 @@ def main() -> None:
             taken=taken,
             skipped=skipped,
             supplement_names=names,
+        )
+    elif args.cmd == "not-logged":
+        write_nutrition_not_logged(
+            store=os.path.abspath(args.store),
+            date_str=args.date,
         )
     elif args.cmd == "dexa":
         write_dexa(
