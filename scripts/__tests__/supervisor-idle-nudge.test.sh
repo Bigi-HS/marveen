@@ -127,32 +127,67 @@ idle_age=$(( $(date +%s) - now_ts ))
 [ "$idle_age" -lt "$IDLE_NUDGE_GRACE_SECONDS" ]
 assert_eq "fresh idle-since -> grace period not elapsed" 0 "$?"
 
-# --- pane_has_overloaded_error: detection-label predicate (card 7ede0997) ---
-# Pure logic test: drive the grep directly (no real tmux needed)
-pane_has_overloaded_error_mock() {
-  local content="$1"
-  echo "$content" | grep -qiE "API Error.*[Oo]verload|[Oo]verload.*API Error|Claude.*overloaded"
+# --- pane_has_overloaded_error: detection-label predicate (card 7ede0997 / 0c567c29) ---
+# Tests call the REAL pane_has_overloaded_error() (sourced above) -- no grep-mock.
+# TMUX_BIN is overridden per-call to emit controlled pane content.
+
+_mock_pane_content=""
+_mock_tmux="$TMP/mock-tmux.sh"
+_pane_content_file="$TMP/pane-content.txt"
+
+# Build the mock tmux script once; it reads from _pane_content_file each call.
+cat > "$_mock_tmux" << SCRIPT
+#!/bin/bash
+cat "$_pane_content_file"
+SCRIPT
+chmod +x "$_mock_tmux"
+
+assert_overloaded() {
+  local label="$1" expected="$2" content="$3"
+  printf '%s' "$content" > "$_pane_content_file"
+  local old_tmux="$TMUX_BIN"
+  TMUX_BIN="$_mock_tmux"
+  pane_has_overloaded_error "fake-session"
+  local rc=$?
+  TMUX_BIN="$old_tmux"
+  assert_eq "$label" "$expected" "$rc"
 }
 
-# overloaded string present -> returns 0 (true)
-pane_has_overloaded_error_mock "Some output\nAPI Error: Overloaded\n❯ "
-assert_eq "API Error: Overloaded in pane -> overloaded=true" 0 "$?"
+# Positive: API Error: Overloaded header (primary TUI form)
+assert_overloaded "API Error: Overloaded -> true" 0 "Some output
+API Error: Overloaded
+❯ "
 
-# case-insensitive variant
-pane_has_overloaded_error_mock "api error: overloaded\n❯ "
-assert_eq "lowercase variant -> overloaded=true" 0 "$?"
+# Positive: lowercase / case-insensitive variant
+assert_overloaded "api error: overloaded (lowercase) -> true" 0 "api error: overloaded
+❯ "
 
-# 'Claude is overloaded' variant (alternate message form)
-pane_has_overloaded_error_mock "Claude is overloaded at the moment\n❯ "
-assert_eq "Claude.*overloaded variant -> overloaded=true" 0 "$?"
+# Positive: narrative form 'is overloaded' (verb-anchored)
+assert_overloaded "'is overloaded' narrative -> true" 0 "Claude claude-opus-4-8 is overloaded at the moment
+❯ "
 
-# clean idle pane -> returns 1 (false)
-pane_has_overloaded_error_mock "Some completed work\n❯ "
-assert_eq "clean idle pane -> overloaded=false" 1 "$?"
+# Positive: 'is currently overloaded' form
+assert_overloaded "'is currently overloaded' -> true" 0 "Claude is currently overloaded -- please retry
+❯ "
 
-# thinking pane (not idle) -> returns 1
-pane_has_overloaded_error_mock "Thinking...\nesc to interrupt"
-assert_eq "thinking pane -> overloaded=false" 1 "$?"
+# ADVERSARIAL FIXTURE 1 (false-positive): generic overload discussion must NOT trigger.
+# "Claude handles overloaded queues" -- no verb 'is/was' before 'overloaded', no API Error.
+assert_overloaded "AF1: discussion of overloaded systems -> false" 1 "I asked Claude about handling overloaded queues
+The model handles overloaded scenarios gracefully
+❯ "
+
+# ADVERSARIAL FIXTURE 2 (false-positive): subject mentions Claude + overloaded but no verb anchor.
+# "Claude's context window is large; overloaded_error type is 529" -- 'overloaded' in a type name,
+# not preceded by ' is/was (currently)'.
+assert_overloaded "AF2: 'overloaded_error' type name -> false" 1 "The overloaded_error type (529) is documented
+Claude returns this when capacity is exceeded
+❯ "
+
+# ADVERSARIAL FIXTURE 3 (opposing-combination): benign Claude mention coexists with real API error.
+# Must still return true because the API Error line matches independently.
+assert_overloaded "AF3: benign Claude mention + real API Error -> true" 0 "Earlier: Claude discussed overloaded systems
+Now: API Error: Overloaded (529)
+❯ "
 
 # --- TOTAL -------------------------------------------------------------------
 echo ""
