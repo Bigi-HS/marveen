@@ -17,7 +17,9 @@ Covers (alongside the Buster-c12 smoke in store/ollama-pathb-spec.md):
 """
 import json
 import os
+import stat
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -102,6 +104,61 @@ class CloudTokenFuseTests(unittest.TestCase):
 
     def test_absent_is_safe(self):
         lw.assert_no_cloud_credentials({"PATH": "/usr/bin"})
+
+    def test_raises_on_oauth_token(self):
+        # Chad: the launcher must scrub CLAUDE_CODE_OAUTH_TOKEN too -- it is the
+        # real exfil-capable cloud credential.
+        with self.assertRaises(RuntimeError):
+            lw.assert_no_cloud_credentials({"CLAUDE_CODE_OAUTH_TOKEN": "oauth"})
+
+    def test_claude_config_dir_is_safe(self):
+        # CLAUDE_CONFIG_DIR is a benign path set fleet-wide -- must NOT abort.
+        lw.assert_no_cloud_credentials({"CLAUDE_CONFIG_DIR": "/home/x/.claude-config"})
+
+
+class AssertLocalUrlsTests(unittest.TestCase):
+    """Chad FLAG (A10 SSRF): the poller reads the whole vault, so both endpoints
+    MUST be loopback -- a tampered env must not exfiltrate vault content."""
+
+    def test_localhost_and_loopback_pass(self):
+        lw.assert_local_urls("http://localhost:11434", "http://127.0.0.1:3420")
+
+    def test_ipv6_loopback_passes(self):
+        lw.assert_local_urls("http://[::1]:11434", "http://localhost:3420")
+
+    def test_external_ollama_raises(self):
+        with self.assertRaises(RuntimeError):
+            lw.assert_local_urls("http://evil.example.com:11434", "http://localhost:3420")
+
+    def test_external_dashboard_raises(self):
+        with self.assertRaises(RuntimeError):
+            lw.assert_local_urls("http://localhost:11434", "http://10.0.0.5:3420")
+
+    def test_lookalike_host_raises(self):
+        # "localhost.evil.com" must not slip past a naive prefix check.
+        with self.assertRaises(RuntimeError):
+            lw.assert_local_urls("http://localhost.evil.com:11434", "http://localhost:3420")
+
+
+class AppendSuggestionPermsTests(unittest.TestCase):
+    """Chad: suggestions.jsonl holds vault-derived content previews -> 0600."""
+
+    def test_file_created_0600(self):
+        tmp = tempfile.mkdtemp(prefix="lw-perm-")
+        path = os.path.join(tmp, "suggestions.jsonl")
+        lw.append_suggestion(path, {"memory_id": 1, "suggested_category": "warm"})
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        self.assertEqual(mode, 0o600, f"expected 0600, got {oct(mode)}")
+
+    def test_loosens_preexisting_perms(self):
+        tmp = tempfile.mkdtemp(prefix="lw-perm2-")
+        path = os.path.join(tmp, "suggestions.jsonl")
+        with open(path, "w") as f:
+            f.write("")
+        os.chmod(path, 0o644)
+        lw.append_suggestion(path, {"memory_id": 2})
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        self.assertEqual(mode, 0o600)
 
 
 class TagsHaveModelTests(unittest.TestCase):

@@ -31,6 +31,7 @@ import random
 import re
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 # --- configuration -----------------------------------------------------------
@@ -64,17 +65,43 @@ SYSTEM_PROMPT = (
 
 # --- pure functions (unit-tested) --------------------------------------------
 
+# Cloud credentials that must be scrubbed from the launch env. Scoped to the
+# actual exfil-capable tokens (NOT a blanket CLAUDE_* -- CLAUDE_CONFIG_DIR is a
+# benign path set fleet-wide and must not trip the fuse).
+CLOUD_CRED_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+
+# Hosts the poller is allowed to talk to. It reads the whole vault, so both
+# endpoints must be loopback -- a tampered env must not exfiltrate to a remote.
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
 def assert_no_cloud_credentials(env):
     """Mandatory cloud-token fuse. Raise if a non-empty cloud credential is set.
 
     PATH B must NEVER reach a cloud model. An explicit empty override
     (ANTHROPIC_API_KEY="") is the documented safe launch form, so only a
-    truthy value aborts.
+    truthy value aborts. The launcher is expected to start the poller with these
+    unset/empty.
     """
-    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+    for var in CLOUD_CRED_VARS:
         if env.get(var):
             raise RuntimeError(
                 f"PATH B: cloud credential {var} detected -- abort. Use Ollama only."
+            )
+
+
+def assert_local_urls(*urls):
+    """SSRF/exfil fuse (Chad A10): every endpoint host MUST be loopback.
+
+    Guards against a prompt-injected agent or compromised supervisor rewriting
+    OLLAMA_URL/DASHBOARD_URL to ship vault content to a remote. Exact host match
+    (so "localhost.evil.com" is rejected, not prefix-matched).
+    """
+    for u in urls:
+        host = urllib.parse.urlparse(u).hostname
+        if host not in LOCAL_HOSTS:
+            raise RuntimeError(
+                f"PATH B: non-loopback endpoint {u!r} (host={host!r}) -- abort (SSRF guard)."
             )
 
 
@@ -227,7 +254,14 @@ def load_already_suggested(path):
 
 
 def append_suggestion(path, record):
-    with open(path, "a", encoding="utf-8") as f:
+    # 0600: the jsonl holds vault-derived content previews (Chad). Create with
+    # owner-only perms and enforce them even if the file pre-exists looser.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except (AttributeError, OSError):
+        pass
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
@@ -285,7 +319,8 @@ def main(argv=None):
     parser.add_argument("--agent", default=DEFAULT_AGENT)
     args = parser.parse_args(argv)
 
-    assert_no_cloud_credentials(os.environ)  # fail-fast before any work
+    assert_no_cloud_credentials(os.environ)            # fail-fast before any work
+    assert_local_urls(args.ollama_url, args.dashboard_url)  # SSRF/exfil guard
 
     token = _read_token()
     rng = random.Random()
