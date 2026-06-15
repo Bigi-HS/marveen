@@ -1,0 +1,22 @@
+{
+  "entries": [
+    {
+      "date": "2026-06-15",
+      "supplements": [
+        {
+          "name": "Omega-3",
+          "taken": true,
+          "time_taken": "08:00",
+          "notes": null
+        },
+        {
+          "name": "Berberine",
+          "taken": false,
+          "notes": "forgot pre-lunch"
+        }
+      ],
+      "source": "manual",
+      "hibiki_validated": true
+    }
+  ]
+}
