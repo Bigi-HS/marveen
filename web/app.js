@@ -7957,7 +7957,10 @@ function renderCarriedItem(item) {
     no.className = 'todo-confirm-no'
     no.textContent = 'Mégsem'
     no.addEventListener('click', () => { actions.innerHTML = ''; actions.appendChild(dismiss) })
-    actions.appendChild(q); actions.appendChild(yes); actions.appendChild(no)
+    // Safe option ('Mégsem') takes the slot 'Elvet' just occupied; the
+    // destructive 'Igen' is pushed to the far end so a fast double-click on the
+    // original button position cannot accidentally confirm the hard delete.
+    actions.appendChild(q); actions.appendChild(no); actions.appendChild(yes)
   })
   actions.appendChild(dismiss)
 
