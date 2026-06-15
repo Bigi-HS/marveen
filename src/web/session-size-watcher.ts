@@ -32,6 +32,7 @@ import {
 import { agentSessionName, isAgentRunning, capturePane, sendPromptToSession } from './agent-process.js'
 import { readContextTokensFromProjectDir, readActiveModelFromProjectDir } from './active-model.js'
 import { isReadyForPrompt } from '../pane-state.js'
+import { shouldHoldProactiveWork } from './fleet-pause-enforcer.js'
 
 // Transcript size at which we compact. Empirically: Dave's 113k-token session
 // produced a 1.5MB JSONL. 1MB is comfortably past normal work but well before
@@ -233,6 +234,13 @@ function checkAgent(name: string): void {
     return
   }
 
+  // Fleet-pause gate (card fd30873b, DA HIGH-1): /compact is itself a model call.
+  // Under a token-budget pause (today's only pause reason) it would burn the very
+  // five-hour window we are trying to let reset, so hold it. The session is idle
+  // and held, so its context is not growing; it compacts on the next sweep after
+  // the pause self-clears. Inert by default (mode=off => false).
+  if (shouldHoldProactiveWork(`compact-soft:${name}`)) return
+
   logger.info(
     { agent: name, contextTokens, tokenThreshold: thresholds.tokenThreshold },
     'session-size-watcher: context exceeds token threshold while agent is idle, sending /compact',
@@ -283,6 +291,12 @@ function checkAgentHardCeiling(name: string): void {
     }
     return
   }
+
+  // Fleet-pause gate (card fd30873b, DA HIGH-1): hold the hard-ceiling /compact
+  // too under an active pause -- the held session is idle and not growing, so it
+  // is safe to defer to the next sweep after the pause self-clears, rather than
+  // spend a model call on the exhausted window. Inert by default (mode=off).
+  if (shouldHoldProactiveWork(`compact-hard:${name}`)) return
 
   logger.info(
     { agent: name, contextTokens, hardCeiling },
