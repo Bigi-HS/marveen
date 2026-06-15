@@ -296,9 +296,17 @@ for line in "${RESULT_LINES[@]}"; do
 done
 echo ""
 
-ok_count=0
+# Per-skill verdict tallies (distinct from the result-LINE counters TOTAL_WARNS/
+# TOTAL_BLOCKS, which can exceed 10 because one skill can emit several lines).
+# ok_count doubles as the badge "pass" count -- a single pass over TOP10 feeds
+# both the verdict line and the badge, so there is no second tally loop.
+ok_count=0; WARN_SKILLS=0; BLOCK_SKILLS=0
 for skill in "${TOP10[@]}"; do
-  [ "${SKILL_STATUS[$skill]:-BLOCK}" = "PASS" ] && ok_count=$((ok_count+1))
+  case "${SKILL_STATUS[$skill]:-BLOCK}" in
+    PASS)  ok_count=$((ok_count+1)) ;;
+    WARN)  WARN_SKILLS=$((WARN_SKILLS+1)) ;;
+    *)     BLOCK_SKILLS=$((BLOCK_SKILLS+1)) ;;
+  esac
 done
 
 # Determine overall verdict
@@ -332,17 +340,6 @@ os.makedirs(os.path.dirname("$LAST_JSON"), exist_ok=True)
 open("$LAST_JSON", "w").write(json.dumps(data, indent=2))
 PY
 
-# Per-skill verdict tallies for the badge (distinct from the result-LINE counters,
-# which can exceed 10 because one skill can emit several lines).
-PASS_SKILLS=0; WARN_SKILLS=0; BLOCK_SKILLS=0
-for skill in "${TOP10[@]}"; do
-  case "${SKILL_STATUS[$skill]:-BLOCK}" in
-    PASS)  PASS_SKILLS=$((PASS_SKILLS+1)) ;;
-    WARN)  WARN_SKILLS=$((WARN_SKILLS+1)) ;;
-    *)     BLOCK_SKILLS=$((BLOCK_SKILLS+1)) ;;
-  esac
-done
-
 # Status badge (shields.io endpoint schema: schemaVersion/label/message/color)
 # plus explicit pass/warn/block skill counts and an ISO-8601 timestamp. Always
 # rewritten so a stale badge can never outlive a fresh run.
@@ -357,7 +354,7 @@ badge = {
     "message": "%s (%d/%d ok)" % (verdict, $ok_count, ${#TOP10[@]}),
     "color": color,
     "verdict": verdict,
-    "counts": {"pass": $PASS_SKILLS, "warn": $WARN_SKILLS, "block": $BLOCK_SKILLS},
+    "counts": {"pass": $ok_count, "warn": $WARN_SKILLS, "block": $BLOCK_SKILLS},
     "total": ${#TOP10[@]},
     "timestamp": int(now),
     "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)),
