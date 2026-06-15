@@ -500,6 +500,19 @@ pane_is_idle_at_prompt() {
   return 1
 }
 
+# Returns 0 (true) when the pane's recent scrollback contains an "API Error:
+# Overloaded" (or equivalent) string, indicating the agent was interrupted by an
+# API overload and dropped to idle -- NOT legitimately done. Detection-label only:
+# callers may annotate log messages or adjust grace periods; this function never
+# retries or sends any message on its own.
+pane_has_overloaded_error() {
+  local session="$1" pane_scroll
+  # Capture more lines than pane_is_idle_at_prompt -- the error may appear above
+  # the prompt and then the agent dropped straight to ❯.
+  pane_scroll=$("$TMUX_BIN" capture-pane -t "$session" -p 2>/dev/null | tail -20)
+  echo "$pane_scroll" | grep -qiE "API Error.*[Oo]verload|[Oo]verload.*API Error|Claude.*overloaded"
+}
+
 # Returns 0 (true) when agent has at least one open obligation: a delivered/
 # pending agent_messages row to this agent with no completed_at, within the
 # IDLE_NUDGE_LOOKBACK_SECONDS window.
@@ -573,8 +586,12 @@ ensure_idle_nudge_watch() {
       continue  # Still within grace period -- do not nudge yet
     fi
 
-    # Grace period elapsed with an open obligation and idle pane: nudge
-    log "idle-nudge: $agent idle ${idle_age}s with open obligation -- sending resume nudge"
+    # Grace period elapsed with an open obligation and idle pane: nudge.
+    # Detection-label: annotate whether the idle was caused by an API overload
+    # (the most common stall cause) vs a legitimately-waiting idle.
+    local overloaded_label=""
+    pane_has_overloaded_error "$session" && overloaded_label=" [OVERLOADED-IDLE]"
+    log "idle-nudge: $agent idle${overloaded_label} ${idle_age}s with open obligation -- sending resume nudge"
     "$TMUX_BIN" send-keys -t "$session" -l "$IDLE_NUDGE_TEXT"
     sleep 0.4
     "$TMUX_BIN" send-keys -t "$session" Enter

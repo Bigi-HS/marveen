@@ -127,6 +127,33 @@ idle_age=$(( $(date +%s) - now_ts ))
 [ "$idle_age" -lt "$IDLE_NUDGE_GRACE_SECONDS" ]
 assert_eq "fresh idle-since -> grace period not elapsed" 0 "$?"
 
+# --- pane_has_overloaded_error: detection-label predicate (card 7ede0997) ---
+# Pure logic test: drive the grep directly (no real tmux needed)
+pane_has_overloaded_error_mock() {
+  local content="$1"
+  echo "$content" | grep -qiE "API Error.*[Oo]verload|[Oo]verload.*API Error|Claude.*overloaded"
+}
+
+# overloaded string present -> returns 0 (true)
+pane_has_overloaded_error_mock "Some output\nAPI Error: Overloaded\n❯ "
+assert_eq "API Error: Overloaded in pane -> overloaded=true" 0 "$?"
+
+# case-insensitive variant
+pane_has_overloaded_error_mock "api error: overloaded\n❯ "
+assert_eq "lowercase variant -> overloaded=true" 0 "$?"
+
+# 'Claude is overloaded' variant (alternate message form)
+pane_has_overloaded_error_mock "Claude is overloaded at the moment\n❯ "
+assert_eq "Claude.*overloaded variant -> overloaded=true" 0 "$?"
+
+# clean idle pane -> returns 1 (false)
+pane_has_overloaded_error_mock "Some completed work\n❯ "
+assert_eq "clean idle pane -> overloaded=false" 1 "$?"
+
+# thinking pane (not idle) -> returns 1
+pane_has_overloaded_error_mock "Thinking...\nesc to interrupt"
+assert_eq "thinking pane -> overloaded=false" 1 "$?"
+
 # --- TOTAL -------------------------------------------------------------------
 echo ""
 if [ "$FAIL" -eq 0 ]; then
