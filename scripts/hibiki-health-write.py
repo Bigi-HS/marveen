@@ -223,7 +223,6 @@ def write_adherence(
         "date": date_str,
         "supplements": supplements,
         "source": source,
-        "hibiki_validated": True,
     }
     if existing is not None:
         entries[existing] = day_entry
@@ -262,16 +261,18 @@ def init_store(store: str) -> None:
 # CLI
 # --------------------------------------------------------------------------- #
 def _parse_taken(s: str) -> list[dict]:
-    """Parse 'Name:HH:MM,Name2::notes' into list of dicts."""
+    """Parse 'Name:HH:MM,Name2:HH:MM' into list of dicts.
+
+    Split on the FIRST colon only so HH:MM stays intact.
+    """
     result = []
     for part in s.split(","):
-        parts = part.strip().split(":")
-        name = parts[0].strip()
+        halves = part.strip().split(":", 1)
+        name = halves[0].strip()
         if not name:
             continue
-        time_ = parts[1].strip() if len(parts) > 1 else None
-        notes = parts[2].strip() if len(parts) > 2 else None
-        result.append({"name": name, "time": time_ or None, "notes": notes})
+        time_ = halves[1].strip() if len(halves) > 1 else None
+        result.append({"name": name, "time": time_ or None, "notes": None})
     return result
 
 
