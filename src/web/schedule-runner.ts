@@ -95,6 +95,47 @@ function persistScheduleLastRun(): void {
 
 // Try to fire a task at a single target agent. Returns the outcome so the
 // caller can decide whether to queue a retry. Splitting this out means the
+// Build the full prompt injected into the agent's session for a scheduled
+// task. Extracted so the cron loop (attemptFireTask) and the on-demand
+// "run now" dashboard trigger compose the prompt identically -- one source of
+// truth for the type-specific prefix + the untrusted-wrap of the user-editable
+// task body. Pure: no IO, no bookkeeping.
+export function buildScheduledTaskPrompt(task: ScheduledTask, agentName: string): string {
+  let prefix: string
+  if (task.type === 'heartbeat') {
+    // Channel-less heartbeat agents (today: only `heartbeat`) MUST NOT
+    // receive the Telegram-keepalive directive -- their CLAUDE.md is
+    // explicit that all output goes to Marveen via inter-agent message
+    // (Marveen 2026-06-02 PR #257 review block). The historical prefix
+    // was Marveen-specific scaffolding ("keep the bun-poller stdio
+    // alive, only Telegram-reply if urgent") and would create a direct
+    // contradiction with the agent's own contract; worse, if the
+    // channel-plugin disable ever leaks through from the user-scope
+    // settings (which it has done before in this fleet -- the very
+    // motivation for this whole rearchitecture), the leftover Telegram
+    // tool would receive an explicit instruction to use chat_id
+    // ALLOWED_CHAT_ID. So: emit a minimal heartbeat tag for the
+    // resubmit-marker code below to match, and let the agent's own
+    // CLAUDE.md + SKILL.md drive behaviour.
+    if (agentName === 'heartbeat') {
+      prefix = `[Heartbeat: ${task.name}] `
+    } else {
+      prefix = `[Heartbeat: ${task.name}] *** KOTELEZO ELSO TEENDO MIELOTT BARMIT IRSZ: hivj meg pontosan EGY local-only tool-t (peldaul Bash 'echo keepalive >> /tmp/marveen-keepalive.log' VAGY Read tool egy meglevo fajlra mint ${join(PROJECT_ROOT, 'HEARTBEAT.md')}). NE Telegram-tool-t -- az zajt eredmenyezne. Ezt a Telegram-bun MCP-stdio-pipe keep-alive-ehez kell, ha kihagyod, a Telegram-conn 30 percen belul disconnect-el. *** Aztan: ez egy csendes ellenorzes. CSAK AKKOR irj Telegramon (chat_id: ${ALLOWED_CHAT_ID}), ha tenyleg fontos/surgos dolgot talalsz. Ha minden rendben, NE kuldj Telegram uzenetet -- a kotelezo no-op tool-call mar megfelelo aktivitas. Egy rovid 'csendes heartbeat' sor a transzkriptbe + a tool-call elég. `
+    }
+  } else {
+    prefix = `[Utemezett feladat: ${task.name}] Az eredmenyt kuldd el Telegramon (chat_id: ${ALLOWED_CHAT_ID}, reply tool). `
+  }
+  // Task prompts are editable via /api/schedules (bearer-gated), which means
+  // they can carry injection payloads just like inter-agent messages. Wrap
+  // the user-editable part and prepend the preamble so the receiving agent
+  // treats it as data, not an instruction override.
+  return (
+    UNTRUSTED_PREAMBLE + '\n' +
+    prefix.trimEnd() + '\n\n' +
+    wrapUntrusted(`scheduled-task:${task.name}`, task.prompt)
+  )
+}
+
 // pendingTaskRetries loop and the normal cron loop share one code path.
 function attemptFireTask(task: ScheduledTask, agentName: string, now: number): 'fired' | 'busy' | 'missing' | 'error' | 'paused' {
   const isMainAgent = agentName === MAIN_AGENT_ID
@@ -139,38 +180,7 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
   }
 
   try {
-    let prefix: string
-    if (task.type === 'heartbeat') {
-      // Channel-less heartbeat agents (today: only `heartbeat`) MUST NOT
-      // receive the Telegram-keepalive directive -- their CLAUDE.md is
-      // explicit that all output goes to Marveen via inter-agent message
-      // (Marveen 2026-06-02 PR #257 review block). The historical prefix
-      // was Marveen-specific scaffolding ("keep the bun-poller stdio
-      // alive, only Telegram-reply if urgent") and would create a direct
-      // contradiction with the agent's own contract; worse, if the
-      // channel-plugin disable ever leaks through from the user-scope
-      // settings (which it has done before in this fleet -- the very
-      // motivation for this whole rearchitecture), the leftover Telegram
-      // tool would receive an explicit instruction to use chat_id
-      // ALLOWED_CHAT_ID. So: emit a minimal heartbeat tag for the
-      // resubmit-marker code below to match, and let the agent's own
-      // CLAUDE.md + SKILL.md drive behaviour.
-      if (agentName === 'heartbeat') {
-        prefix = `[Heartbeat: ${task.name}] `
-      } else {
-        prefix = `[Heartbeat: ${task.name}] *** KOTELEZO ELSO TEENDO MIELOTT BARMIT IRSZ: hivj meg pontosan EGY local-only tool-t (peldaul Bash 'echo keepalive >> /tmp/marveen-keepalive.log' VAGY Read tool egy meglevo fajlra mint ${join(PROJECT_ROOT, 'HEARTBEAT.md')}). NE Telegram-tool-t -- az zajt eredmenyezne. Ezt a Telegram-bun MCP-stdio-pipe keep-alive-ehez kell, ha kihagyod, a Telegram-conn 30 percen belul disconnect-el. *** Aztan: ez egy csendes ellenorzes. CSAK AKKOR irj Telegramon (chat_id: ${ALLOWED_CHAT_ID}), ha tenyleg fontos/surgos dolgot talalsz. Ha minden rendben, NE kuldj Telegram uzenetet -- a kotelezo no-op tool-call mar megfelelo aktivitas. Egy rovid 'csendes heartbeat' sor a transzkriptbe + a tool-call elég. `
-      }
-    } else {
-      prefix = `[Utemezett feladat: ${task.name}] Az eredmenyt kuldd el Telegramon (chat_id: ${ALLOWED_CHAT_ID}, reply tool). `
-    }
-    // Task prompts are editable via /api/schedules (bearer-gated), which means
-    // they can carry injection payloads just like inter-agent messages. Wrap
-    // the user-editable part and prepend the preamble so the receiving agent
-    // treats it as data, not an instruction override.
-    const fullPrompt =
-      UNTRUSTED_PREAMBLE + '\n' +
-      prefix.trimEnd() + '\n\n' +
-      wrapUntrusted(`scheduled-task:${task.name}`, task.prompt)
+    const fullPrompt = buildScheduledTaskPrompt(task, agentName)
     sendPromptToSession(session, fullPrompt)
     scheduleLastRun.set(task.name, now)
     persistScheduleLastRun()

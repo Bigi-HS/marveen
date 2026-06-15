@@ -10,13 +10,15 @@ import { toPendingRetryView } from '../../pending-retries.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
 import { isValidCronShape } from '../cron.js'
 import { readBody, json, RequestBodyTooLargeError } from '../http-helpers.js'
-import { sanitizeScheduleName } from '../sanitize.js'
+import { sanitizeScheduleName, safeScheduleName } from '../sanitize.js'
 import { listAgentNames } from '../agent-config.js'
 import { readFileOr } from '../agent-config.js'
 import {
   SCHEDULED_TASKS_DIR, MAX_SCHEDULED_TASK_PROMPT_LEN,
   listScheduledTasks, writeScheduledTask,
 } from '../scheduled-tasks-io.js'
+import { buildScheduledTaskPrompt } from '../schedule-runner.js'
+import { injectToSession, resolveSession } from '../action-trigger.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleSchedules(ctx: RouteContext): Promise<boolean> {
@@ -145,7 +147,8 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
 
   const scheduleUpdateMatch = path.match(/^\/api\/schedules\/([^/]+)$/)
   if (scheduleUpdateMatch && method === 'PUT') {
-    const name = decodeURIComponent(scheduleUpdateMatch[1])
+    const name = safeScheduleName(scheduleUpdateMatch[1])
+    if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
     const dir = join(SCHEDULED_TASKS_DIR, name)
     if (!existsSync(dir)) { json(res, { error: 'Schedule not found' }, 404); return true }
 
@@ -179,7 +182,8 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
   }
 
   if (scheduleUpdateMatch && method === 'DELETE') {
-    const name = decodeURIComponent(scheduleUpdateMatch[1])
+    const name = safeScheduleName(scheduleUpdateMatch[1])
+    if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
     const dir = join(SCHEDULED_TASKS_DIR, name)
     if (!existsSync(dir)) { json(res, { error: 'Schedule not found' }, 404); return true }
     rmSync(dir, { recursive: true, force: true })
@@ -190,7 +194,8 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
 
   const scheduleToggleMatch = path.match(/^\/api\/schedules\/([^/]+)\/toggle$/)
   if (scheduleToggleMatch && method === 'POST') {
-    const name = decodeURIComponent(scheduleToggleMatch[1])
+    const name = safeScheduleName(scheduleToggleMatch[1])
+    if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
     const dir = join(SCHEDULED_TASKS_DIR, name)
     if (!existsSync(dir)) { json(res, { error: 'Schedule not found' }, 404); return true }
 
@@ -202,6 +207,40 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
     logger.info({ name, enabled: newEnabled }, 'Scheduled task toggled')
     json(res, { ok: true, enabled: newEnabled })
+    return true
+  }
+
+  // Fire a scheduled task NOW, on operator demand, regardless of its cron.
+  // Composes the exact same prompt the cron loop would and injects it into the
+  // task's target session. Does NOT touch the cron last-run bookkeeping -- a
+  // manual run is intentional and must not suppress the next scheduled tick.
+  const scheduleRunMatch = path.match(/^\/api\/schedules\/([^/]+)\/run$/)
+  if (scheduleRunMatch && method === 'POST') {
+    const name = safeScheduleName(scheduleRunMatch[1])
+    if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
+    const task = listScheduledTasks().find(t => t.name === name)
+    if (!task) { json(res, { error: 'Schedule not found' }, 404); return true }
+
+    let force = false
+    try {
+      const body = await readBody(req, { maxBytes: 4 * 1024 })
+      if (body.length) force = (JSON.parse(body.toString()) as { force?: boolean }).force === true
+    } catch { /* no/blank body -> force stays false */ }
+
+    const agentName = task.agent || MAIN_AGENT_ID
+    const session = task.targetSession || resolveSession(agentName)
+    const prompt = buildScheduledTaskPrompt(task, agentName)
+    const status = injectToSession(session, prompt, { force })
+    if (status === 'offline') {
+      json(res, { error: `Target session for "${name}" is not running`, status }, 503)
+      return true
+    }
+    if (status === 'busy') {
+      json(res, { error: `Target session for "${name}" is busy; retry or use force`, status }, 409)
+      return true
+    }
+    logger.info({ name, agent: agentName, session, force }, 'Scheduled task fired on operator demand')
+    json(res, { ok: true, status, agent: agentName })
     return true
   }
 
