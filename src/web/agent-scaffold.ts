@@ -32,6 +32,10 @@ const ASK_FIRST_HOOK_MARKER = 'guardrail-ask-first.py'
 // to a protected branch, SQL DROP via a client, PAT cred-file print).
 const DESTRUCTIVE_BASH_HOOK_MARKER = 'guardrail-destructive-bash.py'
 
+// And the PreToolUse last-match-wins permission ruleset (card 13974213): external-
+// directory deny, .env file read deny, external curl mutating-method deny.
+const PERMISSION_RULES_HOOK_MARKER = 'guardrail-permission-rules.py'
+
 type HookCommand = { type?: string; command?: string; prompt?: string }
 type HookEntry = { matcher?: string; hooks?: HookCommand[] }
 type HooksBlock = Record<string, HookEntry[]>
@@ -95,6 +99,18 @@ export function ensureDestructiveBashHook(target: HooksBlock, template: HooksBlo
   return true
 }
 
+// Targeted idempotent merge of the PreToolUse permission-rules gate (card 13974213):
+// external-directory deny, .env file read deny, external-curl mutating deny.
+// ADD-only; never removes or rewrites existing PreToolUse entries.
+export function ensurePermissionRulesHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.PreToolUse ?? []).filter(e => entryReferences(e, PERMISSION_RULES_HOOK_MARKER))
+  if (entries.length === 0) return false
+  const existing = target.PreToolUse ?? []
+  if (existing.some(e => entryReferences(e, PERMISSION_RULES_HOOK_MARKER))) return false
+  target.PreToolUse = [...existing, ...entries]
+  return true
+}
+
 // Idempotent migration: every agent's settings.json should carry the shared
 // hooks (PreCompact memory-save/skill-reflection + the SessionStart taskstate
 // and memory auto-inject replays). Two cases:
@@ -131,7 +147,8 @@ export function ensureAgentHooks(name: string): boolean {
     const guardChanged = ensureGuardrailHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const askFirstChanged = ensureAskFirstHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const destructiveBashChanged = ensureDestructiveBashHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
-    changed = memChanged || guardChanged || askFirstChanged || destructiveBashChanged
+    const permRulesChanged = ensurePermissionRulesHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    changed = memChanged || guardChanged || askFirstChanged || destructiveBashChanged || permRulesChanged
   }
   if (!changed) return false
   mkdirSync(join(agentDir(name), '.claude'), { recursive: true })

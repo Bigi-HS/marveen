@@ -3,6 +3,20 @@
     "telegram@claude-plugins-official": true
   },
   "effortLevel": "high",
+  "permissions": {
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Write(**/.env)",
+      "Edit(**/.env)",
+      "Write(**/.git-credentials)",
+      "Edit(**/.git-credentials)",
+      "Bash(curl -X POST:*)",
+      "Bash(curl -X PUT:*)",
+      "Bash(curl -X DELETE:*)",
+      "Bash(sudo:*)"
+    ]
+  },
   "hooks": {
     "PreCompact": [
       {
@@ -65,6 +79,16 @@
           {
             "type": "command",
             "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/guardrail-destructive-bash.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/guardrail-permission-rules.py",
             "timeout": 10
           }
         ]
