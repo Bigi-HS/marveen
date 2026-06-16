@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import {
   shouldCompactSession,
   shouldHardCompact,
+  decideContextExhausted,
   adaptiveTokenThresholdForModel,
   adaptiveHardCeilingForModel,
   COMPACT_THRESHOLD_FRACTION,
@@ -11,7 +12,9 @@ import {
   DEFAULT_TOKEN_THRESHOLD,
   DEFAULT_COOLDOWN_MS,
   DEFAULT_HARD_CEILING_TOKENS,
+  CONTEXT_EXHAUSTED_ALERT_DEDUP_MS,
   type SessionSizeThresholds,
+  type ContextExhaustionInput,
 } from '../web/session-size-watcher.js'
 import { DEFAULT_CONTEXT_WINDOW } from '../web/agent-config.js'
 
@@ -329,5 +332,74 @@ describe('session-size-watcher -- hard-ceiling tier contracts', () => {
     const hardFn = SRC.slice(SRC.indexOf('function checkAgentHardCeiling'), SRC.indexOf('export function startSessionSizeWatcher'))
     const sends = (hardFn.match(/sendPromptToSession/g) || []).length
     expect(sends).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Context-exhausted terminal-state decision (card b83e7c92 item-4)
+//
+// This signal sits on the LIVE escalation path, so it carries the mandatory
+// adversarial-fixture set: a false-positive case, a false-negative case, and
+// opposing combinations that must NOT fire. The detector must escalate the
+// genuinely-wedged exhausted session WITHOUT alerting any recoverable or
+// transient one.
+// ---------------------------------------------------------------------------
+
+describe('decideContextExhausted (terminal-state signal)', () => {
+  const CEILING = 900_000 // ~1M window * 0.9
+  const STUCK_MS = 30 * 60 * 1000
+
+  function input(over: Partial<ContextExhaustionInput> = {}): ContextExhaustionInput {
+    return {
+      contextTokens: CEILING + 50_000, // over the ceiling by default
+      hardCeiling: CEILING,
+      paneIsIdle: false,
+      overCeilingMs: STUCK_MS + 60_000, // past the stuck window by default
+      ...over,
+    }
+  }
+
+  // FALSE-NEGATIVE guard: the genuine terminal wedge MUST fire.
+  it('fires for an agent over ceiling, never idle, stuck past the window', () => {
+    expect(decideContextExhausted(input(), STUCK_MS)).toBe(true)
+  })
+
+  // FALSE-POSITIVE guard #1: an idle over-ceiling agent is RECOVERABLE
+  // (the hard-ceiling /compact fires at the idle boundary) -- must NOT escalate.
+  it('does NOT fire when the pane is idle (auto-/compact can recover it)', () => {
+    expect(decideContextExhausted(input({ paneIsIdle: true }), STUCK_MS)).toBe(false)
+  })
+
+  // OPPOSING COMBINATION #1: over ceiling + not idle, but NOT yet stuck long
+  // enough -- a transient mid-tool spike, not a terminal wedge -- must NOT fire.
+  it('does NOT fire while still inside the stuck window (transient, not terminal)', () => {
+    expect(decideContextExhausted(input({ overCeilingMs: STUCK_MS - 1 }), STUCK_MS)).toBe(false)
+  })
+
+  // OPPOSING COMBINATION #2: not a context problem at all -- under the ceiling,
+  // even if not idle and "stuck" for ages (that is a different watcher's job).
+  it('does NOT fire when under the hard ceiling regardless of stuck time', () => {
+    expect(decideContextExhausted(
+      input({ contextTokens: CEILING - 1, overCeilingMs: STUCK_MS * 10 }),
+      STUCK_MS,
+    )).toBe(false)
+  })
+
+  // FALSE-POSITIVE guard #2: unknown token count -- never escalate blind.
+  it('does NOT fire when the token count is unreadable (null)', () => {
+    expect(decideContextExhausted(input({ contextTokens: null }), STUCK_MS)).toBe(false)
+  })
+
+  // Boundary: exactly at the ceiling and exactly at the stuck window -> fires
+  // (>= on both, mirroring shouldHardCompact's inclusive ceiling).
+  it('fires exactly at the ceiling and exactly at the stuck boundary', () => {
+    expect(decideContextExhausted(
+      input({ contextTokens: CEILING, overCeilingMs: STUCK_MS }),
+      STUCK_MS,
+    )).toBe(true)
+  })
+
+  it('uses a 30-min escalation dedup, matching the channel-monitor cadence', () => {
+    expect(CONTEXT_EXHAUSTED_ALERT_DEDUP_MS).toBe(30 * 60 * 1000)
   })
 })
