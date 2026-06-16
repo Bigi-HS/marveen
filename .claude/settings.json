@@ -17,6 +17,10 @@
       { "matcher": "mcp__plugin.telegram.telegram__reply", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/ledger-outbound.py\"", "timeout": 15 } ] }
     ],
     "SessionStart": [
+      { "matcher": "startup", "hooks": [
+        { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/memory-replay.py\"", "timeout": 15 },
+        { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/hot-cache-sessionstart.py\"", "timeout": 5 }
+      ] },
       { "matcher": "startup|resume|clear", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/ledger-replay.py\"", "timeout": 15 } ] }
     ]
   }
