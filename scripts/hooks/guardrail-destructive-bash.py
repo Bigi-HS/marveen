@@ -74,7 +74,9 @@ _SENSITIVE_FILE_RES = (
 )
 
 _PRINT_VERBS = frozenset(
-    {"cat", "echo", "printf", "head", "tail", "xxd", "base64", "less", "more", "strings"}
+    # tac (reverse-cat) and od (octal/hex dump) both read+emit raw file content,
+    # so they exfil a credential file just like cat/strings (card 6f5af73d).
+    {"cat", "echo", "printf", "head", "tail", "tac", "od", "xxd", "base64", "less", "more", "strings"}
 )
 _SQL_CLIENTS = frozenset({"sqlite3", "psql", "mysql", "mariadb"})
 

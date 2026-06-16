@@ -69,7 +69,9 @@ def _command_word(tokens):
 # not read files. `echo $(cat .env)` IS caught because _split_subcommands breaks out
 # the inner `cat .env` as its own sub-piece, where `cat` IS in this set.
 _FILE_READ_VERBS = frozenset(
-    {'cat', 'head', 'tail', 'xxd', 'base64', 'less', 'more', 'strings'}
+    # tac (reverse-cat) and od (octal/hex dump) read+emit raw file content, so a
+    # `tac .env` / `od .env` exfils just like `cat .env` (card 6f5af73d).
+    {'cat', 'head', 'tail', 'tac', 'od', 'xxd', 'base64', 'less', 'more', 'strings'}
 )
 
 # Localhost / fleet-internal hosts that external-curl allows.

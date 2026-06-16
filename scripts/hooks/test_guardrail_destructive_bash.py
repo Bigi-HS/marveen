@@ -141,6 +141,8 @@ class CredFilePrintTests(unittest.TestCase):
         "base64 ~/.git-credentials",
         "head -1 ~/.git-credentials",
         "strings /home/domin/.git-credentials",
+        "tac ~/.git-credentials",                     # reverse-cat exfil (card 6f5af73d)
+        "od -c /home/domin/.git-credentials",         # octal-dump exfil (card 6f5af73d)
     ]
     ALLOW = [
         "cat store/.dashboard-token",                 # CRITICAL: legit fleet-ops idiom
