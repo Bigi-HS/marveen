@@ -219,6 +219,14 @@ export function resolveAckCapableFromConfig(config: { ackCapable?: unknown }): b
 // a missing file / parse error / absent flag. Mirrors the other readers' fresh
 // readFileOr + try/catch shape.
 export function readAgentAckCapable(name: string): boolean {
+  // The main agent (orchestrator) is ALWAYS ACK-capable, decided in CODE with no
+  // agent-config.json -- it is the central delegation hub and the clear-observer
+  // already special-cases its pane (MAIN_AGENT_ID -> MAIN_CHANNELS_SESSION), so
+  // engagement-clear works for it. Done in code on purpose: the bash watchdog
+  // read_model() reads only `model`, so a model-less agents/<main>/agent-config.json
+  // would relaunch the main agent on the sonnet default at the next restart
+  // (card ff96810c). Mirrors the agentDir()/isKnownAgent() MAIN_AGENT_ID cases.
+  if (name === MAIN_AGENT_ID) return true
   const configPath = join(agentDir(name), 'agent-config.json')
   try {
     return resolveAckCapableFromConfig(JSON.parse(readFileOr(configPath, '{}')))
