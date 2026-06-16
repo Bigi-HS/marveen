@@ -27,6 +27,11 @@ const GUARDRAIL_HOOK_MARKER = 'guardrail-telegram-chat.py'
 // gates irreversible/external-effect MCP tools behind the confirm-channel.
 const ASK_FIRST_HOOK_MARKER = 'guardrail-ask-first.py'
 
+// And the PreToolUse destructive-Bash hard-block (card dd48afb6): a narrow
+// deny-list that flat-blocks catastrophic Bash commands (rm -rf root, force-push
+// to a protected branch, SQL DROP via a client, PAT cred-file print).
+const DESTRUCTIVE_BASH_HOOK_MARKER = 'guardrail-destructive-bash.py'
+
 type HookCommand = { type?: string; command?: string; prompt?: string }
 type HookEntry = { matcher?: string; hooks?: HookCommand[] }
 type HooksBlock = Record<string, HookEntry[]>
@@ -77,6 +82,19 @@ export function ensureAskFirstHook(target: HooksBlock, template: HooksBlock): bo
   return true
 }
 
+// Targeted idempotent merge of the PreToolUse destructive-Bash hard-block,
+// mirroring ensureAskFirstHook. ADD-only, drift-proof: backfilled into every
+// existing agent at the next boot so the deny-list reaches the whole fleet
+// without a profile rewrite, never removing or rewriting an agent's own hooks.
+export function ensureDestructiveBashHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.PreToolUse ?? []).filter(e => entryReferences(e, DESTRUCTIVE_BASH_HOOK_MARKER))
+  if (entries.length === 0) return false  // template has no destructive-bash hook -> nothing to merge
+  const existing = target.PreToolUse ?? []
+  if (existing.some(e => entryReferences(e, DESTRUCTIVE_BASH_HOOK_MARKER))) return false  // already present
+  target.PreToolUse = [...existing, ...entries]
+  return true
+}
+
 // Idempotent migration: every agent's settings.json should carry the shared
 // hooks (PreCompact memory-save/skill-reflection + the SessionStart taskstate
 // and memory auto-inject replays). Two cases:
@@ -112,7 +130,8 @@ export function ensureAgentHooks(name: string): boolean {
     const memChanged = ensureMemoryHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const guardChanged = ensureGuardrailHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const askFirstChanged = ensureAskFirstHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
-    changed = memChanged || guardChanged || askFirstChanged
+    const destructiveBashChanged = ensureDestructiveBashHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    changed = memChanged || guardChanged || askFirstChanged || destructiveBashChanged
   }
   if (!changed) return false
   mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
