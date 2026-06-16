@@ -129,6 +129,10 @@ export function initDatabase(dbPathOverride?: string): void {
   }
   db = new Database(dbPath)
   db.pragma('journal_mode = WAL')
+  // ~16 agents + dashboard + watchdogs write concurrently; auto-retry on lock
+  // instead of throwing "database is locked", and relax fsync (safe under WAL).
+  db.pragma('busy_timeout = 5000')
+  db.pragma('synchronous = NORMAL')
   if (!useOverride) tightenDbPermissions(dbPath)
 
   db.exec(`
