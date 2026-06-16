@@ -38,6 +38,10 @@ import ledger_lib  # noqa: E402  (reuse agent_id_from_cwd + store path)
 
 INJECT_SOURCES = {"startup"}
 
+# Content size limit: ~500 words / 2000 chars max (hot-cache injection budget).
+# Keeps additionalContext injection bounded; truncation is lossy but safe.
+CONTENT_CHAR_LIMIT = 2000
+
 HEADER = (
     "HOT CACHE (SessionStart). Az aktuális kontextusod: "
     "utolsó feladat, pending munkák, ha újra elindulsz — az azonnali "
@@ -86,6 +90,10 @@ def main():
 
     if not content:
         sys.exit(0)  # no cache available, no-op
+
+    # Truncate to char limit if needed (generous budget; ~500 words).
+    if len(content) > CONTENT_CHAR_LIMIT:
+        content = content[:CONTENT_CHAR_LIMIT].rstrip() + "\n[truncated]"
 
     block = f"{HEADER}\n\n{content}"
     out = {
