@@ -138,6 +138,60 @@ def match_env_file_print(command: str) -> bool:
     return False
 
 
+# ── R2b: interpreter inline .env read (card b737d67b gap) ───────────────────
+# Complements R2: R2 catches shell print-verbs (cat, head, …). This rule catches
+# interpreter-inline code like `python3 -c "print(open('.env').read())"` that
+# bypasses shell verbs. Scope: only inline code passed via -c / -e flag (the
+# value token AFTER the flag); script-file invocations (python3 script.py) are
+# not inspected because we cannot read the file contents statically.
+# Spike 2026-06-16: 10/10 FN/FP cases passed (see card b737d67b notes).
+
+_INTERPRETER_CMDS = frozenset({'python3', 'python', 'node', 'nodejs'})
+
+# Matches open()/readFileSync() taking a .env filename as the first positional
+# argument. Single or double quotes, with or without a trailing extension.
+_OPEN_ENV_RE = re.compile(
+    r'(?:open|readFileSync)\s*\(\s*[\'"]\.env(?:\.[^\s)\'"]*)?\s*[\'"]',
+    re.IGNORECASE,
+)
+
+# NOTE: _split_subcommands + _tokenize are NOT used here because _split_subcommands
+# replaces ALL ')' with ';', which destroys inline code strings that contain
+# parentheses (e.g. open('.env').read()). Instead we tokenize the raw command
+# directly with shlex, which handles quoted strings correctly, then scan for the
+# -c/-e flag and inspect its value token for .env open patterns.
+
+
+def match_interpreter_env_read(command: str) -> bool:
+    """R2b: An interpreter (-c/-e inline code) that opens a .env file.
+    Catches `python3 -c "print(open('.env').read())"` and equivalents that
+    bypass shell file-read verbs and therefore slip past R2.
+    Script-file invocations (python3 script.py) are not inspected because
+    we cannot read the file contents statically."""
+    tokens = _tokenize(command)
+    if not tokens:
+        return False
+    if _command_word(tokens) not in _INTERPRETER_CMDS:
+        return False
+    # Walk tokens looking for -c or -e flag followed by the code string.
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        code = None
+        if tok in ('-c', '-e') and i + 1 < len(tokens):
+            code = tokens[i + 1]
+            i += 2
+        elif tok.startswith(('-c', '-e')) and len(tok) > 2:
+            code = tok[2:]
+            i += 1
+        else:
+            i += 1
+            continue
+        if code and _OPEN_ENV_RE.search(code):
+            return True
+    return False
+
+
 # ── R3: external curl with mutating method ───────────────────────────────────
 
 def _curl_body_flag(tok):
@@ -244,6 +298,12 @@ RULES = [
         'Bash print-verb reading a .env/.env.* file '
         '(secret exfiltration; use os.environ or a dotenv library instead)',
         lambda tool, inp: match_env_file_print(inp) if tool == 'Bash' else False,
+    ),
+    Rule(
+        'interpreter-env-read',
+        'Bash interpreter (-c/-e inline code) opening a .env file '
+        '(secret exfiltration via process-level read; bypasses shell print-verb R2)',
+        lambda tool, inp: match_interpreter_env_read(inp) if tool == 'Bash' else False,
     ),
     Rule(
         'external-curl',

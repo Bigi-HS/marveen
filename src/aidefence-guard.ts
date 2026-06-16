@@ -126,6 +126,25 @@ const PII_PATTERNS: PatternDef[] = [
     rx: /\b\d{4}[\s\-]\d{4}[\s\-]\d{4}[\s\-]\d{4}\b/g,
     severity: 'medium',
   },
+  {
+    type: 'PII',
+    name: 'local-secret-path',
+    // Absolute or home-relative paths to known sensitive files (.env, .env.*,
+    // .git-credentials, .netrc, .aws/credentials, .ssh/id_<private-key>).
+    // Detecting these in transit prevents Claude Code CLI file-auto-attach from
+    // pulling secret-file contents into the agent's context when an incoming
+    // inter-agent or external message happens to mention the path
+    // (root cause: card b737d67b, transcript 0ce9675d.jsonl:447).
+    // Severity HIGH -> FLAG (logged, not blocked): blocking would break legitimate
+    // security-audit messages that discuss these paths. Token-hygiene (Boss-decision)
+    // is the structural prevention; this pattern is the detection+audit layer.
+    // Path must be absolute (/dir/.env) or home-relative (~/ or $HOME/ or $CLAUDE_PROJECT_DIR/).
+    // Requires a word-boundary before the leading / so relative paths like config/.env
+    // are NOT matched -- only paths where / is the start of the token (after space,
+    // quote, @, etc.). Bare ".env" with no path separator is also not matched.
+    rx: /(?:^|[\s"'`@|;,])(?:\/[^\s"'`|;,\n]+\/|~\/|\$\{?HOME\}?\/|\$\{?CLAUDE_PROJECT_DIR\}?\/[^\s"'`|;,\n]*\/)\.(?:env(?:\.[^\s"'`|;,\n]*)?|git-credentials|netrc|aws\/credentials|ssh\/id_(?!.*\.pub(?:\s|$))[^\s"'`|;,\n]*)/gm,
+    severity: 'high',
+  },
 ]
 
 const INJECTION_PATTERNS: PatternDef[] = [
