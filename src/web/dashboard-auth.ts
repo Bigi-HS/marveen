@@ -112,13 +112,24 @@ export interface RequestOrigin {
 }
 
 // Classify where a request originated, for the remote/local audit tag (AC8 of
-// the remote-access spec). The dashboard binds to 127.0.0.1, so the ONLY remote
-// ingress is the Tailscale Serve proxy, which terminates TLS and adds an
+// the remote-access spec). The dashboard binds to 127.0.0.1, so the intended
+// remote ingress is the Tailscale Serve proxy, which terminates TLS and adds an
 // X-Forwarded-For header carrying the tailnet client IP. A request with a
-// non-empty first X-Forwarded-For hop therefore came in remotely; one without is
-// local loopback. We trust X-Forwarded-For only because nothing but Serve can
-// reach the loopback bind to set it (a direct attacker cannot inject a foreign
-// proxy hop here).
+// non-empty first X-Forwarded-For hop is therefore tagged remote; one without is
+// local loopback.
+//
+// SECURITY -- this result is ADVISORY (audit-log only), NOT an authorization or
+// rate-limit boundary. X-Forwarded-For is NOT trustworthy as a security signal
+// here: any LOCAL process that can reach the 127.0.0.1 bind can set an arbitrary
+// X-Forwarded-For, so both `remote` and `sourceIp` are spoofable by a co-located
+// attacker. That is acceptable for the audit tag (it answers "where did this
+// most likely come from" for the operator log), but it MUST NOT gate access or
+// key the rate limiter. Authentication is the Bearer-token / signed-session
+// check (unaffected by XFF); the rate limiter keys on the unspoofable socket
+// peer via `rateLimitKey` below. Tailscale Serve APPENDS to any client-supplied
+// X-Forwarded-For rather than replacing it, so a poisoned first hop can survive
+// the proxy -- another reason this is advisory-only. See the threat-model notes
+// in store/remote-access-setup.md.
 export function classifyRequestOrigin(
   xForwardedFor: string | string[] | undefined,
   socketRemoteAddress: string | undefined,
@@ -127,6 +138,21 @@ export function classifyRequestOrigin(
   const firstHop = raw?.split(',')[0]?.trim()
   if (firstHop) return { remote: true, sourceIp: firstHop }
   return { remote: false, sourceIp: socketRemoteAddress || 'unknown' }
+}
+
+// Rate-limit bucket key. SECURITY: this MUST be the socket peer, never the
+// X-Forwarded-For-derived sourceIp from classifyRequestOrigin. The dashboard
+// binds 127.0.0.1, so any local process can set an arbitrary X-Forwarded-For
+// header; keying the login brute-force limiter on that lets an attacker mint
+// unlimited distinct buckets and evade the limit entirely. The socket peer is
+// the kernel-reported TCP source and cannot be spoofed over a real connection.
+// Trade-off: behind the Tailscale Serve proxy every remote client shares the
+// proxy's loopback peer (127.0.0.1) = ONE shared bucket. That is acceptable for
+// a single-operator, tailnet-private dashboard -- the limiter is a brute-force
+// speed-bump, not a fairness device, and a shared bucket fails safe (stricter,
+// never looser, than per-client).
+export function rateLimitKey(socketRemoteAddress: string | undefined): string {
+  return socketRemoteAddress || 'unknown'
 }
 
 // Operator-facing access instructions printed on startup. SECURITY: the URL must

@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL } from './config.js'
-import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, buildDashboardAccessMessage, createSession, verifySession, revokeSession, parseCookies, classifyRequestOrigin, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from './web/dashboard-auth.js'
+import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, buildDashboardAccessMessage, createSession, verifySession, revokeSession, parseCookies, classifyRequestOrigin, rateLimitKey, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from './web/dashboard-auth.js'
 import { json, readBody } from './web/http-helpers.js'
 import { createRateLimiter } from './web/rate-limit.js'
 import { securityHeaders } from './web/security-headers.js'
@@ -90,7 +90,9 @@ export function startWebServer(port = 3420): http.Server {
 
   // Per-IP rate limiting (defence-in-depth; the dashboard is tailnet-only, so
   // this guards against token brute-force and accidental request storms, not
-  // public-scale traffic). Two tiers keyed by client IP:
+  // public-scale traffic). Two tiers keyed by the UNSPOOFABLE socket peer (see
+  // rateLimitKey -- NOT the X-Forwarded-For-derived sourceIp, which a local
+  // process could forge to mint unlimited buckets and evade the limiter):
   //   - strict: POST /api/auth/login -- anti-brute-force (~5/min)
   //   - lenient: every other /api/* call (~100/10s burst)
   // The long-lived SSE pane stream and static assets are never rate-limited.
@@ -102,12 +104,16 @@ export function startWebServer(port = 3420): http.Server {
     apiLimiter.prune()
   }, 5 * 60 * 1000)
   if (typeof rateLimitPruneInterval.unref === 'function') rateLimitPruneInterval.unref()
-  // Resolve the request origin (remote-vs-local + client IP) for rate-limiting
-  // and the AC8 audit tag. Honours the first hop of X-Forwarded-For set by the
-  // Tailscale Serve proxy; falls back to the socket peer for direct loopback.
+  // Resolve the request origin (remote-vs-local + client IP) for the AC8 audit
+  // tag ONLY. Honours the first hop of X-Forwarded-For set by the Tailscale
+  // Serve proxy; falls back to the socket peer for direct loopback. ADVISORY --
+  // see classifyRequestOrigin: XFF is spoofable by a local process, so this is
+  // never used for authz or rate-limiting.
   const reqOrigin = (req: http.IncomingMessage) =>
     classifyRequestOrigin(req.headers['x-forwarded-for'], req.socket.remoteAddress)
-  const clientIp = (req: http.IncomingMessage): string => reqOrigin(req).sourceIp
+  // Rate-limit bucket key: the unspoofable socket peer, deliberately independent
+  // of X-Forwarded-For (see rateLimitKey).
+  const limiterKey = (req: http.IncomingMessage): string => rateLimitKey(req.socket.remoteAddress)
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://localhost:${port}`)
@@ -148,7 +154,7 @@ export function startWebServer(port = 3420): http.Server {
     // throttled even when they carry no/invalid credentials). Skips the
     // long-lived SSE pane stream and non-/api static assets.
     if (path.startsWith('/api/') && !isSseStreamPath(path)) {
-      const ip = clientIp(req)
+      const ip = limiterKey(req)
       const isLogin = method === 'POST' && path === '/api/auth/login'
       const limiter = isLogin ? loginLimiter : apiLimiter
       const verdict = limiter.allow(ip)
