@@ -447,13 +447,14 @@ export function readAgentClaudeConfigDir(name: string): string | null {
 }
 
 export function readAgentChannelProvider(name: string): string | null {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    if (typeof config.channelProvider === 'string' && config.channelProvider.trim()) {
-      return config.channelProvider.trim()
-    }
-  } catch { /* fall through */ }
+  // Read through the resolving loader so the channel-launch path is the live
+  // consumer of the secret-pointer wiring (channelProvider itself is not a
+  // secret -- it is left untouched -- but a future channel apiKey/token field
+  // written as {env:}/{file:} would resolve here on the same read).
+  const config = readAgentConfig(name)
+  if (typeof config.channelProvider === 'string' && config.channelProvider.trim()) {
+    return config.channelProvider.trim()
+  }
   return null
 }
 
@@ -653,4 +654,71 @@ export function resolveSecretPointer(value: string, projectRoot: string = PROJEC
 
   // Not a placeholder -- return unchanged.
   return value
+}
+
+// ── secret-pointer config wiring (card 846aa0ac) ──────────────────────────────
+// Wire resolveSecretPointer into agent-config loading so a secret-bearing field
+// can be written as {env:VAR} / {file:relpath} instead of an inline secret.
+//
+// WHITELIST semantics (NoA decision): resolution runs ONLY on secret-semantic
+// keys, and ONLY when the value is actually a pointer. A plain string is NEVER
+// touched -- so a human-readable field that merely looks pointer-ish cannot be
+// mangled. Human-readable fields (displayName, name, persona, model, prompt,
+// catchphrase, ...) are NEVER in scope. The match is case-insensitive: an exact
+// key in the set, OR a key ending in a sensitive suffix (*Token/*Secret/*ApiKey/
+// *Password). Today no live agent-config field is a secret, so this is wired but
+// inactive -- a no-op on every current config, ready for a future secret field.
+const SECRET_KEY_EXACT = new Set([
+  'apikey', 'api_key', 'token', 'secret', 'clientsecret', 'password', 'webhookurl',
+])
+const SECRET_KEY_SUFFIXES = ['token', 'secret', 'apikey', 'password']
+
+export function isSecretPointerKey(key: string): boolean {
+  const k = key.toLowerCase()
+  if (SECRET_KEY_EXACT.has(k)) return true
+  // suffix match, but only for keys LONGER than the suffix (exact words are
+  // already covered above, and this avoids e.g. matching the bare word twice).
+  return SECRET_KEY_SUFFIXES.some((s) => k.length > s.length && k.endsWith(s))
+}
+
+// Pointer SHAPE gate: only attempt resolution when the value opens with a
+// {env:/{file: placeholder. resolveSecretPointer does the full validation; this
+// just avoids calling it (and avoids its throw surface) for plain strings.
+const SECRET_POINTER_SHAPE_RE = /^\{(?:env|file):/
+
+// Resolve secret pointers in a parsed config object: for each WHITELISTED key
+// whose string value is pointer-shaped, replace it with the resolved secret.
+// Everything else (non-whitelisted keys, non-string values, plain strings) is
+// returned untouched. Fail-closed: an unresolvable pointer in a whitelisted key
+// throws SecretPointerError (a misconfigured secret must surface loudly, never
+// silently launch with an empty/bad credential). Shallow by design -- agent
+// config is flat; nested resolution is a future extension if a need appears.
+export function resolveConfigSecrets(
+  config: Record<string, unknown>,
+  projectRoot: string = PROJECT_ROOT,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...config }
+  for (const [key, value] of Object.entries(config)) {
+    if (typeof value !== 'string') continue
+    if (!isSecretPointerKey(key)) continue
+    if (!SECRET_POINTER_SHAPE_RE.test(value)) continue
+    out[key] = resolveSecretPointer(value, projectRoot)
+  }
+  return out
+}
+
+// Canonical accessor: read an agent's full config with secret pointers (in
+// whitelisted keys) resolved. Returns {} when the file is absent/unparseable.
+// This is the wiring point -- any code needing a secret-bearing config field
+// must read it through here so the pointer auto-resolves.
+export function readAgentConfig(name: string): Record<string, unknown> {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileOr(configPath, '{}'))
+  } catch {
+    return {}
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+  return resolveConfigSecrets(parsed as Record<string, unknown>)
 }
