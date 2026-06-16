@@ -6,6 +6,7 @@ import {
   contextWindowForModel,
   modelInfoForModel,
   costForUsageUsd,
+  costForUsageDetailedUsd,
   isModelDeprecated,
   modelSupports1M,
 } from '../web/agent-config.js'
@@ -56,6 +57,23 @@ describe('MODEL_REGISTRY (single source of truth)', () => {
     const q = MODEL_REGISTRY['qwen3:4b']
     expect(q.inputPricePerMTok).toBe(0)
     expect(q.outputPricePerMTok).toBe(0)
+    expect(q.cacheReadPerMTok).toBe(0)
+    expect(q.cacheWritePerMTok).toBe(0)
+  })
+
+  it('cache prices follow the published Anthropic multipliers (read 0.1x, 5m-write 1.25x base input)', () => {
+    // Card bb4992dc: cache pricing is the crux (cache_read dominates per
+    // token-burn-anatomy). Verified 2026-06 against platform.claude.com/pricing:
+    // cache read = 0.1x base input, 5-minute cache write = 1.25x base input.
+    for (const [id, info] of Object.entries(MODEL_REGISTRY)) {
+      if (info.inputPricePerMTok === 0) {
+        expect(info.cacheReadPerMTok, `${id} cache read`).toBe(0)
+        expect(info.cacheWritePerMTok, `${id} cache write`).toBe(0)
+        continue
+      }
+      expect(info.cacheReadPerMTok, `${id} cache read`).toBeCloseTo(info.inputPricePerMTok * 0.1, 6)
+      expect(info.cacheWritePerMTok, `${id} cache write`).toBeCloseTo(info.inputPricePerMTok * 1.25, 6)
+    }
   })
 })
 
@@ -128,6 +146,52 @@ describe('costForUsageUsd', () => {
   it('treats missing/negative token counts as zero', () => {
     expect(costForUsageUsd('claude-sonnet-4-6', 0, 0)).toBe(0)
     expect(costForUsageUsd('claude-sonnet-4-6', -100, -100)).toBe(0)
+  })
+})
+
+describe('costForUsageDetailedUsd (cache-aware, card bb4992dc)', () => {
+  it('prices all four token components at their per-MTok rate', () => {
+    // opus 4.8: in $5, out $25, cacheRead $0.50, cacheWrite(5m) $6.25.
+    // 1M of each -> 5 + 25 + 0.5 + 6.25 = 36.75.
+    expect(costForUsageDetailedUsd('claude-opus-4-8', {
+      input: 1_000_000, output: 1_000_000, cacheRead: 1_000_000, cacheCreation: 1_000_000,
+    })).toBeCloseTo(36.75, 6)
+  })
+
+  it('prices the cache-read-dominant burn scenario correctly (the whole point)', () => {
+    // token-burn-anatomy: cache_read dominates. sonnet: in $3, cacheRead $0.30, out $15.
+    // 10k in + 1M cacheRead + 5k out = 0.03 + 0.30 + 0.075 = 0.405.
+    expect(costForUsageDetailedUsd('claude-sonnet-4-6', {
+      input: 10_000, output: 5_000, cacheRead: 1_000_000, cacheCreation: 0,
+    })).toBeCloseTo(0.405, 6)
+  })
+
+  it('defaults omitted components to zero', () => {
+    // Only output supplied -> 1M out on sonnet = $15.
+    expect(costForUsageDetailedUsd('claude-sonnet-4-6', { output: 1_000_000 })).toBeCloseTo(15, 6)
+    expect(costForUsageDetailedUsd('claude-sonnet-4-6', {})).toBe(0)
+  })
+
+  it('clamps negative components to zero', () => {
+    expect(costForUsageDetailedUsd('claude-sonnet-4-6', {
+      input: -100, output: -100, cacheRead: -100, cacheCreation: -100,
+    })).toBe(0)
+  })
+
+  it('is zero for a local (free) model', () => {
+    expect(costForUsageDetailedUsd('qwen3:4b', {
+      input: 5_000_000, output: 2_000_000, cacheRead: 9_000_000, cacheCreation: 1_000_000,
+    })).toBe(0)
+  })
+
+  it('returns null when the model is unknown (cannot price)', () => {
+    expect(costForUsageDetailedUsd('mystery', { input: 1000, cacheRead: 1000 })).toBeNull()
+  })
+
+  it('resolves aliases and the [1m] variant to the same price as the base', () => {
+    const usage = { input: 1_000_000, output: 0, cacheRead: 0, cacheCreation: 0 }
+    expect(costForUsageDetailedUsd('claude-opus-4-8[1m]', usage)).toBeCloseTo(5, 6)
+    expect(costForUsageDetailedUsd('claude-opus-4-8', usage)).toBeCloseTo(5, 6)
   })
 })
 

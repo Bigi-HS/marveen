@@ -570,6 +570,12 @@ export function initDatabase(dbPathOverride?: string): void {
     `)
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_token_usage_dedup ON token_usage(agent, session_id, timestamp, input_tokens, output_tokens)`)
   }
+  // Card bb4992dc: per-row model (so the cost rollup prices each row at its own
+  // rate) + parent->child lineage (spawned_by = the orchestrating agent for a
+  // workflow phantom child). Both additive, nullable, idempotent ALTERs -- legacy
+  // rows keep NULL and the rollup falls back to the agent's configured model.
+  try { db.exec('ALTER TABLE token_usage ADD COLUMN model TEXT') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE token_usage ADD COLUMN spawned_by TEXT') } catch { /* already exists */ }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS token_usage_cursors (
