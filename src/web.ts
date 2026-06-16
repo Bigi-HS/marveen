@@ -31,6 +31,8 @@ import { logger } from './logger.js'
 import { tryHandleProfiles } from './web/routes/profiles.js'
 import { tryHandleMessages } from './web/routes/messages.js'
 import { tryHandleAgentTerminal } from './web/routes/agent-terminal.js'
+import { tryHandleEvents } from './web/routes/events.js'
+import { isSseStreamPath } from './web/sse-paths.js'
 import { tryHandleAgentActions } from './web/routes/agent-actions.js'
 import { tryHandleAgentTaskState } from './web/routes/agent-taskstate.js'
 import { sweepOrphanTaskStates } from './web/agent-taskstate.js'
@@ -147,7 +149,7 @@ export function startWebServer(port = 3420): http.Server {
     // Per-IP rate limiting (before the auth gate, so brute-force attempts are
     // throttled even when they carry no/invalid credentials). Skips the
     // long-lived SSE pane stream and non-/api static assets.
-    if (path.startsWith('/api/') && !/^\/api\/agents\/[^/]+\/pane\/stream$/.test(path)) {
+    if (path.startsWith('/api/') && !isSseStreamPath(path)) {
       const ip = clientIp(req)
       const isLogin = method === 'POST' && path === '/api/auth/login'
       const limiter = isLogin ? loginLimiter : apiLimiter
@@ -213,7 +215,7 @@ export function startWebServer(port = 3420): http.Server {
     // Authorization header. The session cookie is sent automatically on
     // same-origin EventSource requests; we also still accept the legacy ?token=
     // for backward compat (its removal is a follow-on chunk).
-    const isSseStream = method === 'GET' && /^\/api\/agents\/[^/]+\/pane\/stream$/.test(path)
+    const isSseStream = method === 'GET' && isSseStreamPath(path)
     if (path.startsWith('/api/') && !isPublicApi) {
       const queryOk = isSseStream && checkBearerToken(`Bearer ${url.searchParams.get('token') ?? ''}`, getDashboardToken())
       if (!hasValidSession() && !hasValidBearer() && !queryOk) {
@@ -239,6 +241,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleAgentsSkills(routeCtx)) return
       if (await tryHandleSkills(routeCtx)) return
       if (await tryHandleAgentTerminal(routeCtx)) return
+      if (await tryHandleEvents(routeCtx)) return
       if (await tryHandleAgentActions(routeCtx)) return
       if (await tryHandleAgentTaskState(routeCtx)) return
       if (await tryHandleAgentCategories(routeCtx)) return

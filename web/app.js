@@ -9949,6 +9949,20 @@ document.getElementById('terminalClose')?.addEventListener('click', () => {
   routeFromHash()
 })()
 
+// Live dashboard updates over SSE (card 7c7ea226). Pushes from the server replace
+// the need to manually reload the kanban / messages views after another agent (or
+// a script) mutates them. AUGMENT model: refresh only the view the user is on,
+// coalesced so a write-burst is one fetch (NoA build-note #1). EventSource
+// auto-reconnects; the existing on-demand fetches remain the fallback.
+;(() => {
+  if (!window.DashboardEvents) return
+  const activePage = () => decodeURIComponent((location.hash || '').replace(/^#/, ''))
+  window.DashboardEvents.initDashboardEvents({
+    onKanban: () => { if (activePage() === 'kanban') loadKanban() },
+    onMessage: () => { if (activePage() === 'messages') loadMessagesPage() },
+  })
+})()
+
 // === Agents team-tree view (kanban 78ba4672) ===
 // A category-grouped tree alongside the existing flat card grid. Reads the
 // runtime category map (agentCategories) + the existing `agents` array; no new
