@@ -1993,6 +1993,20 @@ document.getElementById('agentRunSkillBtn').addEventListener('click', async () =
   } catch { showToast('Hiba a skill futtatása során') } finally { btn.disabled = false }
 })
 
+document.getElementById('agentInterruptBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const btn = document.getElementById('agentInterruptBtn')
+  btn.disabled = true
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/interrupt`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    })
+    const data = await res.json().catch(() => ({}))
+    if (res.ok) showToast(`Megszakítás elküldve: ${escapeHtml(currentAgent.name)}`)
+    else showToast(data.error || 'Megszakítás sikertelen')
+  } catch { showToast('Hiba a megszakítás során') } finally { btn.disabled = false }
+})
+
 // === Tab switching ===
 document.getElementById('agentTabNav').addEventListener('click', (e) => {
   const btn = e.target.closest('.tab-btn')

@@ -1463,6 +1463,11 @@
               <select id="agentSkillSelect" class="form-input" style="flex:1"></select>
               <button class="btn-primary btn-compact" id="agentRunSkillBtn">Skill futtatása</button>
             </div>
+            <!-- Soft-interrupt (card b83e7c92): send Escape to cancel the agent's
+                 current turn -- the gentle rung between a nudge and a restart. -->
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <button class="btn-secondary btn-compact" id="agentInterruptBtn" style="flex:1" title="Escape az ügynök paneljébe: megszakítja a folyó kört (nudge és restart közötti finom fokozat)">Megszakítás (Esc)</button>
+            </div>
           </div>
         </div>
 

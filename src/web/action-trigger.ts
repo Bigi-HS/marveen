@@ -20,6 +20,7 @@ import {
   isTmuxSessionAlive,
   isSessionReadyForPrompt,
   sendPromptToSession,
+  sendEscapeToSession,
 } from './agent-process.js'
 
 // Skill identifiers are a kebab slug with at most one `plugin:skill` namespace
@@ -102,4 +103,40 @@ export function injectToAgent(
   deps: InjectDeps = defaultDeps,
 ): TriggerStatus {
   return injectToSession(resolveSession(agentName), prompt, opts, deps)
+}
+
+// Side effects for the soft-interrupt path: probe liveness, then send the bare
+// Escape key. Deliberately NARROWER than InjectDeps -- there is no `ready` gate
+// because an interrupt is FOR a mid-turn (busy) pane, and no prompt `send`
+// because no text is injected, only the cancel key.
+export interface InterruptDeps {
+  sessionAlive: (session: string) => boolean
+  sendEscape: (session: string) => void
+}
+
+const defaultInterruptDeps: InterruptDeps = {
+  sessionAlive: isTmuxSessionAlive,
+  sendEscape: sendEscapeToSession,
+}
+
+// Soft-interrupt: send Escape (Claude Code's cancel-the-current-turn key) into a
+// live session, the gentle rung between an operator nudge and a kill+restart.
+// Two outcomes only: `offline` if the session is dead (Escape would go nowhere),
+// else `fired`. There is intentionally no `busy` outcome -- interrupting a busy
+// pane is the whole point, so a live session always fires.
+export function interruptSession(
+  session: string,
+  deps: InterruptDeps = defaultInterruptDeps,
+): TriggerStatus {
+  if (!deps.sessionAlive(session)) return 'offline'
+  deps.sendEscape(session)
+  return 'fired'
+}
+
+// Soft-interrupt an agent by name, resolving its session first.
+export function interruptAgent(
+  agentName: string,
+  deps: InterruptDeps = defaultInterruptDeps,
+): TriggerStatus {
+  return interruptSession(resolveSession(agentName), deps)
 }

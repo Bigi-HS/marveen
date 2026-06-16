@@ -6,7 +6,10 @@ import {
   resolveSession,
   injectToSession,
   injectToAgent,
+  interruptSession,
+  interruptAgent,
   type InjectDeps,
+  type InterruptDeps,
 } from '../web/action-trigger.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import { MAIN_CHANNELS_SESSION } from '../web/main-agent.js'
@@ -130,5 +133,50 @@ describe('injectToAgent', () => {
     const status = injectToAgent('dave', 'ping', {}, fakeDeps({ send }))
     expect(status).toBe('fired')
     expect(send).toHaveBeenCalledWith('agent-dave', 'ping')
+  })
+})
+
+function fakeInterruptDeps(over: Partial<InterruptDeps> = {}): InterruptDeps {
+  return {
+    sessionAlive: () => true,
+    sendEscape: vi.fn(),
+    ...over,
+  }
+}
+
+describe('interruptSession', () => {
+  it('returns offline and never sends Escape when the session is not alive', () => {
+    const sendEscape = vi.fn()
+    const status = interruptSession('agent-dave', fakeInterruptDeps({ sessionAlive: () => false, sendEscape }))
+    expect(status).toBe('offline')
+    expect(sendEscape).not.toHaveBeenCalled()
+  })
+  it('fires an Escape into a live pane', () => {
+    const sendEscape = vi.fn()
+    const status = interruptSession('agent-dave', fakeInterruptDeps({ sendEscape }))
+    expect(status).toBe('fired')
+    expect(sendEscape).toHaveBeenCalledWith('agent-dave')
+  })
+  it('fires regardless of busy state (interrupt is FOR a mid-turn agent, no ready gate)', () => {
+    // There is deliberately no `ready` dependency: a soft-interrupt must land on
+    // a busy pane -- that is its entire purpose. A live session always fires.
+    const sendEscape = vi.fn()
+    expect(interruptSession('agent-dave', fakeInterruptDeps({ sendEscape }))).toBe('fired')
+    expect(sendEscape).toHaveBeenCalledOnce()
+  })
+})
+
+describe('interruptAgent', () => {
+  it('resolves a sub-agent to its agent-<name> session then sends Escape', () => {
+    const sendEscape = vi.fn()
+    const status = interruptAgent('dave', fakeInterruptDeps({ sendEscape }))
+    expect(status).toBe('fired')
+    expect(sendEscape).toHaveBeenCalledWith('agent-dave')
+  })
+  it('resolves the main agent to the channels session', () => {
+    const sendEscape = vi.fn()
+    const status = interruptAgent(MAIN_AGENT_ID, fakeInterruptDeps({ sendEscape }))
+    expect(status).toBe('fired')
+    expect(sendEscape).toHaveBeenCalledWith(MAIN_CHANNELS_SESSION)
   })
 })
