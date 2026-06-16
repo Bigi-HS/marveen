@@ -133,23 +133,23 @@ class SqlDropTests(unittest.TestCase):
 # --- R4: raw print of the PAT credential file ------------------------------
 class CredFilePrintTests(unittest.TestCase):
     DENY = [
-        "cat ~/.git-credentials",
+        "cat /home/fakeuser/.git-credentials",
         "cat $HOME/.git-credentials",
         "cat ${HOME}/.git-credentials",
-        "cat /home/domin/.git-credentials",
-        "echo $(cat ~/.git-credentials)",
-        "base64 ~/.git-credentials",
-        "head -1 ~/.git-credentials",
-        "strings /home/domin/.git-credentials",
-        "tac ~/.git-credentials",                     # reverse-cat exfil (card 6f5af73d)
-        "od -c /home/domin/.git-credentials",         # octal-dump exfil (card 6f5af73d)
+        "cat /home/fakeuser/.git-credentials",
+        "echo $(cat /home/fakeuser/.git-credentials)",
+        "base64 /home/fakeuser/.git-credentials",
+        "head -1 /home/fakeuser/.git-credentials",
+        "strings /home/fakeuser/.git-credentials",
+        "tac /home/fakeuser/.git-credentials",                     # reverse-cat exfil (card 6f5af73d)
+        "od -c /home/fakeuser/.git-credentials",         # octal-dump exfil (card 6f5af73d)
     ]
     ALLOW = [
         "cat store/.dashboard-token",                 # CRITICAL: legit fleet-ops idiom
-        "TOKEN=$(cat /home/domin/marveen/store/.dashboard-token)",
+        "TOKEN=$(cat /home/fakeuser/marveen/store/.dashboard-token)",
         'git config credential.helper store',         # not a print of the file
-        "ls -la ~/.git-credentials",                  # listing metadata, not content
-        'echo "cat ~/.git-credentials"',              # printing the literal string
+        "ls -la /home/fakeuser/.git-credentials",                  # listing metadata, not content
+        'echo "cat /home/fakeuser/.git-credentials"',              # printing the literal string
     ]
 
     def test_deny(self):
@@ -164,26 +164,26 @@ class CredFilePrintTests(unittest.TestCase):
 # --- R4-enum: print of a closed set of sensitive files (card 48d3c0f9) -------
 class SensitiveFilePrintTests(unittest.TestCase):
     DENY = [
-        "cat ~/.ssh/id_rsa",                                   # SSH private key
-        "cat ~/.ssh/id_ed25519",
-        "base64 ~/.netrc",
+        "cat /home/fakeuser/.ssh/id_rsa",                                   # SSH private key
+        "cat /home/fakeuser/.ssh/id_ed25519",
+        "base64 /home/fakeuser/.netrc",
         "cat $HOME/.aws/credentials",
-        "cat /home/domin/.ssh/id_rsa",
+        "cat /home/fakeuser/.ssh/id_rsa",
         "cat store/.session-secret",
         "echo $(cat store/.dashboard-session-secret)",
-        "cat /home/domin/marveen/store/.dashboard-session-secret",
+        "cat /home/fakeuser/marveen/store/.dashboard-session-secret",
         "cat agents/claudia/.claude/channels/google/oauth-tokens.json",
-        "strings ~/.ssh/id_ecdsa",
+        "strings /home/fakeuser/.ssh/id_ecdsa",
     ]
     ALLOW = [
         "cat store/.dashboard-token",          # fleet-ops idiom (NOT in scope)
-        "cat ~/.ssh/id_rsa.pub",               # public key is not sensitive
+        "cat /home/fakeuser/.ssh/id_rsa.pub",               # public key is not sensitive
         "cat $HOME/.ssh/id_ed25519.pub",
-        "cat ~/.aws/config",                   # config (not credentials) -- out of scope
-        "ls -la ~/.ssh/id_rsa",                # listing metadata, not content
-        'echo "cat ~/.ssh/id_rsa"',            # printing the literal string
+        "cat /home/fakeuser/.aws/config",                   # config (not credentials) -- out of scope
+        "ls -la /home/fakeuser/.ssh/id_rsa",                # listing metadata, not content
+        'echo "cat /home/fakeuser/.ssh/id_rsa"',            # printing the literal string
         "cat .env",                            # .env handled by permission-ruleset R2, not here
-        "cat ~/.ssh/known_hosts",              # not a private key
+        "cat /home/fakeuser/.ssh/known_hosts",              # not a private key
     ]
 
     def test_deny(self):
@@ -199,7 +199,7 @@ class SensitiveFilePrintTests(unittest.TestCase):
 class ClassifyTests(unittest.TestCase):
     def test_sensitive_file_print_denies_with_rule_name(self):
         denied, name, _ = guard.classify(
-            {"tool_name": "Bash", "tool_input": {"command": "cat ~/.ssh/id_rsa"}}
+            {"tool_name": "Bash", "tool_input": {"command": "cat /home/fakeuser/.ssh/id_rsa"}}
         )
         self.assertTrue(denied)
         self.assertEqual(name, "sensitive-file-print")
