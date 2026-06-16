@@ -113,8 +113,8 @@ describe('costForUsageUsd', () => {
   it('prices input + output at the per-MTok list rate', () => {
     // sonnet: $3/MTok in, $15/MTok out. 1M in + 1M out = 3 + 15 = 18.
     expect(costForUsageUsd('claude-sonnet-4-6', 1_000_000, 1_000_000)).toBeCloseTo(18, 6)
-    // opus: $15 in / $75 out. 200k in + 100k out = 3 + 7.5 = 10.5.
-    expect(costForUsageUsd('claude-opus-4-8[1m]', 200_000, 100_000)).toBeCloseTo(10.5, 6)
+    // opus 4.8: $5 in / $25 out. 200k in + 100k out = 1.0 + 2.5 = 3.5.
+    expect(costForUsageUsd('claude-opus-4-8[1m]', 200_000, 100_000)).toBeCloseTo(3.5, 6)
   })
 
   it('is zero for a local (free) model', () => {
