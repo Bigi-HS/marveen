@@ -66,7 +66,7 @@ class EnvFilePrintTests(unittest.TestCase):
         'cat .env.local',
         'cat .env.production',
         'cat /project/.env',
-        'cat /home/domin/marveen/.env',
+        'cat /home/fakeuser/marveen/.env',
         'head .env',
         'echo $(cat .env)',
         'base64 .env',
