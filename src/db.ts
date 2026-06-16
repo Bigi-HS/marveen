@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync } from 'node:fs'
 import { STORE_DIR, DB_FILENAME, ALLOWED_CHAT_ID, OLLAMA_URL } from './config.js'
 import { logger } from './logger.js'
+import { emitDashboardEvent } from './event-bus.js'
 
 let db: Database.Database
 
@@ -1475,6 +1476,7 @@ export function createKanbanCard(card: {
     card.assignee ?? null, card.priority ?? 'normal',
     card.project ?? null, card.parent_id ?? null, card.due_date ?? null, sortOrder, now, now
   )
+  emitDashboardEvent({ type: 'kanban', id: card.id, action: 'created' })
 }
 
 export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'id' | 'created_at'>>): boolean {
@@ -1482,10 +1484,12 @@ export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'i
   if (!card) return false
   const now = Math.floor(Date.now() / 1000)
   const f = { ...card, ...fields, updated_at: now }
-  return db.prepare(
+  const changed = db.prepare(
     `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, due_date=?, sort_order=?, updated_at=?, archived_at=?
      WHERE id=?`
   ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.due_date, f.sort_order, f.updated_at, f.archived_at, id).changes > 0
+  if (changed) emitDashboardEvent({ type: 'kanban', id, action: 'updated' })
+  return changed
 }
 
 export function getChildCards(parentId: string): KanbanCard[] {
@@ -1494,9 +1498,11 @@ export function getChildCards(parentId: string): KanbanCard[] {
 
 export function moveKanbanCard(id: string, status: KanbanCard['status'], sortOrder: number): boolean {
   const now = Math.floor(Date.now() / 1000)
-  return db.prepare(
+  const changed = db.prepare(
     'UPDATE kanban_cards SET status=?, sort_order=?, updated_at=? WHERE id=?'
   ).run(status, sortOrder, now, id).changes > 0
+  if (changed) emitDashboardEvent({ type: 'kanban', id, action: 'moved' })
+  return changed
 }
 
 // Stamp the once-only kanban -> agent dispatch guard. Returns false if the
@@ -1508,7 +1514,9 @@ export function markKanbanCardDispatched(id: string): boolean {
 
 export function archiveKanbanCard(id: string): boolean {
   const now = Math.floor(Date.now() / 1000)
-  return db.prepare('UPDATE kanban_cards SET archived_at=?, updated_at=? WHERE id=?').run(now, now, id).changes > 0
+  const changed = db.prepare('UPDATE kanban_cards SET archived_at=?, updated_at=? WHERE id=?').run(now, now, id).changes > 0
+  if (changed) emitDashboardEvent({ type: 'kanban', id, action: 'archived' })
+  return changed
 }
 
 export function listKanbanProjects(): string[] {
@@ -1520,7 +1528,9 @@ export function listKanbanProjects(): string[] {
 
 export function deleteKanbanCard(id: string): boolean {
   db.prepare('DELETE FROM kanban_comments WHERE card_id = ?').run(id)
-  return db.prepare('DELETE FROM kanban_cards WHERE id = ?').run(id).changes > 0
+  const changed = db.prepare('DELETE FROM kanban_cards WHERE id = ?').run(id).changes > 0
+  if (changed) emitDashboardEvent({ type: 'kanban', id, action: 'deleted' })
+  return changed
 }
 
 export function getKanbanComments(cardId: string): KanbanComment[] {
@@ -1533,6 +1543,7 @@ export function addKanbanComment(cardId: string, author: string, content: string
     'INSERT INTO kanban_comments (card_id, author, content, created_at) VALUES (?, ?, ?, ?)'
   ).run(cardId, author, content, now)
   db.prepare('UPDATE kanban_cards SET updated_at = ? WHERE id = ?').run(now, cardId)
+  emitDashboardEvent({ type: 'kanban', id: cardId, action: 'comment' })
   return { id: Number(info.lastInsertRowid), card_id: cardId, author, content, created_at: now }
 }
 
@@ -1750,8 +1761,10 @@ export function createAgentMessage(
   const info = db.prepare(
     'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, ack_expected, priority, in_reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
   ).run(from, to, content, 'pending', now, ack, priority, inReplyTo)
+  const id = Number(info.lastInsertRowid)
+  emitDashboardEvent({ type: 'message', id: String(id), action: 'created' })
   return {
-    id: Number(info.lastInsertRowid),
+    id,
     from_agent: from, to_agent: to, content, status: 'pending',
     result: null, created_at: now, delivered_at: null, completed_at: null,
     ack_expected: ack, priority, in_reply_to: inReplyTo,
@@ -1769,17 +1782,23 @@ export function getPendingMessages(toAgent?: string): AgentMessage[] {
 
 export function markMessageDelivered(id: number): boolean {
   const now = Math.floor(Date.now() / 1000)
-  return db.prepare("UPDATE agent_messages SET status = 'delivered', delivered_at = ? WHERE id = ?").run(now, id).changes > 0
+  const changed = db.prepare("UPDATE agent_messages SET status = 'delivered', delivered_at = ? WHERE id = ?").run(now, id).changes > 0
+  if (changed) emitDashboardEvent({ type: 'message', id: String(id), action: 'delivered' })
+  return changed
 }
 
 export function markMessageDone(id: number, result?: string): boolean {
   const now = Math.floor(Date.now() / 1000)
-  return db.prepare("UPDATE agent_messages SET status = 'done', result = ?, completed_at = ? WHERE id = ?").run(result ?? null, now, id).changes > 0
+  const changed = db.prepare("UPDATE agent_messages SET status = 'done', result = ?, completed_at = ? WHERE id = ?").run(result ?? null, now, id).changes > 0
+  if (changed) emitDashboardEvent({ type: 'message', id: String(id), action: 'done' })
+  return changed
 }
 
 export function markMessageFailed(id: number, error?: string): boolean {
   const now = Math.floor(Date.now() / 1000)
-  return db.prepare("UPDATE agent_messages SET status = 'failed', result = ?, completed_at = ? WHERE id = ?").run(error ?? null, now, id).changes > 0
+  const changed = db.prepare("UPDATE agent_messages SET status = 'failed', result = ?, completed_at = ? WHERE id = ?").run(error ?? null, now, id).changes > 0
+  if (changed) emitDashboardEvent({ type: 'message', id: String(id), action: 'failed' })
+  return changed
 }
 
 export function listAgentMessages(limit = 50): AgentMessage[] {
