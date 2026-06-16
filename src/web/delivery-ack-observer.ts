@@ -32,7 +32,14 @@ import {
 } from './delivery-ack.js'
 
 const MARVEEN_ROOT = process.env.MARVEEN_ROOT ?? process.cwd()
-const ACK_CLEAR_POLL_MS = 5000
+// 2s (was 5s): a very fast recipient engagement (~1s, "Cogitated for 1s") can
+// finish entirely BETWEEN two polls, so the pane is no longer busy when we
+// observe and the ack never clears -> a FALSE 15-min escalation (card ae09fc73,
+// repro msgs 2906/2919). Tightening the cadence shrinks that race window so a
+// ~1s turn is far more likely to be caught mid-flight. This is a soft-alert
+// correctness fix only -- the 15-min escalation threshold and the
+// abandonment/drop semantics are unchanged.
+const ACK_CLEAR_POLL_MS = 2000
 
 // Recipient name -> tmux session. Mirrors the router's resolution: the main
 // agent runs in `${MAIN_AGENT_ID}-channels`, every sub-agent in `agent-${name}`.
