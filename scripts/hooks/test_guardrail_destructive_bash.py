@@ -159,8 +159,49 @@ class CredFilePrintTests(unittest.TestCase):
             self.assertFalse(guard.match_cred_file_print(c), f"should ALLOW: {c}")
 
 
+# --- R4-enum: print of a closed set of sensitive files (card 48d3c0f9) -------
+class SensitiveFilePrintTests(unittest.TestCase):
+    DENY = [
+        "cat ~/.ssh/id_rsa",                                   # SSH private key
+        "cat ~/.ssh/id_ed25519",
+        "base64 ~/.netrc",
+        "cat $HOME/.aws/credentials",
+        "cat /home/domin/.ssh/id_rsa",
+        "cat store/.session-secret",
+        "echo $(cat store/.dashboard-session-secret)",
+        "cat /home/domin/marveen/store/.dashboard-session-secret",
+        "cat agents/claudia/.claude/channels/google/oauth-tokens.json",
+        "strings ~/.ssh/id_ecdsa",
+    ]
+    ALLOW = [
+        "cat store/.dashboard-token",          # fleet-ops idiom (NOT in scope)
+        "cat ~/.ssh/id_rsa.pub",               # public key is not sensitive
+        "cat $HOME/.ssh/id_ed25519.pub",
+        "cat ~/.aws/config",                   # config (not credentials) -- out of scope
+        "ls -la ~/.ssh/id_rsa",                # listing metadata, not content
+        'echo "cat ~/.ssh/id_rsa"',            # printing the literal string
+        "cat .env",                            # .env handled by permission-ruleset R2, not here
+        "cat ~/.ssh/known_hosts",              # not a private key
+    ]
+
+    def test_deny(self):
+        for c in self.DENY:
+            self.assertTrue(guard.match_sensitive_file_print(c), f"should DENY: {c}")
+
+    def test_allow(self):
+        for c in self.ALLOW:
+            self.assertFalse(guard.match_sensitive_file_print(c), f"should ALLOW: {c}")
+
+
 # --- classifier (pure) ------------------------------------------------------
 class ClassifyTests(unittest.TestCase):
+    def test_sensitive_file_print_denies_with_rule_name(self):
+        denied, name, _ = guard.classify(
+            {"tool_name": "Bash", "tool_input": {"command": "cat ~/.ssh/id_rsa"}}
+        )
+        self.assertTrue(denied)
+        self.assertEqual(name, "sensitive-file-print")
+
     def test_non_bash_tool_passes(self):
         denied, name, _ = guard.classify({"tool_name": "Read", "tool_input": {"file_path": "/x"}})
         self.assertFalse(denied)

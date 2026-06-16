@@ -53,6 +53,26 @@ _CRED_FILE_RE = re.compile(
     r"^(?:~|\$HOME|\$\{HOME\}|/home/[^/]+)?/?\.git-credentials$"
 )
 
+# R4-enum (card 48d3c0f9): a CLOSED set of additional high-sensitivity files that
+# are never legitimately printed through a shell. Each matched as a WHOLE token
+# (shlex keeps ~ / $HOME literal). Scope agreed with Chad (the gate owner):
+#   - SSH PRIVATE keys ~/.ssh/id_*  (the .pub is public -> excluded via lookahead)
+#   - ~/.netrc, ~/.aws/credentials
+#   - store/.session-secret, store/.dashboard-session-secret (dashboard signing keys)
+#   - oauth-tokens.json  (OAuth refresh tokens, in any channel dir)
+# DELIBERATELY OUT OF SCOPE: store/.dashboard-token (fleet-ops idiom, read in every
+# recipe), .env/.env.* (covered by the permission-ruleset R2), ~/.git-credentials
+# (already _CRED_FILE_RE above), ~/.aws/config (false-positive risky).
+_HOME_PREFIX = r"(?:~|\$HOME|\$\{HOME\}|/home/[^/]+)"
+_SENSITIVE_FILE_RES = (
+    re.compile(rf"^{_HOME_PREFIX}/\.ssh/id_(?!.*\.pub$)[^/]*$"),  # SSH private key, not .pub
+    re.compile(rf"^{_HOME_PREFIX}/\.netrc$"),
+    re.compile(rf"^{_HOME_PREFIX}/\.aws/credentials$"),
+    re.compile(r"^(?:.*/)?store/\.session-secret$"),
+    re.compile(r"^(?:.*/)?store/\.dashboard-session-secret$"),
+    re.compile(r"^(?:.*/)?oauth-tokens\.json$"),
+)
+
 _PRINT_VERBS = frozenset(
     {"cat", "echo", "printf", "head", "tail", "xxd", "base64", "less", "more", "strings"}
 )
@@ -196,6 +216,22 @@ def match_cred_file_print(command):
     return False
 
 
+def match_sensitive_file_print(command):
+    """R4-enum (card 48d3c0f9): a print-style command reading any file in the
+    closed sensitive-file set (_SENSITIVE_FILE_RES) -- SSH private keys, ~/.netrc,
+    AWS credentials, the dashboard signing secrets, OAuth refresh-token files.
+    Sibling of match_cred_file_print (which guards ~/.git-credentials)."""
+    for piece in _split_subcommands(command):
+        tokens = _tokenize(piece)
+        if not tokens:
+            continue
+        if _command_word(tokens) not in _PRINT_VERBS:
+            continue
+        if any(rx.match(tok) for tok in tokens for rx in _SENSITIVE_FILE_RES):
+            return True
+    return False
+
+
 class Rule:
     __slots__ = ("name", "reason", "matcher")
 
@@ -228,6 +264,13 @@ RULES = [
         "raw print of the credential file ~/.git-credentials (PAT exfiltration "
         "/ log-leak risk)",
         match_cred_file_print,
+    ),
+    Rule(
+        "sensitive-file-print",
+        "raw print of a sensitive credential file (SSH private key, .netrc, AWS "
+        "credentials, dashboard signing secret, or OAuth token file) -- "
+        "exfiltration / log-leak risk",
+        match_sensitive_file_print,
     ),
 ]
 
