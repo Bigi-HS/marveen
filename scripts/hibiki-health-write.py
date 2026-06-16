@@ -46,6 +46,10 @@ RANGE_CHECKS: dict[str, tuple[float, float]] = {
     "fat_mass_kg": (2, 150),
     "lean_mass_kg": (20, 120),
     "vat_area_cm2": (0, 400),
+    # bone_density is stored as a DEXA T-score (see hibiki-dexa.py: the
+    # bone_density_tscore input maps to the stored `bone_density` key).
+    # Plausible human T-scores span roughly -4 (severe osteoporosis) to +3.
+    "bone_density": (-4.0, 3.0),
 }
 
 DEFAULT_STORE = os.path.join(
@@ -268,6 +272,8 @@ def write_dexa(
     }
     if vat_area_cm2 is not None:
         values["vat_area_cm2"] = vat_area_cm2
+    if bone_density is not None:
+        values["bone_density"] = bone_density
 
     errors = validate_ranges(values)
     if errors:
