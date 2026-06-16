@@ -3,6 +3,7 @@ import {
   uploadVideo,
   buildVideoResource,
   videoContentType,
+  assertGoogleUploadUri,
   YOUTUBE_RESUMABLE_INIT_URL,
   YOUTUBE_UPLOAD_SCOPE,
   type UploadFetch,
@@ -150,6 +151,31 @@ describe('uploadVideo', () => {
   it('throws when the upload response has no video id', async () => {
     const { fetchFn } = stubFetch({ upBody: {} })
     await expect(uploadVideo('AT', META, MEDIA, fetchFn)).rejects.toThrow(/no video id/)
+  })
+
+  it('refuses a non-HTTPS session URI before PUTing bytes', async () => {
+    const { fetchFn, calls } = stubFetch({ location: 'http://www.googleapis.com/upload/x' })
+    await expect(uploadVideo('AT', META, MEDIA, fetchFn)).rejects.toThrow(/non-Google . non-HTTPS|refusing/)
+    expect(calls.length).toBe(1) // never reached the PUT
+  })
+
+  it('refuses a session URI on a non-googleapis host before PUTing bytes', async () => {
+    const { fetchFn, calls } = stubFetch({ location: 'https://evil.example.com/upload/x' })
+    await expect(uploadVideo('AT', META, MEDIA, fetchFn)).rejects.toThrow(/refusing/)
+    expect(calls.length).toBe(1)
+  })
+})
+
+describe('assertGoogleUploadUri', () => {
+  it('accepts googleapis.com HTTPS hosts', () => {
+    expect(() => assertGoogleUploadUri('https://www.googleapis.com/upload/youtube/v3/videos?upload_id=x')).not.toThrow()
+    expect(() => assertGoogleUploadUri('https://googleapis.com/x')).not.toThrow()
+  })
+  it('rejects http, foreign hosts, and a lookalike suffix', () => {
+    expect(() => assertGoogleUploadUri('http://www.googleapis.com/x')).toThrow()
+    expect(() => assertGoogleUploadUri('https://evil.com/x')).toThrow()
+    expect(() => assertGoogleUploadUri('https://googleapis.com.evil.com/x')).toThrow()
+    expect(() => assertGoogleUploadUri('not a url')).toThrow(/malformed/)
   })
 })
 

@@ -62,6 +62,26 @@ export type UploadFetch = (
 
 const realFetch = fetch as unknown as UploadFetch
 
+// Validate the resumable session URI Google hands back before we PUT the media
+// bytes to it. The bytes are not secret, but the upload target should only ever
+// be a Google HTTPS endpoint -- this closes a (low) redirect-hijack of the upload
+// destination (NoA security review, PR #185). Defense-in-depth: the init call
+// already went to a hardcoded googleapis.com URL over the access token.
+export function assertGoogleUploadUri(uri: string): void {
+  let u: URL
+  try {
+    u = new URL(uri)
+  } catch {
+    throw new Error('youtube upload: malformed resumable session URI')
+  }
+  const okHost = u.hostname === 'googleapis.com' || u.hostname.endsWith('.googleapis.com')
+  if (u.protocol !== 'https:' || !okHost) {
+    throw new Error(
+      `youtube upload: refusing non-Google / non-HTTPS session URI (${u.protocol}//${u.hostname})`,
+    )
+  }
+}
+
 // Build the videos.insert request body, validating the metadata. Throws on a
 // missing title or an invalid privacyStatus so a malformed metadata file fails
 // loudly before any network call.
@@ -125,6 +145,7 @@ export async function uploadVideo(
       'youtube upload: no resumable session URI (Location header) in the init response',
     )
   }
+  assertGoogleUploadUri(sessionUri)
 
   // 2. Upload the media bytes to the session URI.
   const upRes = await fetchFn(sessionUri, {
