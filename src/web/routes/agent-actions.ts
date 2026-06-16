@@ -14,6 +14,7 @@ import {
   composeSkillPrompt,
   isValidSkillName,
   injectToAgent,
+  interruptAgent,
   type TriggerStatus,
 } from '../action-trigger.js'
 import type { RouteContext } from './types.js'
@@ -85,6 +86,22 @@ export async function tryHandleAgentActions(ctx: RouteContext): Promise<boolean>
 
     const status = injectToAgent(agent, composeSkillPrompt(skill, note || undefined), { force: data.force === true })
     logger.info({ agent, skill, force: data.force === true, status }, 'Operator run-skill')
+    respondForStatus(res, status, agent)
+    return true
+  }
+
+  // Soft-interrupt: send Escape into the agent's pane to cancel its current
+  // turn -- the gentle rung between a nudge and a kill+restart. No body: this is
+  // a pure control verb, nothing operator-supplied reaches the pane (only the
+  // fixed cancel key), so there is no untrusted text to validate. `force` is
+  // meaningless here -- interrupting a busy pane is the whole point.
+  const interruptMatch = path.match(/^\/api\/agents\/([^/]+)\/interrupt$/)
+  if (interruptMatch && method === 'POST') {
+    const agent = decodeURIComponent(interruptMatch[1])
+    if (!isKnownAgent(agent)) { json(res, { error: 'Unknown agent' }, 404); return true }
+
+    const status = interruptAgent(agent)
+    logger.info({ agent, status }, 'Operator interrupt')
     respondForStatus(res, status, agent)
     return true
   }

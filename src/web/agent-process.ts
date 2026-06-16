@@ -817,6 +817,22 @@ export function sendEnterToSession(session: string): boolean {
   }
 }
 
+// Send a bare Escape to a session: the soft-interrupt primitive behind the
+// dashboard "interrupt this agent" action. Escape is Claude Code's cancel-the-
+// current-turn key, the gentle rung between an operator nudge and a kill+restart
+// (card b83e7c92). No text is typed -- this only sends the control key -- so
+// there is nothing operator-supplied to sanitise. Best-effort: a tmux failure
+// is logged and swallowed, mirroring sendEnterToSession.
+export function sendEscapeToSession(session: string): boolean {
+  try {
+    execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 5000 })
+    return true
+  } catch (err) {
+    logger.warn({ err, session }, 'sendEscapeToSession: failed to send interrupt Escape')
+    return false
+  }
+}
+
 // Capture a pane snapshot with an execFileSync timeout. Null on any error so
 // the caller can treat "capture failed" as "not ready".
 export function capturePane(session: string): string | null {
