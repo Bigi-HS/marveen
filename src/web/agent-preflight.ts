@@ -19,7 +19,7 @@ import { channelStateDir, readChannelToken, channelIntentFromEnabledPlugins, typ
 import {
   agentDir,
   readAgentModel,
-  readAgentChannelProvider,
+  readAgentChannelProviderSafe,
   readAgentClaudeConfigDir,
 } from './agent-config.js'
 import { resolveFromPath } from '../platform.js'
@@ -111,7 +111,8 @@ export function evaluatePreflight(f: PreflightFacts): PreflightFinding[] {
 // ---------------------------------------------------------------------------
 
 function providerFor(name: string): ChannelProviderType {
-  const p = readAgentChannelProvider(name)
+  // Fail-soft on an unreadable config (misconfigured secret pointer) -> default.
+  const p = readAgentChannelProviderSafe(name).provider
   if (p === 'slack' || p === 'telegram' || p === 'discord') return p
   return CHANNEL_PROVIDER
 }

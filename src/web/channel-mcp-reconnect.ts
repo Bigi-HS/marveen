@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, CHANNEL_PROVIDER } from '../config.js'
-import { readAgentChannelProvider } from './agent-config.js'
+import { readAgentChannelProviderSafe } from './agent-config.js'
 import { agentSessionName, capturePane, isSessionReadyForPrompt } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { getProvider, type ChannelProviderType } from '../channel-provider.js'
@@ -21,7 +21,8 @@ export function resolveAgentSession(agentName: string): string {
 }
 
 export function resolveAgentProviderType(agentName: string): ChannelProviderType {
-  const perAgent = readAgentChannelProvider(agentName)
+  // Fail-soft on an unreadable config (misconfigured secret pointer) -> default.
+  const perAgent = readAgentChannelProviderSafe(agentName).provider
   if (perAgent === 'slack' || perAgent === 'telegram') return perAgent
   return CHANNEL_PROVIDER
 }

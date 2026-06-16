@@ -26,7 +26,7 @@ vi.mock('../config.js', () => ({
 }))
 
 vi.mock('../web/agent-config.js', () => ({
-  readAgentChannelProvider: (name: string) => name === 'slacker' ? 'slack' : '',
+  readAgentChannelProviderSafe: (name: string) => ({ provider: name === 'slacker' ? 'slack' : '', misconfigured: false }),
   AGENTS_BASE_DIR: '/tmp/test-claudeclaw/agents',
 }))
 

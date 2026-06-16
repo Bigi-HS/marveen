@@ -18,7 +18,7 @@ import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { resolveFromPath } from '../platform.js'
 import { MAIN_AGENT_ID, CHANNEL_PROVIDER, PROJECT_ROOT } from '../config.js'
-import { listAgentNames, agentDir, readAgentChannelProvider, readAgentClaudeConfigDir } from './agent-config.js'
+import { listAgentNames, agentDir, readAgentChannelProviderSafe, readAgentClaudeConfigDir } from './agent-config.js'
 import {
   isAgentRunning,
   agentSessionName,
@@ -47,6 +47,10 @@ export interface AgentChannelState {
   provider: string | null
   intentionallyEnabled: boolean
   hasToken: boolean
+  /** True when the channel-provider config is unreadable (e.g. a misconfigured
+   *  secret pointer). Surfaced in the health view so a bad config is visible;
+   *  the launch path fails soft (default provider) rather than crashing. */
+  misconfigured?: boolean
 }
 
 export interface AgentTokenRollup {
@@ -146,12 +150,17 @@ function mainChannelState(): AgentChannelState {
   return { provider: CHANNEL_PROVIDER, intentionallyEnabled: true, hasToken: true }
 }
 
-function subAgentChannelState(name: string): AgentChannelState {
-  const configured = readAgentChannelProvider(name)
+export function subAgentChannelState(name: string): AgentChannelState {
+  // Fail-soft: a misconfigured secret pointer surfaces as a health flag instead
+  // of crashing the health collector. intentionallyEnabled / agentHasChannel
+  // route through the hardened resolveAgentProvider, so they are throw-safe too.
+  const read = readAgentChannelProviderSafe(name)
+  const configured = read.provider
   return {
     provider: configured && configured.trim() ? configured : CHANNEL_PROVIDER,
     intentionallyEnabled: isAgentChannelIntentionallyEnabled(name),
     hasToken: agentHasChannel(name),
+    misconfigured: read.misconfigured,
   }
 }
 

@@ -3,11 +3,12 @@ import { join } from 'node:path'
 import { logger } from '../logger.js'
 import { CHANNEL_PROVIDER } from '../config.js'
 import { channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
-import { agentDir, listAgentNames, readAgentChannelProvider } from './agent-config.js'
+import { agentDir, listAgentNames, readAgentChannelProviderSafe } from './agent-config.js'
 import { upsertChannelRequest, listPendingChannelRequests, updateChannelRequestName } from '../db.js'
 
 function resolveAgentProvider(name: string): ChannelProviderType {
-  const perAgent = readAgentChannelProvider(name)
+  // Fail-soft on an unreadable config (misconfigured secret pointer) -> default.
+  const perAgent = readAgentChannelProviderSafe(name).provider
   if (perAgent === 'slack' || perAgent === 'telegram') return perAgent
   return CHANNEL_PROVIDER
 }
