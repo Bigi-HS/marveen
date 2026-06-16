@@ -97,28 +97,94 @@ export function resolveModelId(raw: string): string {
   return MODEL_ALIASES[raw] || raw
 }
 
-// Per-model context window (in tokens). Used to size the proactive /compact
-// threshold per archetype: a Sonnet/Haiku agent (200K window) must compact far
-// earlier than a 1M-context Opus agent, so a single fixed token threshold is
-// wrong for everyone but one model. Keys are full model ids (alias-resolved).
-export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
-  'claude-opus-4-8[1m]': 1_000_000,
-  'claude-sonnet-4-6': 200_000,
-  'claude-haiku-4-5-20251001': 200_000,
+// The per-model facts the fleet needs in ONE typed place (card b83e7c92 item-1).
+// This replaces the bare window-only map: window sizes the proactive /compact
+// threshold (a 200K Sonnet/Haiku must compact far earlier than a 1M Opus), the
+// list prices feed the planned per-agent cost rollup (card bb4992dc), the
+// deprecation date drives stale-model warnings, and supports1M marks the
+// long-context variant. These facts were previously hand-maintained across the
+// window map + the model-migration memory; this const is now their single
+// source of truth. Keys are full model ids (alias-resolved before lookup).
+export interface ModelInfo {
+  /** Total context window, in tokens. */
+  window: number
+  /** Anthropic list price, USD per million INPUT tokens. 0 for local models. */
+  inputPricePerMTok: number
+  /** Anthropic list price, USD per million OUTPUT tokens. 0 for local models. */
+  outputPricePerMTok: number
+  /** ISO date (YYYY-MM-DD) the model retires, or null when none is announced. */
+  deprecationDate: string | null
+  /** True only for the 1M-context variant of a model. */
+  supports1M: boolean
 }
+
+// Prices are Anthropic published list rates (USD per MTok) as of 2026-06; this
+// is the one place to update them on a price change. Local Ollama models cost
+// nothing per token (priced 0) so the cost rollup attributes them as free.
+export const MODEL_REGISTRY: Record<string, ModelInfo> = {
+  'claude-opus-4-8[1m]':       { window: 1_000_000, inputPricePerMTok: 15, outputPricePerMTok: 75, deprecationDate: null, supports1M: true },
+  'claude-opus-4-8':           { window: 200_000,   inputPricePerMTok: 15, outputPricePerMTok: 75, deprecationDate: null, supports1M: false },
+  'claude-sonnet-4-6':         { window: 200_000,   inputPricePerMTok: 3,  outputPricePerMTok: 15, deprecationDate: null, supports1M: false },
+  'claude-haiku-4-5-20251001': { window: 200_000,   inputPricePerMTok: 1,  outputPricePerMTok: 5,  deprecationDate: null, supports1M: false },
+  'claude-haiku-4-5':          { window: 200_000,   inputPricePerMTok: 1,  outputPricePerMTok: 5,  deprecationDate: null, supports1M: false },
+  'qwen3:4b':                  { window: 32_768,    inputPricePerMTok: 0,  outputPricePerMTok: 0,  deprecationDate: null, supports1M: false },
+  // Retired models (model-migration-2026-06): kept so a stale agent-config still
+  // referencing them trips a deprecation warning instead of silent fallback.
+  'claude-sonnet-4-0':         { window: 200_000,   inputPricePerMTok: 3,  outputPricePerMTok: 15, deprecationDate: '2026-06-15', supports1M: false },
+  'claude-opus-4-0':           { window: 200_000,   inputPricePerMTok: 15, outputPricePerMTok: 75, deprecationDate: '2026-06-15', supports1M: false },
+}
+
+// Back-compat projection: the old window-only map, derived from the registry so
+// the two can never drift. Existing importers keep working unchanged.
+export const MODEL_CONTEXT_WINDOWS: Record<string, number> = Object.fromEntries(
+  Object.entries(MODEL_REGISTRY).map(([id, info]) => [id, info.window]),
+)
 
 // Default context window for any model id we don't explicitly know. 200K is the
 // standard Claude window and the safe (smaller) assumption: it makes us compact
 // earlier rather than risk running a large session past its real limit.
 export const DEFAULT_CONTEXT_WINDOW = 200_000
 
+// The full registry row for a model id (alias-resolved), or null when unknown.
+export function modelInfoForModel(modelId: string | null | undefined): ModelInfo | null {
+  if (!modelId || typeof modelId !== 'string') return null
+  return MODEL_REGISTRY[resolveModelId(modelId.trim())] ?? null
+}
+
 // Resolve a model id (alias or full) to its context window in tokens. Strips the
 // alias indirection first so 'opus'/'sonnet'/'haiku' resolve too. Falls back to
 // DEFAULT_CONTEXT_WINDOW for unknown ids (and for a null/empty input).
 export function contextWindowForModel(modelId: string | null | undefined): number {
-  if (!modelId || typeof modelId !== 'string') return DEFAULT_CONTEXT_WINDOW
-  const resolved = resolveModelId(modelId.trim())
-  return MODEL_CONTEXT_WINDOWS[resolved] ?? DEFAULT_CONTEXT_WINDOW
+  return modelInfoForModel(modelId)?.window ?? DEFAULT_CONTEXT_WINDOW
+}
+
+// USD cost of a turn's token usage at the model's list price, or null when the
+// model is unknown (the caller cannot price it). Negative/missing counts clamp
+// to zero so a bad usage reading never produces a negative cost.
+export function costForUsageUsd(
+  modelId: string | null | undefined,
+  inputTokens: number,
+  outputTokens: number,
+): number | null {
+  const info = modelInfoForModel(modelId)
+  if (!info) return null
+  const inTok = inputTokens > 0 ? inputTokens : 0
+  const outTok = outputTokens > 0 ? outputTokens : 0
+  return (inTok / 1_000_000) * info.inputPricePerMTok + (outTok / 1_000_000) * info.outputPricePerMTok
+}
+
+// Whether a model is retired as of the given ISO date (YYYY-MM-DD). False for an
+// unknown model or one with no announced retirement. ISO dates sort
+// lexicographically, so a plain string compare is correct.
+export function isModelDeprecated(modelId: string | null | undefined, asOfIsoDate: string): boolean {
+  const info = modelInfoForModel(modelId)
+  if (!info || !info.deprecationDate) return false
+  return asOfIsoDate >= info.deprecationDate
+}
+
+// Whether a model id is the 1M-context variant. False for unknown ids.
+export function modelSupports1M(modelId: string | null | undefined): boolean {
+  return modelInfoForModel(modelId)?.supports1M ?? false
 }
 
 // Turn a raw context-token count into a percentage of the model's window,
