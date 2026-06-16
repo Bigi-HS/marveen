@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL } from './config.js'
-import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, buildDashboardAccessMessage, createSession, verifySession, revokeSession, parseCookies, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from './web/dashboard-auth.js'
+import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, buildDashboardAccessMessage, createSession, verifySession, revokeSession, parseCookies, classifyRequestOrigin, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from './web/dashboard-auth.js'
 import { json, readBody } from './web/http-helpers.js'
 import { createRateLimiter } from './web/rate-limit.js'
 import { securityHeaders } from './web/security-headers.js'
@@ -102,14 +102,12 @@ export function startWebServer(port = 3420): http.Server {
     apiLimiter.prune()
   }, 5 * 60 * 1000)
   if (typeof rateLimitPruneInterval.unref === 'function') rateLimitPruneInterval.unref()
-  // Resolve the client IP, honouring the first hop of X-Forwarded-For set by
-  // the Tailscale Serve proxy in front of us. Falls back to the socket peer.
-  const clientIp = (req: http.IncomingMessage): string => {
-    const xff = req.headers['x-forwarded-for']
-    const raw = Array.isArray(xff) ? xff[0] : xff
-    const first = raw?.split(',')[0]?.trim()
-    return first || req.socket.remoteAddress || 'unknown'
-  }
+  // Resolve the request origin (remote-vs-local + client IP) for rate-limiting
+  // and the AC8 audit tag. Honours the first hop of X-Forwarded-For set by the
+  // Tailscale Serve proxy; falls back to the socket peer for direct loopback.
+  const reqOrigin = (req: http.IncomingMessage) =>
+    classifyRequestOrigin(req.headers['x-forwarded-for'], req.socket.remoteAddress)
+  const clientIp = (req: http.IncomingMessage): string => reqOrigin(req).sourceIp
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://localhost:${port}`)
@@ -183,11 +181,17 @@ export function startWebServer(port = 3420): http.Server {
         const raw = (await readBody(req, { maxBytes: 4096 })).toString('utf-8')
         token = raw ? (JSON.parse(raw).token ?? '') : ''
       } catch { token = '' }
+      const lo = reqOrigin(req)
       if (!checkBearerToken(`Bearer ${token}`, getDashboardToken())) {
+        // AC8: tag the audit trail remote/local + source IP. A rejected login
+        // from a remote (tailnet) IP is the signal worth watching once the
+        // dashboard is reachable off-box.
+        logger.warn({ remote: lo.remote, sourceIp: lo.sourceIp }, 'dashboard login rejected (bad token)')
         res.writeHead(401, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'Invalid token' }))
         return
       }
+      logger.info({ remote: lo.remote, sourceIp: lo.sourceIp }, 'dashboard login ok')
       const cookie = [
         `${SESSION_COOKIE_NAME}=${createSession()}`,
         'HttpOnly', 'SameSite=Strict', 'Path=/', `Max-Age=${SESSION_MAX_AGE_SECONDS}`,
@@ -219,6 +223,8 @@ export function startWebServer(port = 3420): http.Server {
     if (path.startsWith('/api/') && !isPublicApi) {
       const queryOk = isSseStream && checkBearerToken(`Bearer ${url.searchParams.get('token') ?? ''}`, getDashboardToken())
       if (!hasValidSession() && !hasValidBearer() && !queryOk) {
+        const uo = reqOrigin(req)
+        logger.warn({ remote: uo.remote, sourceIp: uo.sourceIp, path }, 'dashboard request unauthorized')
         res.writeHead(401, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'Unauthorized' }))
         return
