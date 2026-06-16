@@ -102,6 +102,33 @@ export function checkBearerToken(header: string | undefined, expected: string): 
   return timingSafeEqual(provided, wanted)
 }
 
+export interface RequestOrigin {
+  // true = arrived over the tailnet via the Tailscale Serve proxy; false = a
+  // direct loopback hit on 127.0.0.1.
+  remote: boolean
+  // the real client IP where known (first X-Forwarded-For hop when remote, the
+  // socket peer otherwise), or 'unknown'.
+  sourceIp: string
+}
+
+// Classify where a request originated, for the remote/local audit tag (AC8 of
+// the remote-access spec). The dashboard binds to 127.0.0.1, so the ONLY remote
+// ingress is the Tailscale Serve proxy, which terminates TLS and adds an
+// X-Forwarded-For header carrying the tailnet client IP. A request with a
+// non-empty first X-Forwarded-For hop therefore came in remotely; one without is
+// local loopback. We trust X-Forwarded-For only because nothing but Serve can
+// reach the loopback bind to set it (a direct attacker cannot inject a foreign
+// proxy hop here).
+export function classifyRequestOrigin(
+  xForwardedFor: string | string[] | undefined,
+  socketRemoteAddress: string | undefined,
+): RequestOrigin {
+  const raw = Array.isArray(xForwardedFor) ? xForwardedFor[0] : xForwardedFor
+  const firstHop = raw?.split(',')[0]?.trim()
+  if (firstHop) return { remote: true, sourceIp: firstHop }
+  return { remote: false, sourceIp: socketRemoteAddress || 'unknown' }
+}
+
 // Operator-facing access instructions printed on startup. SECURITY: the URL must
 // NOT carry the token. A URL with ?token=<root-equivalent-credential> leaks into
 // shell history, server/proxy access logs, the browser address bar and referrers.
