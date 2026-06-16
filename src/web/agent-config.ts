@@ -112,6 +112,13 @@ export interface ModelInfo {
   inputPricePerMTok: number
   /** Anthropic list price, USD per million OUTPUT tokens. 0 for local models. */
   outputPricePerMTok: number
+  /** Anthropic list price, USD per million CACHE-READ (hit) tokens. 0 for local
+   * models. Published as 0.1x the base input rate. */
+  cacheReadPerMTok: number
+  /** Anthropic list price, USD per million CACHE-WRITE tokens (5-minute TTL,
+   * which is what the harness uses). 0 for local models. Published as 1.25x the
+   * base input rate. The 1-hour write tier (2x) is not modelled. */
+  cacheWritePerMTok: number
   /** ISO date (YYYY-MM-DD) the model retires, or null when none is announced. */
   deprecationDate: string | null
   /** True only for the 1M-context variant of a model. */
@@ -119,23 +126,28 @@ export interface ModelInfo {
 }
 
 // Prices are Anthropic published list rates (USD per MTok), verified 2026-06
-// against anthropic.com/pricing; this is the one place to update them on a price
-// change. Local Ollama models cost nothing per token (priced 0) so the cost
-// rollup attributes them as free. NOTE: Opus 4.8 standard usage is $5/$25 (the
-// older Opus 4.0 was $15/$75 -- see the retired row below); fast mode ($10/$50)
-// and the 1M-context >200K-token surcharge are NOT modelled here (base rate
-// only) -- refine when the cost rollup (card bb4992dc) needs that precision.
+// against platform.claude.com/pricing; this is the one place to update them on a
+// price change. Local Ollama models cost nothing per token (priced 0) so the
+// cost rollup attributes them as free. NOTE: Opus 4.8 standard usage is $5/$25
+// (the older Opus 4.0 was $15/$75 -- see the retired row below); fast mode
+// ($10/$50) and the 1M-context >200K-token surcharge are NOT modelled here (base
+// rate only). Cache rates are the published cache columns: cache read (hit) =
+// 0.1x base input, 5-minute cache write = 1.25x base input (the 1-hour 2x write
+// tier is not modelled -- the harness uses the 5-minute ephemeral cache). These
+// were verified against the published per-model cache columns, not just derived
+// from the multipliers (cache_read dominates the spend per token-burn-anatomy,
+// so a wrong rate here would mis-state the cost rollup's dominant component).
 export const MODEL_REGISTRY: Record<string, ModelInfo> = {
-  'claude-opus-4-8[1m]':       { window: 1_000_000, inputPricePerMTok: 5,  outputPricePerMTok: 25, deprecationDate: null, supports1M: true },
-  'claude-opus-4-8':           { window: 200_000,   inputPricePerMTok: 5,  outputPricePerMTok: 25, deprecationDate: null, supports1M: false },
-  'claude-sonnet-4-6':         { window: 200_000,   inputPricePerMTok: 3,  outputPricePerMTok: 15, deprecationDate: null, supports1M: false },
-  'claude-haiku-4-5-20251001': { window: 200_000,   inputPricePerMTok: 1,  outputPricePerMTok: 5,  deprecationDate: null, supports1M: false },
-  'claude-haiku-4-5':          { window: 200_000,   inputPricePerMTok: 1,  outputPricePerMTok: 5,  deprecationDate: null, supports1M: false },
-  'qwen3:4b':                  { window: 32_768,    inputPricePerMTok: 0,  outputPricePerMTok: 0,  deprecationDate: null, supports1M: false },
+  'claude-opus-4-8[1m]':       { window: 1_000_000, inputPricePerMTok: 5,  outputPricePerMTok: 25, cacheReadPerMTok: 0.5,  cacheWritePerMTok: 6.25,  deprecationDate: null, supports1M: true },
+  'claude-opus-4-8':           { window: 200_000,   inputPricePerMTok: 5,  outputPricePerMTok: 25, cacheReadPerMTok: 0.5,  cacheWritePerMTok: 6.25,  deprecationDate: null, supports1M: false },
+  'claude-sonnet-4-6':         { window: 200_000,   inputPricePerMTok: 3,  outputPricePerMTok: 15, cacheReadPerMTok: 0.3,  cacheWritePerMTok: 3.75,  deprecationDate: null, supports1M: false },
+  'claude-haiku-4-5-20251001': { window: 200_000,   inputPricePerMTok: 1,  outputPricePerMTok: 5,  cacheReadPerMTok: 0.1,  cacheWritePerMTok: 1.25,  deprecationDate: null, supports1M: false },
+  'claude-haiku-4-5':          { window: 200_000,   inputPricePerMTok: 1,  outputPricePerMTok: 5,  cacheReadPerMTok: 0.1,  cacheWritePerMTok: 1.25,  deprecationDate: null, supports1M: false },
+  'qwen3:4b':                  { window: 32_768,    inputPricePerMTok: 0,  outputPricePerMTok: 0,  cacheReadPerMTok: 0,    cacheWritePerMTok: 0,     deprecationDate: null, supports1M: false },
   // Retired models (model-migration-2026-06): kept so a stale agent-config still
   // referencing them trips a deprecation warning instead of silent fallback.
-  'claude-sonnet-4-0':         { window: 200_000,   inputPricePerMTok: 3,  outputPricePerMTok: 15, deprecationDate: '2026-06-15', supports1M: false },
-  'claude-opus-4-0':           { window: 200_000,   inputPricePerMTok: 15, outputPricePerMTok: 75, deprecationDate: '2026-06-15', supports1M: false },
+  'claude-sonnet-4-0':         { window: 200_000,   inputPricePerMTok: 3,  outputPricePerMTok: 15, cacheReadPerMTok: 0.3,  cacheWritePerMTok: 3.75,  deprecationDate: '2026-06-15', supports1M: false },
+  'claude-opus-4-0':           { window: 200_000,   inputPricePerMTok: 15, outputPricePerMTok: 75, cacheReadPerMTok: 1.5,  cacheWritePerMTok: 18.75, deprecationDate: '2026-06-15', supports1M: false },
 }
 
 // Back-compat projection: the old window-only map, derived from the registry so
@@ -175,6 +187,37 @@ export function costForUsageUsd(
   const inTok = inputTokens > 0 ? inputTokens : 0
   const outTok = outputTokens > 0 ? outputTokens : 0
   return (inTok / 1_000_000) * info.inputPricePerMTok + (outTok / 1_000_000) * info.outputPricePerMTok
+}
+
+/** The four billable token components of a turn. All optional; omitted/negative
+ * counts price as zero. cacheRead = cache hits (cheap, but dominant in volume);
+ * cacheCreation = cache writes. */
+export interface DetailedUsage {
+  input?: number
+  output?: number
+  cacheRead?: number
+  cacheCreation?: number
+}
+
+// Cache-aware USD cost of a turn, pricing all four token components at the
+// model's published rates, or null when the model is unknown. This is the rollup
+// helper (card bb4992dc): unlike costForUsageUsd it prices cache_read and
+// cache_creation, which token-burn-anatomy shows dominate real spend -- ignoring
+// them would mis-state the dominant component. Negative/missing counts clamp to
+// zero. costForUsageUsd is left untouched for its existing input+output callers.
+export function costForUsageDetailedUsd(
+  modelId: string | null | undefined,
+  usage: DetailedUsage,
+): number | null {
+  const info = modelInfoForModel(modelId)
+  if (!info) return null
+  const clamp = (n: number | undefined): number => (n && n > 0 ? n : 0)
+  return (
+    (clamp(usage.input) / 1_000_000) * info.inputPricePerMTok +
+    (clamp(usage.output) / 1_000_000) * info.outputPricePerMTok +
+    (clamp(usage.cacheRead) / 1_000_000) * info.cacheReadPerMTok +
+    (clamp(usage.cacheCreation) / 1_000_000) * info.cacheWritePerMTok
+  )
 }
 
 // Whether a model is retired as of the given ISO date (YYYY-MM-DD). False for an

@@ -6,8 +6,20 @@ import { createInterface } from 'node:readline'
 import { getDb } from '../db.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
+import { costForUsageDetailedUsd, readAgentModel } from './agent-config.js'
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
+
+// A workflow phantom sub-agent writes its transcript under the orchestrating
+// session's project dir, in a `subagents/` subtree (card bb4992dc, verified:
+// <projectDir>/<parentSessionUuid>/subagents/agent-<id>.jsonl). Any file on such
+// a path is a child of the source agent; everything else is the agent's own
+// session. The check is path-segment based (not a basename/prefix match) so a
+// dir literally named with an `agent-foo` vs `agent-foobar` prefix can never be
+// misclassified. Returns the parent agent id for a child, else null.
+export function spawnedByForFile(agent: string, filePath: string): string | null {
+  return filePath.includes('/subagents/') ? agent : null
+}
 
 interface AgentTranscriptSource {
   agent: string
@@ -68,6 +80,8 @@ interface ParsedCall {
   cacheCreationTokens: number
   contentPreview: string
   toolName: string | null
+  model: string | null
+  spawnedBy: string | null
 }
 
 async function parseJsonlFile(
@@ -78,6 +92,9 @@ async function parseJsonlFile(
   const calls: ParsedCall[] = []
   let lineNum = 0
   let sessionId = ''
+  // Per-file (not per-line): the lineage is a property of where the transcript
+  // lives, so compute it once.
+  const spawnedBy = spawnedByForFile(agent, filePath)
 
   const rl = createInterface({
     input: createReadStream(filePath, { encoding: 'utf-8' }),
@@ -125,6 +142,8 @@ async function parseJsonlFile(
       }
     }
 
+    const model: string | null = typeof obj.message?.model === 'string' ? obj.message.model : null
+
     calls.push({
       agent,
       sessionId: sessionId || basename(filePath, '.jsonl'),
@@ -135,24 +154,42 @@ async function parseJsonlFile(
       cacheCreationTokens: (u.cache_creation_input_tokens || 0),
       contentPreview: preview,
       toolName,
+      model,
+      spawnedBy,
     })
   }
 
   return { calls, linesRead: lineNum }
 }
 
-export async function collectTokenUsage(): Promise<{ inserted: number; files: number }> {
+export async function collectTokenUsage(
+  opts: { reparse?: boolean } = {},
+): Promise<{ inserted: number; files: number }> {
   const db = getDb()
   const sources = discoverAgentSources()
   let totalInserted = 0
   let totalFiles = 0
 
+  // Opt-in clean re-ingest (card bb4992dc backfill): wipe the cursors so every
+  // transcript is re-parsed from line 0. Safe because the unique dedup index +
+  // INSERT OR IGNORE make a re-read idempotent, while NEW columns (model,
+  // spawned_by) on rows that already existed get filled by the UPDATE below.
+  if (opts.reparse) db.exec('DELETE FROM token_usage_cursors')
+
   const getCursor = db.prepare('SELECT last_line, last_size FROM token_usage_cursors WHERE file_path = ?')
   const setCursor = db.prepare('INSERT OR REPLACE INTO token_usage_cursors (file_path, last_line, last_size) VALUES (?, ?, ?)')
   const insertCall = db.prepare(`
     INSERT OR IGNORE INTO token_usage (agent, session_id, timestamp, input_tokens, output_tokens,
-      cache_read_tokens, cache_creation_tokens, content_preview, tool_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      cache_read_tokens, cache_creation_tokens, content_preview, tool_name, model, spawned_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+  // On a re-ingest the row already exists, so INSERT OR IGNORE is a no-op; this
+  // backfills the new attribution columns onto a pre-existing row keyed by the
+  // dedup tuple. NULL-coalesced so a re-parse never clobbers a known value.
+  const backfillAttribution = db.prepare(`
+    UPDATE token_usage SET model = COALESCE(model, ?), spawned_by = COALESCE(spawned_by, ?)
+    WHERE agent = ? AND session_id = ? AND timestamp = ? AND input_tokens = ? AND output_tokens = ?
+      AND (model IS NULL OR spawned_by IS NULL)
   `)
 
   for (const source of sources) {
@@ -176,8 +213,14 @@ export async function collectTokenUsage(): Promise<{ inserted: number; files: nu
                 c.agent, c.sessionId, c.timestamp,
                 c.inputTokens, c.outputTokens,
                 c.cacheReadTokens, c.cacheCreationTokens,
-                c.contentPreview || null, c.toolName,
+                c.contentPreview || null, c.toolName, c.model, c.spawnedBy,
               )
+              if (c.model !== null || c.spawnedBy !== null) {
+                backfillAttribution.run(
+                  c.model, c.spawnedBy,
+                  c.agent, c.sessionId, c.timestamp, c.inputTokens, c.outputTokens,
+                )
+              }
             }
             setCursor.run(file, linesRead, fileSize)
           })
@@ -205,29 +248,166 @@ export interface TokenSummary {
   totalCacheCreation: number
   firstSeen: number
   lastSeen: number
+  /** Cache-aware USD cost across all four token components, priced per-row at
+   * each row's own model (card bb4992dc). Rows with no captured model are priced
+   * at the agent's configured model as a fallback; rows whose model stays
+   * unknown contribute 0 (cannot be priced). */
+  totalCostUsd: number
 }
 
-export function getTokenSummary(from?: number, to?: number): TokenSummary[] {
-  const db = getDb()
-  let sql = `
-    SELECT agent,
-      COUNT(*) as totalCalls,
-      SUM(input_tokens) as totalInput,
-      SUM(output_tokens) as totalOutput,
-      SUM(cache_read_tokens) as totalCacheRead,
-      SUM(cache_creation_tokens) as totalCacheCreation,
-      MIN(timestamp) as firstSeen,
-      MAX(timestamp) as lastSeen
-    FROM token_usage
-  `
+// Per (agent, model) raw aggregate -- the grain at which cost must be computed,
+// since each model prices differently. Re-aggregated to per-agent in JS.
+interface AgentModelGroup {
+  agent: string
+  model: string | null
+  calls: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheCreation: number
+  firstSeen: number
+  lastSeen: number
+}
+
+// Price one (agent, model) group, falling back to the agent's configured model
+// when the row carried no model (legacy rows). Returns 0 when still unpriceable.
+function costForGroup(g: { agent: string; model: string | null; input: number; output: number; cacheRead: number; cacheCreation: number }): number {
+  const model = g.model ?? readAgentModel(g.agent)
+  const cost = costForUsageDetailedUsd(model, {
+    input: g.input, output: g.output, cacheRead: g.cacheRead, cacheCreation: g.cacheCreation,
+  })
+  return cost ?? 0
+}
+
+function timeFilter(from?: number, to?: number): { clause: string; params: any[] } {
   const conditions: string[] = []
   const params: any[] = []
   if (from) { conditions.push('timestamp >= ?'); params.push(from) }
   if (to) { conditions.push('timestamp <= ?'); params.push(to) }
-  if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ')
-  sql += ' GROUP BY agent ORDER BY totalInput DESC'
+  return { clause: conditions.length ? ' WHERE ' + conditions.join(' AND ') : '', params }
+}
 
-  return db.prepare(sql).all(...params) as TokenSummary[]
+export function getTokenSummary(from?: number, to?: number): TokenSummary[] {
+  const db = getDb()
+  const { clause, params } = timeFilter(from, to)
+  const sql = `
+    SELECT agent, model,
+      COUNT(*) as calls,
+      SUM(input_tokens) as input,
+      SUM(output_tokens) as output,
+      SUM(cache_read_tokens) as cacheRead,
+      SUM(cache_creation_tokens) as cacheCreation,
+      MIN(timestamp) as firstSeen,
+      MAX(timestamp) as lastSeen
+    FROM token_usage${clause}
+    GROUP BY agent, model
+  `
+  const groups = db.prepare(sql).all(...params) as AgentModelGroup[]
+
+  // Re-aggregate the per-(agent,model) groups into one row per agent, summing the
+  // per-model cost so each model prices at its own rate.
+  const byAgent = new Map<string, TokenSummary>()
+  for (const g of groups) {
+    let s = byAgent.get(g.agent)
+    if (!s) {
+      s = {
+        agent: g.agent, totalCalls: 0, totalInput: 0, totalOutput: 0,
+        totalCacheRead: 0, totalCacheCreation: 0,
+        firstSeen: g.firstSeen, lastSeen: g.lastSeen, totalCostUsd: 0,
+      }
+      byAgent.set(g.agent, s)
+    }
+    s.totalCalls += g.calls
+    s.totalInput += g.input
+    s.totalOutput += g.output
+    s.totalCacheRead += g.cacheRead
+    s.totalCacheCreation += g.cacheCreation
+    s.firstSeen = Math.min(s.firstSeen, g.firstSeen)
+    s.lastSeen = Math.max(s.lastSeen, g.lastSeen)
+    s.totalCostUsd += costForGroup(g)
+  }
+
+  return [...byAgent.values()].sort((a, b) => b.totalInput - a.totalInput)
+}
+
+export interface SessionCost {
+  agent: string
+  sessionId: string
+  spawnedBy: string | null
+  calls: number
+  totalInput: number
+  totalOutput: number
+  totalCacheRead: number
+  totalCacheCreation: number
+  costUsd: number
+}
+
+// Per-session cost rollup (card bb4992dc). Priced per (session, model) then
+// summed per session, with the same configured-model fallback. `spawnedBy` is
+// carried through so the caller can tell a phantom child's session apart from a
+// top-level one.
+export function getCostBySession(opts: { agent?: string; from?: number; to?: number } = {}): SessionCost[] {
+  const db = getDb()
+  const conditions: string[] = []
+  const params: any[] = []
+  if (opts.agent) { conditions.push('agent = ?'); params.push(opts.agent) }
+  if (opts.from) { conditions.push('timestamp >= ?'); params.push(opts.from) }
+  if (opts.to) { conditions.push('timestamp <= ?'); params.push(opts.to) }
+  const clause = conditions.length ? ' WHERE ' + conditions.join(' AND ') : ''
+  const rows = db.prepare(`
+    SELECT agent, session_id as sessionId, spawned_by as spawnedBy, model,
+      COUNT(*) as calls,
+      SUM(input_tokens) as input, SUM(output_tokens) as output,
+      SUM(cache_read_tokens) as cacheRead, SUM(cache_creation_tokens) as cacheCreation
+    FROM token_usage${clause}
+    GROUP BY agent, session_id, spawned_by, model
+  `).all(...params) as (AgentModelGroup & { sessionId: string; spawnedBy: string | null })[]
+
+  const bySession = new Map<string, SessionCost>()
+  for (const r of rows) {
+    const key = `${r.agent} ${r.sessionId}`
+    let s = bySession.get(key)
+    if (!s) {
+      s = {
+        agent: r.agent, sessionId: r.sessionId, spawnedBy: r.spawnedBy, calls: 0,
+        totalInput: 0, totalOutput: 0, totalCacheRead: 0, totalCacheCreation: 0, costUsd: 0,
+      }
+      bySession.set(key, s)
+    }
+    s.calls += r.calls
+    s.totalInput += r.input
+    s.totalOutput += r.output
+    s.totalCacheRead += r.cacheRead
+    s.totalCacheCreation += r.cacheCreation
+    s.costUsd += costForGroup(r)
+    if (r.spawnedBy && !s.spawnedBy) s.spawnedBy = r.spawnedBy
+  }
+  return [...bySession.values()].sort((a, b) => b.costUsd - a.costUsd)
+}
+
+export interface LineageRollup {
+  parent: string
+  childCalls: number
+  childSessions: number
+  childCostUsd: number
+}
+
+// One-level parent->child cost rollup (card bb4992dc): for each orchestrating
+// agent that spawned workflow phantoms, the total cost its children incurred,
+// separable from the parent's own-session spend. Only rows with a non-null
+// spawned_by (the phantom children) count here.
+export function getLineageRollup(from?: number, to?: number): LineageRollup[] {
+  const sessions = getCostBySession({ from, to }).filter(s => s.spawnedBy)
+  const byParent = new Map<string, LineageRollup>()
+  for (const s of sessions) {
+    const parent = s.spawnedBy as string
+    let r = byParent.get(parent)
+    if (!r) { r = { parent, childCalls: 0, childSessions: 0, childCostUsd: 0 }; byParent.set(parent, r) }
+    r.childCalls += s.calls
+    r.childSessions += 1
+    r.childCostUsd += s.costUsd
+  }
+  return [...byParent.values()].sort((a, b) => b.childCostUsd - a.childCostUsd)
 }
 
 export interface TimelineBucket {
