@@ -527,3 +527,87 @@ export function normalizeRecipient(
   }
   return null
 }
+
+// --- Secret-pointer resolver (card b83e7c92 item-5) -----------------------
+//
+// Resolves {env:VAR_NAME} and {file:relative/path} placeholders so agent
+// configs can reference secrets by pointer rather than embedding them inline.
+// Canonical use: {file:store/.dashboard-token}, {env:GH_PAT}.
+//
+// Rules:
+//  - Only WHOLE-VALUE placeholders are resolved (not embedded substrings).
+//  - {env:VAR} -- env var name must match [A-Z_][A-Z0-9_]* (strict form).
+//  - {file:path} -- path must be relative (no leading / or ~), no .. segments.
+//    Resolved relative to projectRoot (defaults to PROJECT_ROOT). The resolved
+//    path must remain inside projectRoot.
+//  - File content is trimEnd()-trimmed (token files end with \n).
+//  - Errors are fail-closed: unresolvable pointer -> throw SecretPointerError.
+//    Error messages carry the pointer address (name/path) but NEVER the secret.
+//  - Plain strings (no placeholder) pass through unchanged.
+
+export class SecretPointerError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SecretPointerError'
+  }
+}
+
+// Strict: [A-Z_][A-Z0-9_]* anchored, so lowercase/digit-start/spaces all fail.
+const ENV_POINTER_RE = /^\{env:([A-Z_][A-Z0-9_]*)\}$/
+// File path: everything up to the closing } (validated below, not via regex).
+const FILE_POINTER_RE = /^\{file:([^}]*)\}$/
+
+export function resolveSecretPointer(value: string, projectRoot: string = PROJECT_ROOT): string {
+  // {env:VAR_NAME}
+  const envMatch = ENV_POINTER_RE.exec(value)
+  if (envMatch) {
+    const name = envMatch[1]
+    const resolved = process.env[name]
+    if (resolved === undefined) {
+      throw new SecretPointerError(`{env:${name}} is not set`)
+    }
+    return resolved
+  }
+
+  // {file:relative/path}
+  const fileMatch = FILE_POINTER_RE.exec(value)
+  if (fileMatch) {
+    const rawPath = fileMatch[1].trim()
+    if (!rawPath) {
+      throw new SecretPointerError('{file:} path is empty')
+    }
+    // Reject absolute paths (leading / or ~).
+    if (rawPath.startsWith('/') || rawPath.startsWith('~')) {
+      throw new SecretPointerError(
+        `{file:${rawPath}} must be a relative path (no leading / or ~)`
+      )
+    }
+    // Reject %2e%2e and similar URL-encoded traversal patterns.
+    if (rawPath.includes('%')) {
+      throw new SecretPointerError(
+        `{file:${rawPath}} contains percent-encoded characters (not allowed)`
+      )
+    }
+    // Reject .. segments.
+    if (hasParentTraversal(rawPath)) {
+      throw new SecretPointerError(`{file:${rawPath}} contains parent traversal (..)`)
+    }
+    const resolved = join(projectRoot, rawPath)
+    // Double-check after join normalization: resolved path must be inside root.
+    const rootWithSep = projectRoot.endsWith('/') ? projectRoot : projectRoot + '/'
+    if (!resolved.startsWith(rootWithSep) && resolved !== projectRoot) {
+      throw new SecretPointerError(
+        `{file:${rawPath}} resolves outside project root`
+      )
+    }
+    try {
+      return readFileSync(resolved, 'utf-8').trimEnd()
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? 'unknown'
+      throw new SecretPointerError(`{file:${rawPath}} is not readable (${code})`)
+    }
+  }
+
+  // Not a placeholder -- return unchanged.
+  return value
+}
