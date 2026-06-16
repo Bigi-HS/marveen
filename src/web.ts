@@ -25,6 +25,7 @@ import { startWedgedQueueWatcher } from './web/wedged-queue-watcher.js'
 import { startReauthHealer } from './web/reauth-healer.js'
 import { startAutoRestartRunner } from './web/auto-restart-runner.js'
 import { startSessionSizeWatcher } from './web/session-size-watcher.js'
+import { startTmuxTitleWatcher } from './web/tmux-title.js'
 import { startSupervisorSentinel } from './web/supervisor-sentinel.js'
 import { logger } from './logger.js'
 import { tryHandleProfiles } from './web/routes/profiles.js'
@@ -392,6 +393,9 @@ export function startWebServer(port = 3420): http.Server {
   const sessionSizeInterval = startSessionSizeWatcher()
   logger.info('Session-size watcher started (10min poll, 5min offset)')
 
+  const tmuxTitleInterval = startTmuxTitleWatcher()
+  logger.info('tmux-title watcher started (30s poll) -- per-agent window title = id + state + ctx%')
+
   const supervisorSentinelInterval = startSupervisorSentinel()
   logger.info('Supervisor sentinel started (60s poll, 60s offset) -- who-watches-the-watcher')
 
@@ -457,6 +461,7 @@ export function startWebServer(port = 3420): http.Server {
     if (reauthHealerInterval) clearInterval(reauthHealerInterval)
     clearInterval(autoRestartInterval)
     clearInterval(sessionSizeInterval)
+    clearInterval(tmuxTitleInterval)
     clearInterval(updateCheckerInterval)
     clearInterval(rateLimitPruneInterval)
     return origClose(cb)
