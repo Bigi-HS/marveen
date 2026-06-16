@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Adversarial fixture set for guardrail-permission-rules.py (card 13974213).
+"""Adversarial fixture set for guardrail-permission-rules.py (cards 13974213, b737d67b).
 
 Run: python3 scripts/hooks/test_guardrail_permission_rules.py
 
-Three deny rules (last-match-wins, default=allow):
-  R1 external-dir -- Write/Edit tool to a path with .. (cross-worktree churn)
-  R2 env-file-read -- Bash print-verb reading a .env / .env.* file
-  R3 external-curl -- Bash curl with a non-fleet POST/PUT/DELETE to an external host
+Four deny rules (last-match-wins, default=allow):
+  R1  external-dir       -- Write/Edit tool to a path with .. (cross-worktree churn)
+  R2  env-file-read      -- Bash print-verb reading a .env / .env.* file
+  R2b interpreter-env-read -- Bash interpreter -c/-e inline code opening .env (card b737d67b)
+  R3  external-curl      -- Bash curl with a non-fleet POST/PUT/DELETE to an external host
 
 Each rule has: >=2 must-DENY (FN guard) + >=2 must-ALLOW incl. an opposing case (FP guard).
 Fail-safe invariants: non-matched tool passes, malformed/empty stdin = exit 0, fail-open.
@@ -196,12 +197,45 @@ class ClassifyTests(unittest.TestCase):
         self.assertFalse(denied)  # Read is not in the external-dir rule scope
 
     def test_last_rule_wins_when_two_rules_could_match(self):
-        # A Write to an external path containing .env: external-dir rule fires first
-        # but last-match-wins means the last matching rule determines the outcome.
-        # Both R1 and (were it bash) R2 are separate; for Write, only R1 applies.
+        # Write to path with ..: only R1 (external-dir) applies for Write tool.
         denied, name, _ = guard.classify(self._write('../other/.env'))
         self.assertTrue(denied)
         self.assertEqual(name, 'external-dir')
+
+
+# ── R2b: interpreter inline .env read (card b737d67b) ────────────────────────
+class InterpreterEnvReadTests(unittest.TestCase):
+    def _bash(self, cmd):
+        return {'tool_name': 'Bash', 'tool_input': {'command': cmd}}
+
+    DENY = [
+        "python3 -c \"print(open('.env').read())\"",
+        "python3 -c \"import sys; sys.stdout.write(open('.env').read())\"",
+        "node -e \"console.log(require('fs').readFileSync('.env','utf8'))\"",
+        "python3 -c \"open('.env.local').read()\"",
+        "python -c \"print(open('.env').read())\"",
+    ]
+    ALLOW = [
+        "python3 -c \"import json; print(json.dumps({'key':'val'}))\"",
+        "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:3420')\"",
+        "python3 script.py",           # script-file, not inspectable
+        "node server.js",
+        "python3 -c \"# process .env docs\"",  # no open() call
+        "python3 -c \"f='.env_backup'; open(f).read()\"",  # variable indirection
+    ]
+
+    def test_deny(self):
+        for cmd in self.DENY:
+            with self.subTest(cmd=cmd):
+                denied, name, _ = guard.classify(self._bash(cmd))
+                self.assertTrue(denied, f"should DENY: {cmd}")
+                self.assertEqual(name, 'interpreter-env-read')
+
+    def test_allow(self):
+        for cmd in self.ALLOW:
+            with self.subTest(cmd=cmd):
+                denied, _, _ = guard.classify(self._bash(cmd))
+                self.assertFalse(denied, f"should ALLOW: {cmd}")
 
 
 # ── end-to-end (subprocess) ──────────────────────────────────────────────────
