@@ -118,12 +118,16 @@ export interface ModelInfo {
   supports1M: boolean
 }
 
-// Prices are Anthropic published list rates (USD per MTok) as of 2026-06; this
-// is the one place to update them on a price change. Local Ollama models cost
-// nothing per token (priced 0) so the cost rollup attributes them as free.
+// Prices are Anthropic published list rates (USD per MTok), verified 2026-06
+// against anthropic.com/pricing; this is the one place to update them on a price
+// change. Local Ollama models cost nothing per token (priced 0) so the cost
+// rollup attributes them as free. NOTE: Opus 4.8 standard usage is $5/$25 (the
+// older Opus 4.0 was $15/$75 -- see the retired row below); fast mode ($10/$50)
+// and the 1M-context >200K-token surcharge are NOT modelled here (base rate
+// only) -- refine when the cost rollup (card bb4992dc) needs that precision.
 export const MODEL_REGISTRY: Record<string, ModelInfo> = {
-  'claude-opus-4-8[1m]':       { window: 1_000_000, inputPricePerMTok: 15, outputPricePerMTok: 75, deprecationDate: null, supports1M: true },
-  'claude-opus-4-8':           { window: 200_000,   inputPricePerMTok: 15, outputPricePerMTok: 75, deprecationDate: null, supports1M: false },
+  'claude-opus-4-8[1m]':       { window: 1_000_000, inputPricePerMTok: 5,  outputPricePerMTok: 25, deprecationDate: null, supports1M: true },
+  'claude-opus-4-8':           { window: 200_000,   inputPricePerMTok: 5,  outputPricePerMTok: 25, deprecationDate: null, supports1M: false },
   'claude-sonnet-4-6':         { window: 200_000,   inputPricePerMTok: 3,  outputPricePerMTok: 15, deprecationDate: null, supports1M: false },
   'claude-haiku-4-5-20251001': { window: 200_000,   inputPricePerMTok: 1,  outputPricePerMTok: 5,  deprecationDate: null, supports1M: false },
   'claude-haiku-4-5':          { window: 200_000,   inputPricePerMTok: 1,  outputPricePerMTok: 5,  deprecationDate: null, supports1M: false },
