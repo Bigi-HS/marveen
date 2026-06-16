@@ -3,9 +3,40 @@ import { join } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync } from 'node:fs'
 import { STORE_DIR, DB_FILENAME, ALLOWED_CHAT_ID, OLLAMA_URL } from './config.js'
 import { logger } from './logger.js'
-import { emitDashboardEvent } from './event-bus.js'
+import { emitDashboardEvent, type DashboardEvent } from './event-bus.js'
 
 let db: Database.Database
+
+// Dashboard event emission (card 7c7ea226) is transaction-aware. A write inside
+// runInTransaction() buffers its event and only emits AFTER the transaction
+// commits -- so a rolled-back write never emits, and a committed one emits
+// exactly once, after durability. Standalone writes (the common case) emit
+// immediately. This keeps the "emit strictly on successful write" invariant even
+// for multi-write transactions like /api/kanban/.../breakdown/accept.
+let txEventBuffer: DashboardEvent[] | null = null
+
+function emitOrDefer(event: DashboardEvent): void {
+  if (txEventBuffer) txEventBuffer.push(event)
+  else emitDashboardEvent(event)
+}
+
+// Run fn in a SQLite transaction; dashboard events emitted by writes inside are
+// flushed only on commit (discarded on rollback). Single-level for event
+// buffering -- there are no nested transactions around event-emitting writes.
+export function runInTransaction<T>(fn: () => T): T {
+  if (txEventBuffer) return db.transaction(fn)() // nested: outer owns the buffer
+  txEventBuffer = []
+  try {
+    const result = db.transaction(fn)()
+    const buffered = txEventBuffer
+    txEventBuffer = null
+    for (const e of buffered) emitDashboardEvent(e)
+    return result
+  } catch (err) {
+    txEventBuffer = null // discard events from the rolled-back transaction
+    throw err
+  }
+}
 
 // Lock the DB file and its sidecars (WAL, SHM, rollback journal) down to
 // owner-only. better-sqlite3 opens the main file with the process umask
@@ -1476,7 +1507,7 @@ export function createKanbanCard(card: {
     card.assignee ?? null, card.priority ?? 'normal',
     card.project ?? null, card.parent_id ?? null, card.due_date ?? null, sortOrder, now, now
   )
-  emitDashboardEvent({ type: 'kanban', id: card.id, action: 'created' })
+  emitOrDefer({ type: 'kanban', id: card.id, action: 'created' })
 }
 
 export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'id' | 'created_at'>>): boolean {
@@ -1488,7 +1519,7 @@ export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'i
     `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, due_date=?, sort_order=?, updated_at=?, archived_at=?
      WHERE id=?`
   ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.due_date, f.sort_order, f.updated_at, f.archived_at, id).changes > 0
-  if (changed) emitDashboardEvent({ type: 'kanban', id, action: 'updated' })
+  if (changed) emitOrDefer({ type: 'kanban', id, action: 'updated' })
   return changed
 }
 
@@ -1501,7 +1532,7 @@ export function moveKanbanCard(id: string, status: KanbanCard['status'], sortOrd
   const changed = db.prepare(
     'UPDATE kanban_cards SET status=?, sort_order=?, updated_at=? WHERE id=?'
   ).run(status, sortOrder, now, id).changes > 0
-  if (changed) emitDashboardEvent({ type: 'kanban', id, action: 'moved' })
+  if (changed) emitOrDefer({ type: 'kanban', id, action: 'moved' })
   return changed
 }
 
@@ -1515,7 +1546,7 @@ export function markKanbanCardDispatched(id: string): boolean {
 export function archiveKanbanCard(id: string): boolean {
   const now = Math.floor(Date.now() / 1000)
   const changed = db.prepare('UPDATE kanban_cards SET archived_at=?, updated_at=? WHERE id=?').run(now, now, id).changes > 0
-  if (changed) emitDashboardEvent({ type: 'kanban', id, action: 'archived' })
+  if (changed) emitOrDefer({ type: 'kanban', id, action: 'archived' })
   return changed
 }
 
@@ -1529,7 +1560,7 @@ export function listKanbanProjects(): string[] {
 export function deleteKanbanCard(id: string): boolean {
   db.prepare('DELETE FROM kanban_comments WHERE card_id = ?').run(id)
   const changed = db.prepare('DELETE FROM kanban_cards WHERE id = ?').run(id).changes > 0
-  if (changed) emitDashboardEvent({ type: 'kanban', id, action: 'deleted' })
+  if (changed) emitOrDefer({ type: 'kanban', id, action: 'deleted' })
   return changed
 }
 
@@ -1543,7 +1574,7 @@ export function addKanbanComment(cardId: string, author: string, content: string
     'INSERT INTO kanban_comments (card_id, author, content, created_at) VALUES (?, ?, ?, ?)'
   ).run(cardId, author, content, now)
   db.prepare('UPDATE kanban_cards SET updated_at = ? WHERE id = ?').run(now, cardId)
-  emitDashboardEvent({ type: 'kanban', id: cardId, action: 'comment' })
+  emitOrDefer({ type: 'kanban', id: cardId, action: 'comment' })
   return { id: Number(info.lastInsertRowid), card_id: cardId, author, content, created_at: now }
 }
 
@@ -1762,7 +1793,7 @@ export function createAgentMessage(
     'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, ack_expected, priority, in_reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
   ).run(from, to, content, 'pending', now, ack, priority, inReplyTo)
   const id = Number(info.lastInsertRowid)
-  emitDashboardEvent({ type: 'message', id: String(id), action: 'created' })
+  emitOrDefer({ type: 'message', id: String(id), action: 'created' })
   return {
     id,
     from_agent: from, to_agent: to, content, status: 'pending',
@@ -1783,21 +1814,21 @@ export function getPendingMessages(toAgent?: string): AgentMessage[] {
 export function markMessageDelivered(id: number): boolean {
   const now = Math.floor(Date.now() / 1000)
   const changed = db.prepare("UPDATE agent_messages SET status = 'delivered', delivered_at = ? WHERE id = ?").run(now, id).changes > 0
-  if (changed) emitDashboardEvent({ type: 'message', id: String(id), action: 'delivered' })
+  if (changed) emitOrDefer({ type: 'message', id: String(id), action: 'delivered' })
   return changed
 }
 
 export function markMessageDone(id: number, result?: string): boolean {
   const now = Math.floor(Date.now() / 1000)
   const changed = db.prepare("UPDATE agent_messages SET status = 'done', result = ?, completed_at = ? WHERE id = ?").run(result ?? null, now, id).changes > 0
-  if (changed) emitDashboardEvent({ type: 'message', id: String(id), action: 'done' })
+  if (changed) emitOrDefer({ type: 'message', id: String(id), action: 'done' })
   return changed
 }
 
 export function markMessageFailed(id: number, error?: string): boolean {
   const now = Math.floor(Date.now() / 1000)
   const changed = db.prepare("UPDATE agent_messages SET status = 'failed', result = ?, completed_at = ? WHERE id = ?").run(error ?? null, now, id).changes > 0
-  if (changed) emitDashboardEvent({ type: 'message', id: String(id), action: 'failed' })
+  if (changed) emitOrDefer({ type: 'message', id: String(id), action: 'failed' })
   return changed
 }
 

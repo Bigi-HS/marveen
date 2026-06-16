@@ -3,7 +3,7 @@ import {
   listKanbanCards, listArchivedKanbanCards, createKanbanCard, updateKanbanCard,
   deleteKanbanCard, moveKanbanCard, archiveKanbanCard,
   getKanbanComments, addKanbanComment, listKanbanProjects,
-  getKanbanCard, getChildCards, getDb,
+  getKanbanCard, getChildCards, runInTransaction,
   createAgentMessage, markKanbanCardDispatched,
 } from '../../db.js'
 import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID } from '../../config.js'
@@ -211,8 +211,10 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'Subtask lista kötelező' }, 400)
       return true
     }
-    const db = getDb()
-    const created = db.transaction(() => {
+    // runInTransaction (not getDb().transaction) so the kanban events emitted by
+    // these writes flush only on commit -- a rolled-back breakdown emits nothing
+    // (card 7c7ea226).
+    const created = runInTransaction(() => {
       const ids: string[] = []
       for (const st of subtasks) {
         const id = randomUUID().slice(0, 8).toUpperCase()
@@ -229,7 +231,7 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       }
       addKanbanComment(parentId, BOT_NAME, `Auto-breakdown: ${ids.length} subtask létrehozva (${ids.join(', ')})`)
       return ids
-    })()
+    })
     json(res, { ok: true, created })
     return true
   }

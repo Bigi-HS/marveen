@@ -11,6 +11,7 @@ import {
   markMessageDelivered,
   markMessageDone,
   markMessageFailed,
+  runInTransaction,
 } from '../db.js'
 import { subscribeDashboardEvents, type DashboardEvent } from '../event-bus.js'
 
@@ -106,6 +107,35 @@ describe('agent_messages emits (card 7c7ea226)', () => {
       { type: 'message', id: String(msg.id), action: 'done' },
       { type: 'message', id: String(msg.id), action: 'failed' },
     ])
+  })
+})
+
+describe('transaction-aware emit (card 7c7ea226, NoA focus #2)', () => {
+  it('buffers events inside runInTransaction and flushes them on commit', () => {
+    const a = freshId()
+    const b = freshId()
+    runInTransaction(() => {
+      createKanbanCard({ id: a, title: 'A' })
+      createKanbanCard({ id: b, title: 'B' })
+      // events are buffered, not yet emitted, while the txn is open
+      expect(seen).toEqual([])
+    })
+    expect(seen).toEqual([
+      { type: 'kanban', id: a, action: 'created' },
+      { type: 'kanban', id: b, action: 'created' },
+    ])
+  })
+
+  it('discards buffered events when the transaction rolls back', () => {
+    const a = freshId()
+    expect(() => runInTransaction(() => {
+      createKanbanCard({ id: a, title: 'A' })
+      throw new Error('rollback')
+    })).toThrow('rollback')
+    // no event for the rolled-back write...
+    expect(seen).toEqual([])
+    // ...and the row really was rolled back
+    expect(updateKanbanCard(a, { title: 'x' })).toBe(false)
   })
 })
 
