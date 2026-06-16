@@ -71,6 +71,8 @@ class EnvFilePrintTests(unittest.TestCase):
         'echo $(cat .env)',
         'base64 .env',
         'cat $HOME/project/.env.staging',
+        'tac .env',                        # reverse-cat exfil (card 6f5af73d)
+        'od -c .env',                      # octal-dump exfil (card 6f5af73d)
     ]
     ALLOW = [
         'cat store/.dashboard-token',      # fleet idiom, NOT a .env file
