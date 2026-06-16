@@ -25,7 +25,7 @@ import {
   writeAgentSecurityProfile,
   listAgentNames,
   isKnownAgent,
-  readAgentChannelProvider,
+  readAgentChannelProviderSafe,
   writeAgentChannelProvider,
   readAgentAuthMode,
   writeAgentAuthMode,
@@ -598,7 +598,9 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   if (smokeTestMatch && method === 'POST') {
     const name = decodeURIComponent(smokeTestMatch[1])
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
-    const provider = readAgentChannelProvider(name) as ChannelProviderType
+    const providerRead = readAgentChannelProviderSafe(name)
+    if (providerRead.misconfigured) { json(res, { error: 'Channel provider config unreadable (misconfigured secret pointer)' }, 500); return true }
+    const provider = providerRead.provider as ChannelProviderType
     if (provider !== 'slack') { json(res, { error: 'Nem Slack provider' }, 400); return true }
     const scriptPath = join(agentDir(name), '..', '..', 'scripts', 'smoke-test-slack-channel.sh')
     if (!existsSync(scriptPath)) { json(res, { error: 'Smoke-test script nem található' }, 404); return true }
@@ -1137,7 +1139,9 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const request = pending.find(r => r.id === reqId)
     if (!request) { json(res, { error: 'Request not found' }, 404); return true }
 
-    const provider = readAgentChannelProvider(name) as ChannelProviderType
+    const providerRead = readAgentChannelProviderSafe(name)
+    if (providerRead.misconfigured) { json(res, { error: 'Channel provider config unreadable (misconfigured secret pointer)' }, 500); return true }
+    const provider = providerRead.provider as ChannelProviderType
     if (provider !== 'slack') { json(res, { error: 'Only Slack agents support channel requests' }, 400); return true }
 
     const accessPath = resolveAccessPath(name, provider)

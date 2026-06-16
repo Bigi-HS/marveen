@@ -26,7 +26,7 @@ vi.mock('../config.js', () => ({
 
 vi.mock('../web/agent-config.js', () => ({
   listAgentNames: () => ['samu'],
-  readAgentChannelProvider: () => 'telegram',
+  readAgentChannelProviderSafe: () => ({ provider: 'telegram', misconfigured: false }),
   AGENTS_BASE_DIR: '/tmp/test-claudeclaw/agents',
 }))
 

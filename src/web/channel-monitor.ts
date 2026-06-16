@@ -5,7 +5,7 @@ import { execSync, execFileSync } from 'node:child_process'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, PROJECT_ROOT, RESPAWN_ENABLED } from '../config.js'
-import { agentDir, listAgentNames, readAgentChannelProvider } from './agent-config.js'
+import { agentDir, listAgentNames, readAgentChannelProviderSafe } from './agent-config.js'
 import {
   agentHasChannel,
   agentSessionName,
@@ -49,7 +49,8 @@ function getProcessAgeMs(pid: number): number {
 }
 
 function resolveAgentProvider(name: string): ChannelProviderType {
-  const perAgent = readAgentChannelProvider(name)
+  // Fail-soft on an unreadable config (misconfigured secret pointer) -> default.
+  const perAgent = readAgentChannelProviderSafe(name).provider
   if (perAgent === 'slack' || perAgent === 'telegram' || perAgent === 'discord') return perAgent
   return CHANNEL_PROVIDER
 }

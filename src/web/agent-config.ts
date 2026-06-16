@@ -458,6 +458,38 @@ export function readAgentChannelProvider(name: string): string | null {
   return null
 }
 
+/** Result of a fail-soft channel-provider read. */
+export interface ChannelProviderRead {
+  /** The configured provider, or null when none is configured (channel-less). */
+  provider: string | null
+  /** True when the provider could not be read (e.g. a misconfigured secret
+   *  pointer in a whitelisted config key). Callers treat this as fail-soft: no
+   *  channel is launched, but the agent is NOT crashed. */
+  misconfigured: boolean
+  /** The error message when misconfigured (for the health surface / logs). */
+  error?: string
+}
+
+// readAgentChannelProvider() reads through the secret-pointer resolving loader
+// (readAgentConfig -> resolveConfigSecrets), which throws SecretPointerError
+// fail-closed on a misconfigured pointer ({file:} to a missing file, an unset
+// {env:}). An unhandled throw in the agent launch / health / channel-monitor
+// path would crash agent startup on a single bad config, so every such caller
+// MUST read through this fail-soft wrapper instead. Today inactive (no live
+// agent-config field is a secret pointer), this is the pre-deploy guard for
+// when a live config-pointer field (e.g. a channel apiToken) is introduced.
+export function readAgentChannelProviderSafe(name: string): ChannelProviderRead {
+  try {
+    return { provider: readAgentChannelProvider(name), misconfigured: false }
+  } catch (err) {
+    return {
+      provider: null,
+      misconfigured: true,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
+
 export function writeAgentChannelProvider(name: string, provider: string): void {
   const configPath = join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}

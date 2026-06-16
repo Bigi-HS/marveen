@@ -9,7 +9,7 @@ import {
   decideSubmitFollowup,
   shouldClearTruncatedPreamble,
 } from '../pane-state.js'
-import { agentDir, readAgentModel, readAgentSecurityProfile, readAgentClaudeConfigDir, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName } from './agent-config.js'
+import { agentDir, readAgentModel, readAgentSecurityProfile, readAgentClaudeConfigDir, readAgentChannelProviderSafe, readAgentAuthMode, readAgentDisplayName } from './agent-config.js'
 import { ensureAgentConfigDir } from './agent-config-dir.js'
 import { parseTelegramToken } from './telegram.js'
 import { getProvider, getProviderType, channelStateDir, readChannelToken, channelIntentFromEnabledPlugins, type ChannelProviderType } from '../channel-provider.js'
@@ -79,7 +79,10 @@ export function shouldContinueSession(hasPriorSession: boolean, attempt: number)
 }
 
 function resolveAgentProvider(name: string): ChannelProviderType {
-  const perAgent = readAgentChannelProvider(name)
+  // Fail-soft: a misconfigured secret pointer must not crash the launch path
+  // (agentHasChannel / isAgentChannelIntentionallyEnabled both route through
+  // here) -- fall back to the default provider on an unreadable config.
+  const perAgent = readAgentChannelProviderSafe(name).provider
   if (perAgent === 'slack' || perAgent === 'telegram' || perAgent === 'discord') return perAgent
   return CHANNEL_PROVIDER
 }
