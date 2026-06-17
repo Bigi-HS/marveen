@@ -11,6 +11,7 @@
 #   tests      `npx vitest run` (worktrees excl) -- any failure -> BLOCK; runner missing -> WARN
 #   diff-size  `git diff --numstat base...head`  -- additions count; over threshold -> WARN
 #   static     secret + unused-export grep       -- hardcoded secret -> BLOCK; unused export -> WARN
+#   gitleaks   gitleaks diff scan (card ea3720b3) -- secret found -> BLOCK; binary missing -> WARN
 #
 # Usage:
 #   scripts/pre-gate-bundle.sh <base-branch> <head-sha> [--json] [--notify[=agent]]
@@ -248,6 +249,83 @@ check_static() {
   else
     record static PASS "no hardcoded secrets, no orphan exports"
   fi
+}
+
+# Gitleaks secret scan over the diff (card ea3720b3). Augments check_static with
+# entropy-based detection and 100+ upstream rules that regex-grep cannot cover
+# (e.g. base64-encoded secrets, high-entropy strings, cloud-provider key formats).
+# Fail-open: if the gitleaks binary is absent, records WARN (same pattern as
+# other optional tooling). Never prints a secret value -- only rule-id + file.
+#
+# The binary lives in scripts/bin/gitleaks (gitignored; install with
+# scripts/install-gitleaks.sh). A custom scripts/gitleaks.toml suppresses
+# known fleet-safe patterns (dashboard-token read idiom, test fixtures).
+check_gitleaks() {
+  local gl_bin="${GITLEAKS_BIN:-${INSTALL_DIR}/scripts/bin/gitleaks}"
+  if [ ! -x "$gl_bin" ]; then
+    record gitleaks WARN "gitleaks binary not found at ${gl_bin}; run scripts/install-gitleaks.sh"
+    return
+  fi
+
+  local config_arg=()
+  local toml="${INSTALL_DIR}/scripts/gitleaks.toml"
+  [ -f "$toml" ] && config_arg=(--config "$toml")
+
+  # Write diff to a temp file; gitleaks' stdin mode reads unified diffs.
+  local tmpfile
+  tmpfile="$(mktemp /tmp/pgb-gitleaks-diff.XXXXXX)"
+  trap 'rm -f "$tmpfile"' RETURN
+
+  git -C "$INSTALL_DIR" diff "${BASE}...${HEAD}" -- . \
+      ":(exclude)${VITEST_EXCLUDE}" >"$tmpfile" 2>/dev/null || true
+
+  if [ ! -s "$tmpfile" ]; then
+    record gitleaks PASS "empty diff; nothing to scan"
+    return
+  fi
+
+  # --no-banner: suppress the gitleaks ascii art in CI output.
+  # --exit-code 1: gitleaks exits 1 on findings, 0 on clean.
+  # Report format: json to stdout (we extract only rule-id + file, never the value).
+  local gl_out gl_rc
+  gl_out="$("$gl_bin" detect \
+      "${config_arg[@]}" \
+      --source /dev/stdin \
+      --report-format json \
+      --report-path /dev/stdout \
+      --no-banner \
+      --log-level warn \
+      --exit-code 1 \
+      < "$tmpfile" 2>/dev/null)" || true
+  gl_rc=$?
+
+  if [ "$gl_rc" -eq 0 ]; then
+    record gitleaks PASS "gitleaks: no secrets detected"
+    return
+  fi
+
+  # Parse findings from JSON. Print rule-id + file only, never the secret value.
+  local findings
+  findings="$(printf '%s\n' "$gl_out" | python3 - <<'PY'
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    if not data:
+        print("(no parseable findings)")
+        sys.exit(0)
+    seen = {}
+    for item in data:
+        rid = item.get("RuleID", "?")
+        f   = item.get("File", "?")
+        seen.setdefault(rid, set()).add(f)
+    parts = ["%s(%s)" % (rid, ",".join(sorted(files))) for rid, files in sorted(seen.items())]
+    print(", ".join(parts))
+except Exception as e:
+    print("parse-error: %s" % e)
+PY
+)" 2>/dev/null || findings="(parse error)"
+
+  record gitleaks BLOCK "gitleaks findings (secret value NOT shown): ${findings}"
 }
 
 # Optional cross-model critic (--cross-model flag). Calls a local Ollama model to
@@ -542,6 +620,7 @@ main() {
   check_tests
   check_diff_size
   check_static
+  check_gitleaks
   [ "$cross_model" -eq 1 ] && check_cross_model
   [ "$skill_check" -eq 1 ] && check_skill_regression
   check_da_sentinel

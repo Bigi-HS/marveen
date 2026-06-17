@@ -62,5 +62,8 @@ claudeclaw.log
 # Local backup archives from scripts/backup.sh
 backups/
 
+# Local tool binaries (installed via scripts/install-gitleaks.sh, not committed)
+scripts/bin/
+
 # also ignore a node_modules symlink FILE at repo root (not just the dir)
 /node_modules

@@ -1,0 +1,57 @@
+# gitleaks config for the Genesis fleet repo (card ea3720b3).
+# https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml
+#
+# ALLOWLIST strategy: suppress ONLY known-safe patterns that appear in test
+# fixtures (fictive paths/values) and in fleet operational idioms that grep
+# would also skip. Do NOT allowlist patterns that appear in real secret files.
+
+title = "genesis-fleet"
+
+[extend]
+# Use the upstream default ruleset as the base; extend/override below.
+useDefault = true
+
+[[rules]]
+# Fleet dashboard token read idiom: `$(cat store/.dashboard-token)` appears in
+# every fleet-ops recipe. The token file itself is gitignored; the command is
+# not a secret value.
+id = "fleet-dashboard-token-read"
+description = "Fleet-ops dashboard token read idiom (not a secret value)"
+regex = '''\$\(cat store/\.dashboard-token\)'''
+tags = ["allowlist-candidate"]
+[rules.allowlist]
+regexes = ['''\$\(cat store/\.dashboard-token\)''']
+
+[[rules.allowlist]]
+description = "Test-fixture placeholder values (fictive paths, fakeuser)"
+regexes = [
+  '''/home/fakeuser/''',
+  '''fakeuser''',
+  '''placeholder''',
+  '''example\.com''',
+  '''EXAMPLE''',
+  '''test-only''',
+  # gitleaks high-entropy false-positives on base64 content in tests
+  '''a{16,}''',
+]
+paths = [
+  '''src/__tests__/.*''',
+  '''scripts/hooks/test_.*''',
+]
+
+[allowlist]
+description = "Global allowlist -- patterns safe across all files"
+regexes = [
+  # Model IDs (e.g. sk-ant-... model display names in comments)
+  '''claude-[a-z]+-\d+''',
+  # Markdown/doc token references with no value
+  '''`?\$\{?TOKEN\}?`?''',
+  # Cron-style strings caught by some entropy rules
+  '''[0-9] \* \* \* ''',
+]
+paths = [
+  # Changelog / release notes: may quote old tokens as examples
+  '''CHANGELOG.*''',
+  # The install script itself contains the checksum (not a secret)
+  '''scripts/install-gitleaks\.sh''',
+]
