@@ -218,6 +218,49 @@ describe('auth gate (cookie OR bearer)', () => {
   })
 })
 
+// card 32bcf962: the live pane / event SSE streams are consumed via EventSource,
+// which cannot set an Authorization header. Same-origin EventSource sends the
+// HttpOnly session cookie automatically (withCredentials), so the SSE stream is
+// authenticated by the SAME cookie/bearer gate as every other /api/* route. The
+// legacy ?token= query fallback was removed -- a stream must therefore present a
+// real cookie/bearer credential, and a token smuggled in the URL must NOT work
+// (the precondition for the fallback's safe removal).
+describe('SSE stream auth (post ?token= removal)', () => {
+  const SSE_PATH = '/api/agents/dave/pane/stream'
+
+  it('accepts an SSE stream request with a valid session cookie', async () => {
+    const login = await req('POST', '/api/auth/login', {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: TOKEN }),
+    })
+    const cookie = cookieFromSetCookie(login.setCookie!)
+    const r = await req('GET', SSE_PATH, { headers: { Cookie: cookie } })
+    expect(r.status).toBe(200)
+  })
+
+  it('accepts an SSE stream request with the bearer header (script/curl path)', async () => {
+    const r = await req('GET', SSE_PATH, { headers: { Authorization: `Bearer ${TOKEN}` } })
+    expect(r.status).toBe(200)
+  })
+
+  it('rejects an SSE stream request with neither cookie nor token', async () => {
+    const r = await req('GET', SSE_PATH)
+    expect(r.status).toBe(401)
+  })
+
+  it('rejects an SSE stream request carrying ONLY a ?token= query param', async () => {
+    // The legacy fallback is gone: a valid token in the URL must no longer
+    // authenticate the stream. With no cookie/bearer, this must be rejected.
+    const r = await req('GET', `${SSE_PATH}?token=${TOKEN}`)
+    expect(r.status).toBe(401)
+  })
+
+  it('rejects the multiplexed /api/events/stream with only a ?token= query param', async () => {
+    const r = await req('GET', `/api/events/stream?token=${TOKEN}`)
+    expect(r.status).toBe(401)
+  })
+})
+
 describe('HSTS security header', () => {
   it('sends Strict-Transport-Security when reached over HTTPS (Tailscale Serve)', async () => {
     const r = await req('GET', '/api/anything', {

@@ -223,13 +223,13 @@ export function startWebServer(port = 3420): http.Server {
       return json(res, { authenticated: hasValidSession() || hasValidBearer() })
     }
     // The live pane SSE stream is consumed via EventSource, which cannot set an
-    // Authorization header. The session cookie is sent automatically on
-    // same-origin EventSource requests; we also still accept the legacy ?token=
-    // for backward compat (its removal is a follow-on chunk).
-    const isSseStream = method === 'GET' && isSseStreamPath(path)
+    // Authorization header. Same-origin EventSource sends the HttpOnly session
+    // cookie automatically (withCredentials:true on the client), so the cookie
+    // path below authenticates it -- no token in the URL. The legacy ?token=
+    // query fallback was removed (card 32bcf962) so the root-equivalent token
+    // never appears in a URL (shell history, proxy/access logs, address bar).
     if (path.startsWith('/api/') && !isPublicApi) {
-      const queryOk = isSseStream && checkBearerToken(`Bearer ${url.searchParams.get('token') ?? ''}`, getDashboardToken())
-      if (!hasValidSession() && !hasValidBearer() && !queryOk) {
+      if (!hasValidSession() && !hasValidBearer()) {
         const uo = reqOrigin(req)
         logger.warn({ remote: uo.remote, sourceIp: uo.sourceIp, path }, 'dashboard request unauthorized')
         res.writeHead(401, { 'Content-Type': 'application/json' })

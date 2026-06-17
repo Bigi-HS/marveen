@@ -168,7 +168,10 @@ export function rateLimitKey(socketRemoteAddress: string | undefined): string {
 // stays as leak-safe as the local one. An empty/whitespace publicUrl falls back to
 // the loopback default, preserving the prior behavior for a plain local install.
 export function buildDashboardAccessMessage(port: number, token: string, publicUrl = ''): string {
-  const url = publicUrl.trim() ? publicUrl.trim().replace(/\/$/, '') + '/' : `http://127.0.0.1:${port}/`
+  // Strip ALL trailing slashes (not just one) before re-appending exactly one,
+  // so a publicUrl ending in `/` -- or several `//` -- never yields a double
+  // slash in the printed URL (#205 NIT).
+  const url = publicUrl.trim() ? publicUrl.trim().replace(/\/+$/, '') + '/' : `http://127.0.0.1:${port}/`
   return [
     '',
     'Dashboard access:',

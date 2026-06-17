@@ -9889,8 +9889,8 @@ function openTerminalModal(agentName) {
   setTimeout(() => term.focus(), 50)
 
   // SSE pane stream. Same-origin EventSource sends the HttpOnly session cookie
-  // automatically, so no ?token= is needed (server still accepts the legacy
-  // query param for backward compat -- removal is a follow-on chunk).
+  // automatically (withCredentials), which is the sole auth for the stream --
+  // the legacy ?token= query fallback was removed server-side (card 32bcf962).
   const sse = new EventSource(`/api/agents/${encodeURIComponent(agentName)}/pane/stream`, { withCredentials: true })
   sse.onmessage = (e) => {
     try {
