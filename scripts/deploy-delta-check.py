@@ -78,8 +78,9 @@ def get_delta_prs(tip, target):
 
 
 def get_pr_files(sha):
+    # Use first-parent diff: diff-tree without -m/-c is empty for merge commits.
     result = subprocess.run(
-        ["git", "-C", REPO, "diff-tree", "--no-commit-id", "-r", "--name-only", sha],
+        ["git", "-C", REPO, "diff", "--name-only", f"{sha}^1..{sha}"],
         capture_output=True,
         text=True,
     )
@@ -87,18 +88,25 @@ def get_pr_files(sha):
 
 
 def hook_presence_check():
-    """Scan agent settings.json files for scripts/hooks/*.py refs; return missing."""
-    settings_paths = glob.glob(f"{REPO}/agents/*/.*/.claude/settings.json") + glob.glob(
-        f"{REPO}/agents/*/.claude*/settings*.json"
-    )
+    """Scan agent settings.json files for scripts/hooks/*.py refs.
+
+    Returns (missing: list[str], checked: int).
+    """
+    settings_paths = glob.glob(f"{REPO}/agents/*/.claude*/settings*.json")
     referenced = set()
+    found_any = False
     for path in settings_paths:
         try:
-            for m in re.finditer(r"scripts/hooks/[^\s\"']+\.py", open(path).read()):
+            content = open(path).read()
+            found_any = True
+            for m in re.finditer(r"scripts/hooks/[^\s\"']+\.py", content):
                 referenced.add(m.group())
         except Exception:
             pass
-    return [f for f in sorted(referenced) if not os.path.exists(f"{REPO}/{f}")]
+    if not found_any:
+        print("WARN: hook-presence scan found 0 settings.json files -- vacuous pass, verify REPO path")
+    missing = [f for f in sorted(referenced) if not os.path.exists(f"{REPO}/{f}")]
+    return missing, len(referenced)
 
 
 def main():
@@ -117,25 +125,12 @@ def main():
     print()
 
     # 1. Hook-presence check
-    missing_hooks = hook_presence_check()
+    missing_hooks, checked = hook_presence_check()
     if missing_hooks:
         print(f"HOOK-PRESENCE: BLOCK ({len(missing_hooks)} missing)")
         for f in missing_hooks:
             print(f"  MISSING: {REPO}/{f}")
     else:
-        checked = len(
-            set(
-                m.group()
-                for path in (
-                    glob.glob(f"{REPO}/agents/*/.*/.claude/settings.json")
-                    + glob.glob(f"{REPO}/agents/*/.claude*/settings*.json")
-                )
-                for m in re.finditer(
-                    r"scripts/hooks/[^\s\"']+\.py",
-                    open(path).read() if os.path.exists(path) else "",
-                )
-            )
-        )
         print(f"Hook-presence: OK ({checked} referenced scripts all present)")
     print()
 
