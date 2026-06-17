@@ -5,6 +5,7 @@ import { STORE_DIR, DB_FILENAME, ALLOWED_CHAT_ID, OLLAMA_URL } from './config.js
 import { logger } from './logger.js'
 import { emitDashboardEvent, type DashboardEvent } from './event-bus.js'
 import { migrateGateTables } from './web/gate-db.js'
+import { migrateAckRegistry } from './web/ack-registry.js'
 
 let db: Database.Database
 
@@ -700,6 +701,15 @@ export function initDatabase(dbPathOverride?: string): void {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error('[db] gate tables migration failed:', msg)
+  }
+
+  // ACK-capability V2 runtime registry (card 83b7ec10). Additive
+  // CREATE-IF-NOT-EXISTS, no FK -> no-op on an existing DB, never bricks boot.
+  try {
+    migrateAckRegistry(db)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[db] ack registry migration failed:', msg)
   }
 
   // One-shot migration from the old JSON file (which had a read-modify-write
