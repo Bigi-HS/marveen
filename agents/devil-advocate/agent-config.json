@@ -1,7 +1,7 @@
 {
   "model": "claude-sonnet-4-6",
   "securityProfile": "researcher",
-  "displayName": "Devil's Advocate",
+  "displayName": "Ördög Ügyvédje",
   "team": {
     "role": "member",
     "reportsTo": "marveen",
