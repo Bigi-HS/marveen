@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, c
 import { STORE_DIR, DB_FILENAME, ALLOWED_CHAT_ID, OLLAMA_URL } from './config.js'
 import { logger } from './logger.js'
 import { emitDashboardEvent, type DashboardEvent } from './event-bus.js'
+import { migrateGateTables } from './web/gate-db.js'
 
 let db: Database.Database
 
@@ -689,6 +690,16 @@ export function initDatabase(dbPathOverride?: string): void {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error('[db] todo_items bond-owner migration failed:', msg)
+  }
+
+  // Mechanical merge-gate enforcement tables (card fa11eb63). Additive
+  // CREATE-IF-NOT-EXISTS + indexes, no FK, so it is a no-op on an existing DB
+  // and can never break boot. Defensive: a failure logs but never bricks boot.
+  try {
+    migrateGateTables(db)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[db] gate tables migration failed:', msg)
   }
 
   // One-shot migration from the old JSON file (which had a read-modify-write
