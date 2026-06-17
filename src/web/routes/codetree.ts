@@ -1,0 +1,108 @@
+import { json } from '../http-helpers.js'
+import type { RouteContext } from './types.js'
+import {
+  isCodetreeBuilt,
+  getIndexedAtEpoch,
+  getIndexMeta,
+  querySymbolsByName,
+  fileIndexed,
+  queryExportsForFile,
+  queryImporters,
+} from '../codetree-db.js'
+import type { RebuildSummary } from '../codetree-rebuild.js'
+import { spawnRebuildWorker } from '../codetree-rebuild-spawn.js'
+
+const STALE_AFTER_SECONDS = 24 * 3600
+
+// Rebuild is delegated to a runner so production spawns a child process while
+// tests inject a deterministic stub. Module-scoped lock (single server process)
+// enforces CT-AC6: one rebuild at a time.
+let rebuildRunner: () => Promise<RebuildSummary> = spawnRebuildWorker
+let rebuildInProgress: { started_at: string } | null = null
+
+export function __setCodetreeRebuildRunner(fn: () => Promise<RebuildSummary>): void {
+  rebuildRunner = fn
+}
+
+function indexedAtIso(): string {
+  const epoch = getIndexedAtEpoch()
+  return epoch != null ? new Date(epoch * 1000).toISOString() : ''
+}
+
+function isStale(): boolean {
+  const epoch = getIndexedAtEpoch()
+  if (epoch == null) return true
+  return Math.floor(Date.now() / 1000) - epoch > STALE_AFTER_SECONDS
+}
+
+// Read endpoints return 503 before the first rebuild rather than a misleading
+// empty result (CT-AC4 / CT-SEC1 safety theme).
+function notBuilt(res: RouteContext['res']): boolean {
+  if (!isCodetreeBuilt()) {
+    json(res, { error: 'codetree index has not been built; POST /api/codetree/rebuild' }, 503)
+    return true
+  }
+  return false
+}
+
+export async function tryHandleCodetree(ctx: RouteContext): Promise<boolean> {
+  const { res, path, method, url } = ctx
+
+  if (path === '/api/codetree/symbol' && method === 'GET') {
+    const name = url.searchParams.get('name')
+    if (!name) { json(res, { error: 'name parameter is required' }, 400); return true }
+    if (notBuilt(res)) return true
+    json(res, { indexed_at: indexedAtIso(), results: querySymbolsByName(name) })
+    return true
+  }
+
+  if (path === '/api/codetree/exports' && method === 'GET') {
+    const file = url.searchParams.get('file')
+    if (!file) { json(res, { error: 'file parameter is required' }, 400); return true }
+    if (notBuilt(res)) return true
+    if (!fileIndexed(file)) { json(res, { error: 'file not indexed', file }, 404); return true }
+    json(res, { indexed_at: indexedAtIso(), file, exports: queryExportsForFile(file) })
+    return true
+  }
+
+  if (path === '/api/codetree/importers' && method === 'GET') {
+    const moduleQuery = url.searchParams.get('module')
+    if (!moduleQuery) { json(res, { error: 'module parameter is required' }, 400); return true }
+    if (notBuilt(res)) return true
+    json(res, { indexed_at: indexedAtIso(), module: moduleQuery, importers: queryImporters(moduleQuery) })
+    return true
+  }
+
+  if (path === '/api/codetree/meta' && method === 'GET') {
+    const meta = getIndexMeta()
+    if (meta == null) { json(res, { error: 'codetree index has not been built' }, 503); return true }
+    json(res, {
+      indexed_at: indexedAtIso(),
+      files_count: meta.files_count,
+      symbols_count: meta.symbols_count,
+      imports_count: meta.imports_count,
+      schema_version: meta.schema_version,
+      stale: isStale(),
+    })
+    return true
+  }
+
+  if (path === '/api/codetree/rebuild' && method === 'POST') {
+    if (rebuildInProgress) {
+      json(res, { error: 'rebuild in progress', started_at: rebuildInProgress.started_at }, 409)
+      return true
+    }
+    rebuildInProgress = { started_at: new Date().toISOString() }
+    try {
+      const summary = await rebuildRunner()
+      json(res, { status: 'ok', ...summary })
+    } catch (err) {
+      json(res, { error: 'rebuild failed', detail: err instanceof Error ? err.message : String(err) }, 500)
+    } finally {
+      rebuildInProgress = null
+    }
+    return true
+  }
+
+  return false
+}
