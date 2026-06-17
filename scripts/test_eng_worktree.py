@@ -170,6 +170,17 @@ class SafeRemovePathTests(unittest.TestCase):
         # removing the container dir is not a worktree op
         self.assertFalse(e.is_safe_worktree_path(WT_BASE, REPO, WT_BASE))
 
+    def test_traversal_into_main_checkout_is_not_safe(self):
+        # `..` must not let a wt_base-rooted path escape into the main checkout
+        self.assertFalse(
+            e.is_safe_worktree_path(WT_BASE + "/../marveen", REPO, WT_BASE))
+
+    def test_sibling_prefix_dir_is_not_safe(self):
+        # a sibling whose name merely starts with wt_base is NOT under wt_base
+        # (the guard must match on the os.sep boundary, not a raw string prefix)
+        self.assertFalse(
+            e.is_safe_worktree_path(WT_BASE + ".extra/eph-1", REPO, WT_BASE))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
