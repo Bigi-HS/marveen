@@ -11,6 +11,7 @@ end-to-end by the author before the gate, mirroring prune_merged_worktrees.py.
 
 import importlib.util
 import os
+import tempfile
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -180,6 +181,24 @@ class SafeRemovePathTests(unittest.TestCase):
         # (the guard must match on the os.sep boundary, not a raw string prefix)
         self.assertFalse(
             e.is_safe_worktree_path(WT_BASE + ".extra/eph-1", REPO, WT_BASE))
+
+    def test_symlink_under_wt_base_pointing_at_main_repo_is_not_safe(self):
+        # Chad PR#216 INFO[low]: a wt_base/<key> symlink that targets the main
+        # checkout must NOT pass the guard -- the destructive remove has to see
+        # the REAL target, so the guard resolves symlinks (realpath), not just
+        # normpath (which leaves a symlink unresolved).
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = os.path.join(tmp, "marveen")
+            wt_base = os.path.join(tmp, "marveen-wt")
+            os.makedirs(repo)
+            os.makedirs(wt_base)
+            evil = os.path.join(wt_base, "evil")
+            os.symlink(repo, evil)  # wt_base/evil -> the main checkout
+            self.assertFalse(e.is_safe_worktree_path(evil, repo, wt_base))
+            # control: a real (non-symlinked) child of wt_base is still safe
+            real_child = os.path.join(wt_base, "eph-real")
+            os.makedirs(real_child)
+            self.assertTrue(e.is_safe_worktree_path(real_child, repo, wt_base))
 
 
 if __name__ == "__main__":
