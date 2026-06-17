@@ -691,25 +691,6 @@ export function initDatabase(dbPathOverride?: string): void {
     console.error('[db] todo_items bond-owner migration failed:', msg)
   }
 
-  // ACK-capability V2 registry (card 83b7ec10). A durable TTL-backed table that
-  // lets an agent SELF-DECLARE its ACK-capability at boot, so a dead agent's
-  // declaration lapses (ttl_expires_at < now) and it auto-becomes not-capable
-  // (self-healing), removing the manual static V1 flag. ADDITIVE only -- a fresh
-  // CREATE TABLE IF NOT EXISTS, no rebuild, never breaks boot. The effective
-  // capability the router uses is computed (a LIVE non-expired declaration OR the
-  // static V1 flag); an empty/expired registry with no flag is fail-closed
-  // not-capable. agent_id is the PK so a re-declaration on the next boot is an
-  // UPSERT, never a row leak.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS ack_capability_registry (
-      agent_id        TEXT PRIMARY KEY,
-      ack_capable     INTEGER NOT NULL DEFAULT 0,
-      declared_at     INTEGER NOT NULL,
-      ttl_expires_at  INTEGER NOT NULL
-    )
-  `)
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_ack_capability_ttl ON ack_capability_registry(ttl_expires_at)`)
-
   // One-shot migration from the old JSON file (which had a read-modify-write
   // race). Import rows if they exist, then rename the file so we don't keep
   // re-importing. Wrapped in a transaction so a crash mid-import is safe.
