@@ -82,6 +82,31 @@ describe('isSecuritySensitivePath (MG-AC4)', () => {
     expect(isSecuritySensitivePath('src/web/kanban.ts')).toBe(false)
     expect(isSecuritySensitivePath('')).toBe(false)
   })
+
+  // Gate self-protection (card 88eb6120, Chad FLAG[medium]): the enforcer must
+  // guard the enforcer. A PR that touches the gate's own code or its operative
+  // skill must require Chad, else a future gate-weakening change would bypass
+  // security review -- the same blind spot class as #206.
+  it('matches the gate enforcement modules and skill (card 88eb6120)', () => {
+    expect(isSecuritySensitivePath('src/web/gate-check.ts')).toBe(true)
+    expect(isSecuritySensitivePath('src/web/gate-db.ts')).toBe(true)
+    expect(isSecuritySensitivePath('src/web/github-pr.ts')).toBe(true)
+    expect(isSecuritySensitivePath('src/web/routes/gate.ts')).toBe(true)
+    expect(isSecuritySensitivePath('seed-skills/fleet-pr-merge-gate/SKILL.md')).toBe(true)
+  })
+})
+
+describe('runGateCheck requires chad for a gate-code PR (card 88eb6120)', () => {
+  it('a PR touching gate-check.ts pulls chad into the required set', async () => {
+    const result = await runGateCheck(601, {
+      fetchPr: async () => ({ headSha: 'a'.repeat(40), files: ['src/web/gate-check.ts'] }),
+      readApprovals: () => [],
+      hasActiveOverride: () => false,
+    })
+    expect(result.required).toEqual(['thor', 'dave', 'chad'])
+    expect(result.missing).toContain('chad')
+    expect(result.pass).toBe(false)
+  })
 })
 
 describe('requiredReviewers (MG-AC4)', () => {
