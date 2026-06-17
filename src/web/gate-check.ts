@@ -53,6 +53,16 @@ export function isSecuritySensitivePath(filename: string): boolean {
   if (f === 'src/prompt-safety.ts') return true
   if (f === 'src/team-trust.ts') return true
 
+  // Gate self-protection (card 88eb6120, Chad FLAG[medium]): the merge-gate's
+  // OWN enforcement code and its operative skill must themselves require Chad,
+  // otherwise a PR that weakens the gate could merge without security review --
+  // the enforcer would not guard the enforcer (same blind-spot class as #206).
+  if (f === 'src/web/gate-check.ts') return true
+  if (f === 'src/web/gate-db.ts') return true
+  if (f === 'src/web/github-pr.ts') return true
+  if (f === 'src/web/routes/gate.ts') return true
+  if (f.startsWith('seed-skills/fleet-pr-merge-gate/')) return true
+
   const base = f.split('/').pop() ?? f
 
   // **/.env* -- any dotenv file at any depth.
