@@ -156,7 +156,20 @@ def main() -> int:
     if pr.get("state") != "open":
         print(f"  WARN  : PR is not open -- continuing anyway")
 
-    # 2. Create clean worktree (remove any leftover first)
+    # 2. Fetch so the head SHA is in the local object store (a freshly pushed PR's
+    #    SHA may not be present yet, causing "invalid reference" on worktree add).
+    fetch_r = subprocess.run(
+        ["git", "fetch", "origin", f"pull/{pr_n}/head"],
+        cwd=MAIN_CHECKOUT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+    if fetch_r.returncode != 0:
+        # Fallback: broad fetch if the pull/<N>/head refspec is unavailable
+        subprocess.run(
+            ["git", "fetch", "origin"],
+            cwd=MAIN_CHECKOUT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    # Create clean worktree (remove any leftover first)
     if os.path.exists(wt_path):
         print(f"  WARN  : {wt_path} exists, removing first")
         _remove_worktree(wt_path)
