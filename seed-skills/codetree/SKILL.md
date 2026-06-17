@@ -1,6 +1,6 @@
 ---
 name: codetree
-description: Navigate the marveen codebase without reading files. Query a pre-indexed code knowledge graph (symbols, exports, import edges) over a REST API instead of grep + Read. Use when you need to find where a symbol is defined, what a file exports, or which files import a module. Trigger when about to grep/Read source just to locate a symbol or map dependencies.
+description: Navigate the marveen codebase without reading files. Query a pre-indexed code knowledge graph (symbols, exports, import edges) over a REST API instead of grep + Read. Use when you need to find where a symbol is defined, what a file exports, or which files import a module. Also turns a diff or a kanban card id into change-impact (transitive blast radius) + spec-init context (seams, existing specs, hot memory) via /api/codetree/impact. Trigger when about to grep/Read source just to locate a symbol, map dependencies, scope a change's blast radius, or gather context before a spec.
 ---
 
 # Codetree -- pre-indexed code knowledge graph
@@ -87,6 +87,45 @@ curl -s -H "Authorization: Bearer $TOKEN" "$BASE/api/codetree/importers?module=s
 
 `imported_names` is null for namespace / default / side-effect / `export *` imports. Package
 modules work too: `?module=better-sqlite3` returns every file importing that package.
+
+## Change-impact + spec-loader (`impact`)
+
+One call turns a **diff** OR a **kanban card id** into the context you need before a gate review
+(change blast-radius) or before writing a spec (the seams + what is already specced). Built on
+the same index; same Bearer auth; 503 before the first build; the response carries the
+`index.stale` flag so you can decide whether to rebuild first.
+
+```bash
+# change-impact: blast radius of a diff (gate / TDD -- which files a change ripples to)
+curl -s -H "Authorization: Bearer $TOKEN" "$BASE/api/codetree/impact?diff=origin/develop...HEAD"
+
+# spec-init: everything relevant to a card (pass &agent=<id> to also pull hot/shared memory)
+curl -s -H "Authorization: Bearer $TOKEN" "$BASE/api/codetree/impact?card=5428b78d&agent=quill"
+```
+
+Response envelope (both modes):
+
+```jsonc
+{
+  "input":   { "kind": "diff"|"card", "ref": "...", "card_id": "...",
+               "resolution": "branch-diff"|"keyword" },   // card mode only
+  "seed_files": ["src/web/ack-registry.ts"],              // what changed / what matched
+  "affected":   [{ "file": "src/web/agent-config.ts", "depth": 1 }],  // transitive importer closure
+  "symbols":    [{ "name": "readAgentAckCapable", "file": "src/web/agent-config.ts", "line": 334,
+                   "exported": true, "also_in_spec": ["store/specs/memory-privacy-governance.md"] }],
+  "specs":      [{ "path": "store/specs/ack-capability-v2.md", "score": 3 }],
+  "hot_memory": [{ "id": 12, "content": "...", "category": "hot", "keywords": "..." }],
+  "index":      { "indexed_at": 1700000000, "stale": false }
+}
+```
+
+- **card-id resolution** is automatic: if a branch `eng/eph-<id>-*` exists, seeds = its diff vs
+  `origin/develop` (`resolution: "branch-diff"`, precise -- the gate/TDD use); if no code exists
+  yet, it resolves by keyword over symbols/specs/memory (`resolution: "keyword"` -- the spec-init use).
+- **symbols** are exported-first (the natural spec seams); `also_in_spec` flags symbols already
+  referenced by another spec (the "what's already specced" cross-reference).
+- `400` if you pass neither / both of `diff` and `card`, or a malformed card id. `404` on an
+  unknown card. `hot_memory` is empty unless you pass `&agent=<id>`.
 
 ## On-demand rebuild
 

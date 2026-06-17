@@ -127,6 +127,16 @@ export function fileIndexed(file: string): boolean {
   return row != null
 }
 
+// Every indexed symbol. Used by the impact motor's keyword substring match
+// (~2k rows -- a full scan filtered in JS is negligible and keeps the match
+// semantics in one place: codetree-impact.selectSymbolHits).
+export function queryAllSymbols(): SymbolRow[] {
+  const rows = getCodetreeDb()
+    .prepare('SELECT name, kind, file, line, exported FROM code_symbols ORDER BY file, line')
+    .all() as Array<{ name: string; kind: string; file: string; line: number; exported: number }>
+  return rows.map((r) => ({ ...r, exported: r.exported === 1 }))
+}
+
 export function queryExportsForFile(file: string): Array<{ name: string; kind: string; line: number }> {
   return getCodetreeDb()
     .prepare('SELECT name, kind, line FROM code_symbols WHERE file = ? AND exported = 1 ORDER BY line')
