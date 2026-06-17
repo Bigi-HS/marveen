@@ -4,11 +4,15 @@ import { join } from 'node:path'
 import {
   shouldCompactSession,
   shouldHardCompact,
+  shouldBusyCompact,
   decideContextExhausted,
   adaptiveTokenThresholdForModel,
   adaptiveHardCeilingForModel,
+  adaptiveBusyCeilingForModel,
   COMPACT_THRESHOLD_FRACTION,
   HARD_CEILING_FRACTION,
+  BUSY_COMPACT_FRACTION,
+  BUSY_COMPACT_COOLDOWN_MS,
   DEFAULT_TOKEN_THRESHOLD,
   DEFAULT_COOLDOWN_MS,
   DEFAULT_HARD_CEILING_TOKENS,
@@ -275,7 +279,7 @@ describe('session-size-watcher -- source contracts', () => {
     // checkAgentHardCeiling must derive the ceiling from the agent's model too,
     // so the hard tier is not a dead no-op for 200K models and never inverts the
     // soft tier for opus-1M. It must NOT pass the fixed DEFAULT_HARD_CEILING_TOKENS.
-    const hardFn = SRC.slice(SRC.indexOf('function checkAgentHardCeiling'), SRC.indexOf('export function startSessionSizeWatcher'))
+    const hardFn = SRC.slice(SRC.indexOf('function checkAgentHardCeiling'), SRC.indexOf('function checkAgentBusyCompact'))
     expect(hardFn).toMatch(/adaptiveHardCeilingForModel\(/)
     expect(hardFn).toMatch(/resolveAgentModelId\(/)
     expect(hardFn).not.toMatch(/shouldHardCompact\(contextTokens, DEFAULT_HARD_CEILING_TOKENS\)/)
@@ -312,7 +316,7 @@ describe('session-size-watcher -- hard-ceiling tier contracts', () => {
   it('the hard tier bypasses the cooldown (no lastCompactedAt gate before sending)', () => {
     // shouldHardCompact has no cooldown parameter; the check sets lastCompactedAt
     // AFTER compacting (to inform the soft tier) but never reads it as a gate.
-    const hardFn = SRC.slice(SRC.indexOf('function checkAgentHardCeiling'), SRC.indexOf('export function startSessionSizeWatcher'))
+    const hardFn = SRC.slice(SRC.indexOf('function checkAgentHardCeiling'), SRC.indexOf('function checkAgentBusyCompact'))
     expect(hardFn).toMatch(/shouldHardCompact/)
     expect(hardFn).not.toMatch(/lastCompactedAt\.get/)
   })
@@ -326,10 +330,11 @@ describe('session-size-watcher -- hard-ceiling tier contracts', () => {
     expect(SRC).toMatch(/process\.env\.SESSION_HARD_CEILING_STUCK_WARN_MS/)
   })
 
-  it('does NOT send to a busy pane (no risky turn-boundary injection here)', () => {
-    // The only sendPromptToSession in the hard path is guarded by the idle check
-    // above; there is no "queue to busy pane" path.
-    const hardFn = SRC.slice(SRC.indexOf('function checkAgentHardCeiling'), SRC.indexOf('export function startSessionSizeWatcher'))
+  it('the hard fn itself still only sends behind the idle check (busy injection lives elsewhere)', () => {
+    // The hard-ceiling fn keeps its single idle-gated sendPromptToSession; the
+    // turn-boundary (busy) injection is a SEPARATE function (checkAgentBusyCompact),
+    // so the hard fn must still contain exactly one send, behind !isReadyForPrompt.
+    const hardFn = SRC.slice(SRC.indexOf('function checkAgentHardCeiling'), SRC.indexOf('function checkAgentBusyCompact'))
     const sends = (hardFn.match(/sendPromptToSession/g) || []).length
     expect(sends).toBe(1)
   })
@@ -354,6 +359,7 @@ describe('decideContextExhausted (terminal-state signal)', () => {
       contextTokens: CEILING + 50_000, // over the ceiling by default
       hardCeiling: CEILING,
       paneIsIdle: false,
+      paneActivelyWorking: false, // wedged (neither idle nor working) by default
       overCeilingMs: STUCK_MS + 60_000, // past the stuck window by default
       ...over,
     }
@@ -368,6 +374,16 @@ describe('decideContextExhausted (terminal-state signal)', () => {
   // (the hard-ceiling /compact fires at the idle boundary) -- must NOT escalate.
   it('does NOT fire when the pane is idle (auto-/compact can recover it)', () => {
     expect(decideContextExhausted(input({ paneIsIdle: true }), STUCK_MS)).toBe(false)
+  })
+
+  // FALSE-POSITIVE guard #1b (card 1f0d92a7): an over-ceiling agent that is
+  // ACTIVELY WORKING is RECOVERABLE -- the BUSY tier queues a /compact that runs
+  // at the next turn boundary -- so it must NOT escalate, even if stuck for ages.
+  it('does NOT fire when the pane is actively working (busy tier will queue /compact)', () => {
+    expect(decideContextExhausted(
+      input({ paneActivelyWorking: true, overCeilingMs: STUCK_MS * 10 }),
+      STUCK_MS,
+    )).toBe(false)
   })
 
   // OPPOSING COMBINATION #1: over ceiling + not idle, but NOT yet stuck long
@@ -401,5 +417,156 @@ describe('decideContextExhausted (terminal-state signal)', () => {
 
   it('uses a 30-min escalation dedup, matching the channel-monitor cadence', () => {
     expect(CONTEXT_EXHAUSTED_ALERT_DEDUP_MS).toBe(30 * 60 * 1000)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// BUSY tier (card 1f0d92a7): per-model busy ceiling = contextWindow * 0.78,
+// strictly between the soft (0.75) trigger and the 80% alert wall.
+// ---------------------------------------------------------------------------
+
+describe('adaptiveBusyCeilingForModel', () => {
+  it('the busy fraction is 0.78, between the soft 0.75 and the 80% wall', () => {
+    expect(BUSY_COMPACT_FRACTION).toBe(0.78)
+    expect(BUSY_COMPACT_FRACTION).toBeGreaterThan(COMPACT_THRESHOLD_FRACTION)
+    expect(BUSY_COMPACT_FRACTION).toBeLessThan(0.8) // fires BEFORE the 80% alert wall
+    expect(BUSY_COMPACT_FRACTION).toBeLessThan(HARD_CEILING_FRACTION)
+  })
+
+  it('Sonnet/Haiku (200K window) -> 156K busy ceiling', () => {
+    expect(adaptiveBusyCeilingForModel('claude-sonnet-4-6')).toBe(156_000)
+    expect(adaptiveBusyCeilingForModel('claude-haiku-4-5-20251001')).toBe(156_000)
+  })
+
+  it('Opus 1M (opus-4-8[1m]) -> 780K busy ceiling', () => {
+    expect(adaptiveBusyCeilingForModel('claude-opus-4-8[1m]')).toBe(780_000)
+  })
+
+  it('resolves aliases too (opus -> 780K, sonnet -> 156K)', () => {
+    expect(adaptiveBusyCeilingForModel('opus')).toBe(780_000)
+    expect(adaptiveBusyCeilingForModel('sonnet')).toBe(156_000)
+  })
+
+  it('an unknown / nullish model falls back to the default window * 0.78', () => {
+    const expected = Math.floor(DEFAULT_CONTEXT_WINDOW * BUSY_COMPACT_FRACTION)
+    expect(adaptiveBusyCeilingForModel('some-future-model-x')).toBe(expected)
+    expect(adaptiveBusyCeilingForModel(null)).toBe(expected)
+    expect(adaptiveBusyCeilingForModel(undefined)).toBe(expected)
+  })
+
+  it('INVARIANT: for every model soft < busy < hard (no tier inversion)', () => {
+    for (const model of [
+      'claude-sonnet-4-6',
+      'claude-haiku-4-5-20251001',
+      'claude-opus-4-8[1m]',
+      'opus',
+      'sonnet',
+      'some-unknown-model',
+      null,
+      undefined,
+    ]) {
+      const soft = adaptiveTokenThresholdForModel(model)
+      const busy = adaptiveBusyCeilingForModel(model)
+      const hard = adaptiveHardCeilingForModel(model)
+      expect(busy).toBeGreaterThan(soft)
+      expect(hard).toBeGreaterThan(busy)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// shouldBusyCompact -- the pure BUSY-tier decision. It carries the SAFETY gate
+// (only inject into an actively-working pane), so it gets the full adversarial
+// fixture set: each guard proven in isolation.
+// ---------------------------------------------------------------------------
+
+describe('shouldBusyCompact', () => {
+  const CEILING = 780_000 // ~1M window * 0.78
+  const COOLDOWN = BUSY_COMPACT_COOLDOWN_MS
+
+  it('the default busy cooldown is 45 minutes', () => {
+    expect(BUSY_COMPACT_COOLDOWN_MS).toBe(45 * 60 * 1000)
+  })
+
+  // The positive case: over ceiling, actively working, cooldown elapsed.
+  it('fires when over the busy ceiling, actively working, and past cooldown', () => {
+    expect(shouldBusyCompact(CEILING, CEILING, true, null, NOW, COOLDOWN)).toBe(true)
+    expect(shouldBusyCompact(CEILING + 50_000, CEILING, true, null, NOW, COOLDOWN)).toBe(true)
+  })
+
+  // SAFETY guard: NOT actively working -> never inject (idle/typing/unknown/
+  // limit-menu panes are all paneActivelyWorking=false from the caller).
+  it('does NOT fire when the pane is not actively working (the safety gate)', () => {
+    expect(shouldBusyCompact(CEILING + 50_000, CEILING, false, null, NOW, COOLDOWN)).toBe(false)
+  })
+
+  it('does NOT fire below the busy ceiling even when actively working', () => {
+    expect(shouldBusyCompact(CEILING - 1, CEILING, true, null, NOW, COOLDOWN)).toBe(false)
+  })
+
+  it('does NOT fire when the token count is unreadable (null)', () => {
+    expect(shouldBusyCompact(null, CEILING, true, null, NOW, COOLDOWN)).toBe(false)
+  })
+
+  // Cooldown guard: prevents stacking a second queued /compact behind one that
+  // has not yet fired at the turn boundary.
+  it('does NOT fire inside the cooldown since the last compaction', () => {
+    const lastCompact = NOW - COOLDOWN + 1000 // 1s inside the cooldown
+    expect(shouldBusyCompact(CEILING + 50_000, CEILING, true, lastCompact, NOW, COOLDOWN)).toBe(false)
+  })
+
+  it('fires again once the cooldown has elapsed', () => {
+    const lastCompact = NOW - COOLDOWN // exactly at the boundary
+    expect(shouldBusyCompact(CEILING + 50_000, CEILING, true, lastCompact, NOW, COOLDOWN)).toBe(true)
+  })
+
+  it('is inclusive at the ceiling boundary (>=), mirroring the other tiers', () => {
+    expect(shouldBusyCompact(CEILING, CEILING, true, null, NOW, COOLDOWN)).toBe(true)
+    expect(shouldBusyCompact(CEILING - 1, CEILING, true, null, NOW, COOLDOWN)).toBe(false)
+  })
+})
+
+describe('session-size-watcher -- busy-tier source contracts', () => {
+  it('gates the busy injection on isActivelyWorking, NOT the coarse busy state', () => {
+    // The safety key: queue /compact only into a live-spinner pane, so a
+    // usage-limit menu / pending-paste pane (also "busy") is never injected into.
+    const busyFn = SRC.slice(SRC.indexOf('function checkAgentBusyCompact'), SRC.indexOf('export function startSessionSizeWatcher'))
+    expect(busyFn).toMatch(/isActivelyWorking\(pane\)/)
+    expect(busyFn).toMatch(/shouldBusyCompact\(/)
+  })
+
+  it('the busy tier uses a per-model adaptive ceiling (not a fixed constant)', () => {
+    const busyFn = SRC.slice(SRC.indexOf('function checkAgentBusyCompact'), SRC.indexOf('export function startSessionSizeWatcher'))
+    expect(busyFn).toMatch(/adaptiveBusyCeilingForModel\(/)
+    expect(busyFn).toMatch(/resolveAgentModelId\(/)
+  })
+
+  it('the busy tier respects the cooldown (reads lastCompactedAt before sending)', () => {
+    // Unlike the hard tier, the busy tier MUST honor a cooldown so it does not
+    // stack queued /compacts; it reads lastCompactedAt and passes it to the gate.
+    const busyFn = SRC.slice(SRC.indexOf('function checkAgentBusyCompact'), SRC.indexOf('export function startSessionSizeWatcher'))
+    expect(busyFn).toMatch(/lastCompactedAt\.get\(name\)/)
+    expect(busyFn).toMatch(/BUSY_COMPACT_COOLDOWN_MS/)
+  })
+
+  it('the busy tier holds under a fleet pause (a /compact is a model call)', () => {
+    const busyFn = SRC.slice(SRC.indexOf('function checkAgentBusyCompact'), SRC.indexOf('export function startSessionSizeWatcher'))
+    expect(busyFn).toMatch(/shouldHoldProactiveWork\(`compact-busy:/)
+  })
+
+  it('the busy tier runs on the fast lane (called from hardSweep)', () => {
+    const sweepFn = SRC.slice(SRC.indexOf('function hardSweep'), SRC.indexOf('setTimeout(sweep'))
+    expect(sweepFn).toMatch(/checkAgentBusyCompact\(name\)/)
+  })
+
+  it('the busy cooldown is env-configurable for tuning without a rebuild', () => {
+    expect(SRC).toMatch(/process\.env\.SESSION_BUSY_COMPACT_COOLDOWN_MS/)
+  })
+
+  it('stays sub-agents only -- never the main channels session (Boss 2026-06-17)', () => {
+    // The busy tier rides the same listAgentNames() sweep; it must not introduce
+    // any main-session target.
+    expect(SRC).not.toMatch(/MAIN_AGENT_ID/)
+    expect(SRC).not.toMatch(/marveen-channels/)
   })
 })
