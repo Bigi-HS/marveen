@@ -9,7 +9,8 @@ import {
   decideSubmitFollowup,
   shouldClearTruncatedPreamble,
 } from '../pane-state.js'
-import { agentDir, readAgentModel, readAgentSecurityProfile, readAgentClaudeConfigDir, readAgentChannelProviderSafe, readAgentAuthMode, readAgentDisplayName } from './agent-config.js'
+import { agentDir, readAgentModel, readAgentSecurityProfile, readAgentClaudeConfigDir, readAgentChannelProviderSafe, readAgentAuthMode, readAgentDisplayName, readAgentAckCapable } from './agent-config.js'
+import { recordBootDeclaration } from './ack-capability-registry.js'
 import { ensureAgentConfigDir } from './agent-config-dir.js'
 import { parseTelegramToken } from './telegram.js'
 import { getProvider, getProviderType, channelStateDir, readChannelToken, channelIntentFromEnabledPlugins, type ChannelProviderType } from '../channel-provider.js'
@@ -422,6 +423,17 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     // sessions can also be present, so dismiss both. Errors are swallowed
     // -- the outbound pre-flight remains the safety net if this misses.
     scheduleIdentitySetup(session, readAgentDisplayName(name))
+
+    // ACK-capability V2 boot-declare (card 83b7ec10): the agent is now up, so
+    // record a live TTL-backed capability declaration in the durable registry.
+    // Self-healing: while this agent keeps (re)launching it keeps re-declaring,
+    // so the declaration stays live; once it dies for good and stops relaunching,
+    // the TTL lapses and it auto-becomes not-capable. We only declare for an
+    // agent V1 already deems capable (the static flag is passed in), so V2 never
+    // upgrades a fail-closed agent -- it only marks an already-capable agent as
+    // currently alive. Best-effort: recordBootDeclaration swallows its own errors
+    // so a registry write can never fail a launch (V1 still governs).
+    recordBootDeclaration(name, readAgentAckCapable(name))
 
     return { ok: true }
   } catch (err) {

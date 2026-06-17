@@ -45,7 +45,8 @@ import {
 } from '../prompt-safety.js'
 import { isTrustedPeer } from '../team-trust.js'
 import { COORDINATOR_AGENT_ID } from '../channel-coordinator/ingest.js'
-import { isKnownAgent, readAgentAckCapable } from './agent-config.js'
+import { isKnownAgent } from './agent-config.js'
+import { readEffectiveAckCapable } from './ack-capability-registry.js'
 import { readAgentTeam } from './agent-team.js'
 import {
   agentSessionName,
@@ -266,11 +267,14 @@ export function startMessageRouter(): NodeJS.Timeout {
         if (!markMessageDelivered(msg.id)) {
           logger.warn({ id: msg.id }, 'markMessageDelivered affected 0 rows (deleted concurrently?)')
         }
-        // Delivery ACK protocol (card 1a99b7e2 WRITE + 0978279f capability gate):
-        // record a durable pending-ack on successful inject ONLY when the sender
-        // opted in (ack_expected) AND the recipient is ACK-capable. Capability is
-        // read FRESH from the recipient's live agent-config here (no boot cache),
-        // so flagging an agent ackCapable takes effect without a restart.
+        // Delivery ACK protocol (card 1a99b7e2 WRITE + 0978279f capability gate
+        // + 83b7ec10 V2 TTL registry): record a durable pending-ack on successful
+        // inject ONLY when the sender opted in (ack_expected) AND the recipient is
+        // EFFECTIVELY ACK-capable. Effective = a LIVE boot declaration (V2 self-
+        // heal: a dead agent's declaration lapses) OR the static V1 flag, read
+        // FRESH here (no boot cache) so a live config edit or a fresh boot
+        // declaration takes effect without a dashboard restart. Fail-closed: an
+        // empty/expired registry with no static flag -> not capable.
         //   - 'write': append the pending-ack; a separate consumer escalates if
         //     the recipient never confirms receipt within the window.
         //   - 'skip-recipient-not-capable' (point b): the sender expected an ACK
@@ -280,7 +284,7 @@ export function startMessageRouter(): NodeJS.Timeout {
         //     ack_expected that is silently not tracked is never an invisible
         //     expectation gap. The d3339db9 1h-abandonment net still backstops it.
         //   - 'skip-not-ack-expected': a plain FYI -> nothing to track, no log.
-        const ackDecision = decidePendingAck(msg, readAgentAckCapable(msg.to_agent))
+        const ackDecision = decidePendingAck(msg, readEffectiveAckCapable(msg.to_agent))
         if (ackDecision === 'write') {
           try {
             appendFileSync(join(MARVEEN_ROOT, DELIVERY_PENDING_ACK_SENTINEL), pendingAckRecord(msg, now) + '\n')
