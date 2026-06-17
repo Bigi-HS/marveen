@@ -274,12 +274,12 @@ check_gitleaks() {
   # Write diff to a temp file; gitleaks' stdin mode reads unified diffs.
   local tmpfile
   tmpfile="$(mktemp /tmp/pgb-gitleaks-diff.XXXXXX)"
-  trap 'rm -f "$tmpfile"' RETURN
 
   git -C "$INSTALL_DIR" diff "${BASE}...${HEAD}" -- . \
       ":(exclude)${VITEST_EXCLUDE}" >"$tmpfile" 2>/dev/null || true
 
   if [ ! -s "$tmpfile" ]; then
+    rm -f "$tmpfile"
     record gitleaks PASS "empty diff; nothing to scan"
     return
   fi
@@ -287,6 +287,8 @@ check_gitleaks() {
   # --no-banner: suppress the gitleaks ascii art in CI output.
   # --exit-code 1: gitleaks exits 1 on findings, 0 on clean.
   # Report format: json to stdout (we extract only rule-id + file, never the value).
+  # NOTE: capture stdout and exit code separately; do NOT use `|| true` here --
+  # that would swallow the exit code and always make gl_rc=0 (false clean).
   local gl_out gl_rc
   gl_out="$("$gl_bin" detect \
       "${config_arg[@]}" \
@@ -296,8 +298,9 @@ check_gitleaks() {
       --no-banner \
       --log-level warn \
       --exit-code 1 \
-      < "$tmpfile" 2>/dev/null)" || true
+      < "$tmpfile" 2>/dev/null)"
   gl_rc=$?
+  rm -f "$tmpfile"
 
   if [ "$gl_rc" -eq 0 ]; then
     record gitleaks PASS "gitleaks: no secrets detected"

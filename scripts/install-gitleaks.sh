@@ -25,7 +25,7 @@ trap 'rm -f "$TMPFILE"' EXIT
 echo "Downloading gitleaks ${GITLEAKS_VERSION}..."
 curl -sL --fail "$GITLEAKS_URL" -o "$TMPFILE"
 
-echo "Verifying SHA256..."
+echo "Verifying SHA256 (expected: ${GITLEAKS_SHA256})..."
 echo "${GITLEAKS_SHA256}  ${TMPFILE}" | sha256sum -c -
 
 tar -xzf "$TMPFILE" -C "$BIN_DIR" gitleaks
