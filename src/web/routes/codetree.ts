@@ -20,6 +20,12 @@ const STALE_AFTER_SECONDS = 24 * 3600
 // it can never carry a glob/`..` into the branch-ref scan.
 const CARD_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 
+// Diff ref allowed shape: a git revision or `a..b`/`a...b` range. Must NOT start
+// with `-` -- although git runs via execFileSync argv (no shell), a leading-dash
+// ref would be parsed as a git OPTION (e.g. `--output=<file>` => arbitrary file
+// write). Anchoring to an alphanumeric first char blocks that argument injection.
+const DIFF_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/~^-]*(\.\.\.?[A-Za-z0-9][A-Za-z0-9._/~^-]*)?$/
+
 // Injectable so route tests can stub all git/fs/DB IO (mirrors
 // __setCodetreeRebuildRunner). Production builds the real deps.
 let impactDepsBuilder: (opts: { agent?: string }) => ImpactDeps = realImpactDeps
@@ -93,6 +99,7 @@ export async function tryHandleCodetree(ctx: RouteContext): Promise<boolean> {
     if (!diff && !card) { json(res, { error: 'diff or card parameter is required' }, 400); return true }
     if (diff && card) { json(res, { error: 'provide only one of diff or card' }, 400); return true }
     if (card && !CARD_ID_RE.test(card)) { json(res, { error: 'invalid card id' }, 400); return true }
+    if (diff && !DIFF_REF_RE.test(diff)) { json(res, { error: 'invalid diff ref' }, 400); return true }
     if (notBuilt(res)) return true
     const agent = url.searchParams.get('agent') ?? undefined
     try {

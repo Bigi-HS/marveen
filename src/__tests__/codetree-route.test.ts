@@ -203,6 +203,14 @@ describe('GET /api/codetree/impact', () => {
     expect((await call('GET', '/api/codetree/impact?card=a*b')).status).toBe(400)
   })
 
+  it('400 on a leading-dash diff ref (git argument injection guard)', async () => {
+    seedFresh()
+    __setImpactDepsBuilder(() => stubDeps())
+    // a `-`-prefixed ref would be parsed by git as an option (e.g. --output=<file>)
+    expect((await call('GET', '/api/codetree/impact?diff=' + encodeURIComponent('--output=/tmp/x'))).status).toBe(400)
+    expect((await call('GET', '/api/codetree/impact?diff=' + encodeURIComponent('-rf'))).status).toBe(400)
+  })
+
   it('503 before the index is built', async () => {
     cleanDb()
     initCodetreeDatabase(TEST_DB)
