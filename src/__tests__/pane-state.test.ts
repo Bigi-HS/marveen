@@ -5,6 +5,7 @@ import {
   detectsUsageLimitMenu,
   detectsStalledIdle,
   isReadyForPrompt,
+  isActivelyWorking,
   shouldRetrySubmit,
   shouldClearTruncatedPreamble,
   decideSubmitFollowup,
@@ -1482,6 +1483,70 @@ describe('usage/session-limit menu (PR #130 DA HIGH)', () => {
       ...Array(22).fill('  later idle output line'),
     ].join('\n')
     expect(detectsUsageLimitMenu(deepScrollback)).toBe(false)
+  })
+})
+
+// =============================================================================
+// isActivelyWorking (card 1f0d92a7): the ONLY safe surface to QUEUE input into.
+// It is a STRICT SUBSET of 'busy' -- a live turn spinner -- excluding the
+// usage-limit menu and pending-paste sub-states that detectPaneState also folds
+// into 'busy'. The busy-tier auto-compaction gates on this so a queued /compact
+// can only land while a turn is genuinely in progress (runs at the next turn
+// boundary), never on a blocking dialog.
+// =============================================================================
+
+describe('isActivelyWorking (busy-tier compaction gate)', () => {
+  it('is TRUE for a live turn spinner (full footer)', () => {
+    expect(isActivelyWorking(BUSY_FULL_FOOTER)).toBe(true)
+  })
+
+  it('is TRUE when only the token-stream indicator is present (no spinner label)', () => {
+    expect(isActivelyWorking(BUSY_TOKENS_ONLY)).toBe(true)
+  })
+
+  it('is TRUE for a spinner during a frame-gap (footer not yet showing esc-to-interrupt)', () => {
+    expect(isActivelyWorking(BUSY_FOOTER_FRAME_GAP)).toBe(true)
+  })
+
+  it('is TRUE for an active tool-use turn (spinner alongside a tool summary)', () => {
+    expect(isActivelyWorking(BUSY_TOOL_USE_ACTIVE)).toBe(true)
+  })
+
+  it('is FALSE for an idle pane (idle tiers own that surface)', () => {
+    expect(isActivelyWorking(IDLE_BYPASS)).toBe(false)
+    expect(isActivelyWorking(IDLE_STRICT)).toBe(false)
+    expect(isActivelyWorking(IDLE_AFTER_TOOL_USE)).toBe(false)
+  })
+
+  it('is FALSE for a pane with parked/typing input (no running turn)', () => {
+    expect(isActivelyWorking(TYPING_PARKED)).toBe(false)
+  })
+
+  // THE safety guard: a usage-limit menu is 'busy' by detectPaneState but is a
+  // blocking modal -- queuing /compact into it would repeat the #130 false-ready
+  // bug (Enter behind a menu, stale auto-submit on reset). Must be FALSE.
+  it('is FALSE for a usage-limit menu in every render (NOT a running turn)', () => {
+    expect(isActivelyWorking(LIMIT_MENU_MODAL)).toBe(false)
+    expect(isActivelyWorking(LIMIT_IN_BOX)).toBe(false)
+    expect(isActivelyWorking(LIMIT_SOFT_EMPTY_BOX)).toBe(false)
+  })
+
+  it('is FALSE for empty / whitespace-only panes', () => {
+    expect(isActivelyWorking('')).toBe(false)
+    expect(isActivelyWorking('   \n  \n')).toBe(false)
+  })
+
+  it('INVARIANT: actively-working is a strict subset of busy and disjoint from ready', () => {
+    // Anything actively working is classified busy by detectPaneState, and is
+    // never simultaneously ready-for-prompt.
+    for (const pane of [BUSY_FULL_FOOTER, BUSY_TOKENS_ONLY, BUSY_TOOL_USE_ACTIVE]) {
+      expect(isActivelyWorking(pane)).toBe(true)
+      expect(detectPaneState(pane)).toBe('busy')
+      expect(isReadyForPrompt(pane)).toBe(false)
+    }
+    // A limit menu is busy but NOT actively working -- the subset is strict.
+    expect(detectPaneState(LIMIT_MENU_MODAL)).toBe('busy')
+    expect(isActivelyWorking(LIMIT_MENU_MODAL)).toBe(false)
   })
 })
 

@@ -31,7 +31,7 @@ import {
 } from './agent-config.js'
 import { agentSessionName, isAgentRunning, capturePane, sendPromptToSession } from './agent-process.js'
 import { readContextTokensFromProjectDir, readActiveModelFromProjectDir } from './active-model.js'
-import { isReadyForPrompt } from '../pane-state.js'
+import { isReadyForPrompt, isActivelyWorking } from '../pane-state.js'
 import { shouldHoldProactiveWork } from './fleet-pause-enforcer.js'
 import { notifyChannel } from '../notify.js'
 
@@ -107,6 +107,40 @@ export const DEFAULT_HARD_CEILING_TOKENS = 650_000
 export function adaptiveHardCeilingForModel(modelId: string | null | undefined): number {
   return Math.floor(contextWindowForModel(modelId) * HARD_CEILING_FRACTION)
 }
+
+// BUSY tier (card 1f0d92a7). The soft + hard tiers above are BOTH idle-only: a
+// session that is actively WORKING and never reaches an idle boundary can climb
+// past the 80% wall (the context-window-watchdog alert line) unchecked -- only
+// escalated to the operator, never auto-compacted. This tier closes that gap: an
+// actively-working agent over BUSY_COMPACT_FRACTION gets a /compact QUEUED into
+// its live turn, which Claude Code defers to the next turn boundary (it never
+// interrupts the in-flight tool call -- docs-confirmed). The queued compact runs
+// before the agent can keep climbing across subsequent turns.
+//
+// The fraction sits strictly between the soft (0.75) and the 80% alert wall so
+// the busy compaction fires BEFORE the wall, and the idle tiers (cheaper,
+// immediate) still get first crack at an agent that happens to reach idle. The
+// gate is isActivelyWorking (a live spinner) -- NOT the coarse 'busy' state --
+// so a usage-limit menu or pending-paste pane (both 'busy') is never injected
+// into. Scope stays sub-agents only (Boss 2026-06-17): the main marveen session
+// remains the channel-monitor's exclusive charge, never a second compact actor.
+export const BUSY_COMPACT_FRACTION = 0.78
+
+// Resolve the per-agent busy-compaction ceiling = contextWindow(model) * 0.78.
+// Pure given the model id; its ordering (soft < busy < hard, and busy < 0.80) is
+// asserted directly in the tests.
+export function adaptiveBusyCeilingForModel(modelId: string | null | undefined): number {
+  return Math.floor(contextWindowForModel(modelId) * BUSY_COMPACT_FRACTION)
+}
+
+// A queued /compact takes a turn boundary to actually fire. Without a cooldown
+// the 2-min fast lane would queue a fresh /compact every sweep until it fires,
+// piling redundant compactions behind the first. This cooldown (shared with the
+// soft/hard tiers via lastCompactedAt) prevents the double-queue; once the
+// compact fires the context drops below the ceiling and the loop self-clears.
+export const BUSY_COMPACT_COOLDOWN_MS =
+  Number(process.env.SESSION_BUSY_COMPACT_COOLDOWN_MS) || 45 * 60 * 1000 // 45 min default
+
 // Fast lane: poll over-ceiling agents far more often than the 10-min soft sweep
 // so a busy agent's brief between-turn idle is caught quickly.
 const HARD_CEILING_INTERVAL_MS = 2 * 60 * 1000 // every 2 minutes
@@ -157,6 +191,35 @@ export function shouldHardCompact(contextTokens: number | null, hardCeiling: num
   return contextTokens >= hardCeiling
 }
 
+/**
+ * Pure BUSY-tier decision: should we QUEUE a /compact into an actively-working
+ * session now?
+ *
+ * Returns true only when ALL hold:
+ *   - context is known and at/over the busy ceiling (window * 0.78),
+ *   - the pane is ACTIVELY working (a live turn spinner) -- the caller passes
+ *     isActivelyWorking(pane); this is the safety gate that keeps the queued
+ *     /compact off any idle / typing / unknown / usage-limit surface, and
+ *   - the cooldown since the last compaction has elapsed (so we never stack a
+ *     second queued /compact behind one that has not yet fired).
+ *
+ * The pane signal is a plain boolean so this stays pure and the surface gate is
+ * asserted in isolation (mirroring shouldCompactSession / shouldHardCompact).
+ */
+export function shouldBusyCompact(
+  contextTokens: number | null,
+  busyCeiling: number,
+  paneActivelyWorking: boolean,
+  lastCompactedAt: number | null,
+  now: number,
+  cooldownMs: number,
+): boolean {
+  if (contextTokens == null || contextTokens < busyCeiling) return false
+  if (!paneActivelyWorking) return false
+  if (lastCompactedAt != null && now - lastCompactedAt < cooldownMs) return false
+  return true
+}
+
 // Inputs to the context-exhausted terminal-state decision. Grouped so the pure
 // function below has no hidden coupling to the watcher's maps/clock.
 export interface ContextExhaustionInput {
@@ -167,6 +230,11 @@ export interface ContextExhaustionInput {
   // Is the pane currently at a ready idle boundary? When idle, the hard-ceiling
   // /compact CAN fire and recover the session -- so it is NOT terminal.
   paneIsIdle: boolean
+  // Is the pane ACTIVELY working (a live turn spinner)? When actively working
+  // the BUSY tier queues a /compact that runs at the next turn boundary, so the
+  // session is recoverable -- NOT terminal. Only a pane that is neither idle nor
+  // actively working (a wedged dialog / unknown surface) is unrecoverable.
+  paneActivelyWorking: boolean
   // Continuous time (ms) the agent has been over the ceiling. 0 when not over.
   overCeilingMs: number
 }
@@ -185,8 +253,10 @@ export interface ContextExhaustionInput {
  *   - unknown tokens                 -> false (can't tell -- never escalate blind)
  *   - under the hard ceiling         -> false (not a context problem at all)
  *   - over ceiling but pane is idle  -> false (recoverable -- /compact will fire)
+ *   - over ceiling but actively working -> false (recoverable -- the BUSY tier
+ *       queues a /compact that runs at the next turn boundary)
  *   - over ceiling, not idle, but still inside the stuck window -> false (transient)
- *   - over ceiling, not idle, past the stuck window -> TRUE (terminal -> escalate)
+ *   - over ceiling, neither idle nor working, past the window -> TRUE (terminal)
  *
  * Crucially this fires ONLY on the positive signal; when it is false every
  * existing path (auto-/compact, nudge, log-warn) is unchanged.
@@ -198,6 +268,9 @@ export function decideContextExhausted(
   if (input.contextTokens == null) return false
   if (input.contextTokens < input.hardCeiling) return false
   if (input.paneIsIdle) return false
+  // An actively-working pane is recoverable: the BUSY tier queues a /compact
+  // that runs at the next turn boundary, so it is not the operator's problem.
+  if (input.paneActivelyWorking) return false
   return input.overCeilingMs >= stuckMs
 }
 
@@ -331,17 +404,20 @@ function checkAgentHardCeiling(name: string): void {
   const session = agentSessionName(name)
   const pane = capturePane(session)
   if (pane == null || !isReadyForPrompt(pane)) {
-    // Safety invariant: never compact a busy / mid-tool pane. Defer to the next
-    // between-turn idle. Warn (log-only) if it has been stuck over-ceiling but
-    // never idle for too long -- a candidate for the deferred turn-boundary
-    // approach, but we take NO risky action here.
+    // The IMMEDIATE hard /compact still gates on idle: we never send it to a
+    // non-idle pane. The BUSY tier (checkAgentBusyCompact) handles an
+    // actively-working over-ceiling pane via a queued /compact, so here we only
+    // need the escalation decision -- and an actively-working pane is recoverable
+    // (the queued compact will fire), hence NOT terminal.
     const since = overCeilingSince.get(name) ?? now
     const overCeilingMs = now - since
-    // Terminal-state decision (card b83e7c92 item-4): over ceiling + never idle +
-    // stuck past the window. The idle-gated /compact cannot fire here and a nudge
-    // won't shrink the window, so this is the operator's call, not the watchdog's.
+    const working = pane != null && isActivelyWorking(pane)
+    // Terminal-state decision (card b83e7c92 item-4): over ceiling + neither idle
+    // NOR actively working (a wedged dialog/unknown surface) + stuck past the
+    // window. Only then can neither the idle nor the busy /compact fire and a
+    // nudge won't shrink the window -- the operator's call, not the watchdog's.
     const exhausted = decideContextExhausted(
-      { contextTokens, hardCeiling, paneIsIdle: false, overCeilingMs },
+      { contextTokens, hardCeiling, paneIsIdle: false, paneActivelyWorking: working, overCeilingMs },
       HARD_CEILING_STUCK_WARN_MS,
     )
     if (exhausted) {
@@ -392,6 +468,49 @@ function checkAgentHardCeiling(name: string): void {
   }
 }
 
+// BUSY-tier check (fast lane, card 1f0d92a7). The two idle-gated tiers above
+// cannot help an agent that is over the 80% wall and never reaches idle. This
+// closes that gap: when an actively-WORKING agent crosses the busy ceiling
+// (window * 0.78, below the 80% alert wall), QUEUE a /compact into its live
+// turn. Claude Code defers queued input to the next turn boundary -- it never
+// interrupts the in-flight tool call -- so the compact runs cleanly after the
+// current turn, before the agent keeps climbing across subsequent turns.
+//
+// Safety: the gate is isActivelyWorking (a live spinner), a strict subset of
+// 'busy' that EXCLUDES the usage-limit menu and pending-paste surfaces, so the
+// queued Enter can never land on a blocking dialog (#130 false-ready class). A
+// cooldown (shared via lastCompactedAt) prevents stacking a second queued
+// /compact behind one that has not yet fired.
+function checkAgentBusyCompact(name: string): void {
+  const contextTokens = latestContextTokens(name)
+  const busyCeiling = adaptiveBusyCeilingForModel(resolveAgentModelId(name))
+  const last = lastCompactedAt.get(name) ?? null
+  const now = Date.now()
+
+  const session = agentSessionName(name)
+  const pane = capturePane(session)
+  const working = pane != null && isActivelyWorking(pane)
+  if (!shouldBusyCompact(contextTokens, busyCeiling, working, last, now, BUSY_COMPACT_COOLDOWN_MS)) return
+
+  // Fleet-pause gate (card fd30873b): a /compact is a model call; hold it under
+  // an active token-budget pause exactly like the soft/hard tiers. Inert by
+  // default (mode=off => false).
+  if (shouldHoldProactiveWork(`compact-busy:${name}`)) return
+
+  logger.info(
+    { agent: name, contextTokens, busyCeiling },
+    'session-size-watcher: context over BUSY ceiling while actively working, queuing /compact (turn-boundary)',
+  )
+  try {
+    sendPromptToSession(session, '/compact')
+    // Share the cooldown map so the soft/hard tiers respect this compaction and
+    // we do not stack a second queued /compact before this one fires.
+    lastCompactedAt.set(name, now)
+  } catch (err) {
+    logger.warn({ err, agent: name }, 'session-size-watcher: failed to queue /compact (busy ceiling)')
+  }
+}
+
 export function startSessionSizeWatcher(): NodeJS.Timeout {
   function sweep() {
     for (const name of listAgentNames()) {
@@ -424,6 +543,10 @@ export function startSessionSizeWatcher(): NodeJS.Timeout {
         continue
       }
       try {
+        // BUSY tier first: an actively-working over-ceiling agent gets a queued
+        // /compact (and the shared cooldown set) BEFORE the hard-ceiling check
+        // runs, so the escalation correctly sees it as recoverable, not terminal.
+        checkAgentBusyCompact(name)
         checkAgentHardCeiling(name)
       } catch (err) {
         logger.debug({ err, agent: name }, 'session-size-watcher: hard-ceiling check error')

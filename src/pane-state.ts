@@ -379,6 +379,33 @@ export function isReadyForPrompt(pane: string): boolean {
   return detectPaneState(pane) === 'idle'
 }
 
+/**
+ * True when a turn is ACTIVELY in progress -- a live spinner / token-stream
+ * indicator is rendering RIGHT NOW. This is a strict subset of the coarse
+ * 'busy' state: `detectPaneState` also returns 'busy' for a usage-limit menu
+ * and for pending-paste stubs, neither of which is a running turn. Those are
+ * explicitly excluded here.
+ *
+ * Why a dedicated predicate: it is the ONLY surface into which queued input is
+ * safe to inject. Claude Code defers text typed during an active turn to the
+ * next turn boundary (it never interrupts the in-flight tool call), so a
+ * `/compact` queued here runs cleanly AFTER the current turn. A blocking
+ * surface -- a permission dialog or a usage-limit menu -- STOPS the spinner, so
+ * it cannot match BUSY_INDICATORS; gating on this predicate therefore guarantees
+ * we never land an Enter on a dialog (the #130 false-ready failure class). Idle,
+ * typing, unknown and error panes all return false (a running turn is the only
+ * true case), so the existing idle-gated tiers keep sole ownership of their
+ * surfaces.
+ */
+export function isActivelyWorking(pane: string): boolean {
+  if (!pane || !pane.trim()) return false
+  // A usage-limit menu is classified 'busy' by detectPaneState but is a
+  // blocking modal, not a running turn -- never queue into it.
+  if (detectsUsageLimitMenu(pane)) return false
+  // A genuine in-flight turn shows a spinner / `(Ns · ↓ … tokens)` indicator.
+  return BUSY_INDICATORS.some(rx => rx.test(pane))
+}
+
 // External state for idle-nudge classification. Cannot be derived from the
 // pane string alone -- see detectsStalledIdle for the invariant that makes
 // this external injection load-bearing.
