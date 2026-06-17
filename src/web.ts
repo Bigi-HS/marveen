@@ -343,7 +343,7 @@ export function startWebServer(port = 3420): http.Server {
     // Print the access instructions to stderr (interactive terminal only, not the
     // pino stream). The token is on its OWN line and never in the URL, so a
     // pasted/logged URL cannot leak the credential.
-    process.stderr.write(buildDashboardAccessMessage(port, DASHBOARD_TOKEN))
+    process.stderr.write(buildDashboardAccessMessage(port, DASHBOARD_TOKEN, DASHBOARD_PUBLIC_URL))
   })
 
   const routerInterval = startMessageRouter()
