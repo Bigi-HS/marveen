@@ -160,11 +160,19 @@ export function rateLimitKey(socketRemoteAddress: string | undefined): string {
 // shell history, server/proxy access logs, the browser address bar and referrers.
 // We print a tokenless URL and the token on its OWN line; the UI prompts for it
 // and stores it client-side (the dashboard still strips a legacy ?token= too).
-export function buildDashboardAccessMessage(port: number, token: string): string {
+//
+// When DASHBOARD_PUBLIC_URL is set (e.g. the Tailscale Serve URL the dashboard is
+// reachable on from off-box), the operator is told to open THAT instead of the
+// loopback URL -- a localhost link is useless from a remote device. The token is
+// still surfaced on its own line and never appended to the URL, so the public URL
+// stays as leak-safe as the local one. An empty/whitespace publicUrl falls back to
+// the loopback default, preserving the prior behavior for a plain local install.
+export function buildDashboardAccessMessage(port: number, token: string, publicUrl = ''): string {
+  const url = publicUrl.trim() ? publicUrl.trim().replace(/\/$/, '') + '/' : `http://127.0.0.1:${port}/`
   return [
     '',
     'Dashboard access:',
-    `  1. Open in your browser:  http://127.0.0.1:${port}/`,
+    `  1. Open in your browser:  ${url}`,
     '  2. When prompted, paste this access token:',
     `     ${token}`,
     '',
