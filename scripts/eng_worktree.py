@@ -113,17 +113,26 @@ def is_safe_worktree_path(path, repo=REPO_DEFAULT, wt_base=WT_BASE_DEFAULT):
     Guards the destructive `worktree remove --force`: never the main checkout,
     never the wt-base container itself, never a harness-managed worktree. Only
     a child of wt_base or of /tmp counts.
+
+    Uses realpath, not normpath: a `wt_base/<key>` symlink that targets the main
+    checkout would slip past a normpath check (normpath does not resolve
+    symlinks), so the remove must see the REAL target (Chad PR#216 INFO[low]).
+    For a path with no symlinked components realpath == normpath, so the plain
+    string-path behaviour is unchanged.
     """
-    path = os.path.normpath(path)
-    if path == os.path.normpath(repo):
+    real = os.path.realpath(path)
+    real_repo = os.path.realpath(repo)
+    real_wt = os.path.realpath(wt_base)
+    real_harness = os.path.realpath(HARNESS_DIR)
+    if real == real_repo:
         return False
-    if path == os.path.normpath(wt_base):
+    if real == real_wt:
         return False
-    if path == HARNESS_DIR or path.startswith(HARNESS_DIR + os.sep):
+    if real == real_harness or real.startswith(real_harness + os.sep):
         return False
-    if path.startswith(os.path.normpath(wt_base) + os.sep):
+    if real.startswith(real_wt + os.sep):
         return True
-    if path.startswith("/tmp/"):
+    if real.startswith("/tmp/"):
         return True
     return False
 
