@@ -11,6 +11,7 @@ import { execFileSync, execSync } from 'node:child_process'
 import type { Server as HttpServer } from 'node:http'
 import { STORE_DIR, PID_FILENAME, WEB_PORT, ALLOWED_CHAT_ID, MAIN_AGENT_ID, RESPAWN_ENABLED } from './config.js'
 import { initDatabase } from './db.js'
+import { initCodetreeDatabase } from './web/codetree-db.js'
 import { runDecaySweep, runDailyDigest } from './memory.js'
 import { initHeartbeat, stopHeartbeat } from './heartbeat.js'
 import { ensureHeartbeatAgent, HEARTBEAT_AGENT_NAME } from './web/heartbeat-agent-scaffold.js'
@@ -403,6 +404,7 @@ async function main(): Promise<void> {
 
   // Database
   initDatabase()
+  initCodetreeDatabase()
   logger.info('Adatbazis inicializalva')
 
   // Memory decay (24h cycle)
