@@ -11,8 +11,28 @@ import {
 } from '../codetree-db.js'
 import type { RebuildSummary } from '../codetree-rebuild.js'
 import { spawnRebuildWorker } from '../codetree-rebuild-spawn.js'
+import { buildImpactReport, type ImpactDeps } from '../codetree-impact.js'
+import { realImpactDeps } from '../codetree-impact-io.js'
 
 const STALE_AFTER_SECONDS = 24 * 3600
+
+// Card id allowed shape -- kanban ids are short hex, but guard the URL param so
+// it can never carry a glob/`..` into the branch-ref scan.
+const CARD_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+
+// Diff ref allowed shape: a git revision or `a..b`/`a...b` range. Must NOT start
+// with `-` -- although git runs via execFileSync argv (no shell), a leading-dash
+// ref would be parsed as a git OPTION (e.g. `--output=<file>` => arbitrary file
+// write). Anchoring to an alphanumeric first char blocks that argument injection.
+const DIFF_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/~^-]*(\.\.\.?[A-Za-z0-9][A-Za-z0-9._/~^-]*)?$/
+
+// Injectable so route tests can stub all git/fs/DB IO (mirrors
+// __setCodetreeRebuildRunner). Production builds the real deps.
+let impactDepsBuilder: (opts: { agent?: string }) => ImpactDeps = realImpactDeps
+
+export function __setImpactDepsBuilder(fn: (opts: { agent?: string }) => ImpactDeps): void {
+  impactDepsBuilder = fn
+}
 
 // Rebuild is delegated to a runner so production spawns a child process while
 // tests inject a deterministic stub. Module-scoped lock (single server process)
@@ -70,6 +90,28 @@ export async function tryHandleCodetree(ctx: RouteContext): Promise<boolean> {
     if (!moduleQuery) { json(res, { error: 'module parameter is required' }, 400); return true }
     if (notBuilt(res)) return true
     json(res, { indexed_at: indexedAtIso(), module: moduleQuery, importers: queryImporters(moduleQuery) })
+    return true
+  }
+
+  if (path === '/api/codetree/impact' && method === 'GET') {
+    const diff = url.searchParams.get('diff')
+    const card = url.searchParams.get('card')
+    if (!diff && !card) { json(res, { error: 'diff or card parameter is required' }, 400); return true }
+    if (diff && card) { json(res, { error: 'provide only one of diff or card' }, 400); return true }
+    if (card && !CARD_ID_RE.test(card)) { json(res, { error: 'invalid card id' }, 400); return true }
+    if (diff && !DIFF_REF_RE.test(diff)) { json(res, { error: 'invalid diff ref' }, 400); return true }
+    if (notBuilt(res)) return true
+    const agent = url.searchParams.get('agent') ?? undefined
+    try {
+      const report = buildImpactReport(
+        diff ? { kind: 'diff', ref: diff } : { kind: 'card', cardId: card! },
+        impactDepsBuilder({ agent }),
+      )
+      json(res, report)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      json(res, { error: msg }, /unknown card/.test(msg) ? 404 : 500)
+    }
     return true
   }
 

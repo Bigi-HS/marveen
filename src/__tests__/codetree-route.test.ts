@@ -6,7 +6,9 @@ import {
   replaceIndexData,
   setIndexMeta,
 } from '../web/codetree-db.js'
-import { tryHandleCodetree, __setCodetreeRebuildRunner } from '../web/routes/codetree.js'
+import { tryHandleCodetree, __setCodetreeRebuildRunner, __setImpactDepsBuilder } from '../web/routes/codetree.js'
+import { realImpactDeps } from '../web/codetree-impact-io.js'
+import type { ImpactDeps } from '../web/codetree-impact.js'
 import type { RebuildSummary } from '../web/codetree-rebuild.js'
 
 const TEST_DB = '/tmp/test-codetree-route.db'
@@ -163,5 +165,81 @@ describe('POST /api/codetree/rebuild (CT-AC5, CT-AC6)', () => {
     __setCodetreeRebuildRunner(async () => fakeSummary)
     expect((await call('POST', '/api/codetree/rebuild')).status).toBe(200)
     expect((await call('POST', '/api/codetree/rebuild')).status).toBe(200)
+  })
+})
+
+describe('GET /api/codetree/impact', () => {
+  function stubDeps(over: Partial<ImpactDeps> = {}): ImpactDeps {
+    return {
+      importersOf: (f) => (f === 'src/a.ts' ? ['src/b.ts'] : []),
+      allSymbols: () => [{ name: 'fooBar', kind: 'function', file: 'src/a.ts', line: 1, exported: true }],
+      specCorpus: () => [{ path: 'store/specs/x.md', text: 'foo bar fooBar' }],
+      searchHotMemory: () => [],
+      getCard: (id) => (id === 'good' ? { title: 'foo bar', description: '' } : null),
+      getCardFiles: () => null,
+      diffFiles: () => ['src/a.ts'],
+      index: () => ({ indexed_at: 123, stale: false }),
+      ...over,
+    }
+  }
+
+  afterAll(() => __setImpactDepsBuilder(realImpactDeps))
+
+  it('400 when neither diff nor card is given', async () => {
+    seedFresh()
+    __setImpactDepsBuilder(() => stubDeps())
+    expect((await call('GET', '/api/codetree/impact')).status).toBe(400)
+  })
+
+  it('400 when both diff and card are given', async () => {
+    seedFresh()
+    __setImpactDepsBuilder(() => stubDeps())
+    expect((await call('GET', '/api/codetree/impact?diff=x&card=good')).status).toBe(400)
+  })
+
+  it('400 on a malformed card id (no glob/traversal into the ref scan)', async () => {
+    seedFresh()
+    __setImpactDepsBuilder(() => stubDeps())
+    expect((await call('GET', '/api/codetree/impact?card=a*b')).status).toBe(400)
+  })
+
+  it('400 on a leading-dash diff ref (git argument injection guard)', async () => {
+    seedFresh()
+    __setImpactDepsBuilder(() => stubDeps())
+    // a `-`-prefixed ref would be parsed by git as an option (e.g. --output=<file>)
+    expect((await call('GET', '/api/codetree/impact?diff=' + encodeURIComponent('--output=/tmp/x'))).status).toBe(400)
+    expect((await call('GET', '/api/codetree/impact?diff=' + encodeURIComponent('-rf'))).status).toBe(400)
+  })
+
+  it('503 before the index is built', async () => {
+    cleanDb()
+    initCodetreeDatabase(TEST_DB)
+    __setImpactDepsBuilder(() => stubDeps())
+    expect((await call('GET', '/api/codetree/impact?diff=develop...HEAD')).status).toBe(503)
+  })
+
+  it('diff mode: 200 with seed files + transitive blast radius', async () => {
+    seedFresh()
+    __setImpactDepsBuilder(() => stubDeps())
+    const r = await call('GET', '/api/codetree/impact?diff=develop...HEAD')
+    expect(r.status).toBe(200)
+    expect(r.body.input.kind).toBe('diff')
+    expect(r.body.seed_files).toEqual(['src/a.ts'])
+    expect(r.body.affected).toContainEqual({ file: 'src/b.ts', depth: 1 })
+  })
+
+  it('card mode keyword resolution: symbols carry the also_in_spec flag', async () => {
+    seedFresh()
+    __setImpactDepsBuilder(() => stubDeps())
+    const r = await call('GET', '/api/codetree/impact?card=good')
+    expect(r.status).toBe(200)
+    expect(r.body.input.resolution).toBe('keyword')
+    expect(r.body.symbols[0]).toMatchObject({ name: 'fooBar', also_in_spec: ['store/specs/x.md'] })
+  })
+
+  it('404 on an unknown card', async () => {
+    seedFresh()
+    __setImpactDepsBuilder(() => stubDeps())
+    expect((await call('GET', '/api/codetree/impact?card=missing')).status).toBe(404)
   })
 })
