@@ -4,6 +4,8 @@ import { homedir } from 'node:os'
 import { PROJECT_ROOT, MAIN_AGENT_ID } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { safeJoin } from './sanitize.js'
+import { getDb } from '../db.js'
+import { isAckCapableInRegistry } from './ack-registry.js'
 
 export const AGENTS_BASE_DIR = join(PROJECT_ROOT, 'agents')
 
@@ -326,23 +328,27 @@ export function resolveAckCapableFromConfig(config: { ackCapable?: unknown }): b
   return false
 }
 
-// The recipient's ACK-capability, read FRESH from agent-config.json on every
-// call (no module cache) so a live flag edit takes effect at router time, not at
-// boot (card 0978279f, live-config requirement). Default false (fail-closed) on
-// a missing file / parse error / absent flag. Mirrors the other readers' fresh
-// readFileOr + try/catch shape.
+// The recipient's ACK-capability (V2, card 83b7ec10). Authoritative source is
+// the runtime `agent_ack_registry` table -- NOT the static config flag. An agent
+// self-declares at boot via a SessionStart hook; capability is true iff a
+// non-expired registry entry exists. The static `resolveAckCapableFromConfig`
+// path is deliberately NOT consulted here (AV2-AC1): the reverted V2 gated the
+// declaration on the static flag, making the registry a no-op -- this decoupling
+// is the structural fix. Fail-closed on every non-affirmative path (no entry,
+// expired, or DB error); MUST NOT throw (a throw would crash the router for all
+// in-flight messages -- isAckCapableInRegistry already swallows DB errors, and
+// this wrapper guards the getDb() handle as well).
 export function readAgentAckCapable(name: string): boolean {
   // The main agent (orchestrator) is ALWAYS ACK-capable, decided in CODE with no
-  // agent-config.json -- it is the central delegation hub and the clear-observer
-  // already special-cases its pane (MAIN_AGENT_ID -> MAIN_CHANNELS_SESSION), so
-  // engagement-clear works for it. Done in code on purpose: the bash watchdog
-  // read_model() reads only `model`, so a model-less agents/<main>/agent-config.json
-  // would relaunch the main agent on the sonnet default at the next restart
-  // (card ff96810c). Mirrors the agentDir()/isKnownAgent() MAIN_AGENT_ID cases.
+  // agent-config.json and no registry entry -- it is the central delegation hub
+  // and the clear-observer already special-cases its pane (MAIN_AGENT_ID ->
+  // MAIN_CHANNELS_SESSION), so engagement-clear works for it. Done in code on
+  // purpose: the bash watchdog read_model() reads only `model`, so a model-less
+  // agents/<main>/agent-config.json would relaunch the main agent on the sonnet
+  // default at the next restart (card ff96810c). Retained from V1 (AV2-AC9).
   if (name === MAIN_AGENT_ID) return true
-  const configPath = join(agentDir(name), 'agent-config.json')
   try {
-    return resolveAckCapableFromConfig(JSON.parse(readFileOr(configPath, '{}')))
+    return isAckCapableInRegistry(getDb(), name, Math.floor(Date.now() / 1000))
   } catch {
     return false
   }

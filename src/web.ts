@@ -59,6 +59,7 @@ import { tryHandleIdeas } from './web/routes/ideas.js'
 import { tryHandleToolLog } from './web/routes/tool-log.js'
 import { tryHandleCodetree } from './web/routes/codetree.js'
 import { tryHandleGate } from './web/routes/gate.js'
+import { tryHandleAck } from './web/routes/ack.js'
 import { tryHandleAgentCategories } from './web/routes/agent-categories.js'
 import { tryHandleAdmin } from './web/routes/admin.js'
 import { tryHandleStatic } from './web/routes/static.js'
@@ -260,6 +261,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleAgentTaskState(routeCtx)) return
       if (await tryHandleAgentCategories(routeCtx)) return
       if (await tryHandleAdmin(routeCtx)) return
+      if (await tryHandleAck(routeCtx)) return
       if (await tryHandleAgents(routeCtx, WEB_DIR)) return
       if (await tryHandleMarveen(routeCtx, WEB_DIR)) return
       if (await tryHandleBackgroundTasks(routeCtx)) return
