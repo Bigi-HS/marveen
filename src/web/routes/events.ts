@@ -7,7 +7,8 @@ import type { RouteContext } from './types.js'
 // SSE. Thin-notify -- the frame carries only {type,id,action}, the client
 // re-fetches the affected resource. Topic goes in the SSE `event:` field so a
 // client can route by type. Mirrors the existing pane-stream SSE in
-// agent-terminal.ts (headers, ?token= auth handled in web.ts, req-close cleanup).
+// agent-terminal.ts (headers, session-cookie auth handled in web.ts, req-close
+// cleanup; the legacy ?token= fallback was removed in card 32bcf962).
 
 // A comment line every 25s keeps proxies/load-balancers from idling the
 // connection out. A FAILED heartbeat write means the socket is half-dead (a

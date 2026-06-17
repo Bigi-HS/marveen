@@ -42,6 +42,12 @@ describe('buildDashboardAccessMessage', () => {
       expect(m).not.toContain('.ts.net//')
     })
 
+    it('normalizes MULTIPLE trailing slashes to exactly one (#205 NIT)', () => {
+      const m = buildDashboardAccessMessage(3420, TOKEN, 'https://noa.tail1234.ts.net///')
+      expect(m).toContain('https://noa.tail1234.ts.net/')
+      expect(m).not.toContain('.ts.net//')
+    })
+
     it('falls back to the loopback URL for an empty/whitespace public URL', () => {
       expect(buildDashboardAccessMessage(3420, TOKEN, '')).toContain('http://127.0.0.1:3420/')
       expect(buildDashboardAccessMessage(3420, TOKEN, '   ')).toContain('http://127.0.0.1:3420/')

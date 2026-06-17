@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import { isSseStreamPath } from '../web/sse-paths.js'
 
-// Card 7c7ea226: the rate-limit skip (web.ts) and the ?token= auth allowance
-// (web.ts) both gate on this predicate -- they must agree on exactly which
-// paths are long-lived SSE streams.
+// Card 7c7ea226: the rate-limit skip in web.ts gates on this predicate -- the
+// two long-lived SSE stream paths must be recognised identically so neither
+// counts against the per-IP burst budget. (The legacy ?token= auth allowance
+// that also keyed off this predicate was removed in card 32bcf962; auth is now
+// the normal cookie/bearer gate.)
 describe('isSseStreamPath (card 7c7ea226)', () => {
   it('matches the per-agent pane stream', () => {
     expect(isSseStreamPath('/api/agents/dave/pane/stream')).toBe(true)
