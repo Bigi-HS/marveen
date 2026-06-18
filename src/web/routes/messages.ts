@@ -9,7 +9,7 @@ import { COORDINATOR_AGENT_ID } from '../../channel-coordinator/ingest.js'
 import { sanitizeAgentIdent } from '../../prompt-safety.js'
 import { normalizeRecipient } from '../agent-config.js'
 import { aiDefenceGuard } from '../../aidefence-guard.js'
-import { decideMessageFrom, enforceFromBindingEnabled } from '../agent-identity-binding.js'
+import { decideMessageFrom, enforceFromBindingEnabled, logFromMismatch } from '../agent-identity-binding.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
 
@@ -58,6 +58,12 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'from is reserved for the in-process channel coordinator' }, 403)
       return true
     }
+    // Detection-only mismatch log (card 38bff392, C-INTERIM): flag-INDEPENDENT.
+    // Logs an impersonation-surface hit (a token sending as another agent) WITHOUT
+    // blocking, so we gather evidence today while enforcement is still OFF. Reuses
+    // the decideMessageFrom predicate internally -> never diverges from the C-BIND
+    // enforcer and inherits the admin/operator-relay exclusion.
+    logFromMismatch((line) => logger.warn(line), identity, from)
     // Identity binding (card b1ce5118): the server DERIVES the effective sender
     // from the token-resolved identity rather than trusting the body. This
     // GENERALIZES the single-id coordinator guard above to every agent_id -- a
