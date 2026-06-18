@@ -38,6 +38,7 @@ import { MAIN_AGENT_ID } from '../config.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { hardRestartMarveenChannels, lastMainRespawnAt, MARVEEN_POST_RESPAWN_GRACE_MS } from './channel-monitor.js'
 import { detectPaneState, type PaneState } from '../pane-state.js'
+import { checkPaneDetectorGate } from './pane-detector-gate.js'
 import { getPendingMessages } from '../db.js'
 
 // The oldest undelivered inter-agent message must exceed this age before the
@@ -182,6 +183,10 @@ async function checkSession(session: string): Promise<void> {
 
 export function startWedgedQueueWatcher(): NodeJS.Timeout {
   function sweep() {
+    // Stand down on a Claude CLI drift until a pane-detector smoke re-validates
+    // it (card 56ad0fa3): a wedge verdict rests on detectPaneState=>'unknown',
+    // which an unverified CLI render could produce for a healthy pane.
+    if (!checkPaneDetectorGate('wedged-queue')) return
     checkSession(MAIN_CHANNELS_SESSION).catch((err) => {
       logger.debug({ err }, 'wedged-queue-watcher: main session check error')
     })

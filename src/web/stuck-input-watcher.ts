@@ -4,6 +4,7 @@ import { listAgentNames } from './agent-config.js'
 import { isAgentRunning, capturePane, sendEnterToSession } from './agent-process.js'
 import { resolveAgentSession } from './channel-mcp-reconnect.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
+import { checkPaneDetectorGate } from './pane-detector-gate.js'
 import {
   stuckInputSignature,
   decideStuckInputRecovery,
@@ -82,6 +83,10 @@ function checkSession(label: string, session: string): void {
 
 export function startStuckInputWatcher(): NodeJS.Timeout {
   function sweep() {
+    // Stand down on a Claude CLI drift until a pane-detector smoke re-validates
+    // it (card 56ad0fa3): the recovery decision reads detectPaneState, which
+    // could mis-fire on an unverified CLI render and nudge a healthy agent.
+    if (!checkPaneDetectorGate('stuck-input')) return
     // The main agent's channels session is named `<id>-channels`, not
     // `agent-<id>`, so isAgentRunning (which checks the agent- prefix)
     // does not apply. Check it directly; capturePane returns null when it

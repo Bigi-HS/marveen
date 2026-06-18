@@ -35,6 +35,7 @@
 import { logger } from '../logger.js'
 import { capturePane } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
+import { checkPaneDetectorGate } from './pane-detector-gate.js'
 import { hardRestartMarveenChannels, lastMainRespawnAt, MARVEEN_POST_RESPAWN_GRACE_MS } from './channel-monitor.js'
 import {
   stuckToolCallSignature,
@@ -145,6 +146,10 @@ function checkSession(label: string, session: string): void {
 
 export function startStuckToolCallWatcher(): NodeJS.Timeout {
   function sweep() {
+    // Stand down on a Claude CLI drift until a pane-detector smoke re-validates
+    // it (card 56ad0fa3): the recovery reads detectPaneState and could hard-
+    // restart a healthy channels session on an unverified CLI render.
+    if (!checkPaneDetectorGate('stuck-tool-call')) return
     try {
       checkSession('main', MAIN_CHANNELS_SESSION)
     } catch (err) {

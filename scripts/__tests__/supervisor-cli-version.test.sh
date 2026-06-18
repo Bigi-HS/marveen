@@ -39,6 +39,7 @@ export PATH="$TMP:$PATH"
 
 VER_FILE="$STATE_DIR/claude-cli-version.txt"
 NEXT_FILE="$STATE_DIR/cli-version-check.next"
+MISMATCH_FILE="$STATE_DIR/cli-version-mismatch.txt"
 
 # --- throttle: skip if next file is in the future ---------------------------
 rm -f "$NEXT_FILE" "$VER_FILE"
@@ -48,12 +49,13 @@ ensure_cli_version_watch
 assert_not_contains "future throttle -> no log output" "cli-version-watch" "$(cat "$CAPTURE")"
 
 # --- first run: baseline recorded, no alert ---------------------------------
-rm -f "$NEXT_FILE" "$VER_FILE"
+rm -f "$NEXT_FILE" "$VER_FILE" "$MISMATCH_FILE"
 : > "$CAPTURE"
 ensure_cli_version_watch
 assert_contains "first run -> baseline logged" "baseline recorded" "$(cat "$CAPTURE")"
 assert_eq "first run -> version file written" "2.1.200" "$(cat "$VER_FILE" 2>/dev/null)"
 assert_not_contains "first run -> no alert" "HTTPS alert" "$(cat "$CAPTURE")"
+assert_eq "first run -> no drift gate flagged (baseline is not a drift)" "" "$(cat "$MISMATCH_FILE" 2>/dev/null)"
 
 # --- unchanged: no action after baseline ------------------------------------
 # Reset throttle so it fires again
@@ -63,7 +65,7 @@ ensure_cli_version_watch
 assert_not_contains "unchanged -> no log" "cli-version-watch" "$(cat "$CAPTURE")"
 
 # --- version changed: logs + dry-run alert -----------------------------------
-rm -f "$NEXT_FILE"
+rm -f "$NEXT_FILE" "$MISMATCH_FILE"
 echo "2.1.100" > "$VER_FILE"   # stored version is older than stub's 2.1.200
 : > "$CAPTURE"
 ensure_cli_version_watch
@@ -71,6 +73,8 @@ assert_contains "changed -> upgrade logged" "CLI changed 2.1.100 -> 2.1.200" "$(
 assert_contains "changed -> c12 smoke mentioned" "c12" "$(cat "$CAPTURE")"
 assert_contains "changed -> dry-run alert noted" "DRY-RUN would" "$(cat "$CAPTURE")"
 assert_eq "changed -> version file updated to new" "2.1.200" "$(cat "$VER_FILE" 2>/dev/null)"
+# Card 56ad0fa3: a drift flags the pane-detector gate so the watchdogs stand down.
+assert_eq "changed -> drift gate flagged with new version" "2.1.200" "$(cat "$MISMATCH_FILE" 2>/dev/null)"
 
 # --- claude not on PATH: silent no-op --------------------------------------
 # CLAUDE_BIN_OVERRIDE="" forces the empty-bin path without depending on PATH manipulation
