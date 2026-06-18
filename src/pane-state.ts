@@ -21,10 +21,13 @@
 
 export type PaneState = 'idle' | 'busy' | 'typing' | 'unknown' | 'error'
 
-// The footer + input-box patterns below were validated against this CLI version.
-// When the supervisor detects a CLI upgrade (ensure_cli_version_watch in fleet-supervisor.sh),
-// it alerts and a mandatory c12 pane-detector smoke must confirm the regexes still hold.
-// Bump this constant when the detectors are re-validated against a new CLI release.
+// The footer + input-box patterns below were last hand-validated against this
+// CLI version. This is a DOCUMENTATION reference only -- no runtime code reads
+// it (the live drift enforcement is the pane-detector gate, card 56ad0fa3:
+// fleet-supervisor.sh flags a CLI drift and the pane-dependent watchdogs stand
+// down via pane-detector-gate.ts until a c12 smoke clears it with
+// `tsx scripts/pane-detector-smoke-clear.ts`). Bump this when the regexes are
+// re-validated against a new CLI release, for human reference.
 export const PANE_DETECTOR_BASELINE_CLI_VERSION = '2.1.160'
 
 // Claude Code shows the footer in one of two modes: the default "bypass"

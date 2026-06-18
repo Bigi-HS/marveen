@@ -643,7 +643,16 @@ ensure_cli_version_watch() {
   stored_ver=$(cat "$ver_file" 2>/dev/null); case "$stored_ver" in (*[!0-9.]*|'') stored_ver="";; esac
   [ "$current_ver" != "$stored_ver" ] || return 0
   echo "$current_ver" > "$ver_file"
-  log "cli-version-watch: CLI changed ${stored_ver:-unknown} -> $current_ver -- mandatory c12 pane-detector smoke required"
+  # Card 56ad0fa3 (B1/B4): flag the drift so the pane-dependent watchdogs
+  # (stuck-input, stuck-tool-call, wedged-queue) automatically STAND DOWN until a
+  # c12 pane-detector smoke re-validates the new CLI render. The baseline above
+  # is bumped only to stop re-alerting; this file is the enforced gate signal and
+  # persists (read by pane-detector-gate.ts) until the smoke clears it via
+  # `tsx scripts/pane-detector-smoke-clear.ts`. NOT auto-cleared here -- a silent
+  # baseline bump that re-enabled the watchdogs would HIDE a detector-breaking
+  # drift (the documented anti-pattern).
+  echo "$current_ver" > "$STATE_DIR/cli-version-mismatch.txt"
+  log "cli-version-watch: CLI changed ${stored_ver:-unknown} -> $current_ver -- pane watchdogs gated, c12 pane-detector smoke required"
   if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: send Telegram HTTPS alert for CLI version change"; return 0; fi
   local env_file="$INSTALL_DIR/agents/chad/.claude/channels/telegram/.env" token
   token=$(grep 'TELEGRAM_BOT_TOKEN=' "$env_file" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]') || true
@@ -651,7 +660,7 @@ ensure_cli_version_watch() {
     "$CURL" -sf --max-time 10 \
       "https://api.telegram.org/bot${token}/sendMessage" \
       -d "chat_id=8643929442" \
-      --data-urlencode "text=[Chad] Claude Code CLI frissult: ${stored_ver:-ismeretlen} -> ${current_ver}. Kotelezo c12 pane-detektor smoke mielott barmely pane-fuggo watchdog (idle-nudge, stuck-input) aktivalodna. Ha smoke PASS: src/pane-state.ts PANE_DETECTOR_BASELINE_CLI_VERSION = '${current_ver}' frissitendo." \
+      --data-urlencode "text=[Chad] Claude Code CLI frissult: ${stored_ver:-ismeretlen} -> ${current_ver}. A pane-fuggo watchdogok (stuck-input, stuck-tool-call, wedged-queue) AUTOMATIKUSAN lealltak, amig egy c12 pane-detektor smoke le nem fut az uj CLI-n. Ha a smoke PASS: futtasd 'tsx scripts/pane-detector-smoke-clear.ts' -- ez rogziti a verziot es ujraengedi a watchdogokat." \
       >/dev/null 2>&1 \
       && log "cli-version-watch: HTTPS alert sent" \
       || log "cli-version-watch: HTTPS alert failed (non-fatal)"
