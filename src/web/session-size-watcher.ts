@@ -220,6 +220,67 @@ export function shouldBusyCompact(
   return true
 }
 
+// IDLE-LOW tier (card fe8d4a8d / F1). The soft tier fires at window * 0.75, which
+// for a 1M-window Opus is ~750K -- so a parked or heartbeat-driven Opus agent can
+// sit at 200-600K of STALE context, re-paying cache_read on the whole tail every
+// turn and every heartbeat fire for ~zero working benefit (the THREAD F finding:
+// cache_read is ~70% of burn). This tier sheds that tail by compacting a
+// SUSTAINED-IDLE agent at a LOW ABSOLUTE threshold, far below the model fraction.
+//
+// The danger of a blanket low threshold is compacting an agent that is mid-task
+// and merely idle BETWEEN two turns (losing load-bearing working context -> more
+// burn, the opposite of the goal). The guard is SUSTAINED idle: an actively-
+// working agent goes busy every few minutes and so never accumulates the required
+// continuous-idle window, while a parked/heartbeat agent is idle for long
+// stretches. So this can only ever fire on the parked-with-stale-tail case.
+export const IDLE_LOW_THRESHOLD_TOKENS =
+  Number(process.env.SESSION_IDLE_LOW_THRESHOLD_TOKENS) || 200_000
+// How long an agent must have been continuously NOT actively working before the
+// idle-low tier may compact it. Long enough that a working agent's between-turn
+// idle never qualifies; short enough to trim a parked agent promptly.
+export const IDLE_LOW_SUSTAINED_MS =
+  Number(process.env.SESSION_IDLE_LOW_SUSTAINED_MS) || 20 * 60 * 1000 // 20 min
+
+/**
+ * Pure IDLE-LOW decision: should we compact a sustained-idle agent that is
+ * carrying a stale context tail? True only when ALL hold:
+ *   - context is known and at/over the LOW absolute threshold (not the model
+ *     fraction) -- the point is to trim well below the soft tier,
+ *   - the agent has been continuously NOT actively working for at least
+ *     requiredSustainedMs (the guard that excludes a mid-task agent merely idle
+ *     between turns), and
+ *   - the shared cooldown since the last compaction has elapsed.
+ * The pane/idle-ready surface gate stays with the caller (as the other tiers),
+ * so "only send to a ready idle pane" is asserted separately.
+ */
+export function shouldIdleLowCompact(
+  contextTokens: number | null,
+  idleLowThreshold: number,
+  sustainedIdleMs: number,
+  requiredSustainedMs: number,
+  lastCompactedAt: number | null,
+  now: number,
+  cooldownMs: number,
+): boolean {
+  if (contextTokens == null || contextTokens < idleLowThreshold) return false
+  if (sustainedIdleMs < requiredSustainedMs) return false
+  if (lastCompactedAt != null && now - lastCompactedAt < cooldownMs) return false
+  return true
+}
+
+/**
+ * Stale-context cost proxy (card fe8d4a8d, the measurement lever): the cache_read
+ * waste an idle agent is paying, as token-minutes = contextTokens * minutes of
+ * continuous idle. The watcher has no per-turn count, so sustained-idle duration
+ * is the available proxy for "how long this tail has been re-read for nothing".
+ * Logged when the idle-low tier evaluates an over-threshold agent so the trim's
+ * value is observable. Pure; returns 0 for unknown context.
+ */
+export function staleContextCostTokenMinutes(contextTokens: number | null, sustainedIdleMs: number): number {
+  if (contextTokens == null || contextTokens <= 0 || sustainedIdleMs <= 0) return 0
+  return Math.round(contextTokens * (sustainedIdleMs / 60000))
+}
+
 // Inputs to the context-exhausted terminal-state decision. Grouped so the pure
 // function below has no hidden coupling to the watcher's maps/clock.
 export interface ContextExhaustionInput {
@@ -341,10 +402,54 @@ const overCeilingSince = new Map<string, number>()
 // Cleared when the agent recovers (drops below ceiling) or stops.
 const lastExhaustedAlertAt = new Map<string, number>()
 
+// Per-agent wall-clock of when the agent was FIRST observed not actively working
+// in the current idle spell (card fe8d4a8d). Set when a sweep sees a non-working
+// pane and there is no open spell; cleared the moment the agent is actively
+// working (and on stop). now - this = the continuous-idle duration the idle-low
+// tier gates on, so an agent that goes busy between turns never accumulates it.
+const notWorkingSince = new Map<string, number>()
+
 function checkAgent(name: string): void {
   const contextTokens = latestContextTokens(name)
   const last = lastCompactedAt.get(name) ?? null
   const now = Date.now()
+  const session = agentSessionName(name)
+  const pane = capturePane(session)
+
+  // Sustained-idle tracking (card fe8d4a8d): reset the idle clock whenever the
+  // agent is actively working, so only a genuinely parked/heartbeat agent ever
+  // accumulates the continuous-idle window the idle-low tier requires.
+  const working = pane != null && isActivelyWorking(pane)
+  if (working) notWorkingSince.delete(name)
+  else if (!notWorkingSince.has(name)) notWorkingSince.set(name, now)
+  const sustainedIdleMs = working ? 0 : now - (notWorkingSince.get(name) ?? now)
+
+  // IDLE-LOW tier: trim a sustained-idle agent's stale context tail at a LOW
+  // absolute threshold, below the model fraction. Idle-ready pane required (the
+  // same never-mid-turn safety as the soft tier); the sustained-idle guard above
+  // is what keeps a mid-task agent (idle only between turns) out of this path.
+  if (
+    shouldIdleLowCompact(contextTokens, IDLE_LOW_THRESHOLD_TOKENS, sustainedIdleMs, IDLE_LOW_SUSTAINED_MS, last, now, DEFAULT_COOLDOWN_MS) &&
+    pane != null && isReadyForPrompt(pane) &&
+    !shouldHoldProactiveWork(`compact-idle-low:${name}`)
+  ) {
+    logger.info(
+      {
+        agent: name,
+        contextTokens,
+        sustainedIdleMin: Math.round(sustainedIdleMs / 60000),
+        staleCostTokenMin: staleContextCostTokenMinutes(contextTokens, sustainedIdleMs),
+      },
+      'session-size-watcher: sustained-idle agent over low threshold, sending /compact (stale-tail trim)',
+    )
+    try {
+      sendPromptToSession(session, '/compact')
+      lastCompactedAt.set(name, now)
+    } catch (err) {
+      logger.warn({ err, agent: name }, 'session-size-watcher: failed to send /compact (idle-low)')
+    }
+    return
+  }
 
   // Model-adaptive threshold: contextWindow(model) * fraction, so a 200K-window
   // Sonnet/Haiku agent compacts ~150K and a 1M Opus agent ~750K. Cooldown stays
@@ -355,8 +460,6 @@ function checkAgent(name: string): void {
   }
   if (!shouldCompactSession(contextTokens, last, now, thresholds)) return
 
-  const session = agentSessionName(name)
-  const pane = capturePane(session)
   if (pane == null || !isReadyForPrompt(pane)) {
     logger.debug({ agent: name, contextTokens }, 'session-size-watcher: context large but pane not idle, deferring')
     return
@@ -519,6 +622,8 @@ export function startSessionSizeWatcher(): NodeJS.Timeout {
         // a compaction that happened in the prior session.
         lastCompactedAt.delete(name)
         overCeilingSince.delete(name)
+        // Reset the sustained-idle clock so a restart starts a fresh idle spell.
+        notWorkingSince.delete(name)
         continue
       }
       try {
