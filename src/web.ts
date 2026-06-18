@@ -12,6 +12,7 @@ import { ensureAgentHooks, ensureDefaultScheduledTasks } from './web/agent-scaff
 import { refreshMarveenBotUsername } from './web/telegram.js'
 import { startMessageRouter } from './web/message-router.js'
 import { startAckClearObserver } from './web/delivery-ack-observer.js'
+import { compactDeliverySentinelsOnBoot } from './web/delivery-sentinel-maintenance.js'
 import { startUpdateChecker } from './web/update-checker.js'
 import { startMcpListChecker } from './web/mcp-list.js'
 import { startScheduleRunner } from './web/schedule-runner.js'
@@ -352,6 +353,13 @@ export function startWebServer(port = 3420): http.Server {
 
   const routerInterval = startMessageRouter()
   logger.info('Agent message router started (5s poll)')
+
+  // Fold/cap the append-only delivery sentinel trails once at boot (card
+  // 681f99b0 / A2), BEFORE the clear-observer reads the pending-ack file: drop
+  // collapsed pending+cleared pairs, reconcile terminal-status acks (dampens the
+  // A3 restart-window false escalation), and size-cap the abandonment trail.
+  // Non-fatal: each step is wrapped so it never blocks startup.
+  compactDeliverySentinelsOnBoot()
 
   // Delivery ACK clear-observer (card 1a99b7e2): watches recipient panes and
   // clears a pending-ack once the recipient engages (busy = our injected turn

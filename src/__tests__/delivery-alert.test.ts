@@ -7,6 +7,7 @@ import {
   abandonmentRecord,
   parseAbandonmentSentinel,
   abandonmentRate,
+  capJsonlTrail,
 } from '../web/delivery-alert.js'
 
 // Defense-in-depth for d3339db9: an abandoned inter-agent message must
@@ -200,5 +201,38 @@ describe('abandonmentRate', () => {
     const rate = abandonmentRate([], 60 * 60 * 1000, Date.parse('2026-06-13T12:00:00.000Z'))
     expect(rate.count).toBe(0)
     expect(rate.byRecipient).toEqual({})
+  })
+})
+
+// Card 681f99b0 (A2): the abandonment trail accumulates one row per abandonment
+// plus per throttled re-alert and has no fold-collapse (every row is a distinct
+// historical event), so its only bound is a size cap. capJsonlTrail keeps the
+// NEWEST maxLines rows (the consumer cursors by per-id ts; dropped rows are
+// already-escalated history) and returns null when no trim is needed.
+describe('capJsonlTrail (A2 abandonment size-cap rotation)', () => {
+  const line = (i: number) => abandonmentRecord({ id: i, from_agent: 'a', to_agent: 'b' }, 60000, 1000 * i)
+
+  it('returns null when at or under the cap (no rewrite churn)', () => {
+    const raw = [line(1), line(2), line(3)].join('\n') + '\n'
+    expect(capJsonlTrail(raw, 3)).toBeNull()
+    expect(capJsonlTrail(raw, 10)).toBeNull()
+    expect(capJsonlTrail('', 5)).toBeNull()
+  })
+
+  it('keeps the newest maxLines rows when over the cap', () => {
+    const raw = [line(1), line(2), line(3), line(4), line(5)].join('\n') + '\n'
+    const capped = capJsonlTrail(raw, 2)
+    expect(capped).not.toBeNull()
+    const kept = parseAbandonmentSentinel(capped!)
+    expect(kept.map((e) => e.id)).toEqual([4, 5])
+    expect(capped!.endsWith('\n')).toBe(true)
+  })
+
+  it('ignores blank lines when counting and trimming', () => {
+    const raw = '\n' + line(1) + '\n\n' + line(2) + '\n' + line(3) + '\n\n'
+    // three real rows, cap 3 -> no trim needed despite the blank lines.
+    expect(capJsonlTrail(raw, 3)).toBeNull()
+    const capped = capJsonlTrail(raw, 1)
+    expect(parseAbandonmentSentinel(capped!).map((e) => e.id)).toEqual([3])
   })
 })

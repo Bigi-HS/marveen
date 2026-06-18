@@ -1832,6 +1832,27 @@ export function getPendingMessages(toAgent?: string): AgentMessage[] {
     .all() as AgentMessage[]
 }
 
+/**
+ * Current status of each of the given message ids, as a Map (id -> status).
+ * Ids with no row are simply absent from the map. Used by the delivery-sentinel
+ * boot-fold (card 681f99b0) to reconcile outstanding pending-acks against the
+ * message lifecycle. Chunked to stay under SQLite's bound-parameter limit even
+ * though the live id set is tiny.
+ */
+export function getMessageStatusesByIds(ids: number[]): Map<number, string> {
+  const out = new Map<number, string>()
+  const CHUNK = 500
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const slice = ids.slice(i, i + CHUNK)
+    if (slice.length === 0) continue
+    const placeholders = slice.map(() => '?').join(',')
+    const rows = db.prepare(`SELECT id, status FROM agent_messages WHERE id IN (${placeholders})`)
+      .all(...slice) as { id: number; status: string }[]
+    for (const r of rows) out.set(r.id, r.status)
+  }
+  return out
+}
+
 export function markMessageDelivered(id: number): boolean {
   const now = Math.floor(Date.now() / 1000)
   const changed = db.prepare("UPDATE agent_messages SET status = 'delivered', delivered_at = ? WHERE id = ?").run(now, id).changes > 0

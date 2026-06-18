@@ -11,6 +11,7 @@ import {
   selectAcksToClear,
   selectAckEscalations,
   ackEscalationText,
+  compactPendingAckSentinel,
   EMPTY_ACK_CURSOR,
   ACK_ESCALATION_WINDOW_MS,
 } from '../web/delivery-ack.js'
@@ -326,5 +327,70 @@ describe('ACK gate x escalation interplay (card 0978279f point c)', () => {
     // Nothing was written, so the escalation consumer has nothing to escalate.
     const plan = selectAckEscalations([], EMPTY_ACK_CURSOR, NOW_MS, { baselineOnFirstRun: false })
     expect(plan.escalations).toEqual([])
+  })
+})
+
+// Card 681f99b0 (A2): the pending-ack trail is append-only -- a received ack
+// leaves a pending+cleared PAIR forever, so the file grows unbounded. The
+// boot-fold compacts it to only the records a restart still legitimately owes a
+// receipt for: cleared pairs collapse, and an outstanding ack whose message has
+// reached a TERMINAL status (done/failed) is reconciled away (done => recipient
+// completed => received; failed => abandonment net owns it). Surviving records
+// re-serialize losslessly.
+describe('compactPendingAckSentinel (A2 boot-fold + DB reconcile)', () => {
+  const neverTerminal = () => false
+
+  it('returns empty for an empty / blank trail', () => {
+    expect(compactPendingAckSentinel('', neverTerminal)).toBe('')
+    expect(compactPendingAckSentinel('\n\n  \n', neverTerminal)).toBe('')
+  })
+
+  it('collapses a fully-cleared trail to empty (the dominant growth case)', () => {
+    const raw =
+      pendingAckRecord({ id: 1, from_agent: 'a', to_agent: 'b' }, 1000) + '\n' +
+      pendingAckRecord({ id: 2, from_agent: 'a', to_agent: 'c' }, 1000) + '\n' +
+      ackClearedRecord(1, 2000) + '\n' +
+      ackClearedRecord(2, 2000) + '\n'
+    expect(compactPendingAckSentinel(raw, neverTerminal)).toBe('')
+  })
+
+  it('keeps outstanding records and drops the cleared one', () => {
+    const raw =
+      pendingAckRecord({ id: 1, from_agent: 'a', to_agent: 'b' }, 1000) + '\n' +
+      pendingAckRecord({ id: 2, from_agent: 'a', to_agent: 'c' }, 1500) + '\n' +
+      ackClearedRecord(1, 2000) + '\n'
+    const out = compactPendingAckSentinel(raw, neverTerminal)
+    const survivors = parsePendingAckSentinel(out)
+    expect(survivors.map((s) => s.id)).toEqual([2])
+    // Lossless re-serialization: the surviving record is byte-identical.
+    expect(out).toBe(pendingAckRecord({ id: 2, from_agent: 'a', to_agent: 'c' }, 1500) + '\n')
+  })
+
+  it('reconciles away an outstanding ack whose message is terminal (done/failed)', () => {
+    const raw =
+      pendingAckRecord({ id: 10, from_agent: 'a', to_agent: 'b' }, 1000) + '\n' +
+      pendingAckRecord({ id: 11, from_agent: 'a', to_agent: 'c' }, 1000) + '\n'
+    // id 10 is done (received), id 11 still in flight.
+    const out = compactPendingAckSentinel(raw, (id) => id === 10)
+    expect(parsePendingAckSentinel(out).map((s) => s.id)).toEqual([11])
+  })
+
+  it('ends non-empty output with a newline so a concurrent append cannot merge lines', () => {
+    const raw = pendingAckRecord({ id: 7, from_agent: 'a', to_agent: 'b' }, 1000) + '\n'
+    const out = compactPendingAckSentinel(raw, neverTerminal)
+    expect(out.endsWith('\n')).toBe(true)
+    // Appending the next record yields two clean, separately-parseable lines.
+    const appended = out + ackClearedRecord(7, 3000) + '\n'
+    expect(outstandingPendingAcks(appended)).toEqual([])
+  })
+
+  it('skips malformed lines and is idempotent (re-folding a folded trail is a no-op)', () => {
+    const raw =
+      'not json\n' +
+      pendingAckRecord({ id: 5, from_agent: 'x', to_agent: 'y' }, 4000) + '\n' +
+      '{"event":"garbage"}\n'
+    const once = compactPendingAckSentinel(raw, neverTerminal)
+    expect(parsePendingAckSentinel(once).map((s) => s.id)).toEqual([5])
+    expect(compactPendingAckSentinel(once, neverTerminal)).toBe(once)
   })
 })
