@@ -176,6 +176,12 @@ export function safeResolveAgentIdentity(
 // revoke half of a revoke+remint rotation). Returns the number revoked. The
 // revoked rows stay until pruned past expiry, mirroring the session revocation
 // pattern in dashboard-auth.ts.
+//
+// INCIDENT RESPONSE (DA FLAG 3): on a *suspected token compromise*, call this --
+// revocation is immediate (revoked -> 401). Do NOT rely on the 24h expiry to
+// "age out" a leaked token: expiry is a blast-radius bound for the normal cycle,
+// not an IR control, and an expired token still passes GET reads (scopeless)
+// during migration. Compromise => revoke now, then remint.
 export function revokeAgentTokens(db: Database.Database, agentId: string, now: number = Date.now()): number {
   return db
     .prepare('UPDATE agent_tokens SET revoked_at = ? WHERE agent_id = ? AND revoked_at IS NULL')

@@ -12,8 +12,17 @@
 // at the destination with the real file rather than following it, so a planted
 // symlink cannot redirect this write -- the read-side guard in the launch helper
 // covers the converse (reading through a planted symlink).
+//
+// PARENT-DIR symlink safety (DA FLAG 1): rename(2) only protects the FINAL path
+// component. If the parent directory itself is a symlink (e.g. agents/dave ->
+// agents/marveen, planted before the agent's first launch), the atomic write
+// would follow it and clobber another agent's token file. We lstat the parent
+// and refuse to write through a symlinked directory rather than follow it. This
+// covers the immediate parent; a symlinked *ancestor* (agents/ itself) requires
+// write access to the fleet root, which already grants direct token overwrite --
+// out of the Tier-1 single-user threat model (design §5.5 note).
 
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, lstatSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { mintAgentToken, revokeAgentTokens, ADMIN_SCOPE } from './agent-token-registry.js'
@@ -76,7 +85,15 @@ export function provisionAgentToken(
   // Rotate: kill any previous live token so only the freshly-minted one resolves.
   revokeAgentTokens(db, agentId, now)
   const { token, tokenSha256, expiresAt } = mintAgentToken(db, agentId, scopes, { now, ttlMs })
-  mkdirSync(dirname(tokenFile), { recursive: true })
+  const tokenDir = dirname(tokenFile)
+  mkdirSync(tokenDir, { recursive: true })
+  // Parent-dir symlink guard (DA FLAG 1): refuse to write through a symlinked
+  // directory rather than follow it into another agent's token file.
+  if (lstatSync(tokenDir).isSymbolicLink()) {
+    throw new Error(
+      `agent-token-provision: refusing to write ${tokenFile}: parent directory ${tokenDir} is a symlink`,
+    )
+  }
   atomicWriteFileSync(tokenFile, serializeTokenFile(token, expiresAt), { mode: 0o600 })
   return { tokenSha256, expiresAt, scopes }
 }

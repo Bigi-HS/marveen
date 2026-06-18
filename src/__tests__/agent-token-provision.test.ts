@@ -100,4 +100,24 @@ describe('provisionAgentToken', () => {
     expect(lstatSync(file).isSymbolicLink()).toBe(false)
     expect(readToken(file).token).toMatch(/^[0-9a-f]{64}$/)
   })
+
+  it('refuses to write through a symlinked PARENT directory rather than follow it (DA FLAG 1)', () => {
+    // A peer's token dir, with its real token file already in place.
+    const victimDir = join(TEST_DIR, 'agents', 'marveen')
+    mkdirSync(victimDir, { recursive: true })
+    const victimToken = join(victimDir, '.genesis-token')
+    writeFileSync(victimToken, 'MARVEEN-ADMIN-TOKEN\n9999999999\n')
+
+    // Attacker plants the agent's own dir as a symlink to the victim's dir
+    // before its first launch: agents/dave -> agents/marveen.
+    const attackerDir = join(TEST_DIR, 'agents', 'dave')
+    symlinkSync(victimDir, attackerDir)
+    const file = join(attackerDir, '.genesis-token')
+
+    // Provisioning must throw, not follow the dir symlink and clobber the victim.
+    expect(() => provisionAgentToken(db, 'dave', file, { now: NOW })).toThrow(/parent directory .* is a symlink/)
+
+    // The victim's admin token file is untouched.
+    expect(readFileSync(victimToken, 'utf-8')).toBe('MARVEEN-ADMIN-TOKEN\n9999999999\n')
+  })
 })

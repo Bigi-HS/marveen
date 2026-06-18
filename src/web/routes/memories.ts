@@ -83,6 +83,12 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  // Read isolation is NOT a goal of the capability-token system (DA FLAG 2): the
+  // per-agent scope set gates WRITE/DELETE (decideMemoryMutation) only. Reads here
+  // are authentication-only -- any valid token can GET memories, filtered by the
+  // advisory, caller-supplied ?agent= and access_scope, not by the token identity.
+  // Closing read isolation is OS-user/broker work (design Option B/C), out of this
+  // Tier-1 slice.
   if (path === '/api/memories' && method === 'GET') {
     const q = url.searchParams.get('q')?.trim() || ''
     const agentId = url.searchParams.get('agent') || ''
