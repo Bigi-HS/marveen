@@ -5,6 +5,10 @@ import {
   shouldCompactSession,
   shouldHardCompact,
   shouldBusyCompact,
+  shouldIdleLowCompact,
+  staleContextCostTokenMinutes,
+  IDLE_LOW_THRESHOLD_TOKENS,
+  IDLE_LOW_SUSTAINED_MS,
   decideContextExhausted,
   adaptiveTokenThresholdForModel,
   adaptiveHardCeilingForModel,
@@ -568,5 +572,56 @@ describe('session-size-watcher -- busy-tier source contracts', () => {
     // any main-session target.
     expect(SRC).not.toMatch(/MAIN_AGENT_ID/)
     expect(SRC).not.toMatch(/marveen-channels/)
+  })
+})
+
+// Card fe8d4a8d (F1): the IDLE-LOW tier trims a sustained-idle agent's stale
+// context tail at a low absolute threshold, guarded by sustained-idle so a
+// mid-task agent merely idle between turns is never compacted.
+describe('shouldIdleLowCompact (sustained-idle low-threshold tier)', () => {
+  const TH = IDLE_LOW_THRESHOLD_TOKENS
+  const SUSTAIN = IDLE_LOW_SUSTAINED_MS
+  const COOLDOWN = DEFAULT_COOLDOWN_MS
+
+  it('does not fire below the low threshold', () => {
+    expect(shouldIdleLowCompact(TH - 1, TH, SUSTAIN, SUSTAIN, null, NOW, COOLDOWN)).toBe(false)
+    expect(shouldIdleLowCompact(null, TH, SUSTAIN, SUSTAIN, null, NOW, COOLDOWN)).toBe(false)
+  })
+
+  it('does NOT fire when idle has not been sustained long enough (the working-agent guard)', () => {
+    // Over threshold, but only idle for a moment (a mid-task agent between turns).
+    expect(shouldIdleLowCompact(TH + 50_000, TH, SUSTAIN - 1, SUSTAIN, null, NOW, COOLDOWN)).toBe(false)
+    expect(shouldIdleLowCompact(TH + 50_000, TH, 0, SUSTAIN, null, NOW, COOLDOWN)).toBe(false)
+  })
+
+  it('fires when over threshold AND sustained-idle AND cooldown elapsed', () => {
+    expect(shouldIdleLowCompact(TH, TH, SUSTAIN, SUSTAIN, null, NOW, COOLDOWN)).toBe(true)
+    expect(shouldIdleLowCompact(TH + 100_000, TH, SUSTAIN + 1, SUSTAIN, NOW - COOLDOWN - 1, NOW, COOLDOWN)).toBe(true)
+  })
+
+  it('respects the shared cooldown', () => {
+    expect(shouldIdleLowCompact(TH + 100_000, TH, SUSTAIN, SUSTAIN, NOW - 1000, NOW, COOLDOWN)).toBe(false)
+  })
+
+  it('targets big-window agents: the low threshold sits below a 1M Opus soft trigger but the soft tier already covers a 200K agent', () => {
+    // For a 1M-window Opus, the soft fraction (0.75 => ~750K) is far above the
+    // idle-low threshold, so idle-low is the lever that trims a parked Opus.
+    expect(IDLE_LOW_THRESHOLD_TOKENS).toBeLessThan(adaptiveTokenThresholdForModel('claude-opus-4-8[1m]'))
+    // For a 200K-window agent the soft trigger (~150K) is already BELOW idle-low,
+    // so the soft tier handles small agents and idle-low never needs to.
+    expect(adaptiveTokenThresholdForModel('claude-sonnet-4-6')).toBeLessThan(IDLE_LOW_THRESHOLD_TOKENS)
+  })
+})
+
+describe('staleContextCostTokenMinutes (measurement proxy)', () => {
+  it('is zero for unknown / non-positive inputs', () => {
+    expect(staleContextCostTokenMinutes(null, 60_000)).toBe(0)
+    expect(staleContextCostTokenMinutes(0, 60_000)).toBe(0)
+    expect(staleContextCostTokenMinutes(200_000, 0)).toBe(0)
+  })
+
+  it('is contextTokens times idle-minutes', () => {
+    expect(staleContextCostTokenMinutes(200_000, 60_000)).toBe(200_000) // 1 min
+    expect(staleContextCostTokenMinutes(300_000, 600_000)).toBe(3_000_000) // 10 min
   })
 })
