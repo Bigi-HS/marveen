@@ -102,6 +102,16 @@ export function checkBearerToken(header: string | undefined, expected: string): 
   return timingSafeEqual(provided, wanted)
 }
 
+// Pull the raw token out of an `Authorization: Bearer <token>` header, or
+// undefined when the header is absent/malformed. Used by the per-agent identity
+// resolver (agent-token-registry) which must hash the presented token rather
+// than only compare it against the shared one.
+export function extractBearer(header: string | undefined): string | undefined {
+  if (!header) return undefined
+  const m = /^Bearer\s+(.+)$/.exec(header)
+  return m ? m[1].trim() : undefined
+}
+
 export interface RequestOrigin {
   // true = arrived over the tailnet via the Tailscale Serve proxy; false = a
   // direct loopback hit on 127.0.0.1.

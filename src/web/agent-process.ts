@@ -20,6 +20,8 @@ import { getSecret } from './vault.js'
 import { backupChannelEnv, restoreChannelEnv } from './channel-token-durability.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { runPreflight, logPreflightFindings, summarizePreflightErrors } from './agent-preflight.js'
+import { provisionAgentToken } from './agent-token-provision.js'
+import { getDb } from '../db.js'
 
 const TMUX = resolveFromPath('tmux')
 const CLAUDE = resolveFromPath('claude')
@@ -30,6 +32,13 @@ const CLAUDE = resolveFromPath('claude')
 // watchdogs already source it; this path covers the DASHBOARD launch (restart
 // button, chameleon sandbox, scaffold) that the bash migration could not reach.
 const FLEET_OAUTH_HELPER = join(PROJECT_ROOT, 'scripts', 'lib', 'fleet-oauth-env.sh')
+
+// Per-agent dashboard-token helper (card b1ce5118). Sourcing it exports
+// GENESIS_AGENT_TOKEN -- the launched agent's OWN dashboard bearer -- so its
+// /api calls authenticate as itself and the server derives its identity from
+// the credential. Mirrors the OAuth helper exactly (env-only, never logged,
+// no-op fallback). Inert until the fleet-ops recipe flips to it (C-BIND).
+const AGENT_TOKEN_HELPER = join(PROJECT_ROOT, 'scripts', 'lib', 'agent-token-env.sh')
 
 // How many times startAgentProcess will (re)spawn the tmux session when the
 // inner claude dies inside the liveness window. Two total attempts: the
@@ -328,6 +337,20 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
       isClaude && authMode === 'shared' && existsSync(FLEET_OAUTH_HELPER)
         ? `export FLEET_ROOT="${PROJECT_ROOT}" && . "${FLEET_OAUTH_HELPER}" && `
         : ''
+    // Per-agent dashboard token (card b1ce5118). Mint+persist this agent's token
+    // file, then source the helper to export GENESIS_AGENT_TOKEN. Provisioning is
+    // best-effort: a failure (DB/disk) must NEVER break a launch -- the agent
+    // simply falls back to the shared bearer (fail-open for availability). The
+    // raw token never enters this process; it is written 0600 and read only by
+    // the sourced helper in the spawned shell.
+    try {
+      provisionAgentToken(getDb(), name, join(agentDir(name), '.genesis-token'))
+    } catch (err) {
+      logger.warn({ err, name }, 'Per-agent token provisioning failed; agent will use the shared bearer')
+    }
+    const agentTokenEnv = existsSync(AGENT_TOKEN_HELPER)
+      ? `export FLEET_ROOT="${PROJECT_ROOT}" && export GENESIS_AGENT_ID="${name}" && . "${AGENT_TOKEN_HELPER}" && `
+      : ''
     // `--continue` requires an existing session; on a brand-new agent the
     // Claude Code projects directory does not yet exist and `claude` exits
     // immediately with an obscure "No deferred tool marker found" error
@@ -354,7 +377,7 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     // `continueFlag` is decided per-attempt (see shouldContinueSession): the
     // first attempt resumes, a liveness-window death falls back to a fresh boot.
     const buildLaunchCmd = (continueFlag: string): string =>
-      `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${channelSetup}${apiKeyEnv}${claudeConfigEnv}${fleetOauthEnv}${ollamaEnv}${deepseekEnv}cd "${dir}" && ${CLAUDE} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
+      `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${channelSetup}${apiKeyEnv}${claudeConfigEnv}${fleetOauthEnv}${agentTokenEnv}${ollamaEnv}${deepseekEnv}cd "${dir}" && ${CLAUDE} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
 
     // `tmux new-session -d "cmd"` returns as soon as the SESSION exists, not
     // when the inner claude is up: if claude exits within ~1s (the silent

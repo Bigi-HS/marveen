@@ -6,8 +6,17 @@ import {
 } from '../../db.js'
 import { MAIN_AGENT_ID, ALLOWED_CHAT_ID, OLLAMA_URL } from '../../config.js'
 import { logger } from '../../logger.js'
+import { decideMemoryMutation, enforceFromBindingEnabled } from '../agent-identity-binding.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
+
+// Resolve a memory row's owner (single owner per row -- the `agent_id` column).
+// Returns undefined when the id does not exist, so the caller can 404 cleanly
+// before any authorization decision.
+function memoryOwner(id: number): string | undefined {
+  const row = getDb().prepare('SELECT agent_id FROM memories WHERE id = ?').get(id) as { agent_id: string } | undefined
+  return row?.agent_id
+}
 
 // Canonical memory categories. Kept in sync with the DB CHECK constraint in
 // src/db.ts so the API rejects bad values before they even reach SQLite.
@@ -31,7 +40,7 @@ function containsSuspiciousContent(content: string): boolean {
 }
 
 export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
-  const { req, res, path, method, url } = ctx
+  const { req, res, path, method, url, identity } = ctx
 
   if (path === '/api/memories' && method === 'POST') {
     const body = await readBody(req)
@@ -74,6 +83,12 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  // Read isolation is NOT a goal of the capability-token system (DA FLAG 2): the
+  // per-agent scope set gates WRITE/DELETE (decideMemoryMutation) only. Reads here
+  // are authentication-only -- any valid token can GET memories, filtered by the
+  // advisory, caller-supplied ?agent= and access_scope, not by the token identity.
+  // Closing read isolation is OS-user/broker work (design Option B/C), out of this
+  // Tier-1 slice.
   if (path === '/api/memories' && method === 'GET') {
     const q = url.searchParams.get('q')?.trim() || ''
     const agentId = url.searchParams.get('agent') || ''
@@ -245,6 +260,19 @@ Respond ONLY with JSON, nothing else:
     const id = parseInt(memUpdateMatch[1], 10)
     const body = await readBody(req)
     const { content, category, tier, agent_id, keywords } = JSON.parse(body.toString()) as { content: string; category?: string; tier?: string; agent_id?: string; keywords?: string }
+    // Gap (a), card b1ce5118: a memory may only be mutated by its owner (or the
+    // curator/admin scope). Resolve the owner from the token-bound identity, not
+    // a body field. Gated behind ENFORCE_FROM_BINDING (default OFF) so it is
+    // inert until rollout; with the flag off decideMemoryMutation always allows,
+    // preserving today's behaviour exactly.
+    const owner = memoryOwner(id)
+    if (owner === undefined) { json(res, { error: 'Memory not found' }, 404); return true }
+    const authz = decideMemoryMutation(identity, owner, enforceFromBindingEnabled())
+    if (!authz.ok) {
+      logger.warn({ tokenAgent: identity.agentId, owner, id, op: 'PUT' }, 'Rejected memory mutation: not owner')
+      json(res, { error: authz.error }, authz.status)
+      return true
+    }
     if (updateMemory(id, content, tier || category, agent_id, keywords)) { json(res, { ok: true }); return true }
     json(res, { error: 'Memory not found' }, 404)
     return true
@@ -252,8 +280,15 @@ Respond ONLY with JSON, nothing else:
 
   if (memUpdateMatch && method === 'DELETE') {
     const id = parseInt(memUpdateMatch[1], 10)
-    const db2 = getDb()
-    const changes = db2.prepare('DELETE FROM memories WHERE id = ?').run(id).changes
+    const owner = memoryOwner(id)
+    if (owner === undefined) { json(res, { error: 'Memory not found' }, 404); return true }
+    const authz = decideMemoryMutation(identity, owner, enforceFromBindingEnabled())
+    if (!authz.ok) {
+      logger.warn({ tokenAgent: identity.agentId, owner, id, op: 'DELETE' }, 'Rejected memory mutation: not owner')
+      json(res, { error: authz.error }, authz.status)
+      return true
+    }
+    const changes = getDb().prepare('DELETE FROM memories WHERE id = ?').run(id).changes
     if (changes > 0) { json(res, { ok: true }); return true }
     json(res, { error: 'Memory not found' }, 404)
     return true

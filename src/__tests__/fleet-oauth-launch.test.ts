@@ -32,7 +32,9 @@ describe('startAgentProcess -- fleet OAuth env injection (dashboard launch path)
   })
 
   it('wires fleetOauthEnv into the launch command alongside the other env exports', () => {
-    expect(PROCESS_SRC).toMatch(/\$\{claudeConfigEnv\}\$\{fleetOauthEnv\}\$\{ollamaEnv\}/)
+    // agentTokenEnv (card b1ce5118) is sourced right after the oauth env; both
+    // sit between the config-dir export and the ollama env.
+    expect(PROCESS_SRC).toMatch(/\$\{claudeConfigEnv\}\$\{fleetOauthEnv\}\$\{agentTokenEnv\}\$\{ollamaEnv\}/)
   })
 
   it('exports the token via a SOURCED helper, not a value embedded in TS (token never in process memory or argv)', () => {

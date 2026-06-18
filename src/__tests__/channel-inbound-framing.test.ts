@@ -103,7 +103,9 @@ describe('message-router channel-inbound classification', () => {
 describe('/api/messages 403 guard (forged coordinator id)', () => {
   it('rejects the coordinator id BEFORE creating the message, normalized with sanitizeAgentIdent (NOT trim)', () => {
     const guardIdx = MESSAGES_ROUTE_SRC.indexOf('sanitizeAgentIdent(from) === COORDINATOR_AGENT_ID')
-    const createIdx = MESSAGES_ROUTE_SRC.indexOf('createAgentMessage(from.trim()')
+    // The create call now binds the token-derived `effectiveFrom` (card
+    // b1ce5118) rather than the raw body `from`; the guard still precedes it.
+    const createIdx = MESSAGES_ROUTE_SRC.indexOf('createAgentMessage(effectiveFrom')
     expect(guardIdx).toBeGreaterThan(0)
     expect(createIdx).toBeGreaterThan(0)
     expect(guardIdx).toBeLessThan(createIdx) // guard runs first
