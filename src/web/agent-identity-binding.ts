@@ -45,6 +45,13 @@ export function fromBindingStatusLine(enabled: boolean): string {
   return `[auth] from_agent enforcement: ${enabled ? 'ON' : 'OFF'}`
 }
 
+// Boot-time emission of the enforcement status (Chad #5 mandatory). Extracted as
+// a thin pure function -- taking the emit sink + env -- so the "logged at boot"
+// guarantee is unit-tested without standing up the monitor-heavy server.
+export function logFromBindingStatus(emit: (line: string) => void, env: NodeJS.ProcessEnv = process.env): void {
+  emit(fromBindingStatusLine(enforceFromBindingEnabled(env)))
+}
+
 export type FromDecision = { ok: true; from: string } | { ok: false; status: number; error: string }
 
 // Decide the effective `from_agent` for an inter-agent message.

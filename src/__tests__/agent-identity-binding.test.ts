@@ -3,6 +3,7 @@ import Database from 'better-sqlite3'
 import {
   enforceFromBindingEnabled,
   fromBindingStatusLine,
+  logFromBindingStatus,
   decideMessageFrom,
   decideMemoryMutation,
   resolveRequestIdentity,
@@ -46,6 +47,13 @@ describe('fromBindingStatusLine (Chad #5 mandatory startup log)', () => {
   it('renders the exact ON/OFF line the operator greps for', () => {
     expect(fromBindingStatusLine(true)).toBe('[auth] from_agent enforcement: ON')
     expect(fromBindingStatusLine(false)).toBe('[auth] from_agent enforcement: OFF')
+  })
+
+  it('logFromBindingStatus emits the status at boot reflecting the env flag', () => {
+    const lines: string[] = []
+    logFromBindingStatus((l) => lines.push(l), {})
+    logFromBindingStatus((l) => lines.push(l), { ENFORCE_FROM_BINDING: 'on' })
+    expect(lines).toEqual(['[auth] from_agent enforcement: OFF', '[auth] from_agent enforcement: ON'])
   })
 })
 

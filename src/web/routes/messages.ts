@@ -9,11 +9,12 @@ import { COORDINATOR_AGENT_ID } from '../../channel-coordinator/ingest.js'
 import { sanitizeAgentIdent } from '../../prompt-safety.js'
 import { normalizeRecipient } from '../agent-config.js'
 import { aiDefenceGuard } from '../../aidefence-guard.js'
+import { decideMessageFrom, enforceFromBindingEnabled } from '../agent-identity-binding.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
-  const { req, res, path, method, url } = ctx
+  const { req, res, path, method, url, identity } = ctx
 
   if (path === '/api/messages' && method === 'POST') {
     const body = await readBody(req)
@@ -57,10 +58,27 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'from is reserved for the in-process channel coordinator' }, 403)
       return true
     }
-    const guard = aiDefenceGuard(from.trim(), content.trim())
+    // Identity binding (card b1ce5118): the server DERIVES the effective sender
+    // from the token-resolved identity rather than trusting the body. This
+    // GENERALIZES the single-id coordinator guard above to every agent_id -- a
+    // per-agent token may only send as itself; admin/operator may impersonate.
+    // Gated behind ENFORCE_FROM_BINDING (default OFF) so it lands inert until
+    // the per-agent tokens are rolled out (C-BIND flips it ON). With the flag
+    // off the decision is the legacy pass-through, so behaviour is unchanged.
+    const fromDecision = decideMessageFrom(identity, from, enforceFromBindingEnabled())
+    if (!fromDecision.ok) {
+      logger.warn(
+        { tokenAgent: identity.agentId, claimedFrom: from.trim(), to: to.trim() },
+        'Rejected /api/messages POST: from does not match authenticated identity',
+      )
+      json(res, { error: fromDecision.error }, fromDecision.status)
+      return true
+    }
+    const effectiveFrom = fromDecision.from.trim()
+    const guard = aiDefenceGuard(effectiveFrom, content.trim())
     if (guard.verdict === 'BLOCK') {
       logger.warn(
-        { from: from.trim(), to: to.trim(), findings: guard.findings },
+        { from: effectiveFrom, to: to.trim(), findings: guard.findings },
         'AIDefence: message BLOCKED',
       )
       json(res, { error: 'Message blocked by AIDefence security guard', findings: guard.findings }, 400)
@@ -68,7 +86,7 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     }
     if (guard.verdict === 'FLAG') {
       logger.warn(
-        { from: from.trim(), to: to.trim(), findings: guard.findings },
+        { from: effectiveFrom, to: to.trim(), findings: guard.findings },
         'AIDefence: message FLAGGED (allowed through)',
       )
     }
@@ -80,11 +98,11 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     // undeliverable message.
     const recipient = normalizeRecipient(to)
     if (!recipient) {
-      logger.warn({ from: from.trim(), to: to.trim() }, 'Rejected /api/messages POST: unknown recipient')
+      logger.warn({ from: effectiveFrom, to: to.trim() }, 'Rejected /api/messages POST: unknown recipient')
       json(res, { error: `Unknown recipient: ${to.trim()}` }, 400)
       return true
     }
-    const msg = createAgentMessage(from.trim(), recipient, content.trim(), ack_expected === true, (priority as AgentMessage['priority']) ?? 'normal', in_reply_to ?? null)
+    const msg = createAgentMessage(effectiveFrom, recipient, content.trim(), ack_expected === true, (priority as AgentMessage['priority']) ?? 'normal', in_reply_to ?? null)
     logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ackExpected: msg.ack_expected, priority: msg.priority, inReplyTo: msg.in_reply_to }, 'Agent message created')
     json(res, msg)
     return true

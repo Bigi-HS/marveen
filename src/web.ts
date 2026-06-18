@@ -3,7 +3,10 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL } from './config.js'
-import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, buildDashboardAccessMessage, createSession, verifySession, revokeSession, parseCookies, classifyRequestOrigin, rateLimitKey, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from './web/dashboard-auth.js'
+import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, extractBearer, buildDashboardAccessMessage, createSession, verifySession, revokeSession, parseCookies, classifyRequestOrigin, rateLimitKey, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from './web/dashboard-auth.js'
+import { getDb } from './db.js'
+import { resolveRequestIdentity, logFromBindingStatus } from './web/agent-identity-binding.js'
+import { type AgentIdentity } from './web/agent-token-registry.js'
 import { json, readBody } from './web/http-helpers.js'
 import { createRateLimiter } from './web/rate-limit.js'
 import { securityHeaders } from './web/security-headers.js'
@@ -84,6 +87,9 @@ export function startWebServer(port = 3420): http.Server {
   // can swap it at runtime without a restart. DASHBOARD_TOKEN is only used for
   // the one-time startup access message below.
   initDashboardToken(DASHBOARD_TOKEN)
+  // Chad #5: surface the from_agent enforcement state at boot so an env-less
+  // restart that silently flips it OFF is visible in the logs, never invisible.
+  logFromBindingStatus((line) => logger.info(line))
   const allowedOrigins = new Set([
     `http://localhost:${port}`,
     `http://127.0.0.1:${port}`,
@@ -231,18 +237,32 @@ export function startWebServer(port = 3420): http.Server {
     // path below authenticates it -- no token in the URL. The legacy ?token=
     // query fallback was removed (card 32bcf962) so the root-equivalent token
     // never appears in a URL (shell history, proxy/access logs, address bar).
+    // Token-resolved caller identity. Public/static paths fall through with an
+    // anonymous, scope-less placeholder; gated /api routes resolve a real
+    // identity (operator for the shared token / browser session, or a per-agent
+    // identity for a registered token) and 401 on anything unresolved.
+    let identity: AgentIdentity = { agentId: '', scopes: [], source: 'agent' }
     if (path.startsWith('/api/') && !isPublicApi) {
-      if (!hasValidSession() && !hasValidBearer()) {
+      const gate = resolveRequestIdentity({
+        hasSession: hasValidSession(),
+        bearer: extractBearer(req.headers.authorization),
+        db: getDb(),
+        sharedToken: getDashboardToken(),
+        now: Date.now(),
+        isWrite: !isSafeMethod(method),
+      })
+      if (!gate.pass) {
         const uo = reqOrigin(req)
         logger.warn({ remote: uo.remote, sourceIp: uo.sourceIp, path }, 'dashboard request unauthorized')
-        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.writeHead(gate.status, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'Unauthorized' }))
         return
       }
+      identity = gate.identity
     }
 
     try {
-      const routeCtx: RouteContext = { req, res, path, method, url }
+      const routeCtx: RouteContext = { req, res, path, method, url, identity }
 
       if (await tryHandleProfiles(routeCtx)) return
       if (await tryHandleMessages(routeCtx)) return
