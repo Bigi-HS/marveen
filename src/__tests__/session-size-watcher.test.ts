@@ -13,9 +13,14 @@ import {
   adaptiveTokenThresholdForModel,
   adaptiveHardCeilingForModel,
   adaptiveBusyCeilingForModel,
+  adaptiveEscalationFloorForModel,
+  effectiveStuckStart,
+  shouldEmitExhaustionAlert,
+  positiveEnvMs,
   COMPACT_THRESHOLD_FRACTION,
   HARD_CEILING_FRACTION,
   BUSY_COMPACT_FRACTION,
+  ESCALATION_FLOOR_FRACTION,
   BUSY_COMPACT_COOLDOWN_MS,
   DEFAULT_TOKEN_THRESHOLD,
   DEFAULT_COOLDOWN_MS,
@@ -360,11 +365,11 @@ describe('decideContextExhausted (terminal-state signal)', () => {
 
   function input(over: Partial<ContextExhaustionInput> = {}): ContextExhaustionInput {
     return {
-      contextTokens: CEILING + 50_000, // over the ceiling by default
-      hardCeiling: CEILING,
+      contextTokens: CEILING + 50_000, // over the threshold by default
+      escalationThreshold: CEILING,
       paneIsIdle: false,
       paneActivelyWorking: false, // wedged (neither idle nor working) by default
-      overCeilingMs: STUCK_MS + 60_000, // past the stuck window by default
+      overThresholdMs: STUCK_MS + 60_000, // past the stuck window by default
       ...over,
     }
   }
@@ -385,7 +390,7 @@ describe('decideContextExhausted (terminal-state signal)', () => {
   // at the next turn boundary -- so it must NOT escalate, even if stuck for ages.
   it('does NOT fire when the pane is actively working (busy tier will queue /compact)', () => {
     expect(decideContextExhausted(
-      input({ paneActivelyWorking: true, overCeilingMs: STUCK_MS * 10 }),
+      input({ paneActivelyWorking: true, overThresholdMs: STUCK_MS * 10 }),
       STUCK_MS,
     )).toBe(false)
   })
@@ -393,14 +398,14 @@ describe('decideContextExhausted (terminal-state signal)', () => {
   // OPPOSING COMBINATION #1: over ceiling + not idle, but NOT yet stuck long
   // enough -- a transient mid-tool spike, not a terminal wedge -- must NOT fire.
   it('does NOT fire while still inside the stuck window (transient, not terminal)', () => {
-    expect(decideContextExhausted(input({ overCeilingMs: STUCK_MS - 1 }), STUCK_MS)).toBe(false)
+    expect(decideContextExhausted(input({ overThresholdMs: STUCK_MS - 1 }), STUCK_MS)).toBe(false)
   })
 
   // OPPOSING COMBINATION #2: not a context problem at all -- under the ceiling,
   // even if not idle and "stuck" for ages (that is a different watcher's job).
   it('does NOT fire when under the hard ceiling regardless of stuck time', () => {
     expect(decideContextExhausted(
-      input({ contextTokens: CEILING - 1, overCeilingMs: STUCK_MS * 10 }),
+      input({ contextTokens: CEILING - 1, overThresholdMs: STUCK_MS * 10 }),
       STUCK_MS,
     )).toBe(false)
   })
@@ -414,7 +419,7 @@ describe('decideContextExhausted (terminal-state signal)', () => {
   // (>= on both, mirroring shouldHardCompact's inclusive ceiling).
   it('fires exactly at the ceiling and exactly at the stuck boundary', () => {
     expect(decideContextExhausted(
-      input({ contextTokens: CEILING, overCeilingMs: STUCK_MS }),
+      input({ contextTokens: CEILING, overThresholdMs: STUCK_MS }),
       STUCK_MS,
     )).toBe(true)
   })
@@ -623,5 +628,241 @@ describe('staleContextCostTokenMinutes (measurement proxy)', () => {
   it('is contextTokens times idle-minutes', () => {
     expect(staleContextCostTokenMinutes(200_000, 60_000)).toBe(200_000) // 1 min
     expect(staleContextCostTokenMinutes(300_000, 600_000)).toBe(3_000_000) // 10 min
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ESCALATION FLOOR (card 17df64d7): the non-compactable-pane gap.
+//
+// RCA: a pane that is NEITHER idle (isReadyForPrompt) NOR actively-working
+// (isActivelyWorking) -- 'typing' / 'unknown' / 'error' / usage-limit / paste --
+// is acted on by NO compaction tier. Below the 90% hard ceiling such a pane was
+// never even escalated. This decouples the ESCALATION threshold (the 80% warn
+// floor) from the auto-/compact hard ceiling (90%): escalate-only, no new
+// /compact firing, so the over-fire surface is untouched.
+// ---------------------------------------------------------------------------
+
+describe('adaptiveEscalationFloorForModel', () => {
+  it('the floor fraction is 0.80 -- exactly the warn wall, between busy 0.78 and hard 0.90', () => {
+    expect(ESCALATION_FLOOR_FRACTION).toBe(0.8)
+    expect(ESCALATION_FLOOR_FRACTION).toBeGreaterThan(BUSY_COMPACT_FRACTION)
+    expect(ESCALATION_FLOOR_FRACTION).toBeLessThan(HARD_CEILING_FRACTION)
+  })
+
+  it('Sonnet/Haiku (200K window) -> 160K escalation floor', () => {
+    expect(adaptiveEscalationFloorForModel('claude-sonnet-4-6')).toBe(160_000)
+    expect(adaptiveEscalationFloorForModel('claude-haiku-4-5-20251001')).toBe(160_000)
+  })
+
+  it('Opus 1M (opus-4-8[1m]) -> 800K escalation floor', () => {
+    expect(adaptiveEscalationFloorForModel('claude-opus-4-8[1m]')).toBe(800_000)
+  })
+
+  it('resolves aliases and falls back to the default window * 0.80', () => {
+    expect(adaptiveEscalationFloorForModel('opus')).toBe(800_000)
+    expect(adaptiveEscalationFloorForModel('sonnet')).toBe(160_000)
+    const expected = Math.floor(DEFAULT_CONTEXT_WINDOW * ESCALATION_FLOOR_FRACTION)
+    expect(adaptiveEscalationFloorForModel('some-future-model-x')).toBe(expected)
+    expect(adaptiveEscalationFloorForModel(null)).toBe(expected)
+    expect(adaptiveEscalationFloorForModel(undefined)).toBe(expected)
+  })
+
+  it('INVARIANT: for every model  busy < floor < hard (no tier inversion)', () => {
+    for (const model of [
+      'claude-sonnet-4-6',
+      'claude-haiku-4-5-20251001',
+      'claude-opus-4-8[1m]',
+      'opus',
+      'sonnet',
+      'some-unknown-model',
+      null,
+      undefined,
+    ]) {
+      const busy = adaptiveBusyCeilingForModel(model)
+      const floor = adaptiveEscalationFloorForModel(model)
+      const hard = adaptiveHardCeilingForModel(model)
+      expect(floor).toBeGreaterThan(busy)
+      expect(hard).toBeGreaterThan(floor)
+    }
+  })
+
+  it('decideContextExhausted fires at the FLOOR, not only at the 90% ceiling', () => {
+    // The behavioural heart of the card: a sonnet agent at 86% (172K) -- the DA
+    // incident's peak -- is UNDER the 180K hard ceiling but OVER the 160K floor,
+    // so a non-compactable stuck pane there must now be escalatable.
+    const floor = adaptiveEscalationFloorForModel('claude-sonnet-4-6') // 160K
+    const STUCK = 30 * 60 * 1000
+    expect(decideContextExhausted({
+      contextTokens: 172_000, // 86% -- DA's peak, below the 180K hard ceiling
+      escalationThreshold: floor,
+      paneIsIdle: false,
+      paneActivelyWorking: false,
+      overThresholdMs: STUCK,
+    }, STUCK)).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// effectiveStuckStart (card 17df64d7, DA red-team FLAG 1, MEDIUM):
+// a queued-but-not-yet-run /compact must NOT be escalated as a wedge. Any
+// compaction ATTEMPT (soft/hard/busy all set lastCompactedAt) pushes the stuck
+// clock forward, so the escalation never fires within the stuck window of a
+// compaction attempt.
+// ---------------------------------------------------------------------------
+
+describe('effectiveStuckStart (compaction-attempt resets the stuck clock)', () => {
+  it('returns null when there is no floor timer yet', () => {
+    expect(effectiveStuckStart(null, null)).toBeNull()
+    expect(effectiveStuckStart(null, 1000)).toBeNull()
+  })
+
+  it('returns the floor timer when no compaction has happened', () => {
+    expect(effectiveStuckStart(5000, null)).toBe(5000)
+  })
+
+  it('a compaction BEFORE the floor timer does not move the clock', () => {
+    expect(effectiveStuckStart(5000, 4000)).toBe(5000)
+  })
+
+  it('a compaction AFTER the floor timer restarts the clock (FLAG 1 fix)', () => {
+    // overFloorSince=5000, but a /compact was queued at 7000 -> the stuck window
+    // counts from 7000, so we give the queued compaction time to run before
+    // escalating. This is the queued-but-not-run false-positive DA flagged.
+    expect(effectiveStuckStart(5000, 7000)).toBe(7000)
+  })
+
+  it('feeds the escalation: no escalation within the stuck window of a /compact attempt', () => {
+    const STUCK = 30 * 60 * 1000
+    const floor = 160_000
+    const floorSince = 0
+    const lastCompact = 10 * 60 * 1000 // a /compact attempt 10 min after timing began
+    const now = floorSince + STUCK + 1000 // 30min+ since the timer, but only 20min since the compact
+    const overMs = now - (effectiveStuckStart(floorSince, lastCompact) as number)
+    expect(overMs).toBeLessThan(STUCK) // still inside the window measured from the compact
+    expect(decideContextExhausted({
+      contextTokens: 172_000,
+      escalationThreshold: floor,
+      paneIsIdle: false,
+      paneActivelyWorking: false,
+      overThresholdMs: overMs,
+    }, STUCK)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// shouldEmitExhaustionAlert (card 17df64d7, NoA-required escalation-dedup
+// fixture): a flapping non-compactable pane (#130 false-idle class) must NOT
+// spam the operator -- at most one alert per dedup window.
+// ---------------------------------------------------------------------------
+
+describe('shouldEmitExhaustionAlert (anti-spam dedup)', () => {
+  const DEDUP = CONTEXT_EXHAUSTED_ALERT_DEDUP_MS
+
+  it('emits the first alert (no prior alert)', () => {
+    expect(shouldEmitExhaustionAlert(null, 1000, DEDUP)).toBe(true)
+  })
+
+  it('suppresses a second alert inside the dedup window', () => {
+    expect(shouldEmitExhaustionAlert(1000, 1000 + DEDUP - 1, DEDUP)).toBe(false)
+  })
+
+  it('re-emits at and past the dedup window', () => {
+    expect(shouldEmitExhaustionAlert(1000, 1000 + DEDUP, DEDUP)).toBe(true)
+    expect(shouldEmitExhaustionAlert(1000, 1000 + DEDUP + 5000, DEDUP)).toBe(true)
+  })
+
+  it('FLAP: a pane re-entering the exhausted state every 2 min for an hour alerts ~twice, not ~30x', () => {
+    // Simulate the #130 false-idle flap: the escalation predicate keeps returning
+    // true on a fast (2-min) lane for a full hour. Dedup must cap the operator
+    // pings to one per 30-min window.
+    let lastAlertAt: number | null = null
+    let alerts = 0
+    for (let t = 0; t <= 60 * 60 * 1000; t += 2 * 60 * 1000) {
+      if (shouldEmitExhaustionAlert(lastAlertAt, t, DEDUP)) {
+        alerts++
+        lastAlertAt = t
+      }
+    }
+    // t=0 (first), t=30min, t=60min -> exactly 3 over the inclusive hour; never 31.
+    expect(alerts).toBe(3)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// positiveEnvMs (card cd007200, Chad INFO-low #221): a negative / NaN env value
+// must fall back to the default, not become a truthy bad duration (e.g. a -5ms
+// cooldown that disables the cooldown entirely).
+// ---------------------------------------------------------------------------
+
+describe('positiveEnvMs (negative/NaN env guard)', () => {
+  const DEF = 45 * 60 * 1000
+
+  it('parses a valid positive value', () => {
+    expect(positiveEnvMs('60000', DEF)).toBe(60_000)
+  })
+
+  it('falls back to the default for a negative value (the bug)', () => {
+    expect(positiveEnvMs('-5', DEF)).toBe(DEF)
+  })
+
+  it('falls back for zero', () => {
+    expect(positiveEnvMs('0', DEF)).toBe(DEF)
+  })
+
+  it('falls back for non-numeric / NaN garbage', () => {
+    expect(positiveEnvMs('abc', DEF)).toBe(DEF)
+    expect(positiveEnvMs('', DEF)).toBe(DEF)
+  })
+
+  it('falls back for an unset (undefined) env var', () => {
+    expect(positiveEnvMs(undefined, DEF)).toBe(DEF)
+  })
+
+  it('falls back for a non-finite value (Infinity)', () => {
+    expect(positiveEnvMs('Infinity', DEF)).toBe(DEF)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Source contracts for the escalation-floor wiring (card 17df64d7)
+// ---------------------------------------------------------------------------
+
+describe('session-size-watcher -- escalation-floor source contracts', () => {
+  it('the escalation derives the per-model FLOOR, not the hard ceiling', () => {
+    const escFn = SRC.slice(SRC.indexOf('function checkAgentContextEscalation'))
+    expect(escFn).toMatch(/adaptiveEscalationFloorForModel\(/)
+  })
+
+  it('the escalation is escalate-ONLY: it notifies but never sends /compact', () => {
+    const escFn = SRC.slice(
+      SRC.indexOf('function checkAgentContextEscalation'),
+      SRC.indexOf('export function startSessionSizeWatcher'),
+    )
+    expect(escFn).toMatch(/notifyChannel/)
+    expect(escFn).not.toMatch(/sendPromptToSession/)
+  })
+
+  it('the escalation runs on the fast lane (called from hardSweep), after the action tiers', () => {
+    const sweepFn = SRC.slice(SRC.indexOf('function hardSweep'), SRC.indexOf('setTimeout(sweep'))
+    expect(sweepFn).toMatch(/checkAgentContextEscalation\(name\)/)
+    // ordering: busy + hard (which may /compact) get first crack, escalation last
+    expect(sweepFn.indexOf('checkAgentBusyCompact')).toBeLessThan(sweepFn.indexOf('checkAgentContextEscalation'))
+    expect(sweepFn.indexOf('checkAgentHardCeiling')).toBeLessThan(sweepFn.indexOf('checkAgentContextEscalation'))
+  })
+
+  it('the escalation respects a queued /compact via the lastCompactedAt-aware clock (FLAG 1)', () => {
+    const escFn = SRC.slice(
+      SRC.indexOf('function checkAgentContextEscalation'),
+      SRC.indexOf('export function startSessionSizeWatcher'),
+    )
+    expect(escFn).toMatch(/effectiveStuckStart\(/)
+    expect(escFn).toMatch(/lastCompactedAt\.get\(name\)/)
+  })
+
+  it('the env-reads are guarded against negative/NaN via positiveEnvMs', () => {
+    expect(SRC).toMatch(/positiveEnvMs\(/)
+    // the raw `Number(process.env...) || default` foot-gun must be gone
+    expect(SRC).not.toMatch(/Number\(process\.env\.SESSION_BUSY_COMPACT_COOLDOWN_MS\)\s*\|\|/)
+    expect(SRC).not.toMatch(/Number\(process\.env\.SESSION_HARD_CEILING_STUCK_WARN_MS\)\s*\|\|/)
   })
 })
