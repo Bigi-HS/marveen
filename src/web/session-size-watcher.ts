@@ -35,6 +35,17 @@ import { isReadyForPrompt, isActivelyWorking } from '../pane-state.js'
 import { shouldHoldProactiveWork } from './fleet-pause-enforcer.js'
 import { notifyChannel } from '../notify.js'
 
+// Parse a millisecond duration from an env var, falling back to `def` for any
+// value that is not a finite POSITIVE number (card cd007200, Chad INFO-low #221).
+// The old `Number(process.env.X) || def` idiom let a negative env through: `-5`
+// is truthy, so a `SESSION_*_MS=-5` silently became a -5ms duration -- e.g. a
+// negative cooldown that disables the cooldown entirely and lets the fast lane
+// re-queue every sweep. `Number.isFinite(n) && n > 0` closes that.
+export function positiveEnvMs(raw: string | undefined, def: number): number {
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : def
+}
+
 // Transcript size at which we compact. Empirically: Dave's 113k-token session
 // produced a 1.5MB JSONL. 1MB is comfortably past normal work but well before
 // the resume-menu risk zone.
@@ -133,13 +144,34 @@ export function adaptiveBusyCeilingForModel(modelId: string | null | undefined):
   return Math.floor(contextWindowForModel(modelId) * BUSY_COMPACT_FRACTION)
 }
 
+// ESCALATION FLOOR (card 17df64d7). RCA of the DA@86% incident: a pane that is
+// NEITHER idle (isReadyForPrompt) NOR actively-working (isActivelyWorking) --
+// 'typing' / 'unknown' / 'error' / usage-limit / pending-paste -- is acted on by
+// NO compaction tier (soft+hard own idle, busy owns actively-working). Below the
+// 90% hard ceiling such a "non-compactable" pane was never even escalated: it sat
+// only-pinged by the read-only 80% warn-watchdog until it reached idle or climbed
+// to 90%. This decouples the ESCALATE-to-operator threshold (the 80% warn wall)
+// from the auto-/compact hard ceiling (0.90): we escalate a non-compactable pane
+// stuck over the floor, but send NO /compact (you cannot compact a non-compactable
+// pane, and adding /compact firing here would widen the over-fire surface). The
+// fraction sits exactly at the context-window-watchdog's 80% ALERT_THRESHOLD so
+// the actionable escalation lines up with the generic warn ping.
+export const ESCALATION_FLOOR_FRACTION = 0.8
+
+// Resolve the per-agent escalation floor = contextWindow(model) * 0.80. Pure given
+// the model id; its ordering (busy 0.78 < floor 0.80 < hard 0.90) is asserted in
+// the tests so the floor never inverts against the busy ceiling or hard ceiling.
+export function adaptiveEscalationFloorForModel(modelId: string | null | undefined): number {
+  return Math.floor(contextWindowForModel(modelId) * ESCALATION_FLOOR_FRACTION)
+}
+
 // A queued /compact takes a turn boundary to actually fire. Without a cooldown
 // the 2-min fast lane would queue a fresh /compact every sweep until it fires,
 // piling redundant compactions behind the first. This cooldown (shared with the
 // soft/hard tiers via lastCompactedAt) prevents the double-queue; once the
 // compact fires the context drops below the ceiling and the loop self-clears.
 export const BUSY_COMPACT_COOLDOWN_MS =
-  Number(process.env.SESSION_BUSY_COMPACT_COOLDOWN_MS) || 45 * 60 * 1000 // 45 min default
+  positiveEnvMs(process.env.SESSION_BUSY_COMPACT_COOLDOWN_MS, 45 * 60 * 1000) // 45 min default
 
 // Fast lane: poll over-ceiling agents far more often than the 10-min soft sweep
 // so a busy agent's brief between-turn idle is caught quickly.
@@ -149,7 +181,7 @@ const HARD_CEILING_INITIAL_DELAY_MS = 90 * 1000 // offset from the soft sweep + 
 // idle for this long -- a candidate for the (deferred, riskier) turn-boundary
 // injection approach. Configurable via env so we can tune it without a rebuild.
 const HARD_CEILING_STUCK_WARN_MS =
-  Number(process.env.SESSION_HARD_CEILING_STUCK_WARN_MS) || 30 * 60 * 1000 // 30 min default
+  positiveEnvMs(process.env.SESSION_HARD_CEILING_STUCK_WARN_MS, 30 * 60 * 1000) // 30 min default
 
 export interface SessionSizeThresholds {
   tokenThreshold: number
@@ -286,38 +318,43 @@ export function staleContextCostTokenMinutes(contextTokens: number | null, susta
 export interface ContextExhaustionInput {
   // Live context size in tokens; null when the transcript is unreadable.
   contextTokens: number | null
-  // Per-agent hard ceiling = contextWindow(model) * HARD_CEILING_FRACTION.
-  hardCeiling: number
-  // Is the pane currently at a ready idle boundary? When idle, the hard-ceiling
-  // /compact CAN fire and recover the session -- so it is NOT terminal.
+  // The escalation threshold in tokens. Originally the 90% hard ceiling; since
+  // card 17df64d7 the caller passes the 80% escalation FLOOR
+  // (adaptiveEscalationFloorForModel) so a non-compactable pane is escalated in
+  // the 80-90% band, decoupled from the unchanged auto-/compact hard ceiling.
+  escalationThreshold: number
+  // Is the pane currently at a ready idle boundary? When idle, the idle-gated
+  // tiers (soft >=75% / hard >=90%) CAN fire and recover the session -- NOT terminal.
   paneIsIdle: boolean
   // Is the pane ACTIVELY working (a live turn spinner)? When actively working
   // the BUSY tier queues a /compact that runs at the next turn boundary, so the
   // session is recoverable -- NOT terminal. Only a pane that is neither idle nor
   // actively working (a wedged dialog / unknown surface) is unrecoverable.
   paneActivelyWorking: boolean
-  // Continuous time (ms) the agent has been over the ceiling. 0 when not over.
-  overCeilingMs: number
+  // Continuous time (ms) the agent has been over the threshold in a non-compactable
+  // state. Measured from effectiveStuckStart so a queued /compact resets it.
+  overThresholdMs: number
 }
 
 /**
  * Pure decision: is the agent in the context-exhausted / unrecoverable terminal
  * state (escalate to the operator, do NOT nudge)?
  *
- * The normal recovery is the idle-gated hard-ceiling /compact (checkAgentHard-
- * Ceiling). It can only run when the pane reaches an idle boundary. An agent
- * that is over the ceiling AND never reaches idle AND has stayed that way past
- * the stuck window is one the watchdog cannot help: /compact can't fire (no idle
- * boundary) and a nudge won't shrink the window. That is the terminal state.
+ * The normal recovery is a compaction tier: soft/hard at an idle boundary, or the
+ * BUSY tier on an actively-working pane. An agent over the escalation threshold
+ * whose pane is NEITHER idle NOR actively working -- a wedged dialog / unknown /
+ * usage-limit surface -- can be recovered by none of them: /compact can't land and
+ * a nudge won't shrink the window. Past the stuck window, that is the terminal
+ * state the operator must be told about.
  *
  * Guards (each its own adversarial fixture):
- *   - unknown tokens                 -> false (can't tell -- never escalate blind)
- *   - under the hard ceiling         -> false (not a context problem at all)
- *   - over ceiling but pane is idle  -> false (recoverable -- /compact will fire)
- *   - over ceiling but actively working -> false (recoverable -- the BUSY tier
+ *   - unknown tokens                    -> false (can't tell -- never escalate blind)
+ *   - under the threshold               -> false (not a context problem at all)
+ *   - over threshold but pane is idle   -> false (recoverable -- an idle tier fires)
+ *   - over threshold but actively working -> false (recoverable -- the BUSY tier
  *       queues a /compact that runs at the next turn boundary)
- *   - over ceiling, not idle, but still inside the stuck window -> false (transient)
- *   - over ceiling, neither idle nor working, past the window -> TRUE (terminal)
+ *   - over threshold, not idle, but still inside the stuck window -> false (transient)
+ *   - over threshold, neither idle nor working, past the window -> TRUE (terminal)
  *
  * Crucially this fires ONLY on the positive signal; when it is false every
  * existing path (auto-/compact, nudge, log-warn) is unchanged.
@@ -327,12 +364,46 @@ export function decideContextExhausted(
   stuckMs: number,
 ): boolean {
   if (input.contextTokens == null) return false
-  if (input.contextTokens < input.hardCeiling) return false
+  if (input.contextTokens < input.escalationThreshold) return false
   if (input.paneIsIdle) return false
   // An actively-working pane is recoverable: the BUSY tier queues a /compact
   // that runs at the next turn boundary, so it is not the operator's problem.
   if (input.paneActivelyWorking) return false
-  return input.overCeilingMs >= stuckMs
+  return input.overThresholdMs >= stuckMs
+}
+
+/**
+ * Pure: the effective start of the "stuck over the threshold" clock. A compaction
+ * ATTEMPT (any tier sets lastCompactedAt) means recovery may be in flight -- a
+ * queued /compact runs at the next turn boundary -- so the stuck window must count
+ * from the LATER of the floor timer and the last compaction (DA red-team FLAG 1).
+ * Without this, a pane that briefly flips idle (soft tier queues a /compact) then
+ * flips back to a non-compactable surface while the compaction is still pending
+ * would falsely escalate after 30 min even though recovery was queued.
+ *
+ * Returns null when there is no floor timer yet (nothing to measure).
+ */
+export function effectiveStuckStart(
+  floorTimerStart: number | null,
+  lastCompactedAt: number | null,
+): number | null {
+  if (floorTimerStart == null) return null
+  if (lastCompactedAt == null) return floorTimerStart
+  return Math.max(floorTimerStart, lastCompactedAt)
+}
+
+/**
+ * Pure: should we emit an exhaustion escalation now, given when we last did? A
+ * flapping non-compactable pane (#130 false-idle class) can keep the predicate
+ * true on the 2-min fast lane; this caps the operator pings to one per dedup
+ * window so a wedge can't spam (NoA-required anti-spam guard).
+ */
+export function shouldEmitExhaustionAlert(
+  lastAlertAt: number | null,
+  now: number,
+  dedupMs: number,
+): boolean {
+  return lastAlertAt == null || now - lastAlertAt >= dedupMs
 }
 
 // How long between repeat operator escalations for the same stuck-exhausted
@@ -391,15 +462,15 @@ const INTERVAL_MS = 10 * 60 * 1000 // every 10 minutes
 // agent stops so a restarted agent gets a fresh cooldown.
 const lastCompactedAt = new Map<string, number>()
 
-// Per-agent wall-clock of when we FIRST observed it over the hard ceiling while
-// still busy (never caught idle). Used only to warn on a never-idle agent.
-// Cleared on a successful hard compaction, on stop, or when it drops below the
-// ceiling.
-const overCeilingSince = new Map<string, number>()
+// Per-agent wall-clock of when we FIRST observed it over the ESCALATION FLOOR
+// (80%) in a non-compactable pane (neither idle nor actively working). Drives the
+// stuck-window timing for the operator escalation. Cleared when the pane becomes
+// compactable again, when it drops below the floor, or on stop.
+const overFloorSince = new Map<string, number>()
 
 // Per-agent wall-clock of the last context-exhausted operator escalation, so a
 // session wedged for hours alerts on the dedup cadence rather than every sweep.
-// Cleared when the agent recovers (drops below ceiling) or stops.
+// Cleared when the agent recovers (drops below the floor) or stops.
 const lastExhaustedAlertAt = new Map<string, number>()
 
 // Per-agent wall-clock of when the agent was FIRST observed not actively working
@@ -494,58 +565,20 @@ function checkAgentHardCeiling(name: string): void {
   // tier's per-model derivation, so a 200K-window agent's ceiling is ~180K and a
   // 1M agent's is ~900K -- both strictly above their soft trigger, never inverted.
   const hardCeiling = adaptiveHardCeilingForModel(resolveAgentModelId(name))
-  if (!shouldHardCompact(contextTokens, hardCeiling)) {
-    overCeilingSince.delete(name)
-    // Recovered below the ceiling -> re-arm the escalation so a future wedge
-    // alerts again rather than staying suppressed by the stale dedup stamp.
-    lastExhaustedAlertAt.delete(name)
-    return
-  }
+  if (!shouldHardCompact(contextTokens, hardCeiling)) return
   const now = Date.now()
-  if (!overCeilingSince.has(name)) overCeilingSince.set(name, now)
 
   const session = agentSessionName(name)
   const pane = capturePane(session)
   if (pane == null || !isReadyForPrompt(pane)) {
-    // The IMMEDIATE hard /compact still gates on idle: we never send it to a
-    // non-idle pane. The BUSY tier (checkAgentBusyCompact) handles an
-    // actively-working over-ceiling pane via a queued /compact, so here we only
-    // need the escalation decision -- and an actively-working pane is recoverable
-    // (the queued compact will fire), hence NOT terminal.
-    const since = overCeilingSince.get(name) ?? now
-    const overCeilingMs = now - since
-    const working = pane != null && isActivelyWorking(pane)
-    // Terminal-state decision (card b83e7c92 item-4): over ceiling + neither idle
-    // NOR actively working (a wedged dialog/unknown surface) + stuck past the
-    // window. Only then can neither the idle nor the busy /compact fire and a
-    // nudge won't shrink the window -- the operator's call, not the watchdog's.
-    const exhausted = decideContextExhausted(
-      { contextTokens, hardCeiling, paneIsIdle: false, paneActivelyWorking: working, overCeilingMs },
-      HARD_CEILING_STUCK_WARN_MS,
+    // The IMMEDIATE hard /compact gates on idle: we never inject it into a
+    // non-idle pane. An actively-working over-ceiling pane is handled by the BUSY
+    // tier (queued /compact); a wedged non-compactable one is surfaced by
+    // checkAgentContextEscalation. Here we simply defer to the next idle window.
+    logger.debug(
+      { agent: name, contextTokens },
+      'session-size-watcher: over hard ceiling but pane not idle, deferring to next idle',
     )
-    if (exhausted) {
-      logger.warn(
-        { agent: name, contextTokens, stuckMs: overCeilingMs },
-        'session-size-watcher: over HARD ceiling but never caught idle -- may need turn-boundary compaction',
-      )
-      // ESCALATE, do NOT nudge: surface the unrecoverable session to the operator
-      // on the dedup cadence. Fire-and-forget; a failed notify must not wedge the
-      // sweep. This is the ONLY new side effect, gated entirely on the positive
-      // signal -- every other path is unchanged when `exhausted` is false.
-      const lastAlert = lastExhaustedAlertAt.get(name)
-      if (lastAlert == null || now - lastAlert >= CONTEXT_EXHAUSTED_ALERT_DEDUP_MS) {
-        lastExhaustedAlertAt.set(name, now)
-        const stuckMin = Math.round(overCeilingMs / 60000)
-        notifyChannel(
-          `🚨 A(z) ${name} agens context-kimerult allapotban ragadt: ${stuckMin} perce a hard-ceiling (${hardCeiling.toLocaleString()} token) felett, de SOHA nem ert idle hatart, igy az auto-/compact nem tud lefutni es a nudge sem segit. Kezi beavatkozas kell: tmux attach -t ${session} -> /compact vagy friss session. (Nem nudge-olom tovabb.)`,
-        ).catch(() => {})
-      }
-    } else {
-      logger.debug(
-        { agent: name, contextTokens },
-        'session-size-watcher: over hard ceiling but pane not idle, deferring to next idle',
-      )
-    }
     return
   }
 
@@ -563,9 +596,6 @@ function checkAgentHardCeiling(name: string): void {
     sendPromptToSession(session, '/compact')
     // Update the shared cooldown map so the soft tier respects this compaction.
     lastCompactedAt.set(name, now)
-    overCeilingSince.delete(name)
-    // Recovered via idle /compact -> re-arm escalation for any future wedge.
-    lastExhaustedAlertAt.delete(name)
   } catch (err) {
     logger.warn({ err, agent: name }, 'session-size-watcher: failed to send /compact (hard ceiling)')
   }
@@ -614,6 +644,88 @@ function checkAgentBusyCompact(name: string): void {
   }
 }
 
+// Non-compactable-pane escalation (card 17df64d7, escalate-ONLY). RCA of the
+// DA@86% incident: a pane over the 80% escalation FLOOR that is NEITHER idle (the
+// soft/hard tiers own idle) NOR actively working (the busy tier owns that) cannot
+// be auto-compacted by any tier. Below the 90% hard ceiling such a pane was only
+// pinged by the read-only warn-watchdog and never escalated -- it sat silently
+// until it reached idle or climbed to 90%. This surfaces the genuinely-stuck case
+// to the operator with a graded next-action, sending NO /compact (you cannot
+// compact a non-compactable pane, and a send here would widen the over-fire
+// surface the 13-compact pile-up taught us to respect). Escalate-only.
+function checkAgentContextEscalation(name: string): void {
+  const contextTokens = latestContextTokens(name)
+  const modelId = resolveAgentModelId(name)
+  const escalationFloor = adaptiveEscalationFloorForModel(modelId)
+  const now = Date.now()
+
+  // Under the floor -> not a context problem here; clear state + re-arm the alert
+  // so a future wedge is not suppressed by a stale dedup stamp.
+  if (contextTokens == null || contextTokens < escalationFloor) {
+    overFloorSince.delete(name)
+    lastExhaustedAlertAt.delete(name)
+    return
+  }
+
+  const session = agentSessionName(name)
+  const pane = capturePane(session)
+  const idle = pane != null && isReadyForPrompt(pane)
+  const working = pane != null && isActivelyWorking(pane)
+
+  // Recoverable surfaces are owned by the acting tiers (idle -> soft/hard, working
+  // -> busy). Reset the stuck timer whenever the pane is compactable so a brief
+  // wedge between healthy turns never accrues stuck time toward an escalation.
+  if (idle || working) {
+    overFloorSince.delete(name)
+    return
+  }
+
+  // Non-compactable over the floor: start/continue the stuck timer.
+  if (!overFloorSince.has(name)) overFloorSince.set(name, now)
+  // Count the stuck window from the LATER of the floor timer and any compaction
+  // ATTEMPT (lastCompactedAt) so a queued-but-not-yet-run /compact is given time
+  // to land and is not escalated as a wedge (DA red-team FLAG 1).
+  const stuckStart =
+    effectiveStuckStart(overFloorSince.get(name) ?? now, lastCompactedAt.get(name) ?? null) ?? now
+  const overThresholdMs = now - stuckStart
+
+  const exhausted = decideContextExhausted(
+    {
+      contextTokens,
+      escalationThreshold: escalationFloor,
+      paneIsIdle: false,
+      paneActivelyWorking: false,
+      overThresholdMs,
+    },
+    HARD_CEILING_STUCK_WARN_MS,
+  )
+  if (!exhausted) {
+    logger.debug(
+      { agent: name, contextTokens },
+      'session-size-watcher: over escalation floor in a non-compactable pane but not yet stuck past the window, deferring',
+    )
+    return
+  }
+
+  // Dedup the operator pings so a flapping non-compactable pane (#130 false-idle
+  // class) cannot spam: at most one alert per dedup window.
+  if (!shouldEmitExhaustionAlert(lastExhaustedAlertAt.get(name) ?? null, now, CONTEXT_EXHAUSTED_ALERT_DEDUP_MS)) return
+  lastExhaustedAlertAt.set(name, now)
+
+  const stuckMin = Math.round(overThresholdMs / 60000)
+  const pct = Math.round((contextTokens / contextWindowForModel(modelId)) * 100)
+  logger.warn(
+    { agent: name, contextTokens, stuckMs: overThresholdMs },
+    'session-size-watcher: over escalation floor in a non-compactable pane past the stuck window -- escalating to operator',
+  )
+  // ESCALATE, do NOT compact/nudge. Fire-and-forget; a failed notify must not
+  // wedge the sweep. The message carries a GRADED next-action (DA red-team Q1):
+  // the operator cannot /compact a non-compactable pane, so spell out the branches.
+  notifyChannel(
+    `🚨 A(z) ${name} agens ~${pct}% kontextuson (${contextTokens.toLocaleString()} token) ragadt egy NEM-compactalhato pane-ben: ${stuckMin} perce sem idle, sem aktivan dolgozo, igy egyik auto-/compact tier sem tud lefutni. Kezi beavatkozas: 'tmux attach -t ${session}' -> ha usage-limit, varj a reset-re; ha bedolt dialog/wedge, inditsd ujra a pane-t (friss session); ha promptolhato, kuldj /compact-ot. (Nem compactalom es nem nudge-olom.)`,
+  ).catch(() => {})
+}
+
 export function startSessionSizeWatcher(): NodeJS.Timeout {
   function sweep() {
     for (const name of listAgentNames()) {
@@ -621,7 +733,7 @@ export function startSessionSizeWatcher(): NodeJS.Timeout {
         // Clear the cooldown so a freshly restarted agent is not penalised for
         // a compaction that happened in the prior session.
         lastCompactedAt.delete(name)
-        overCeilingSince.delete(name)
+        overFloorSince.delete(name)
         // Reset the sustained-idle clock so a restart starts a fresh idle spell.
         notWorkingSince.delete(name)
         continue
@@ -641,7 +753,7 @@ export function startSessionSizeWatcher(): NodeJS.Timeout {
   function hardSweep() {
     for (const name of listAgentNames()) {
       if (!isAgentRunning(name)) {
-        overCeilingSince.delete(name)
+        overFloorSince.delete(name)
         // A stopped agent re-arms: a restart starts a fresh window, so a prior
         // exhaustion alert must not suppress a genuine new one.
         lastExhaustedAlertAt.delete(name)
@@ -650,9 +762,12 @@ export function startSessionSizeWatcher(): NodeJS.Timeout {
       try {
         // BUSY tier first: an actively-working over-ceiling agent gets a queued
         // /compact (and the shared cooldown set) BEFORE the hard-ceiling check
-        // runs, so the escalation correctly sees it as recoverable, not terminal.
+        // runs. Then the hard-ceiling idle /compact. The escalation runs LAST so
+        // both acting tiers get first crack -- it only fires if the pane is still
+        // non-compactable (neither idle nor working) over the floor.
         checkAgentBusyCompact(name)
         checkAgentHardCeiling(name)
+        checkAgentContextEscalation(name)
       } catch (err) {
         logger.debug({ err, agent: name }, 'session-size-watcher: hard-ceiling check error')
       }
