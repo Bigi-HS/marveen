@@ -210,6 +210,35 @@ export function outstandingPendingAcks(raw: string): PendingAckEvent[] {
 }
 
 /**
+ * Compact the append-only pending-ack trail to only the records a restart still
+ * legitimately owes a receipt for (card 681f99b0 / A2). The file grows unbounded
+ * because a received ack leaves a pending+cleared PAIR forever; this rewrites it
+ * to:
+ *   - the still-OUTSTANDING acks (cleared pairs collapse to nothing), AND
+ *   - of those, only the ones whose message is NOT terminal -- `isMessageTerminal`
+ *     is true for a message marked done (recipient completed => received, so the
+ *     observer would have cleared it) or failed (delivery gave up, owned by the
+ *     d37df625 abandonment net). This reconcile-on-boot is the natural place to
+ *     resolve the restart-window acks the in-process observer never saw engage
+ *     (dampens A3), without the unsound live "clear on status=done" that was
+ *     retracted for long delegations.
+ * Surviving records are re-serialized byte-for-byte via pendingAckRecord, so the
+ * output re-parses to the same outstanding set and is idempotent. Returns '' when
+ * nothing survives; a non-empty result ALWAYS ends with a newline so a concurrent
+ * append cannot merge onto the last line. Pure: the DB lookup is injected.
+ */
+export function compactPendingAckSentinel(
+  raw: string,
+  isMessageTerminal: (id: number) => boolean,
+): string {
+  const survivors = outstandingPendingAcks(raw).filter((p) => !isMessageTerminal(p.id))
+  if (survivors.length === 0) return ''
+  return survivors
+    .map((p) => pendingAckRecord({ id: p.id, from_agent: p.from, to_agent: p.to }, p.delivered_at_ms))
+    .join('\n') + '\n'
+}
+
+/**
  * LOAD-BEARING INVARIANT (card 1a99b7e2, DA MUST-INCLUDE):
  *   The router injects an inter-agent message ONLY into a pane that
  *   isSessionReadyForPrompt reports IDLE (the idle-only inject gate in

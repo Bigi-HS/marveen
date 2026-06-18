@@ -129,6 +129,23 @@ export function parseAbandonmentSentinel(raw: string): AbandonmentEvent[] {
   return out
 }
 
+/**
+ * Cap an append-only JSONL trail to its most recent `maxLines` records (card
+ * 681f99b0 / A2). The abandonment trail accumulates one row per abandonment plus
+ * per throttled re-alert and -- unlike the pending-ack trail -- has no fold
+ * collapse (every row is a distinct historical event), so its only bound is a
+ * size cap. Keeps the NEWEST rows (the consumer cursors by per-id ts, so dropped
+ * older rows are already-escalated history). Blank lines are ignored for both
+ * the count and the output. Returns null when no trim is needed (<= maxLines
+ * non-empty lines), so the caller can skip rewrite churn; otherwise the trimmed
+ * content with a trailing newline. Pure: takes the raw file text.
+ */
+export function capJsonlTrail(raw: string, maxLines: number): string | null {
+  const lines = raw.split('\n').filter((l) => l.trim().length > 0)
+  if (lines.length <= maxLines) return null
+  return lines.slice(lines.length - maxLines).join('\n') + '\n'
+}
+
 export interface AbandonmentRate {
   /** Abandonments whose ts falls within [nowMs - windowMs, nowMs]. */
   count: number

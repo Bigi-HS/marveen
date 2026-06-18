@@ -6,6 +6,10 @@ import {
   initDatabase,
   createAgentMessage,
   getPendingMessages,
+  markMessageDelivered,
+  markMessageDone,
+  markMessageFailed,
+  getMessageStatusesByIds,
   getSession,
   setSession,
   clearSession,
@@ -357,5 +361,30 @@ describe('database file permissions', () => {
   it('tolerates a missing sidecar without throwing', () => {
     const absent = join(tmpDir, 'does-not-exist.db')
     expect(() => tightenDbPermissions(absent)).not.toThrow()
+  })
+})
+
+// Card 681f99b0 (A2): the boot-fold reconciles outstanding pending-acks against
+// the message lifecycle, so it needs the statuses of a set of message ids.
+describe('getMessageStatusesByIds (A2 boot-fold reconcile)', () => {
+  it('returns each id mapped to its current status, omitting unknown ids', () => {
+    const pending = createAgentMessage('thor', 'dave', 'still pending')
+    const delivered = createAgentMessage('thor', 'dave', 'delivered one')
+    const done = createAgentMessage('thor', 'dave', 'done one')
+    const failed = createAgentMessage('thor', 'dave', 'failed one')
+    markMessageDelivered(delivered.id)
+    markMessageDone(done.id, 'ok')
+    markMessageFailed(failed.id, 'boom')
+
+    const statuses = getMessageStatusesByIds([pending.id, delivered.id, done.id, failed.id, 999999])
+    expect(statuses.get(pending.id)).toBe('pending')
+    expect(statuses.get(delivered.id)).toBe('delivered')
+    expect(statuses.get(done.id)).toBe('done')
+    expect(statuses.get(failed.id)).toBe('failed')
+    expect(statuses.has(999999)).toBe(false)
+  })
+
+  it('returns an empty map for no ids', () => {
+    expect(getMessageStatusesByIds([]).size).toBe(0)
   })
 })
