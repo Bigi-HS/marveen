@@ -124,6 +124,19 @@ describe('parsePendingAckSentinel', () => {
   it('returns empty for empty input', () => {
     expect(parsePendingAckSentinel('')).toEqual([])
   })
+
+  it('skips already-cleared ids when a clearedIds set is passed (card f7491ad3)', () => {
+    const raw = [
+      pendingAckRecord({ id: 1, from_agent: 'a', to_agent: 'b' }, 1000),
+      pendingAckRecord({ id: 2, from_agent: 'c', to_agent: 'b' }, 2000),
+      pendingAckRecord({ id: 3, from_agent: 'd', to_agent: 'b' }, 3000),
+    ].join('\n')
+    // Without the set, every pending record is returned (original contract).
+    expect(parsePendingAckSentinel(raw).map((e) => e.id)).toEqual([1, 2, 3])
+    // With the set, cleared ids are dropped during the parse.
+    expect(parsePendingAckSentinel(raw, new Set([2])).map((e) => e.id)).toEqual([1, 3])
+    expect(parsePendingAckSentinel(raw, new Set([1, 3])).map((e) => e.id)).toEqual([2])
+  })
 })
 
 describe('DELIVERY_PENDING_ACK_SENTINEL', () => {
