@@ -502,6 +502,7 @@ export function startWebServer(port = 3420): http.Server {
   const origClose = server.close.bind(server)
   server.close = (cb?: (err?: Error) => void) => {
     clearTimeout(bootRecoveryTimer)
+    clearInterval(supervisorSentinelInterval)
     clearInterval(routerInterval)
     clearInterval(ackObserverInterval)
     clearInterval(scheduleInterval)
