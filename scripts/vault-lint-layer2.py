@@ -46,7 +46,7 @@ _DONE_PATTERNS = [
     r"\bLEZARVA\b",
     r"PR #\d+ merged",
     r"status[: ]+done",
-    r"DEPLOY DONE",
+    r"DEPLOY DONE\b",
 ]
 _DONE_RE = re.compile("|".join(_DONE_PATTERNS), re.IGNORECASE)
 
