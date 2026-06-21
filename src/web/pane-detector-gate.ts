@@ -110,6 +110,16 @@ const alertedMismatchVersions = new Set<string>()
 // CLI drift occurs, which is precisely when the alert is most needed).
 export type DriftAlertFn = (reason: string, mismatchVersion: string) => Promise<void>
 
+// Pure text builder, exported for testing the user-facing alert copy.
+export function buildDriftAlertText(reason: string, mismatchVersion: string): string {
+  return [
+    `[Marveen] Claude CLI drift eszlelve: ${mismatchVersion}`,
+    `A pane-fuggo watchdogok LEALLTAK amig a c12 pane-detektor smoke el nem fut az uj CLI-n.`,
+    `Futtasd: tsx scripts/pane-detector-smoke-clear.ts -- ez ujraengedi a watchdogokat.`,
+    `Reszlet: ${reason}`,
+  ].join('\n')
+}
+
 async function defaultDriftAlert(reason: string, mismatchVersion: string): Promise<void> {
   const envContent = readFileSync(join(PROJECT_ROOT, '.env'), 'utf-8')
   const tokenMatch = envContent.match(/TELEGRAM_BOT_TOKEN=(.+)/)
@@ -118,13 +128,7 @@ async function defaultDriftAlert(reason: string, mismatchVersion: string): Promi
     logger.warn({ mismatchVersion }, 'pane-detector drift alert suppressed: no TELEGRAM_BOT_TOKEN or ALLOWED_CHAT_ID')
     return
   }
-  const text = [
-    `[Marveen] Claude CLI drift eszlelve: ${mismatchVersion}`,
-    `A pane-fuggo watchdogok LEALLTAK amig a c12 pane-detektor smoke el nem fut az uj CLI-n.`,
-    `Futtatsd: tsx scripts/pane-detector-smoke-clear.ts -- ez ujraengedi a watchdogokat.`,
-    `Reszlet: ${reason}`,
-  ].join('\n')
-  await sendTelegramMessage(token, ALLOWED_CHAT_ID, text)
+  await sendTelegramMessage(token, ALLOWED_CHAT_ID, buildDriftAlertText(reason, mismatchVersion))
 }
 
 let _driftAlertFn: DriftAlertFn = defaultDriftAlert

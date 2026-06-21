@@ -9,6 +9,7 @@ import {
   recordPaneDetectorSmokePass,
   paneDetectorMismatchFile,
   paneDetectorSmokePassedFile,
+  buildDriftAlertText,
   __setDriftAlertFn,
   __resetPaneGateState,
   type DriftAlertFn,
@@ -164,5 +165,19 @@ describe('B1: direct Telegram drift alert on first stand-down per mismatch versi
     await Promise.resolve()
     expect(alerts[0].version).toBe('3.0.0')
     expect(alerts[0].reason).toContain('3.0.0')
+  })
+})
+
+describe('buildDriftAlertText (Boss-visible alert copy)', () => {
+  it('uses correct Hungarian imperative "Futtasd" (card dc839c85 typo guard)', () => {
+    const text = buildDriftAlertText('reason here', '3.0.0')
+    expect(text).toContain('Futtasd:')
+    expect(text).not.toContain('Futtatsd')
+  })
+
+  it('embeds the mismatch version and reason', () => {
+    const text = buildDriftAlertText('drift detail', '9.9.9')
+    expect(text).toContain('9.9.9')
+    expect(text).toContain('drift detail')
   })
 })
