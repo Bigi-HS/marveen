@@ -814,12 +814,17 @@ function checkOpusBurnThresholds(): void {
         { level: alert.level, burnPct: result.burnPct.toFixed(1), totalBurnTokens: result.totalBurnTokens },
         `[opus-burn] ${alert.level} threshold crossed`,
       )
+      let sent = false
       try {
         createAgentMessage('server', MAIN_AGENT_ID, alert.message, false, alert.priority)
+        sent = true
       } catch (err) {
-        logger.warn({ err }, '[opus-burn] failed to send alert message -- continuing')
+        logger.warn({ err }, '[opus-burn] failed to send alert message -- will retry next tick')
       }
-      writeBurnAlertState(alert.nextState)
+      // Only persist dedup state if the message actually went out.
+      // If the DB insert failed, the next 30-min check will retry rather than
+      // silently marking the alert as sent.
+      if (sent) writeBurnAlertState(alert.nextState)
     }
   } catch (err) {
     logger.warn({ err }, '[opus-burn] threshold check failed -- non-fatal')
