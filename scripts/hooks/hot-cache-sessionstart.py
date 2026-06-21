@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """SessionStart hook: inject per-agent hot-cache context (current tasks / pending work).
 
-This hook injects a per-agent `.claude/hot-cache.md` file into the session's
-additionalContext at startup. The hot-cache contains the agent's immediate
-context: last task, pending work, top-2-3 active priorities. It complements
-the memory-replay hook (which injects vault memories) by providing immediate
-situational awareness without a database query.
+Injection policy (card 847237f4 F3 -- cut fixed per-fire priming):
 
-Injection policy: startup only (cold start). The hook is idempotent and
-never breaks session start (always exit 0).
+  - resume / clear: full hot-cache for every agent (~2000 chars). Resuming an
+    existing session needs immediate situational awareness.
+  - startup (cold start):
+      * context-sensitive agents (dave, quill): mini hot-cache (<= 800 chars).
+        These agents carry long-lived state and benefit from a brief reminder
+        even on a fresh start.
+      * stateless agents (thor, gauge, and all others): skip entirely. Cold
+        starts don't need the hot-cache; the memory-replay hook supplies vault
+        facts. Saving these injections removes ~25-35K tokens/day fleet-wide.
 
 Hot-cache file location per agent:
   - Main agent (marveen): /home/domin/marveen/.claude/hot-cache.md
@@ -34,13 +37,18 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import ledger_lib  # noqa: E402  (reuse agent_id_from_cwd + store path)
+import ledger_lib  # noqa: E402
 
-INJECT_SOURCES = {"startup"}
+# resume + clear: full inject for all agents.
+FULL_INJECT_SOURCES = {"resume", "clear"}
 
-# Content size limit: ~500 words / 2000 chars max (hot-cache injection budget).
-# Keeps additionalContext injection bounded; truncation is lossy but safe.
+# startup: only context-sensitive agents get a mini inject.
+MINI_HOT_CACHE_AGENTS = {"dave", "quill", "marveen"}
+
+# Full inject limit (~500 words).
 CONTENT_CHAR_LIMIT = 2000
+# Mini inject limit (startup budget for context-sensitive agents, ~200 tokens).
+MINI_CONTENT_CHAR_LIMIT = 800
 
 HEADER = (
     "HOT CACHE (SessionStart). Az aktuális kontextusod: "
@@ -50,19 +58,19 @@ HEADER = (
 )
 
 
-def _hot_cache_path(cwd: str | None) -> Path:
-    """Resolve the hot-cache file path for the agent in the given cwd."""
-    agent_id = ledger_lib.agent_id_from_cwd(cwd)
-    install_dir = ledger_lib._install_dir()
+def _agent_id(cwd: str | None) -> str:
+    return ledger_lib.agent_id_from_cwd(cwd)
 
-    if agent_id == "marveen":  # Main agent
+
+def _hot_cache_path(cwd: str | None) -> Path:
+    agent_id = _agent_id(cwd)
+    install_dir = ledger_lib._install_dir()
+    if agent_id == "marveen":
         return Path(install_dir) / ".claude" / "hot-cache.md"
-    else:  # Sub-agent
-        return Path(install_dir) / "agents" / agent_id / ".claude" / "hot-cache.md"
+    return Path(install_dir) / "agents" / agent_id / ".claude" / "hot-cache.md"
 
 
 def _read_hot_cache(path: Path) -> str | None:
-    """Read the hot-cache file if it exists and is readable. Returns None on error."""
     try:
         if path.exists() and path.is_file():
             content = path.read_text("utf-8").strip()
@@ -82,18 +90,23 @@ def main():
     except Exception:
         pass
 
-    if source not in INJECT_SOURCES:
+    # Determine inject mode for this source + agent combination.
+    if source in FULL_INJECT_SOURCES:
+        char_limit = CONTENT_CHAR_LIMIT
+    elif source == "startup" and _agent_id(cwd) in MINI_HOT_CACHE_AGENTS:
+        char_limit = MINI_CONTENT_CHAR_LIMIT
+    else:
+        # startup + stateless agent: skip.
         sys.exit(0)
 
     cache_path = _hot_cache_path(cwd)
     content = _read_hot_cache(cache_path)
 
     if not content:
-        sys.exit(0)  # no cache available, no-op
+        sys.exit(0)
 
-    # Truncate to char limit if needed (generous budget; ~500 words).
-    if len(content) > CONTENT_CHAR_LIMIT:
-        content = content[:CONTENT_CHAR_LIMIT].rstrip() + "\n[truncated]"
+    if len(content) > char_limit:
+        content = content[:char_limit].rstrip() + "\n[truncated]"
 
     block = f"{HEADER}\n\n{content}"
     out = {
