@@ -30,6 +30,14 @@ const OPUS_ID_PREFIX = 'claude-opus'
 // its credits allocation, distinct from the five-hour usage-limit menu.
 const CREDITS_REQUIRED_RX = /usage credits required/i
 
+// After a deactivate, suppress reactivation for this long so a stale pane
+// that still shows the cap banner does not immediately re-trigger (card 4c800b62).
+export const REACTIVATE_COOLDOWN_MS = 30 * 60 * 1000
+
+// 5h-limit resets after ~5 hours. We use 6h (with buffer) as the time-based
+// deactivation threshold. Sunday-noon restore only runs for weekly-cap activations.
+export const FIVE_HOUR_LIMIT_RESET_MS = 6 * 60 * 60 * 1000
+
 export const SONNET_FALLBACK = 'claude-sonnet-4-6'
 
 // Agents that run Opus by default and therefore need automatic fallback logic.
@@ -52,6 +60,19 @@ export function isOpusModel(modelId: string): boolean {
 }
 
 /**
+ * Returns the reason for the cap signal or null if no cap is detected.
+ * Distinguishes 5h-limit (resets after ~5h) from weekly-cap (resets Sunday noon).
+ * 5h-limit takes precedence when both signals are present (conservative).
+ */
+export function detectOpusCapReason(pane: string): CapReason | null {
+  if (!pane) return null
+  if (detectsUsageLimitMenu(pane)) return '5h-limit'
+  const tail = pane.split('\n').slice(-18).join('\n')
+  if (CREDITS_REQUIRED_RX.test(tail)) return 'weekly-cap'
+  return null
+}
+
+/**
  * True if the pane content signals a usage-limit / weekly-cap event.
  *
  * Two-tier: reuses the proven `detectsUsageLimitMenu` from pane-state.ts
@@ -59,13 +80,7 @@ export function isOpusModel(modelId: string): boolean {
  * banner (weekly Opus-cap CLI signal).
  */
 export function detectOpusWeeklyCapInPane(pane: string): boolean {
-  if (!pane) return false
-  if (detectsUsageLimitMenu(pane)) return true
-  // Scope to the tail (same 18-line window as detectsUsageLimitMenu) so a
-  // document or error description containing "usage credits required" that
-  // scrolled into history does not trigger a false fallback + stopAgentProcess.
-  const tail = pane.split('\n').slice(-18).join('\n')
-  return CREDITS_REQUIRED_RX.test(tail)
+  return detectOpusCapReason(pane) !== null
 }
 
 /**
@@ -81,12 +96,18 @@ export function isSundayNoonUtc(nowMs: number): boolean {
 // State types
 // ---------------------------------------------------------------------------
 
+export type CapReason = 'weekly-cap' | '5h-limit'
+
 export interface OpusFallbackState {
   fallbackActive: boolean
   /** The Opus model that was replaced; null when inactive. */
   originalModel: string | null
   /** Epoch ms when fallback was activated; null when inactive. */
   activeSince: number | null
+  /** Epoch ms when fallback was last deactivated; used for reactivation cooldown. */
+  deactivatedAt?: number | null
+  /** Why the fallback was activated; absent = treat as 'weekly-cap' (backwards compat). */
+  activationReason?: CapReason | null
 }
 
 export type OpusFallbackAction = 'activate' | 'deactivate' | 'none'
@@ -107,27 +128,51 @@ export interface DecideOpusFallbackOpts {
 
 /**
  * Pure decision: should we activate the Sonnet fallback, deactivate (restore
- * Opus after Sunday reset), or do nothing?
+ * Opus after reset), or do nothing? (card 4c800b62 hardening)
  *
- * Priority: deactivate > activate. On Sunday noon the restore always wins even
- * if the pane still shows a cap signal -- once the reset occurred the agent
- * should resume Opus, not stay on Sonnet indefinitely.
+ * Priority: deactivate > activate.
+ *
+ * Deactivation paths:
+ *   - weekly-cap (or unknown/absent reason): Sunday noon UTC restore.
+ *   - 5h-limit: time-based restore after FIVE_HOUR_LIMIT_RESET_MS elapsed.
+ *
+ * Oscillation cooldown: after a deactivate, do NOT reactivate within
+ * REACTIVATE_COOLDOWN_MS even if the pane still shows a stale cap banner.
  */
 export function decideOpusFallback(opts: DecideOpusFallbackOpts): OpusFallbackDecision {
   const { paneHasCapSignal, currentModel, state, nowMs } = opts
+  const reason = state.activationReason ?? 'weekly-cap' // absent = backwards-compat weekly-cap
 
-  // Deactivate: Sunday noon + fallback currently active -> restore Opus.
-  if (state.fallbackActive && isSundayNoonUtc(nowMs)) {
-    return {
-      action: 'deactivate',
-      originalModel: state.originalModel ?? undefined,
-      reason: 'Sunday weekly reset: restoring original Opus model',
+  if (state.fallbackActive) {
+    // 5h-limit: time-based deactivation (Sunday reset doesn't apply).
+    if (reason === '5h-limit') {
+      if (state.activeSince != null && nowMs - state.activeSince >= FIVE_HOUR_LIMIT_RESET_MS) {
+        return {
+          action: 'deactivate',
+          originalModel: state.originalModel ?? undefined,
+          reason: '5h-limit reset: restoring Opus after time-based expiry',
+        }
+      }
+    } else {
+      // weekly-cap: deactivate on Sunday noon UTC.
+      if (isSundayNoonUtc(nowMs)) {
+        return {
+          action: 'deactivate',
+          originalModel: state.originalModel ?? undefined,
+          reason: 'Sunday weekly reset: restoring original Opus model',
+        }
+      }
     }
   }
 
   // Activate: cap signal in pane + agent is on Opus + not yet in fallback.
   if (paneHasCapSignal && isOpusModel(currentModel) && !state.fallbackActive) {
-    return { action: 'activate', reason: 'Opus weekly-cap banner detected in pane' }
+    // Oscillation cooldown: suppress reactivation shortly after a deactivate.
+    const deactivatedAt = state.deactivatedAt ?? null
+    if (deactivatedAt != null && nowMs - deactivatedAt < REACTIVATE_COOLDOWN_MS) {
+      return { action: 'none', reason: 'reactivate cooldown active (post-deactivate)' }
+    }
+    return { action: 'activate', reason: 'Opus cap banner detected in pane' }
   }
 
   return { action: 'none', reason: 'no transition' }

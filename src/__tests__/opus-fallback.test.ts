@@ -2,10 +2,13 @@ import { describe, it, expect } from 'vitest'
 import {
   isOpusModel,
   detectOpusWeeklyCapInPane,
+  detectOpusCapReason,
   decideOpusFallback,
   isSundayNoonUtc,
   SONNET_FALLBACK,
   OPUS_FALLBACK_AGENTS,
+  REACTIVATE_COOLDOWN_MS,
+  FIVE_HOUR_LIMIT_RESET_MS,
   type OpusFallbackState,
 } from '../web/opus-fallback.js'
 
@@ -167,6 +170,135 @@ describe('decideOpusFallback', () => {
     // Edge: pane still shows cap signal on Sunday noon (agent is still wedged).
     // Deactivate should fire so the agent gets the Opus model restored.
     const d = decideOpusFallback({ paneHasCapSignal: true, currentModel: 'claude-sonnet-4-6', state: activeState, nowMs: sundayNoonMs })
+    expect(d.action).toBe('deactivate')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// detectOpusCapReason (card 4c800b62)
+// ---------------------------------------------------------------------------
+describe('detectOpusCapReason', () => {
+  const limitMenuPane = [
+    "You've reached your usage limit",
+    'Stop and wait for limit to reset',
+    '> ❯',
+  ].join('\n')
+
+  const creditsPane = 'Usage credits required for 1M context'
+
+  it('returns "5h-limit" for the usage-limit menu', () => {
+    expect(detectOpusCapReason(limitMenuPane)).toBe('5h-limit')
+  })
+
+  it('returns "weekly-cap" for the usage-credits-required banner', () => {
+    expect(detectOpusCapReason(creditsPane)).toBe('weekly-cap')
+  })
+
+  it('returns null for a clean pane', () => {
+    expect(detectOpusCapReason('❯')).toBeNull()
+  })
+
+  it('5h-limit takes precedence when both signals present (conservative)', () => {
+    const both = [limitMenuPane, creditsPane].join('\n')
+    expect(detectOpusCapReason(both)).toBe('5h-limit')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// decideOpusFallback -- oscillation cooldown + 5h-vs-weekly (card 4c800b62)
+// ---------------------------------------------------------------------------
+describe('decideOpusFallback -- oscillation cooldown', () => {
+  const saturdayMs = Date.UTC(2026, 5, 20, 15, 0, 0)
+
+  it('does NOT activate if within the reactivate cooldown after deactivate', () => {
+    const state: OpusFallbackState = {
+      fallbackActive: false,
+      originalModel: null,
+      activeSince: null,
+      deactivatedAt: saturdayMs - REACTIVATE_COOLDOWN_MS + 1, // just within cooldown
+    }
+    const d = decideOpusFallback({ paneHasCapSignal: true, currentModel: 'claude-opus-4-8', state, nowMs: saturdayMs })
+    expect(d.action).toBe('none')
+  })
+
+  it('activates once the cooldown has elapsed after deactivate', () => {
+    const state: OpusFallbackState = {
+      fallbackActive: false,
+      originalModel: null,
+      activeSince: null,
+      deactivatedAt: saturdayMs - REACTIVATE_COOLDOWN_MS - 1, // just past cooldown
+    }
+    const d = decideOpusFallback({ paneHasCapSignal: true, currentModel: 'claude-opus-4-8', state, nowMs: saturdayMs })
+    expect(d.action).toBe('activate')
+  })
+
+  it('activates normally when deactivatedAt is null (no prior deactivate)', () => {
+    const state: OpusFallbackState = { fallbackActive: false, originalModel: null, activeSince: null, deactivatedAt: null }
+    const d = decideOpusFallback({ paneHasCapSignal: true, currentModel: 'claude-opus-4-8', state, nowMs: saturdayMs })
+    expect(d.action).toBe('activate')
+  })
+})
+
+describe('decideOpusFallback -- 5h-limit vs weekly-cap distinction', () => {
+  const sundayNoonMs = Date.UTC(2026, 5, 21, 10, 0, 0)
+  const saturdayMs = Date.UTC(2026, 5, 20, 15, 0, 0)
+
+  it('does NOT deactivate on Sunday noon when activation was due to 5h-limit (within 6h window)', () => {
+    // activeSince = just within FIVE_HOUR_LIMIT_RESET_MS so time-based reset hasn't fired
+    const activeSince = sundayNoonMs - FIVE_HOUR_LIMIT_RESET_MS + 60_000
+    const state: OpusFallbackState = {
+      fallbackActive: true,
+      originalModel: 'claude-opus-4-8',
+      activeSince,
+      activationReason: '5h-limit',
+    }
+    const d = decideOpusFallback({ paneHasCapSignal: false, currentModel: 'claude-sonnet-4-6', state, nowMs: sundayNoonMs })
+    expect(d.action).toBe('none')
+  })
+
+  it('deactivates via 5h-limit time-based reset once FIVE_HOUR_LIMIT_RESET_MS elapsed', () => {
+    const activeSince = saturdayMs - FIVE_HOUR_LIMIT_RESET_MS - 1
+    const state: OpusFallbackState = {
+      fallbackActive: true,
+      originalModel: 'claude-opus-4-8',
+      activeSince,
+      activationReason: '5h-limit',
+    }
+    const d = decideOpusFallback({ paneHasCapSignal: false, currentModel: 'claude-sonnet-4-6', state, nowMs: saturdayMs })
+    expect(d.action).toBe('deactivate')
+  })
+
+  it('does NOT deactivate 5h-limit activation before time-based reset expires', () => {
+    const activeSince = saturdayMs - FIVE_HOUR_LIMIT_RESET_MS + 60_000 // 1 min short
+    const state: OpusFallbackState = {
+      fallbackActive: true,
+      originalModel: 'claude-opus-4-8',
+      activeSince,
+      activationReason: '5h-limit',
+    }
+    const d = decideOpusFallback({ paneHasCapSignal: false, currentModel: 'claude-sonnet-4-6', state, nowMs: saturdayMs })
+    expect(d.action).toBe('none')
+  })
+
+  it('deactivates on Sunday noon when activation was due to weekly-cap (existing path)', () => {
+    const state: OpusFallbackState = {
+      fallbackActive: true,
+      originalModel: 'claude-opus-4-8',
+      activeSince: saturdayMs,
+      activationReason: 'weekly-cap',
+    }
+    const d = decideOpusFallback({ paneHasCapSignal: false, currentModel: 'claude-sonnet-4-6', state, nowMs: sundayNoonMs })
+    expect(d.action).toBe('deactivate')
+  })
+
+  it('deactivates on Sunday noon when activationReason is absent (backwards compat = weekly-cap)', () => {
+    const state: OpusFallbackState = {
+      fallbackActive: true,
+      originalModel: 'claude-opus-4-8',
+      activeSince: saturdayMs,
+      // no activationReason -> treat as weekly-cap
+    }
+    const d = decideOpusFallback({ paneHasCapSignal: false, currentModel: 'claude-sonnet-4-6', state, nowMs: sundayNoonMs })
     expect(d.action).toBe('deactivate')
   })
 })
