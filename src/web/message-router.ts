@@ -10,6 +10,8 @@ import {
   getPendingMessages,
   markMessageDelivered,
   markMessageFailed,
+  loadEscalationState,
+  updateMessageLastEscalatedAt,
 } from '../db.js'
 import {
   DELIVERY_MONITOR_AGENT_ID,
@@ -102,8 +104,16 @@ function appendAbandonmentSentinel(
 }
 
 // Checks for pending messages every 5 seconds and injects them into target
-// agent tmux sessions.
+// agent tmux sessions. Pre-populates escalationState from the DB on startup
+// (card 0ae61457, A2) so overdue messages already escalated before a restart
+// don't look like "genuine first crossings" and fire duplicate in-band alerts.
 export function startMessageRouter(): NodeJS.Timeout {
+  // Restore escalation timestamps from pending rows with a recorded last_escalated_at.
+  // routerLoggedMisses is left empty: the consequence is at most one extra
+  // "skipping target not ready" log line per already-seen id -- cosmetic only.
+  for (const [id, ts] of loadEscalationState()) {
+    escalationState.set(id, ts)
+  }
   return setInterval(() => {
     const pending = getPendingMessages()
     const now = Date.now()
@@ -166,6 +176,8 @@ export function startMessageRouter(): NodeJS.Timeout {
         }
         appendAbandonmentSentinel(msg, ageMs, now, 'overdue')
         escalationState.set(msg.id, now)
+        // Persist so a restart cannot re-fire the in-band alert (card 0ae61457, A2).
+        try { updateMessageLastEscalatedAt(msg.id, now) } catch { /* non-fatal */ }
       }
       // The main agent runs in `${MAIN_AGENT_ID}-channels`, not `agent-${name}`,
       // so agentSessionName() would miss it and strand every sub-agent → main
