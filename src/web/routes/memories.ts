@@ -1,5 +1,6 @@
 import {
   saveAgentMemory, getAgentMemories, searchAgentMemories, getMemoryStats, updateMemory,
+  updateMemoryCategory,
   hybridSearch, backfillEmbeddings,
   searchMemories, getMemoriesForChat, getDb, applyScopeFilter, ScopedSharedError,
   type Memory,
@@ -274,6 +275,32 @@ Respond ONLY with JSON, nothing else:
       return true
     }
     if (updateMemory(id, content, tier || category, agent_id, keywords)) { json(res, { ok: true }); return true }
+    json(res, { error: 'Memory not found' }, 404)
+    return true
+  }
+
+  // PATCH /api/memories/<id> -- category-only update (card b68b9e71 Part B).
+  // Updates ONLY the category column; content and accessed_at are intentionally
+  // unchanged so vault-lint --apply can re-tier entries without corrupting
+  // staleness signals (TM-1/TM-3 correctness invariant from the spec).
+  if (memUpdateMatch && method === 'PATCH') {
+    const id = parseInt(memUpdateMatch[1], 10)
+    const body = await readBody(req)
+    const parsed = JSON.parse(body.toString()) as { category?: unknown }
+    const category = parsed.category
+    if (typeof category !== 'string' || !MEMORY_CATEGORIES.has(category)) {
+      json(res, { error: `category must be one of: ${[...MEMORY_CATEGORIES].join(', ')}` }, 400)
+      return true
+    }
+    const owner = memoryOwner(id)
+    if (owner === undefined) { json(res, { error: 'Memory not found' }, 404); return true }
+    const authz = decideMemoryMutation(identity, owner, enforceFromBindingEnabled())
+    if (!authz.ok) {
+      logger.warn({ tokenAgent: identity.agentId, owner, id, op: 'PATCH' }, 'Rejected memory mutation: not owner')
+      json(res, { error: authz.error }, authz.status)
+      return true
+    }
+    if (updateMemoryCategory(id, category)) { json(res, { ok: true }); return true }
     json(res, { error: 'Memory not found' }, 404)
     return true
   }

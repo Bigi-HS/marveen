@@ -1151,6 +1151,20 @@ export function updateMemory(id: number, content: string, category?: string, age
   return db.prepare(`UPDATE memories SET ${sets.join(', ')} WHERE id = ?`).run(...params).changes > 0
 }
 
+// Fetch a single memory row by id. Returns undefined if not found.
+export function getMemoryById(id: number): { id: number; agent_id: string; content: string; category: string; keywords: string | null; accessed_at: number } | undefined {
+  return db.prepare('SELECT id, agent_id, content, category, keywords, accessed_at FROM memories WHERE id = ?').get(id) as
+    | { id: number; agent_id: string; content: string; category: string; keywords: string | null; accessed_at: number }
+    | undefined
+}
+
+// Category-only update (card b68b9e71 Part B): updates ONLY the category column.
+// content and accessed_at are intentionally NOT touched so TM-1/TM-3 staleness
+// signals stay accurate and vault-lint --apply can safely re-categorise entries.
+export function updateMemoryCategory(id: number, category: string): boolean {
+  return db.prepare('UPDATE memories SET category = ? WHERE id = ?').run(category, id).changes > 0
+}
+
 // --- Daily logs ---
 
 export function appendDailyLog(agentId: string, content: string): void {
