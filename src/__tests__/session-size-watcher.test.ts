@@ -26,6 +26,7 @@ import {
   DEFAULT_COOLDOWN_MS,
   DEFAULT_HARD_CEILING_TOKENS,
   CONTEXT_EXHAUSTED_ALERT_DEDUP_MS,
+  OPUS_COMPACT_THRESHOLD_FRACTION,
   type SessionSizeThresholds,
   type ContextExhaustionInput,
 } from '../web/session-size-watcher.js'
@@ -92,61 +93,74 @@ describe('shouldCompactSession', () => {
 // ---------------------------------------------------------------------------
 
 describe('adaptiveTokenThresholdForModel', () => {
-  it('the compaction fraction is 0.75 (75% of the context window)', () => {
+  it('the non-Opus compaction fraction is 0.75 (75% of the context window)', () => {
     expect(COMPACT_THRESHOLD_FRACTION).toBe(0.75)
   })
 
-  it('Sonnet (200K window) -> 150K threshold', () => {
+  it('the Opus compaction fraction is 0.45 (weekly-burn cap, card 3689b271)', () => {
+    expect(OPUS_COMPACT_THRESHOLD_FRACTION).toBe(0.45)
+  })
+
+  it('Sonnet (200K window) -> 150K threshold (0.75)', () => {
     expect(adaptiveTokenThresholdForModel('claude-sonnet-4-6')).toBe(150_000)
   })
 
-  it('Haiku (200K window) -> 150K threshold', () => {
+  it('Haiku (200K window) -> 150K threshold (0.75)', () => {
     expect(adaptiveTokenThresholdForModel('claude-haiku-4-5-20251001')).toBe(150_000)
   })
 
-  it('Opus 1M (opus-4-8[1m]) -> 750K threshold', () => {
-    expect(adaptiveTokenThresholdForModel('claude-opus-4-8[1m]')).toBe(750_000)
+  it('Opus 1M (opus-4-8[1m]) -> 450K threshold (1M * 0.45, not 0.75)', () => {
+    expect(adaptiveTokenThresholdForModel('claude-opus-4-8[1m]')).toBe(450_000)
   })
 
-  it('resolves model aliases too (opus -> 750K, sonnet -> 150K)', () => {
-    expect(adaptiveTokenThresholdForModel('opus')).toBe(750_000)
+  it('Opus non-1M (opus-4-8, 200K window) -> 90K threshold (200K * 0.45)', () => {
+    // A 200K-window Opus variant (non-1m) compacts at 45% = 90K.
+    expect(adaptiveTokenThresholdForModel('claude-opus-4-8')).toBe(90_000)
+  })
+
+  it('resolves model aliases too (opus -> 450K, sonnet -> 150K)', () => {
+    expect(adaptiveTokenThresholdForModel('opus')).toBe(450_000)
     expect(adaptiveTokenThresholdForModel('sonnet')).toBe(150_000)
   })
 
-  it('an unknown model falls back to the default window * fraction', () => {
+  it('an unknown model falls back to the default window * non-Opus fraction', () => {
     const expected = Math.floor(DEFAULT_CONTEXT_WINDOW * COMPACT_THRESHOLD_FRACTION)
     expect(adaptiveTokenThresholdForModel('some-future-model-x')).toBe(expected)
     expect(adaptiveTokenThresholdForModel(null)).toBe(expected)
     expect(adaptiveTokenThresholdForModel(undefined)).toBe(expected)
   })
 
-  it('a 1M agent compacts much later than a 200K agent (the whole point)', () => {
-    const sonnet = adaptiveTokenThresholdForModel('claude-sonnet-4-6')
-    const opus = adaptiveTokenThresholdForModel('claude-opus-4-8[1m]')
-    expect(opus).toBeGreaterThan(sonnet)
-    // The 200K agent's threshold (150K) is below the legacy fixed 250K, so the
-    // old constant would never have fired for it -- exactly the no-op bug fixed.
-    expect(sonnet).toBeLessThan(DEFAULT_TOKEN_THRESHOLD)
+  it('a 1M Opus agent compacts earlier (450K) than the old 750K -- the whole point', () => {
+    const opus1m = adaptiveTokenThresholdForModel('claude-opus-4-8[1m]')
+    expect(opus1m).toBe(450_000)
+    // The old 0.75 fraction would give 750K; 450K compacts much sooner.
+    const oldThreshold = Math.floor(1_000_000 * 0.75)
+    expect(opus1m).toBeLessThan(oldThreshold)
   })
 
-  it('feeds shouldCompactSession: a 200K agent fires at 150K, below the old 250K', () => {
+  it('Opus threshold is still above Sonnet (absolute, no inversion)', () => {
+    const sonnet = adaptiveTokenThresholdForModel('claude-sonnet-4-6')
+    const opus = adaptiveTokenThresholdForModel('claude-opus-4-8[1m]')
+    expect(opus).toBeGreaterThan(sonnet) // 450K > 150K
+  })
+
+  it('feeds shouldCompactSession: a 200K Sonnet fires at 150K, below the old 250K', () => {
     const thresholds: SessionSizeThresholds = {
       tokenThreshold: adaptiveTokenThresholdForModel('claude-sonnet-4-6'),
       cooldownMs: DEFAULT_COOLDOWN_MS,
     }
     expect(shouldCompactSession(149_999, null, NOW, thresholds)).toBe(false)
     expect(shouldCompactSession(150_000, null, NOW, thresholds)).toBe(true)
-    // The old fixed 250K threshold would still be false here -- the regression.
     expect(160_000).toBeLessThan(DEFAULT_TOKEN_THRESHOLD)
   })
 
-  it('feeds shouldCompactSession: a 1M agent only fires at 750K', () => {
+  it('feeds shouldCompactSession: a 1M Opus fires at 450K (not 750K)', () => {
     const thresholds: SessionSizeThresholds = {
       tokenThreshold: adaptiveTokenThresholdForModel('claude-opus-4-8[1m]'),
       cooldownMs: DEFAULT_COOLDOWN_MS,
     }
-    expect(shouldCompactSession(749_999, null, NOW, thresholds)).toBe(false)
-    expect(shouldCompactSession(750_000, null, NOW, thresholds)).toBe(true)
+    expect(shouldCompactSession(449_999, null, NOW, thresholds)).toBe(false)
+    expect(shouldCompactSession(450_000, null, NOW, thresholds)).toBe(true)
   })
 })
 

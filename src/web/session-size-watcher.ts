@@ -28,6 +28,7 @@ import {
   readAgentClaudeConfigDir,
   readAgentModel,
   contextWindowForModel,
+  resolveModelId,
 } from './agent-config.js'
 import { agentSessionName, isAgentRunning, capturePane, sendPromptToSession } from './agent-process.js'
 import { readContextTokensFromProjectDir, readActiveModelFromProjectDir } from './active-model.js'
@@ -66,13 +67,37 @@ export const DEFAULT_SIZE_THRESHOLD_BYTES = 1 * 1024 * 1024 // 1MB
 export const COMPACT_THRESHOLD_FRACTION = 0.75
 export const DEFAULT_TOKEN_THRESHOLD = 250_000
 
+// Opus agents (dave, radar) burn the weekly quota disproportionately fast because
+// their 1M-context window lets the transcript balloon: a 634K-token session
+// re-pays cache_read on every turn, making the tail the dominant Opus cost.
+// Phase 5 (Opus-aware): compact these agents at a tighter fraction so the long
+// context is shed before it grows into the high-cost zone. Non-Opus models keep
+// the original 0.75 fraction (Sonnet 200K -> 150K is already conservative).
+//
+// Rationale for 0.45: empirical floor from the 634K incident (Dave's all-time
+// high before the weekly cap) halved with margin. At 1M context this gives a
+// 450K soft trigger -- well below 634K -- while leaving enough headroom for
+// normal multi-file engineering work without thrashing the cooldown.
+export const OPUS_COMPACT_THRESHOLD_FRACTION = 0.45
+
+// True for any Opus model variant (claude-opus-4-8, claude-opus-4-8[1m], the
+// 'opus' alias, etc.). Resolves MODEL_ALIASES first so 'opus' -> 'claude-opus-4-8[1m]'
+// is caught. Kept local to avoid coupling this module to opus-fallback.ts (card 339d0a36).
+function isOpusModelId(modelId: string | null | undefined): boolean {
+  return resolveModelId(modelId ?? '').startsWith('claude-opus')
+}
+
 // Resolve the per-agent token threshold = contextWindow(model) * fraction. Uses
 // the agent's LIVE model from the transcript when available (it may differ from
 // the configured model after a manual /model switch), falling back to the
 // configured model id. Pure given the two model ids, so it is unit-testable via
 // adaptiveTokenThresholdForModel below.
+//
+// Opus models use OPUS_COMPACT_THRESHOLD_FRACTION (0.45) to cap weekly burn;
+// all other models keep the standard COMPACT_THRESHOLD_FRACTION (0.75).
 export function adaptiveTokenThresholdForModel(modelId: string | null | undefined): number {
-  return Math.floor(contextWindowForModel(modelId) * COMPACT_THRESHOLD_FRACTION)
+  const fraction = isOpusModelId(modelId) ? OPUS_COMPACT_THRESHOLD_FRACTION : COMPACT_THRESHOLD_FRACTION
+  return Math.floor(contextWindowForModel(modelId) * fraction)
 }
 
 // The live model the agent is currently answering on, falling back to its
