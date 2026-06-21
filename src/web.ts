@@ -15,7 +15,7 @@ import { ensureAgentHooks, ensureDefaultScheduledTasks } from './web/agent-scaff
 import { refreshMarveenBotUsername } from './web/telegram.js'
 import { startMessageRouter } from './web/message-router.js'
 import { startAckClearObserver } from './web/delivery-ack-observer.js'
-import { compactDeliverySentinelsOnBoot } from './web/delivery-sentinel-maintenance.js'
+import { compactDeliverySentinelsOnBoot, startDeliverySentinelMaintenance } from './web/delivery-sentinel-maintenance.js'
 import { startUpdateChecker } from './web/update-checker.js'
 import { startMcpListChecker } from './web/mcp-list.js'
 import { startScheduleRunner } from './web/schedule-runner.js'
@@ -382,6 +382,8 @@ export function startWebServer(port = 3420): http.Server {
   // A3 restart-window false escalation), and size-cap the abandonment trail.
   // Non-fatal: each step is wrapped so it never blocks startup.
   compactDeliverySentinelsOnBoot()
+  const sentinelMaintenanceInterval = startDeliverySentinelMaintenance()
+  logger.info('Delivery sentinel maintenance started (60min rotation)')
 
   // Delivery ACK clear-observer (card 1a99b7e2): watches recipient panes and
   // clears a pending-ack once the recipient engages (busy = our injected turn
@@ -504,6 +506,7 @@ export function startWebServer(port = 3420): http.Server {
     clearTimeout(bootRecoveryTimer)
     clearInterval(routerInterval)
     clearInterval(ackObserverInterval)
+    clearInterval(sentinelMaintenanceInterval)
     clearInterval(scheduleInterval)
     if (pluginMonitorInterval) clearInterval(pluginMonitorInterval)
     clearInterval(channelHealthInterval)
