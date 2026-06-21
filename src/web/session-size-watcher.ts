@@ -172,12 +172,18 @@ export function adaptiveHardCeilingForModel(modelId: string | null | undefined):
 // into. Scope stays sub-agents only (Boss 2026-06-17): the main marveen session
 // remains the channel-monitor's exclusive charge, never a second compact actor.
 export const BUSY_COMPACT_FRACTION = 0.78
+// Opus-specific busy ceiling: lower than the standard 0.78 because Opus-1M sessions
+// can balloon to 780K before a forced /compact fires. 0.55 gives ~550K for a 1M
+// context window -- above the Opus soft threshold (0.45 = 450K) but well below the
+// 780K danger zone (card 953725f7 / Thor C2 follow-up).
+export const OPUS_BUSY_COMPACT_FRACTION = 0.55
 
-// Resolve the per-agent busy-compaction ceiling = contextWindow(model) * 0.78.
-// Pure given the model id; its ordering (soft < busy < hard, and busy < 0.80) is
-// asserted directly in the tests.
+// Resolve the per-agent busy-compaction ceiling. Opus models use a lower fraction
+// (0.55 vs 0.78) so a busy Opus-1M session cannot balloon to the weekly-cap zone.
+// Pure given the model id; tier ordering (soft < busy < hard) is asserted in tests.
 export function adaptiveBusyCeilingForModel(modelId: string | null | undefined): number {
-  return Math.floor(contextWindowForModel(modelId) * BUSY_COMPACT_FRACTION)
+  const fraction = isOpusModelId(modelId) ? OPUS_BUSY_COMPACT_FRACTION : BUSY_COMPACT_FRACTION
+  return Math.floor(contextWindowForModel(modelId) * fraction)
 }
 
 // ESCALATION FLOOR (card 17df64d7). RCA of the DA@86% incident: a pane that is

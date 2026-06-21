@@ -27,6 +27,7 @@ import {
   DEFAULT_HARD_CEILING_TOKENS,
   CONTEXT_EXHAUSTED_ALERT_DEDUP_MS,
   OPUS_COMPACT_THRESHOLD_FRACTION,
+  OPUS_BUSY_COMPACT_FRACTION,
   type SessionSizeThresholds,
   type ContextExhaustionInput,
 } from '../web/session-size-watcher.js'
@@ -478,12 +479,18 @@ describe('adaptiveBusyCeilingForModel', () => {
     expect(adaptiveBusyCeilingForModel('claude-haiku-4-5-20251001')).toBe(156_000)
   })
 
-  it('Opus 1M (opus-4-8[1m]) -> 780K busy ceiling', () => {
-    expect(adaptiveBusyCeilingForModel('claude-opus-4-8[1m]')).toBe(780_000)
+  it('Opus 1M (opus-4-8[1m]) -> 550K busy ceiling (card 953725f7)', () => {
+    expect(adaptiveBusyCeilingForModel('claude-opus-4-8[1m]')).toBe(550_000)
   })
 
-  it('resolves aliases too (opus -> 780K, sonnet -> 156K)', () => {
-    expect(adaptiveBusyCeilingForModel('opus')).toBe(780_000)
+  it('OPUS_BUSY_COMPACT_FRACTION is 0.55 and between the soft Opus 0.45 and 0.78', () => {
+    expect(OPUS_BUSY_COMPACT_FRACTION).toBe(0.55)
+    expect(OPUS_BUSY_COMPACT_FRACTION).toBeGreaterThan(OPUS_COMPACT_THRESHOLD_FRACTION)
+    expect(OPUS_BUSY_COMPACT_FRACTION).toBeLessThan(BUSY_COMPACT_FRACTION)
+  })
+
+  it('resolves aliases too (opus -> 550K, sonnet -> 156K)', () => {
+    expect(adaptiveBusyCeilingForModel('opus')).toBe(550_000)
     expect(adaptiveBusyCeilingForModel('sonnet')).toBe(156_000)
   })
 
