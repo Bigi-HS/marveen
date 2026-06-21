@@ -211,6 +211,26 @@ describe('GET /api/codetree/impact', () => {
     expect((await call('GET', '/api/codetree/impact?diff=' + encodeURIComponent('-rf'))).status).toBe(400)
   })
 
+  it('400 on `..` inside a refname segment, while a real range stays valid (card 139b5434)', async () => {
+    seedFresh()
+    __setImpactDepsBuilder(() => stubDeps())
+    // `..`/`...` is only the range separator between two clean refs -- a refname
+    // segment carrying its own `..` (double range) is rejected.
+    expect((await call('GET', '/api/codetree/impact?diff=' + encodeURIComponent('a..b..c'))).status).toBe(400)
+    expect((await call('GET', '/api/codetree/impact?diff=' + encodeURIComponent('foo..bar..baz'))).status).toBe(400)
+    // a legitimate single range still passes the guard (reaches 200 on a fresh index)
+    expect((await call('GET', '/api/codetree/impact?diff=' + encodeURIComponent('main..feature'))).status).toBe(200)
+  })
+
+  it('400 on a malformed/oversized agent param (defense-in-depth, card 139b5434)', async () => {
+    seedFresh()
+    __setImpactDepsBuilder(() => stubDeps())
+    expect((await call('GET', '/api/codetree/impact?diff=develop...HEAD&agent=' + encodeURIComponent('bad;name'))).status).toBe(400)
+    expect((await call('GET', '/api/codetree/impact?diff=develop...HEAD&agent=' + 'a'.repeat(65))).status).toBe(400)
+    // a well-formed agent passes through to the report
+    expect((await call('GET', '/api/codetree/impact?diff=develop...HEAD&agent=dave')).status).toBe(200)
+  })
+
   it('503 before the index is built', async () => {
     cleanDb()
     initCodetreeDatabase(TEST_DB)
