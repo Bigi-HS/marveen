@@ -28,6 +28,8 @@ import {
   CONTEXT_EXHAUSTED_ALERT_DEDUP_MS,
   OPUS_COMPACT_THRESHOLD_FRACTION,
   OPUS_BUSY_COMPACT_FRACTION,
+  HARD_CEILING_COOLDOWN_MS,
+  isHardCeilingCooledDown,
   type SessionSizeThresholds,
   type ContextExhaustionInput,
 } from '../web/session-size-watcher.js'
@@ -201,6 +203,32 @@ describe('shouldHardCompact', () => {
 })
 
 // ---------------------------------------------------------------------------
+// isHardCeilingCooledDown (card a649c31b): cooldown guard for the hard lane
+// ---------------------------------------------------------------------------
+describe('isHardCeilingCooledDown', () => {
+  const now = 1_000_000_000_000
+
+  it('returns true when lastCompactedAt is null (never compacted)', () => {
+    expect(isHardCeilingCooledDown(null, now)).toBe(true)
+  })
+
+  it('returns false within the cooldown window', () => {
+    const last = now - HARD_CEILING_COOLDOWN_MS + 1
+    expect(isHardCeilingCooledDown(last, now)).toBe(false)
+  })
+
+  it('returns true once the cooldown has elapsed', () => {
+    const last = now - HARD_CEILING_COOLDOWN_MS
+    expect(isHardCeilingCooledDown(last, now)).toBe(true)
+  })
+
+  it('HARD_CEILING_COOLDOWN_MS is positive and less than 30 min (fast-lane appropriate)', () => {
+    expect(HARD_CEILING_COOLDOWN_MS).toBeGreaterThan(0)
+    expect(HARD_CEILING_COOLDOWN_MS).toBeLessThan(30 * 60 * 1000)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Model-adaptive HARD ceiling = contextWindow(model) * 0.9, paired with the
 // soft tier so the two never invert (the bug: a fixed 650K ceiling preempted
 // the 750K soft trigger for opus-1M and was a dead no-op for 200K models).
@@ -354,12 +382,14 @@ describe('session-size-watcher -- hard-ceiling tier contracts', () => {
     expect(hardFn).toMatch(/!isReadyForPrompt\(pane\)/)
   })
 
-  it('the hard tier bypasses the cooldown (no lastCompactedAt gate before sending)', () => {
-    // shouldHardCompact has no cooldown parameter; the check sets lastCompactedAt
-    // AFTER compacting (to inform the soft tier) but never reads it as a gate.
+  it('the hard tier has a cooldown guard to prevent false-idle pile-up (card a649c31b)', () => {
+    // shouldHardCompact has no cooldown parameter, but checkAgentHardCeiling now
+    // reads lastCompactedAt via isHardCeilingCooledDown to prevent /compact pile-up
+    // on panes that exhibit false-idle (#130 class). Contract: the guard IS present.
     const hardFn = SRC.slice(SRC.indexOf('function checkAgentHardCeiling'), SRC.indexOf('function checkAgentBusyCompact'))
     expect(hardFn).toMatch(/shouldHardCompact/)
-    expect(hardFn).not.toMatch(/lastCompactedAt\.get/)
+    expect(hardFn).toMatch(/isHardCeilingCooledDown/)
+    expect(hardFn).toMatch(/lastCompactedAt\.get/)
   })
 
   it('runs a separate faster sweep than the 10-min soft sweep', () => {

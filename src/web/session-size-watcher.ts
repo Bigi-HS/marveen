@@ -215,6 +215,22 @@ export function adaptiveEscalationFloorForModel(modelId: string | null | undefin
 export const BUSY_COMPACT_COOLDOWN_MS =
   positiveEnvMs(process.env.SESSION_BUSY_COMPACT_COOLDOWN_MS, 45 * 60 * 1000) // 45 min default
 
+// Hard-lane cooldown (card a649c31b): prevents /compact pile-up when a pane
+// exhibits false-idle (#130 class) -- appears isReadyForPrompt but is actually
+// mid-turn. Without this, the 2-min sweep would re-queue /compact every tick
+// until the genuine idle boundary fires the first one. 10 min is well above the
+// sweep interval (2 min) and short enough to still recover within one /compact
+// fire cycle on a real idle.
+export const HARD_CEILING_COOLDOWN_MS =
+  positiveEnvMs(process.env.SESSION_HARD_CEILING_COOLDOWN_MS, 10 * 60 * 1000) // 10 min default
+
+// True if enough time has passed since the last hard-ceiling compact so a new
+// one may be sent. Pure helper so checkAgentHardCeiling can be read + tested
+// without starting the full watcher. lastCompactedAt=null -> never compacted -> cooled.
+export function isHardCeilingCooledDown(lastCompactedAt: number | null, nowMs: number): boolean {
+  return lastCompactedAt == null || nowMs - lastCompactedAt >= HARD_CEILING_COOLDOWN_MS
+}
+
 // Fast lane: poll over-ceiling agents far more often than the 10-min soft sweep
 // so a busy agent's brief between-turn idle is caught quickly.
 const HARD_CEILING_INTERVAL_MS = 2 * 60 * 1000 // every 2 minutes
@@ -609,6 +625,15 @@ function checkAgentHardCeiling(name: string): void {
   const hardCeiling = adaptiveHardCeilingForModel(resolveAgentWindowModelId(name))
   if (!shouldHardCompact(contextTokens, hardCeiling)) return
   const now = Date.now()
+
+  // Hard-lane cooldown guard (card a649c31b): a false-idle pane (#130 class)
+  // would otherwise receive /compact every 2-min sweep tick until a real idle
+  // fires the first one. isHardCeilingCooledDown checks against the shared
+  // lastCompactedAt map (the hard tier writes it on send, so self-consistent).
+  if (!isHardCeilingCooledDown(lastCompactedAt.get(name) ?? null, now)) {
+    logger.debug({ agent: name, contextTokens }, 'session-size-watcher: hard ceiling in cooldown, skipping to prevent pile-up')
+    return
+  }
 
   const session = agentSessionName(name)
   const pane = capturePane(session)
