@@ -1,5 +1,5 @@
 import http from 'node:http'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL } from './config.js'
@@ -384,6 +384,13 @@ export function startWebServer(port = 3420): http.Server {
   compactDeliverySentinelsOnBoot()
   const sentinelMaintenanceInterval = startDeliverySentinelMaintenance()
   logger.info('Delivery sentinel maintenance started (60min rotation)')
+  // Boot timestamp for delivery-ack-cli escalation boot-grace (card 4beb20b7).
+  try {
+    const bootAtPath = join(PROJECT_ROOT, 'store', '.fleet-supervisor', 'server-boot-at.txt')
+    writeFileSync(bootAtPath, String(Date.now()))
+  } catch (err) {
+    logger.warn({ err }, 'delivery-ack: failed to write server-boot-at (non-fatal)')
+  }
 
   // Delivery ACK clear-observer (card 1a99b7e2): watches recipient panes and
   // clears a pending-ack once the recipient engages (busy = our injected turn
