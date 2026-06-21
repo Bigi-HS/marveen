@@ -60,7 +60,9 @@ export function isSecuritySensitivePath(filename: string): boolean {
   if (f === 'src/web/gate-check.ts') return true
   if (f === 'src/web/gate-db.ts') return true
   if (f === 'src/web/github-pr.ts') return true
+  if (f === 'src/web/github-merge.ts') return true  // card cfb10d14 (Thor MINOR PR#230)
   if (f === 'src/web/routes/gate.ts') return true
+  if (f === 'src/web/routes/github.ts') return true  // card cfb10d14 (Thor MINOR PR#230)
   if (f.startsWith('seed-skills/fleet-pr-merge-gate/')) return true
 
   const base = f.split('/').pop() ?? f
