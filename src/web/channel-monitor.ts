@@ -10,7 +10,7 @@ import {
   OPUS_FALLBACK_AGENTS,
   SONNET_FALLBACK,
   isOpusModel,
-  detectOpusWeeklyCapInPane,
+  detectOpusCapReason,
   decideOpusFallback,
   readOpusFallbackState,
   writeOpusFallbackState,
@@ -894,14 +894,18 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       // is restored the same way. Only the agents in OPUS_FALLBACK_AGENTS are
       // checked; all others already run Sonnet by default.
       if (!t.isMarveen && t.agentName && OPUS_FALLBACK_AGENTS.includes(t.agentName)) {
-        const capSignal = pane != null && detectOpusWeeklyCapInPane(pane)
+        const capReason = pane != null ? detectOpusCapReason(pane) : null
+        const capSignal = capReason !== null
         const allFallbackState = readOpusFallbackState()
         const agentFallbackState = allFallbackState[t.agentName] ?? { fallbackActive: false, originalModel: null, activeSince: null }
         const currentModel = readAgentModel(t.agentName)
-        const fallbackDecision = decideOpusFallback({ paneHasCapSignal: capSignal, currentModel, state: agentFallbackState, nowMs: Date.now() })
+        const nowMs = Date.now()
+        const fallbackDecision = decideOpusFallback({ paneHasCapSignal: capSignal, currentModel, state: agentFallbackState, nowMs })
         if (fallbackDecision.action === 'activate') {
-          writeOpusFallbackState({ ...allFallbackState, [t.agentName]: { fallbackActive: true, originalModel: currentModel, activeSince: Date.now() } })
+          // Write-order fix (card 4c800b62 #3): model write first, state second.
+          // If writeAgentModel throws, fallback state stays inactive -> re-detect on next tick.
           writeAgentModel(t.agentName, SONNET_FALLBACK)
+          writeOpusFallbackState({ ...allFallbackState, [t.agentName]: { fallbackActive: true, originalModel: currentModel, activeSince: nowMs, activationReason: capReason ?? 'weekly-cap', deactivatedAt: null } })
           // Graceful degradation (card 75a5ecc3): move in_progress cards to
           // waiting so they are not silently stuck while the agent is offline.
           // Wrapped in try-catch so a SQLite error never prevents stopAgentProcess
@@ -913,16 +917,17 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           } catch (err) {
             logger.warn({ err, agent: t.agentName }, '[opus-fallback] markAgentCardsWaiting failed (non-fatal, continuing to stopAgentProcess)')
           }
-          logger.warn({ agent: t.agentName, originalModel: currentModel, cardsMovedToWaiting: moved }, '[opus-fallback] weekly cap detected -- switched to Sonnet, watchdog will restart')
-          sendAlert(`⚠️ ${t.agentName}: Opus weekly-cap detektálva. Sonnet-fallbackre váltva (${SONNET_FALLBACK}). ${moved > 0 ? `${moved} kártya waiting-re állítva. ` : ''}Vasárnap reset után automatikusan visszaáll.`)
+          logger.warn({ agent: t.agentName, originalModel: currentModel, cardsMovedToWaiting: moved, capReason }, '[opus-fallback] cap detected -- switched to Sonnet, watchdog will restart')
+          sendAlert(`⚠️ ${t.agentName}: Opus cap detektálva (${capReason ?? 'unknown'}). Sonnet-fallbackre váltva (${SONNET_FALLBACK}). ${moved > 0 ? `${moved} kártya waiting-re állítva. ` : ''}Reset után automatikusan visszaáll.`)
           stopAgentProcess(t.agentName)
         } else if (fallbackDecision.action === 'deactivate') {
           const rawOrig = fallbackDecision.originalModel
           const origModel = (rawOrig && isOpusModel(rawOrig)) ? rawOrig : 'claude-opus-4-8'
-          writeOpusFallbackState({ ...allFallbackState, [t.agentName]: { fallbackActive: false, originalModel: null, activeSince: null } })
+          // Write-order fix (card 4c800b62 #3): model write first, state second.
           writeAgentModel(t.agentName, origModel)
-          logger.info({ agent: t.agentName, model: origModel }, '[opus-fallback] Sunday reset -- restoring Opus model, watchdog will restart')
-          sendAlert(`✅ ${t.agentName}: Vasárnap reset -- visszaállítva erre: ${origModel}.`)
+          writeOpusFallbackState({ ...allFallbackState, [t.agentName]: { fallbackActive: false, originalModel: null, activeSince: null, activationReason: null, deactivatedAt: nowMs } })
+          logger.info({ agent: t.agentName, model: origModel }, '[opus-fallback] reset -- restoring Opus model, watchdog will restart')
+          sendAlert(`✅ ${t.agentName}: Reset -- visszaállítva erre: ${origModel}.`)
           stopAgentProcess(t.agentName)
         }
       }
