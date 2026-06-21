@@ -653,9 +653,18 @@ ensure_cli_version_watch() {
   # drift (the documented anti-pattern).
   echo "$current_ver" > "$STATE_DIR/cli-version-mismatch.txt"
   log "cli-version-watch: CLI changed ${stored_ver:-unknown} -> $current_ver -- pane watchdogs gated, c12 pane-detector smoke required"
+  # Durable sentinel: write a JSON event so the drift is on record even if Telegram
+  # sends fail (card ed4945a4). Written before dry-run check -- local file, no
+  # external side effect, safe in all modes.
+  echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"cli-drift\",\"from\":\"${stored_ver:-unknown}\",\"to\":\"${current_ver}\"}" >> "$STATE_DIR/cli-drift-alerts.jsonl"
   if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: send Telegram HTTPS alert for CLI version change"; return 0; fi
   local env_file="$INSTALL_DIR/agents/chad/.claude/channels/telegram/.env" token
   token=$(grep 'TELEGRAM_BOT_TOKEN=' "$env_file" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]') || true
+  if [ -z "$token" ]; then
+    # Fallback: main agent token from root .env (same chat_id, different bot)
+    token=$(grep 'TELEGRAM_BOT_TOKEN=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]') || true
+    [ -n "$token" ] && log "cli-version-watch: chad token absent, using fallback token"
+  fi
   if [ -n "$token" ] && [ -n "$CURL" ]; then
     "$CURL" -sf --max-time 10 \
       "https://api.telegram.org/bot${token}/sendMessage" \
@@ -665,7 +674,7 @@ ensure_cli_version_watch() {
       && log "cli-version-watch: HTTPS alert sent" \
       || log "cli-version-watch: HTTPS alert failed (non-fatal)"
   else
-    log "cli-version-watch: no chad telegram token -- alert suppressed"
+    log "cli-version-watch: no telegram token available -- alert suppressed"
   fi
 }
 
