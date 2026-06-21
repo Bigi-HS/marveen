@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL } from './config.js'
+import { SERVER_BOOT_AT_PATH } from './server-boot-path.js'
 import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, extractBearer, buildDashboardAccessMessage, createSession, verifySession, revokeSession, parseCookies, classifyRequestOrigin, rateLimitKey, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from './web/dashboard-auth.js'
 import { getDb } from './db.js'
 import { resolveRequestIdentity, logFromBindingStatus } from './web/agent-identity-binding.js'
@@ -386,8 +387,7 @@ export function startWebServer(port = 3420): http.Server {
   logger.info('Delivery sentinel maintenance started (60min rotation)')
   // Boot timestamp for delivery-ack-cli escalation boot-grace (card 4beb20b7).
   try {
-    const bootAtPath = join(PROJECT_ROOT, 'store', '.fleet-supervisor', 'server-boot-at.txt')
-    writeFileSync(bootAtPath, String(Date.now()))
+    writeFileSync(SERVER_BOOT_AT_PATH, String(Date.now()))
   } catch (err) {
     logger.warn({ err }, 'delivery-ack: failed to write server-boot-at (non-fatal)')
   }

@@ -27,6 +27,10 @@ import { join, dirname } from 'node:path'
 import { logger } from './logger.js'
 import { channelStateDir, readChannelToken, type ChannelProviderType } from './channel-provider.js'
 import { sendFallbackAlert } from './web/telegram-pipe-watchdog.js'
+// Shared, side-effect-free home so web.ts can use this path without importing
+// this CLI module (its top-level main() runs on import). Card cc871848.
+import { SERVER_BOOT_AT_PATH } from './server-boot-path.js'
+export { SERVER_BOOT_AT_PATH }
 import {
   DELIVERY_PENDING_ACK_SENTINEL,
   outstandingPendingAcks,
@@ -41,7 +45,6 @@ const PROJECT_ROOT = process.env.MARVEEN_ROOT ?? process.cwd()
 const ALERT_CHAT_ID = process.env.WATCHDOG_ALERT_CHAT_ID ?? '8643929442'
 const SENTINEL_PATH = join(PROJECT_ROOT, DELIVERY_PENDING_ACK_SENTINEL)
 const CURSOR_PATH = join(PROJECT_ROOT, 'store', '.fleet-supervisor', 'delivery-ack.cursor')
-export const SERVER_BOOT_AT_PATH = join(PROJECT_ROOT, 'store', '.fleet-supervisor', 'server-boot-at.txt')
 
 // Grace period after server restart: skip escalation and advance cursor instead.
 // 60s matches the card spec (~60s blind spot accepted; ACK_ESCALATION_WINDOW_MS=15min
