@@ -28,6 +28,7 @@ import {
   readAgentClaudeConfigDir,
   readAgentModel,
   contextWindowForModel,
+  resolveModelId,
 } from './agent-config.js'
 import { agentSessionName, isAgentRunning, capturePane, sendPromptToSession } from './agent-process.js'
 import { readContextTokensFromProjectDir, readActiveModelFromProjectDir } from './active-model.js'
@@ -66,13 +67,37 @@ export const DEFAULT_SIZE_THRESHOLD_BYTES = 1 * 1024 * 1024 // 1MB
 export const COMPACT_THRESHOLD_FRACTION = 0.75
 export const DEFAULT_TOKEN_THRESHOLD = 250_000
 
+// Opus agents (dave, radar) burn the weekly quota disproportionately fast because
+// their 1M-context window lets the transcript balloon: a 634K-token session
+// re-pays cache_read on every turn, making the tail the dominant Opus cost.
+// Phase 5 (Opus-aware): compact these agents at a tighter fraction so the long
+// context is shed before it grows into the high-cost zone. Non-Opus models keep
+// the original 0.75 fraction (Sonnet 200K -> 150K is already conservative).
+//
+// Rationale for 0.45: empirical floor from the 634K incident (Dave's all-time
+// high before the weekly cap) halved with margin. At 1M context this gives a
+// 450K soft trigger -- well below 634K -- while leaving enough headroom for
+// normal multi-file engineering work without thrashing the cooldown.
+export const OPUS_COMPACT_THRESHOLD_FRACTION = 0.45
+
+// True for any Opus model variant (claude-opus-4-8, claude-opus-4-8[1m], the
+// 'opus' alias, etc.). Resolves MODEL_ALIASES first so 'opus' -> 'claude-opus-4-8[1m]'
+// is caught. Kept local to avoid coupling this module to opus-fallback.ts (card 339d0a36).
+function isOpusModelId(modelId: string | null | undefined): boolean {
+  return resolveModelId(modelId ?? '').startsWith('claude-opus')
+}
+
 // Resolve the per-agent token threshold = contextWindow(model) * fraction. Uses
 // the agent's LIVE model from the transcript when available (it may differ from
 // the configured model after a manual /model switch), falling back to the
 // configured model id. Pure given the two model ids, so it is unit-testable via
 // adaptiveTokenThresholdForModel below.
+//
+// Opus models use OPUS_COMPACT_THRESHOLD_FRACTION (0.45) to cap weekly burn;
+// all other models keep the standard COMPACT_THRESHOLD_FRACTION (0.75).
 export function adaptiveTokenThresholdForModel(modelId: string | null | undefined): number {
-  return Math.floor(contextWindowForModel(modelId) * COMPACT_THRESHOLD_FRACTION)
+  const fraction = isOpusModelId(modelId) ? OPUS_COMPACT_THRESHOLD_FRACTION : COMPACT_THRESHOLD_FRACTION
+  return Math.floor(contextWindowForModel(modelId) * fraction)
 }
 
 // The live model the agent is currently answering on, falling back to its
@@ -84,6 +109,17 @@ function resolveAgentModelId(agentName: string): string {
     readAgentClaudeConfigDir(agentName) ?? undefined,
   )
   return live ?? readAgentModel(agentName)
+}
+
+// Resolve the model ID to use for CONTEXT-WINDOW SIZING only. This MUST use
+// the configured model (agent-config.json) rather than the live transcript
+// model because the transcript drops the '[1m]' suffix for Opus-1M agents:
+// live='claude-opus-4-8' while configured='claude-opus-4-8[1m]'. Using the
+// live model would size the window at 200K instead of 1M, giving a 90K
+// threshold (0.45 * 200K) where 450K (0.45 * 1M) is intended -- too aggressive.
+// See memory 'transcript model drops [1m] suffix'.
+function resolveAgentWindowModelId(agentName: string): string {
+  return readAgentModel(agentName)
 }
 // Do not compact the same session more often than this, so /compact does not
 // interrupt a freshly-compacted agent that immediately starts heavy work again.
@@ -526,7 +562,7 @@ function checkAgent(name: string): void {
   // Sonnet/Haiku agent compacts ~150K and a 1M Opus agent ~750K. Cooldown stays
   // global. The idle-only gate below is unchanged.
   const thresholds: SessionSizeThresholds = {
-    tokenThreshold: adaptiveTokenThresholdForModel(resolveAgentModelId(name)),
+    tokenThreshold: adaptiveTokenThresholdForModel(resolveAgentWindowModelId(name)),
     cooldownMs: DEFAULT_COOLDOWN_MS,
   }
   if (!shouldCompactSession(contextTokens, last, now, thresholds)) return
@@ -564,7 +600,7 @@ function checkAgentHardCeiling(name: string): void {
   // Per-model hard ceiling = contextWindow(model) * 0.9, mirroring the soft
   // tier's per-model derivation, so a 200K-window agent's ceiling is ~180K and a
   // 1M agent's is ~900K -- both strictly above their soft trigger, never inverted.
-  const hardCeiling = adaptiveHardCeilingForModel(resolveAgentModelId(name))
+  const hardCeiling = adaptiveHardCeilingForModel(resolveAgentWindowModelId(name))
   if (!shouldHardCompact(contextTokens, hardCeiling)) return
   const now = Date.now()
 
@@ -616,7 +652,7 @@ function checkAgentHardCeiling(name: string): void {
 // /compact behind one that has not yet fired.
 function checkAgentBusyCompact(name: string): void {
   const contextTokens = latestContextTokens(name)
-  const busyCeiling = adaptiveBusyCeilingForModel(resolveAgentModelId(name))
+  const busyCeiling = adaptiveBusyCeilingForModel(resolveAgentWindowModelId(name))
   const last = lastCompactedAt.get(name) ?? null
   const now = Date.now()
 
@@ -655,7 +691,7 @@ function checkAgentBusyCompact(name: string): void {
 // surface the 13-compact pile-up taught us to respect). Escalate-only.
 function checkAgentContextEscalation(name: string): void {
   const contextTokens = latestContextTokens(name)
-  const modelId = resolveAgentModelId(name)
+  const modelId = resolveAgentWindowModelId(name)
   const escalationFloor = adaptiveEscalationFloorForModel(modelId)
   const now = Date.now()
 
