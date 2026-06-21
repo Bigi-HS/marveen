@@ -186,23 +186,33 @@ class TestTM2Detection(unittest.TestCase):
         self.assertEqual(p["to_category"], "cold")
 
     def test_done_markers_variety(self):
-        """Various done-marker patterns are recognised."""
-        patterns = [
-            "This card is DONE",
+        """Tightened pattern set (card 73ec620c): MERGED, LEZARVA, PR#N merged,
+        status: done, DEPLOY DONE are recognised; bare DONE/kész/closed are NOT."""
+        should_match = [
             "LEZARVA -- no more work",
-            "Task kész",
             "PR #42 merged",
             "status: done",
+            "DEPLOY DONE 2026-06-21",
         ]
-        for content in patterns:
+        should_not_match = [
+            "This card is DONE",        # bare DONE -- FP source (card 73ec620c)
+            "Task kész",                # kész -- FP source (card 73ec620c)
+            "incident CLOSED",          # closed -- FP source (card 73ec620c)
+            "SCOPE done, AWAITING",     # cross-ref done -- FP source (card 73ec620c)
+        ]
+        for content in should_match:
             db = make_db()
             insert(db, category="hot", accessed_at=NOW - 1, content=content)
             report = run_on(db)
-            tms = report["tier_migration_proposals"]
-            rules = [p["rule"] for p in tms]
-            # At least TM-2 from this entry; TM-1 may also appear if stale
-            # but TM-2 is the one from our entry (not stale: accessed_at=NOW-1).
-            self.assertIn("TM-2", rules, f"pattern not matched: {content!r}")
+            rules = [p["rule"] for p in report["tier_migration_proposals"]]
+            self.assertIn("TM-2", rules, f"pattern not matched (should): {content!r}")
+            os.unlink(db)
+        for content in should_not_match:
+            db = make_db()
+            insert(db, category="hot", accessed_at=NOW - 1, content=content)
+            report = run_on(db)
+            rules = [p["rule"] for p in report["tier_migration_proposals"]]
+            self.assertNotIn("TM-2", rules, f"pattern matched (should NOT): {content!r}")
             os.unlink(db)
 
 
