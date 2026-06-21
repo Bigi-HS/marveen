@@ -44,8 +44,8 @@ EARLY_EXIT=0
 QUIET=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Gauge lives at agents/gauge/scripts -> go up 3 levels to reach the main repo
-PROJECT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# Script lives at repo-root/scripts/ -> one level up is the repo root
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ---------------------------------------------------------------------------
 # Args
