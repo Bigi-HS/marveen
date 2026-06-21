@@ -15,6 +15,7 @@ import {
   readOpusFallbackState,
   writeOpusFallbackState,
 } from './opus-fallback.js'
+import { markAgentCardsWaiting, OPUS_LIMIT_COMMENT } from './opus-fallback-kanban.js'
 import {
   agentHasChannel,
   agentSessionName,
@@ -864,8 +865,19 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         if (fallbackDecision.action === 'activate') {
           writeOpusFallbackState({ ...allFallbackState, [t.agentName]: { fallbackActive: true, originalModel: currentModel, activeSince: Date.now() } })
           writeAgentModel(t.agentName, SONNET_FALLBACK)
-          logger.warn({ agent: t.agentName, originalModel: currentModel }, '[opus-fallback] weekly cap detected -- switched to Sonnet, watchdog will restart')
-          sendAlert(`⚠️ ${t.agentName}: Opus weekly-cap detektálva. Sonnet-fallbackre váltva (${SONNET_FALLBACK}). Vasárnap reset után automatikusan visszaáll.`)
+          // Graceful degradation (card 75a5ecc3): move in_progress cards to
+          // waiting so they are not silently stuck while the agent is offline.
+          // Wrapped in try-catch so a SQLite error never prevents stopAgentProcess
+          // (Thor MINOR: if markAgentCardsWaiting throws, the agent would stay on
+          // Opus while state says fallback=true -> zombie state).
+          let moved = 0
+          try {
+            moved = markAgentCardsWaiting(t.agentName, OPUS_LIMIT_COMMENT)
+          } catch (err) {
+            logger.warn({ err, agent: t.agentName }, '[opus-fallback] markAgentCardsWaiting failed (non-fatal, continuing to stopAgentProcess)')
+          }
+          logger.warn({ agent: t.agentName, originalModel: currentModel, cardsMovedToWaiting: moved }, '[opus-fallback] weekly cap detected -- switched to Sonnet, watchdog will restart')
+          sendAlert(`⚠️ ${t.agentName}: Opus weekly-cap detektálva. Sonnet-fallbackre váltva (${SONNET_FALLBACK}). ${moved > 0 ? `${moved} kártya waiting-re állítva. ` : ''}Vasárnap reset után automatikusan visszaáll.`)
           stopAgentProcess(t.agentName)
         } else if (fallbackDecision.action === 'deactivate') {
           const rawOrig = fallbackDecision.originalModel
