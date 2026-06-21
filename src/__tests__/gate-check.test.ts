@@ -95,6 +95,22 @@ describe('isSecuritySensitivePath (MG-AC4)', () => {
     expect(isSecuritySensitivePath('seed-skills/fleet-pr-merge-gate/SKILL.md')).toBe(true)
   })
 
+  // Codetree change-impact arg-injection surface (card b8e014a4, Thor flag on
+  // PR#259/139b5434). Adversarial fixtures: the guard + the git-exec sink must
+  // be caught (false-negative guard); the pure impact-logic module that carries
+  // neither must NOT be caught (false-positive guard).
+  it('matches the codetree git-ref guard and exec sink (card b8e014a4)', () => {
+    expect(isSecuritySensitivePath('src/web/routes/codetree.ts')).toBe(true)
+    expect(isSecuritySensitivePath('src/web/codetree-impact-io.ts')).toBe(true)
+  })
+
+  it('does NOT match the pure codetree impact logic (no guard, no exec)', () => {
+    // codetree-impact.ts builds the report from injected deps -- no DIFF_REF_RE,
+    // no execFileSync -- so it stays 2-way; over-broadening would dilute the gate.
+    expect(isSecuritySensitivePath('src/web/codetree-impact.ts')).toBe(false)
+    expect(isSecuritySensitivePath('src/web/routes/kanban.ts')).toBe(false)
+  })
+
   // GitHub endpoint modules carry PAT egress + gate enforcement -- a PR touching
   // them must require Chad review (card cfb10d14, Thor MINOR from PR#230).
   it('matches github-merge.ts and routes/github.ts (card cfb10d14)', () => {
@@ -119,6 +135,17 @@ describe('runGateCheck requires chad for a gate-code PR (card 88eb6120)', () => 
   it('a PR touching gate-check.ts pulls chad into the required set', async () => {
     const result = await runGateCheck(601, {
       fetchPr: async () => ({ headSha: 'a'.repeat(40), files: ['src/web/gate-check.ts'] }),
+      readApprovals: () => [],
+      hasActiveOverride: () => false,
+    })
+    expect(result.required).toEqual(['thor', 'dave', 'chad'])
+    expect(result.missing).toContain('chad')
+    expect(result.pass).toBe(false)
+  })
+
+  it('a PR touching routes/codetree.ts pulls chad into the required set (card b8e014a4)', async () => {
+    const result = await runGateCheck(602, {
+      fetchPr: async () => ({ headSha: 'b'.repeat(40), files: ['src/web/routes/codetree.ts'] }),
       readApprovals: () => [],
       hasActiveOverride: () => false,
     })
