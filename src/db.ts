@@ -503,6 +503,16 @@ export function initDatabase(dbPathOverride?: string): void {
     // column already exists
   }
 
+  // card 0ae61457 (A2): persist escalation timestamp so the in-process
+  // escalationState Map can be restored after a restart -- preventing a stale
+  // pending message from appearing as a "genuine first crossing" and triggering
+  // a duplicate in-band alert to the main agent.
+  try {
+    db.exec('ALTER TABLE agent_messages ADD COLUMN last_escalated_at INTEGER')
+  } catch {
+    // column already exists
+  }
+
   // --- Pending Channel Requests (Slack channel opt-in workflow) ---
   db.exec(`
     CREATE TABLE IF NOT EXISTS pending_channel_requests (
@@ -1887,6 +1897,24 @@ export function markMessageFailed(id: number, error?: string): boolean {
 
 export function listAgentMessages(limit = 50): AgentMessage[] {
   return db.prepare('SELECT * FROM agent_messages ORDER BY created_at DESC LIMIT ?').all(limit) as AgentMessage[]
+}
+
+// card 0ae61457 (A2): persist escalation timestamp for the pending-message
+// router so the in-process escalationState Map survives server restarts.
+export function updateMessageLastEscalatedAt(id: number, epochMs: number): void {
+  db.prepare('UPDATE agent_messages SET last_escalated_at = ? WHERE id = ?').run(epochMs, id)
+}
+
+// Restore the escalation Map from pending messages that already have a recorded
+// last_escalated_at. Called once at startup before startMessageRouter() so the
+// router never re-fires an in-band alert for messages that were already escalated.
+export function loadEscalationState(): Map<number, number> {
+  const rows = db.prepare(
+    "SELECT id, last_escalated_at FROM agent_messages WHERE status = 'pending' AND last_escalated_at IS NOT NULL"
+  ).all() as Array<{ id: number; last_escalated_at: number }>
+  const map = new Map<number, number>()
+  for (const row of rows) map.set(row.id, row.last_escalated_at)
+  return map
 }
 
 // System/automation participants that are not real conversation peers. They are
