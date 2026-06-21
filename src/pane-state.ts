@@ -82,6 +82,19 @@ const IDLE_FOOTER_RX = /bypass permissions on(?: \(shift\+tab to cycle\)| · \d+
 // label. `esc to interrupt` is the footer-scoped fallback. A future
 // Claude Code release that renames the spinner labels will miss the
 // label regex but still be caught by the tokens pattern.
+
+// Known Claude Code turn-spinner labels (last validated: CLI 2.x, 2026-06-21).
+// Non-exhaustive by design: the bare token-counter pattern is the authoritative
+// fallback. Update this list when the CLI adds or renames spinners; the regex
+// below is rebuilt from it automatically so there's only one place to edit.
+export const CLAUDE_SPINNER_LABELS: readonly string[] = [
+  'Combobulating', 'Beaming', 'Thinking', 'Pondering', 'Reticulating',
+  'Configuring', 'Noodling', 'Ruminating', 'Percolating', 'Cogitating',
+  'Deliberating', 'Contemplating', 'Musing', 'Brewing', 'Synthesizing',
+  'Distilling', 'Refining', 'Simmering', 'Crafting', 'Formulating',
+  'Consulting', 'Unfurling', 'Unspooling', 'Unraveling',
+]
+
 const BUSY_INDICATORS: RegExp[] = [
   /\besc to interrupt\b/,
   // Tokens-down-arrow counter: "(52s · ↓ 2.6k tokens ..." Turn-scoped,
@@ -91,7 +104,7 @@ const BUSY_INDICATORS: RegExp[] = [
   // the same line. The tail requirement kills the "Thinking…" prose
   // false positive. Non-exhaustive by design; the bare tokens pattern
   // above is the authoritative fallback.
-  /\b(?:Combobulating|Beaming|Thinking|Pondering|Reticulating|Configuring|Noodling|Ruminating|Percolating|Cogitating|Deliberating|Contemplating|Musing|Brewing|Synthesizing|Distilling|Refining|Simmering|Crafting|Formulating|Consulting|Unfurling|Unspooling|Unraveling)…\s*\(\s*\d+s\s*·\s*↓/,
+  new RegExp(`\\b(?:${CLAUDE_SPINNER_LABELS.join('|')})…\\s*\\(\\s*\\d+s\\s*·\\s*↓`),
 ]
 
 // Pasted-text placeholder. Claude Code lifts bursts of input keys into

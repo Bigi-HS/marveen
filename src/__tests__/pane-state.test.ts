@@ -12,6 +12,7 @@ import {
   decidePaneErrorAlert,
   stuckInputSignature,
   decideStuckInputRecovery,
+  CLAUDE_SPINNER_LABELS,
 } from '../pane-state.js'
 
 // Realistic pane fixtures modelled on actual `tmux capture-pane -p`
@@ -503,6 +504,33 @@ describe('detectPaneState', () => {
 
   it('returns unknown for a pane that is not a Claude Code surface', () => {
     expect(detectPaneState(NON_CLAUDE)).toBe('unknown')
+  })
+
+  describe('CLAUDE_SPINNER_LABELS (card be2bebce)', () => {
+    it('is exported and non-empty', () => {
+      expect(Array.isArray(CLAUDE_SPINNER_LABELS)).toBe(true)
+      expect(CLAUDE_SPINNER_LABELS.length).toBeGreaterThan(0)
+    })
+
+    it('contains no duplicates', () => {
+      const set = new Set(CLAUDE_SPINNER_LABELS)
+      expect(set.size).toBe(CLAUDE_SPINNER_LABELS.length)
+    })
+
+    it('each label is a non-empty string', () => {
+      for (const label of CLAUDE_SPINNER_LABELS) {
+        expect(typeof label).toBe('string')
+        expect(label.length).toBeGreaterThan(0)
+      }
+    })
+
+    it('every label in the test list is in CLAUDE_SPINNER_LABELS', () => {
+      // The it.each list below should be a subset of the exported constant.
+      const known = ['Thinking', 'Pondering', 'Beaming', 'Noodling', 'Cogitating']
+      for (const name of known) {
+        expect(CLAUDE_SPINNER_LABELS).toContain(name)
+      }
+    })
   })
 
   it.each([
