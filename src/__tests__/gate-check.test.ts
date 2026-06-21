@@ -101,6 +101,18 @@ describe('isSecuritySensitivePath (MG-AC4)', () => {
     expect(isSecuritySensitivePath('src/web/github-merge.ts')).toBe(true)
     expect(isSecuritySensitivePath('src/web/routes/github.ts')).toBe(true)
   })
+
+  // Auth/credential modules not caught by keyword patterns (card 9839f503, Chad scope-bővítés).
+  // dashboard-auth.ts: rotateDashboardToken + rotateSessionSecret (no 'token/auth' in path).
+  // agent-identity-binding.ts: all auth-gate logic (decideMemoryMutation, enforceFromBinding...).
+  // agent-token-registry.ts: per-agent token minting -- 'token' in name but not in auth/secret/store path.
+  // routes/admin.ts: credential-invalidation endpoint (rotate token + kick sessions).
+  it('matches auth/admin modules missing from keyword patterns (card 9839f503)', () => {
+    expect(isSecuritySensitivePath('src/web/dashboard-auth.ts')).toBe(true)
+    expect(isSecuritySensitivePath('src/web/agent-identity-binding.ts')).toBe(true)
+    expect(isSecuritySensitivePath('src/web/agent-token-registry.ts')).toBe(true)
+    expect(isSecuritySensitivePath('src/web/routes/admin.ts')).toBe(true)
+  })
 })
 
 describe('runGateCheck requires chad for a gate-code PR (card 88eb6120)', () => {

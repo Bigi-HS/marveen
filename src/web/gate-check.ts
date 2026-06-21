@@ -65,6 +65,14 @@ export function isSecuritySensitivePath(filename: string): boolean {
   if (f === 'src/web/routes/github.ts') return true  // card cfb10d14 (Thor MINOR PR#230)
   if (f.startsWith('seed-skills/fleet-pr-merge-gate/')) return true
 
+  // Auth/credential modules not caught by keyword patterns (card 9839f503, Chad scope-bővítés):
+  // their names don't contain token/oauth/credential in a qualifying path context yet they
+  // carry credential-handling logic that must require Chad review.
+  if (f === 'src/web/dashboard-auth.ts') return true          // rotateDashboardToken + rotateSessionSecret
+  if (f === 'src/web/agent-identity-binding.ts') return true  // all auth-gate logic (decideMemoryMutation etc.)
+  if (f === 'src/web/agent-token-registry.ts') return true    // per-agent token minting/resolution
+  if (f === 'src/web/routes/admin.ts') return true            // credential-invalidation endpoints
+
   const base = f.split('/').pop() ?? f
 
   // **/.env* -- any dotenv file at any depth.
