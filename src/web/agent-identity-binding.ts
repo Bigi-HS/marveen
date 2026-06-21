@@ -41,9 +41,8 @@ const FALSY = new Set(['off', '0', 'false', 'no'])
 // Set ENFORCE_FROM_BINDING=false only when per-agent tokens are not provisioned.
 export function enforceFromBindingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const val = (env['ENFORCE_FROM_BINDING'] ?? '').trim().toLowerCase()
-  if (val === '') return true // default ON after C-BIND
   if (FALSY.has(val)) return false
-  return TRUTHY.has(val)
+  return true // default ON: absent/empty/truthy/unrecognised all enforce (fail-safe)
 }
 
 // The mandatory startup log line (Chad #5): emitted once at boot so an operator

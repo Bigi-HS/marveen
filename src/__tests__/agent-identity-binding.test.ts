@@ -48,8 +48,9 @@ describe('enforceFromBindingEnabled (env-only flag, default ON after C-BIND db9b
     expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: 'no' })).toBe(false)
   })
 
-  it('unrecognised values fall through to OFF (neither truthy nor falsy)', () => {
-    expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: 'enabled-ish' })).toBe(false)
+  it('unrecognised values default to ON (fail-safe to enforcement, Thor MINOR db9bc192)', () => {
+    expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: 'enabled-ish' })).toBe(true)
+    expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: 'yes-please' })).toBe(true)
   })
 })
 
