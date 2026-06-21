@@ -94,6 +94,13 @@ describe('isSecuritySensitivePath (MG-AC4)', () => {
     expect(isSecuritySensitivePath('src/web/routes/gate.ts')).toBe(true)
     expect(isSecuritySensitivePath('seed-skills/fleet-pr-merge-gate/SKILL.md')).toBe(true)
   })
+
+  // GitHub endpoint modules carry PAT egress + gate enforcement -- a PR touching
+  // them must require Chad review (card cfb10d14, Thor MINOR from PR#230).
+  it('matches github-merge.ts and routes/github.ts (card cfb10d14)', () => {
+    expect(isSecuritySensitivePath('src/web/github-merge.ts')).toBe(true)
+    expect(isSecuritySensitivePath('src/web/routes/github.ts')).toBe(true)
+  })
 })
 
 describe('runGateCheck requires chad for a gate-code PR (card 88eb6120)', () => {
