@@ -29,6 +29,7 @@ import {
   insertOverride,
   hasActiveOverride,
   consumeOverride,
+  readPrAuthor,
 } from '../gate-db.js'
 import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
 import { fetchPrInfo } from '../github-pr.js'
@@ -102,6 +103,22 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
         return true
       }
     }
+    // MG-SEC5: self-approval block (card ec818352). A per-agent token may not
+    // record its own approval on a PR it authored. Admin/operator tokens bypass
+    // (author-deferral relay: NoA fills Dave-seat for Dave-authored PRs). Fail-open
+    // when no author record exists (old PRs opened before this table was added).
+    if (identity && identity.source !== 'operator' && !hasScope(identity.scopes, ADMIN_SCOPE)) {
+      const prAuthor = readPrAuthor(getDb(), pr_number)
+      if (prAuthor != null && identity.agentId === prAuthor) {
+        logger.warn(
+          { agent: identity.agentId, pr: pr_number },
+          'Gate self-approval blocked (MG-SEC5): reviewer is PR author',
+        )
+        json(res, { error: `self-approval blocked: ${identity.agentId} is the PR author (MG-SEC5)` }, 403)
+        return true
+      }
+    }
+
     if (!isValidVerdict(verdict)) {
       json(res, { error: "verdict must be one of 'approved', 'blocked'" }, 400)
       return true

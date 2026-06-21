@@ -3,6 +3,8 @@ import { Readable } from 'node:stream'
 import { rmSync } from 'node:fs'
 import { initDatabase } from '../db.js'
 import { tryHandleGate, __setGatePrFetcher } from '../web/routes/gate.js'
+import { insertPrAuthor } from '../web/gate-db.js'
+import { getDb } from '../db.js'
 import type { GithubPrInfo } from '../web/gate-check.js'
 import { ADMIN_SCOPE, type AgentIdentity } from '../web/agent-token-registry.js'
 
@@ -219,5 +221,40 @@ describe('reviewer identity binding (MG-SEC4 BLOCK, card db9bc192)', () => {
   it('no identity (test call without auth middleware) treated as admin/relay', async () => {
     // Existing tests call without identity -> MG-SEC4 check is skipped -> backward compatible.
     expect((await approve('dave')).status).toBe(201)
+  })
+})
+
+describe('POST /api/gate/approve -- MG-SEC5: self-approval block', () => {
+  const PR = 250
+
+  function approve(reviewer: string, identity?: AgentIdentity) {
+    return call('POST', '/api/gate/approve', { pr_number: PR, head_sha: SHA_A, reviewer, verdict: 'approved' }, identity)
+  }
+
+  beforeEach(() => {
+    // Record dave as the PR author
+    insertPrAuthor(getDb(), PR, 'dave', 1750000000)
+  })
+
+  it('blocks dave from approving his own PR (MG-SEC5)', async () => {
+    const r = await approve('dave', daveId)
+    expect(r.status).toBe(403)
+    expect(r.body.error).toMatch(/self.approval|author/)
+  })
+
+  it('allows thor to approve a dave-authored PR (different agent)', async () => {
+    const r = await approve('thor', thorId)
+    expect(r.status).toBe(201)
+  })
+
+  it('operator/admin can relay dave-seat for a dave-authored PR (author-deferral)', async () => {
+    const r = await approve('dave', operatorId)
+    expect(r.status).toBe(201)
+  })
+
+  it('self-approval block skipped when author is unknown (no record -> fail-open)', async () => {
+    // PR 9999 has no author record -> no block
+    const r = await call('POST', '/api/gate/approve', { pr_number: 9999, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved' }, daveId)
+    expect(r.status).toBe(201)
   })
 })

@@ -15,7 +15,7 @@ import { readBody, json } from '../http-helpers.js'
 import { openPullRequest, PrRequestError, fetchPrInfo } from '../github-pr.js'
 import { mergePullRequest, MergeRequestError, validateMergeParams } from '../github-merge.js'
 import { runGateCheck } from '../gate-check.js'
-import { readApprovals, hasActiveOverride } from '../gate-db.js'
+import { readApprovals, hasActiveOverride, insertPrAuthor } from '../gate-db.js'
 import { getDb } from '../../db.js'
 import type { RouteContext } from './types.js'
 
@@ -119,6 +119,13 @@ export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
     const pr = await openPullRequest({ head: parsed.head ?? '', base: parsed.base, title: parsed.title ?? '', body: parsed.body })
     // Attribute the action to the authenticated caller (card b1ce5118 identity).
     logger.info({ caller: identity.agentId, head: pr.head, base: pr.base, number: pr.number }, 'opened GitHub PR server-side')
+    // Record author for MG-SEC5 self-approval block (card ec818352). INSERT OR IGNORE
+    // so a re-open by a different agent does not override the original author record.
+    try {
+      insertPrAuthor(getDb(), pr.number, identity.agentId, Math.floor(Date.now() / 1000))
+    } catch (err) {
+      logger.warn({ err, pr: pr.number }, 'Failed to record PR author (non-fatal, MG-SEC5 fail-open)')
+    }
     json(res, { number: pr.number, html_url: pr.htmlUrl, head: pr.head, base: pr.base }, 201)
   } catch (err) {
     const status = err instanceof PrRequestError ? err.status : 500
