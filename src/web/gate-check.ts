@@ -73,6 +73,15 @@ export function isSecuritySensitivePath(filename: string): boolean {
   if (f === 'src/web/agent-token-registry.ts') return true    // per-agent token minting/resolution
   if (f === 'src/web/routes/admin.ts') return true            // credential-invalidation endpoints
 
+  // Codetree change-impact surface (card b8e014a4, Thor flag on PR#259/139b5434):
+  // a git-revision arg-injection surface (leading-dash ref -> `--output=` arbitrary
+  // file write). routes/codetree.ts carries the DIFF_REF_RE validation guard;
+  // codetree-impact-io.ts is the execFileSync('git', argv) sink. Weakening EITHER
+  // is a security change, so both must auto-require Chad (they carry no
+  // token/oauth/credential keyword, so the patterns below miss them).
+  if (f === 'src/web/routes/codetree.ts') return true         // DIFF_REF_RE / AGENT_RE validation guard
+  if (f === 'src/web/codetree-impact-io.ts') return true      // execFileSync('git', argv) sink
+
   const base = f.split('/').pop() ?? f
 
   // **/.env* -- any dotenv file at any depth.
