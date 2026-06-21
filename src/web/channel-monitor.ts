@@ -15,6 +15,7 @@ import {
   readOpusFallbackState,
   writeOpusFallbackState,
 } from './opus-fallback.js'
+import { markAgentCardsWaiting, OPUS_LIMIT_COMMENT } from './opus-fallback-kanban.js'
 import {
   agentHasChannel,
   agentSessionName,
@@ -864,8 +865,11 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         if (fallbackDecision.action === 'activate') {
           writeOpusFallbackState({ ...allFallbackState, [t.agentName]: { fallbackActive: true, originalModel: currentModel, activeSince: Date.now() } })
           writeAgentModel(t.agentName, SONNET_FALLBACK)
-          logger.warn({ agent: t.agentName, originalModel: currentModel }, '[opus-fallback] weekly cap detected -- switched to Sonnet, watchdog will restart')
-          sendAlert(`⚠️ ${t.agentName}: Opus weekly-cap detektálva. Sonnet-fallbackre váltva (${SONNET_FALLBACK}). Vasárnap reset után automatikusan visszaáll.`)
+          // Graceful degradation (card 75a5ecc3): move in_progress cards to
+          // waiting so they are not silently stuck while the agent is offline.
+          const moved = markAgentCardsWaiting(t.agentName, OPUS_LIMIT_COMMENT)
+          logger.warn({ agent: t.agentName, originalModel: currentModel, cardsMovedToWaiting: moved }, '[opus-fallback] weekly cap detected -- switched to Sonnet, watchdog will restart')
+          sendAlert(`⚠️ ${t.agentName}: Opus weekly-cap detektálva. Sonnet-fallbackre váltva (${SONNET_FALLBACK}). ${moved > 0 ? `${moved} kártya waiting-re állítva. ` : ''}Vasárnap reset után automatikusan visszaáll.`)
           stopAgentProcess(t.agentName)
         } else if (fallbackDecision.action === 'deactivate') {
           const rawOrig = fallbackDecision.originalModel
