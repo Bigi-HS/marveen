@@ -64,8 +64,8 @@ rm -f "$NEXT_FILE"
 ensure_cli_version_watch
 assert_not_contains "unchanged -> no log" "cli-version-watch" "$(cat "$CAPTURE")"
 
-# --- version changed: logs + dry-run alert -----------------------------------
-rm -f "$NEXT_FILE" "$MISMATCH_FILE"
+# --- version changed: logs + dry-run alert + sentinel written ----------------
+rm -f "$NEXT_FILE" "$MISMATCH_FILE" "$STATE_DIR/cli-drift-alerts.jsonl"
 echo "2.1.100" > "$VER_FILE"   # stored version is older than stub's 2.1.200
 : > "$CAPTURE"
 ensure_cli_version_watch
@@ -75,6 +75,49 @@ assert_contains "changed -> dry-run alert noted" "DRY-RUN would" "$(cat "$CAPTUR
 assert_eq "changed -> version file updated to new" "2.1.200" "$(cat "$VER_FILE" 2>/dev/null)"
 # Card 56ad0fa3: a drift flags the pane-detector gate so the watchdogs stand down.
 assert_eq "changed -> drift gate flagged with new version" "2.1.200" "$(cat "$MISMATCH_FILE" 2>/dev/null)"
+# Card ed4945a4: durable sentinel written even in dry-run (local file, no external side effect).
+assert_contains "changed -> sentinel written" "cli-drift" "$(cat "$STATE_DIR/cli-drift-alerts.jsonl" 2>/dev/null)"
+assert_contains "changed -> sentinel has correct to-version" "2.1.200" "$(cat "$STATE_DIR/cli-drift-alerts.jsonl" 2>/dev/null)"
+
+# --- fallback token used when chad token absent (non-dry-run) ----------------
+# Use $TMP as INSTALL_DIR so we never touch real credentials. Put the fallback
+# token in $TMP/.env and provide no chad token file.
+CURL_CALLS="$TMP/curl-calls.txt"
+FAKE_CURL2="$TMP/curl-cap2"
+# Unquoted heredoc: $CURL_CALLS expands now, embedding the abs path in the script.
+cat > "$FAKE_CURL2" << CURLEOF
+#!/bin/sh
+for arg; do
+  case "\$arg" in
+    https://api.telegram.org/bot*/sendMessage) echo "\$arg" >> "$CURL_CALLS" ;;
+  esac
+done
+exit 0
+CURLEOF
+chmod +x "$FAKE_CURL2"
+# Fake INSTALL_DIR in $TMP: .env with marveen token, no agents/chad token
+mkdir -p "$TMP/fake-install/store/.fleet-supervisor"
+echo "TELEGRAM_BOT_TOKEN=marveen-fallback-token" > "$TMP/fake-install/.env"
+_REAL_INSTALL="$INSTALL_DIR"
+_REAL_STATE="$STATE_DIR"
+_REAL_VER="$VER_FILE"
+INSTALL_DIR="$TMP/fake-install"
+STATE_DIR="$TMP/fake-install/store/.fleet-supervisor"
+VER_FILE="$STATE_DIR/claude-cli-version.txt"
+MISMATCH_FILE="$STATE_DIR/cli-version-mismatch.txt"
+NEXT_FILE="$STATE_DIR/cli-version-check.next"
+rm -f "$CURL_CALLS"
+echo "2.1.100" > "$VER_FILE"
+: > "$CAPTURE"
+CURL="$FAKE_CURL2" DRY_RUN=0 ensure_cli_version_watch
+# Restore
+INSTALL_DIR="$_REAL_INSTALL"
+STATE_DIR="$_REAL_STATE"
+VER_FILE="$_REAL_VER"
+MISMATCH_FILE="$STATE_DIR/cli-version-mismatch.txt"
+NEXT_FILE="$STATE_DIR/cli-version-check.next"
+assert_contains "fallback token -> logged" "fallback" "$(cat "$CAPTURE")"
+assert_contains "fallback token -> curl used marveen token" "marveen-fallback-token" "$(cat "$CURL_CALLS" 2>/dev/null)"
 
 # --- claude not on PATH: silent no-op --------------------------------------
 # CLAUDE_BIN_OVERRIDE="" forces the empty-bin path without depending on PATH manipulation
