@@ -17,6 +17,13 @@ import {
 } from './opus-fallback.js'
 import { markAgentCardsWaiting, OPUS_LIMIT_COMMENT } from './opus-fallback-kanban.js'
 import {
+  aggregateOpusBurn,
+  decideBurnAlerts,
+  readBurnAlertState,
+  writeBurnAlertState,
+} from './opus-burn-monitor.js'
+import { createAgentMessage } from '../db.js'
+import {
   agentHasChannel,
   agentSessionName,
   capturePane,
@@ -794,6 +801,36 @@ function shouldEscalateMarveenDown(): boolean {
   return now - marveenSuspectFirstSeen >= MARVEEN_DOWN_CONFIRM_MS
 }
 
+// Opus burn early-warning (card 1584cad7). Called every 30 min from
+// startChannelPluginMonitor. Sends inter-agent messages to marveen at
+// 70% / 90% of the weekly Opus credit limit (deduped per week via file state).
+function checkOpusBurnThresholds(): void {
+  try {
+    const result = aggregateOpusBurn(Date.now())
+    const state = readBurnAlertState()
+    const alerts = decideBurnAlerts(result, state)
+    for (const alert of alerts) {
+      logger.warn(
+        { level: alert.level, burnPct: result.burnPct.toFixed(1), totalBurnTokens: result.totalBurnTokens },
+        `[opus-burn] ${alert.level} threshold crossed`,
+      )
+      let sent = false
+      try {
+        createAgentMessage('server', MAIN_AGENT_ID, alert.message, false, alert.priority)
+        sent = true
+      } catch (err) {
+        logger.warn({ err }, '[opus-burn] failed to send alert message -- will retry next tick')
+      }
+      // Only persist dedup state if the message actually went out.
+      // If the DB insert failed, the next 30-min check will retry rather than
+      // silently marking the alert as sent.
+      if (sent) writeBurnAlertState(alert.nextState)
+    }
+  } catch (err) {
+    logger.warn({ err }, '[opus-burn] threshold check failed -- non-fatal')
+  }
+}
+
 export function startChannelPluginMonitor(): NodeJS.Timeout | null {
   // Respawn/keep-alive is production-only. On any non-production host (e.g. a
   // local dev checkout) we never respawn the main agent or auto-restart
@@ -964,6 +1001,13 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     void reconcileDesiredAgents()
   }
   setTimeout(check, 30000)
+  // Opus burn early-warning: check every 30 min (independent of 60s pane loop).
+  // First check at startup after 5 min to let token_usage writer catch up.
+  const BURN_CHECK_INTERVAL_MS = 30 * 60 * 1000
+  setTimeout(() => {
+    checkOpusBurnThresholds()
+    setInterval(checkOpusBurnThresholds, BURN_CHECK_INTERVAL_MS)
+  }, 5 * 60 * 1000)
   return setInterval(check, 60000)
 }
 
