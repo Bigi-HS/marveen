@@ -40,5 +40,18 @@ export async function tryHandleAdmin(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  // Incident-response one-call (card 456293c4): rotates BOTH the bearer token
+  // AND the session secret in a single request. Composes the two existing
+  // primitives so an operator can fully lock down the dashboard during an
+  // incident without a two-step dance. Returns the new bearer token (same as
+  // /rotate-token) -- the caller must persist it to regain API access.
+  if (path === '/api/admin/incident-response' && method === 'POST') {
+    const fresh = rotateDashboardToken()
+    rotateSessionSecret()
+    logger.warn('Incident response: dashboard token rotated + all sessions revoked (card 456293c4)')
+    json(res, { ok: true, token: fresh })
+    return true
+  }
+
   return false
 }
