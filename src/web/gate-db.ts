@@ -44,6 +44,31 @@ export function migrateGateTables(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_gate_override_pr_sha ON gate_overrides(pr_number, head_sha)`)
+
+  // MG-SEC5: track which agent opened each PR so self-approval can be blocked.
+  // INSERT OR IGNORE so a PR re-open does not override the original author record.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gate_pr_authors (
+      pr_number   INTEGER PRIMARY KEY,
+      author_agent TEXT NOT NULL,
+      recorded_at  INTEGER NOT NULL
+    )
+  `)
+}
+
+// Record the opening agent for a PR (card ec818352, MG-SEC5). INSERT OR IGNORE
+// keeps the first record intact if the PR is re-opened by a different caller.
+export function insertPrAuthor(db: Database.Database, prNumber: number, authorAgent: string, now: number): void {
+  db.prepare(`INSERT OR IGNORE INTO gate_pr_authors (pr_number, author_agent, recorded_at) VALUES (?, ?, ?)`)
+    .run(prNumber, authorAgent, now)
+}
+
+// Returns the stored author agent for a PR, or null if not recorded (fail-open).
+export function readPrAuthor(db: Database.Database, prNumber: number): string | null {
+  const row = db.prepare(`SELECT author_agent FROM gate_pr_authors WHERE pr_number = ?`).get(prNumber) as
+    | { author_agent: string }
+    | undefined
+  return row?.author_agent ?? null
 }
 
 export interface ApprovalInput {

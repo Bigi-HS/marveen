@@ -7,6 +7,8 @@ import {
   insertOverride,
   hasActiveOverride,
   consumeOverride,
+  insertPrAuthor,
+  readPrAuthor,
 } from '../web/gate-db.js'
 
 const SHA_A = 'a'.repeat(40)
@@ -20,13 +22,39 @@ beforeEach(() => {
 })
 
 describe('migrateGateTables (MG-AC1 additive)', () => {
-  it('creates both tables and is idempotent (safe on every boot)', () => {
+  it('creates all tables including gate_pr_authors and is idempotent', () => {
     expect(() => migrateGateTables(db)).not.toThrow()
     migrateGateTables(db) // second run is a no-op
     const tables = db
       .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'gate_%' ORDER BY name`)
       .all() as Array<{ name: string }>
-    expect(tables.map((t) => t.name)).toEqual(['gate_approvals', 'gate_overrides'])
+    expect(tables.map((t) => t.name)).toEqual(['gate_approvals', 'gate_overrides', 'gate_pr_authors'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// gate_pr_authors -- PR author tracking for self-approval block (MG-SEC5)
+// ---------------------------------------------------------------------------
+describe('insertPrAuthor / readPrAuthor (MG-SEC5)', () => {
+  it('inserts and reads back the author for a PR', () => {
+    insertPrAuthor(db, 250, 'dave', 1750000000)
+    expect(readPrAuthor(db, 250)).toBe('dave')
+  })
+
+  it('returns null for an unknown PR', () => {
+    expect(readPrAuthor(db, 9999)).toBeNull()
+  })
+
+  it('is idempotent on conflict (same PR re-opened does not crash)', () => {
+    insertPrAuthor(db, 250, 'dave', 1750000000)
+    expect(() => insertPrAuthor(db, 250, 'dave', 1750000001)).not.toThrow()
+  })
+
+  it('returns the first recorded author if re-inserted with a different agent', () => {
+    // The first PR-open wins; a re-open by a different agent does not override.
+    insertPrAuthor(db, 250, 'dave', 1750000000)
+    insertPrAuthor(db, 250, 'thor', 1750000001)
+    expect(readPrAuthor(db, 250)).toBe('dave')
   })
 })
 
