@@ -9,6 +9,7 @@ import { agentDir, listAgentNames, readAgentChannelProviderSafe, readAgentModel,
 import {
   OPUS_FALLBACK_AGENTS,
   SONNET_FALLBACK,
+  isOpusModel,
   detectOpusWeeklyCapInPane,
   decideOpusFallback,
   readOpusFallbackState,
@@ -867,7 +868,8 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           sendAlert(`⚠️ ${t.agentName}: Opus weekly-cap detektálva. Sonnet-fallbackre váltva (${SONNET_FALLBACK}). Vasárnap reset után automatikusan visszaáll.`)
           stopAgentProcess(t.agentName)
         } else if (fallbackDecision.action === 'deactivate') {
-          const origModel = fallbackDecision.originalModel ?? 'claude-opus-4-8'
+          const rawOrig = fallbackDecision.originalModel
+          const origModel = (rawOrig && isOpusModel(rawOrig)) ? rawOrig : 'claude-opus-4-8'
           writeOpusFallbackState({ ...allFallbackState, [t.agentName]: { fallbackActive: false, originalModel: null, activeSince: null } })
           writeAgentModel(t.agentName, origModel)
           logger.info({ agent: t.agentName, model: origModel }, '[opus-fallback] Sunday reset -- restoring Opus model, watchdog will restart')

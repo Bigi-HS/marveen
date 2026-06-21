@@ -67,8 +67,20 @@ describe('detectOpusWeeklyCapInPane', () => {
     expect(detectOpusWeeklyCapInPane(prosePane)).toBe(false)
   })
 
-  it('detects "Usage credits required" (weekly-cap CLI variant)', () => {
+  it('detects "Usage credits required" in the tail (weekly-cap CLI variant)', () => {
     expect(detectOpusWeeklyCapInPane('Usage credits required for 1M context')).toBe(true)
+  })
+
+  it('does NOT trigger on "usage credits required" buried deep in scrollback history (tail-anchor guard)', () => {
+    // Chad FLAG [medium]: CREDITS_REQUIRED_RX must only test the tail (last 18 lines),
+    // not the full pane. This is a document/error-description false-positive scenario.
+    const scrollbackPane = [
+      'Usage credits required for 1M context',  // line 1 -- in scrollback, >18 lines ago
+      ...Array.from({ length: 20 }, (_, i) => `Normal output line ${i + 1}`),
+      '❯',
+      '─────────────────────────────────────',
+    ].join('\n')
+    expect(detectOpusWeeklyCapInPane(scrollbackPane)).toBe(false)
   })
 })
 

@@ -61,7 +61,11 @@ export function isOpusModel(modelId: string): boolean {
 export function detectOpusWeeklyCapInPane(pane: string): boolean {
   if (!pane) return false
   if (detectsUsageLimitMenu(pane)) return true
-  return CREDITS_REQUIRED_RX.test(pane)
+  // Scope to the tail (same 18-line window as detectsUsageLimitMenu) so a
+  // document or error description containing "usage credits required" that
+  // scrolled into history does not trigger a false fallback + stopAgentProcess.
+  const tail = pane.split('\n').slice(-18).join('\n')
+  return CREDITS_REQUIRED_RX.test(tail)
 }
 
 /**
