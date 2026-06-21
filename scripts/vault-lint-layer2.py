@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+"""Vault-lint Layer 2: tier-migration + dedup proposals (Part A, read-only).
+
+Card: 4cb02536. Spec: store/vault-lint-layer2-spec.md v1.2.
+
+Reads store/claudeclaw.db (memories table). Never modifies the DB or calls
+any API endpoint. Writes two output files:
+  store/vault-lint-l2-proposals.json -- structured proposal list
+  store/vault-lint-l2-badge.json     -- shields.io endpoint badge
+
+Usage:
+  python3 scripts/vault-lint-layer2.py          # human-readable stdout
+  python3 scripts/vault-lint-layer2.py --json   # JSON stdout
+  VAULT_L2_HOT_STALE_DAYS=5 python3 scripts/vault-lint-layer2.py
+"""
+
+import json
+import os
+import re
+import sqlite3
+import sys
+import time
+
+# ---------------------------------------------------------------------------
+# Configuration (env-overridable)
+# ---------------------------------------------------------------------------
+HOT_STALE_DAYS = int(os.environ.get("VAULT_L2_HOT_STALE_DAYS", "3"))
+WARM_STALE_DAYS = int(os.environ.get("VAULT_L2_WARM_STALE_DAYS", "90"))
+DEDUP_JACCARD_THRESHOLD = float(os.environ.get("VAULT_L2_DEDUP_JACCARD", "0.4"))
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.normpath(os.path.join(HERE, ".."))
+DB_PATH = os.path.join(PROJECT_ROOT, "store", "claudeclaw.db")
+PROPOSALS_PATH = os.path.join(PROJECT_ROOT, "store", "vault-lint-l2-proposals.json")
+BADGE_PATH = os.path.join(PROJECT_ROOT, "store", "vault-lint-l2-badge.json")
+
+# ---------------------------------------------------------------------------
+# Done-marker patterns (TM-2)
+# ---------------------------------------------------------------------------
+_DONE_PATTERNS = [
+    r"\bMERGED\b",
+    r"\bDONE\b",
+    r"\bLEZARVA\b",
+    r"\bkész\b",
+    r"\bclosed\b",
+    r"PR #\d+ merged",
+    r"status[: ]+done",
+]
+_DONE_RE = re.compile("|".join(_DONE_PATTERNS), re.IGNORECASE)
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers (no I/O)
+# ---------------------------------------------------------------------------
+
+def matches_done_marker(content: str) -> bool:
+    return bool(_DONE_RE.search(content or ""))
+
+
+def is_stale(accessed_at_effective: int, now: int, stale_days: int) -> bool:
+    return (now - accessed_at_effective) > stale_days * 86400
+
+
+def parse_keywords(kw_str) -> frozenset:
+    """Split comma-separated keywords into a frozenset of non-empty tokens."""
+    if not kw_str:
+        return frozenset()
+    return frozenset(k.strip() for k in kw_str.split(",") if k.strip())
+
+
+def jaccard(a: frozenset, b: frozenset) -> float:
+    if not a or not b:
+        return 0.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+
+# ---------------------------------------------------------------------------
+# DB reader
+# ---------------------------------------------------------------------------
+
+def load_memories(db_path: str) -> list:
+    """Return all memory rows as dicts. Opens read-only (uri mode)."""
+    uri = f"file:{db_path}?mode=ro"
+    con = sqlite3.connect(uri, uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute(
+            "SELECT id, agent_id, category, content, keywords, created_at, accessed_at "
+            "FROM memories"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------------------
+# Module 1: Tier-migration detector
+# ---------------------------------------------------------------------------
+
+def compute_tier_migrations(
+    memories: list,
+    now: int,
+    hot_stale_days: int = HOT_STALE_DAYS,
+    warm_stale_days: int = WARM_STALE_DAYS,
+) -> list:
+    """Return tier-migration proposals. Never writes to DB."""
+    proposals = []
+    for m in memories:
+        cat = m.get("category", "")
+        # Spec S2: shared and cold are excluded from all TM rules.
+        if cat not in ("hot", "warm"):
+            continue
+
+        created_at = m.get("created_at")
+        accessed_at = m.get("accessed_at")
+
+        # M1: NULL accessed_at -> use created_at; both NULL -> skip.
+        accessed_at_eff = accessed_at if accessed_at is not None else created_at
+        if accessed_at_eff is None:
+            print(
+                f"[WARN] memory id={m['id']} has NULL created_at+accessed_at, skipping",
+                file=sys.stderr,
+            )
+            continue
+
+        content = m.get("content") or ""
+
+        if cat == "hot":
+            # M3: TM-2 takes priority over TM-1.
+            if matches_done_marker(content):
+                proposals.append(
+                    {
+                        "rule": "TM-2",
+                        "from_category": "hot",
+                        "to_category": "cold",
+                        "id": m["id"],
+                        "agent_id": m["agent_id"],
+                        "reason": "done-marker",
+                        "content_preview": content[:80],
+                    }
+                )
+            elif is_stale(accessed_at_eff, now, hot_stale_days):
+                age_days = (now - accessed_at_eff) / 86400
+                proposals.append(
+                    {
+                        "rule": "TM-1",
+                        "from_category": "hot",
+                        "to_category": "warm",
+                        "id": m["id"],
+                        "agent_id": m["agent_id"],
+                        "reason": f"{age_days:.1f}d untouched",
+                        "content_preview": content[:80],
+                    }
+                )
+        elif cat == "warm":
+            # TM-3 only (S3: TM-2 is hot-only; warm + done-marker is TM-3 only).
+            if is_stale(accessed_at_eff, now, warm_stale_days):
+                age_days = (now - accessed_at_eff) / 86400
+                proposals.append(
+                    {
+                        "rule": "TM-3",
+                        "from_category": "warm",
+                        "to_category": "cold",
+                        "id": m["id"],
+                        "agent_id": m["agent_id"],
+                        "reason": f"{age_days:.1f}d untouched",
+                        "content_preview": content[:80],
+                    }
+                )
+    return proposals
+
+
+# ---------------------------------------------------------------------------
+# Module 2: Dedup detector
+# ---------------------------------------------------------------------------
+
+def compute_dedup_candidates(
+    memories: list,
+    jaccard_threshold: float = DEDUP_JACCARD_THRESHOLD,
+) -> list:
+    """Return dedup candidate pairs within same agent_id+category. SUGGEST only."""
+    from collections import defaultdict
+
+    groups: dict = defaultdict(list)
+    for m in memories:
+        kw = parse_keywords(m.get("keywords", ""))
+        # M2: skip entries with empty keyword set (avoid false-positive Jaccard=1.0).
+        if not kw:
+            continue
+        key = (m["agent_id"], m["category"])
+        groups[key].append(
+            {
+                "id": m["id"],
+                "agent_id": m["agent_id"],
+                "keywords": kw,
+                "keywords_str": m.get("keywords", ""),
+                "content_preview": (m.get("content") or "")[:80],
+            }
+        )
+
+    candidates = []
+    for entries in groups.values():
+        n = len(entries)
+        for i in range(n):
+            for j in range(i + 1, n):
+                a, b = entries[i], entries[j]
+                score = jaccard(a["keywords"], b["keywords"])
+                if score >= jaccard_threshold:
+                    candidates.append(
+                        {
+                            "agent_id": a["agent_id"],
+                            "entry_a": {
+                                "id": a["id"],
+                                "keywords": a["keywords_str"],
+                                "content_preview": a["content_preview"],
+                            },
+                            "entry_b": {
+                                "id": b["id"],
+                                "keywords": b["keywords_str"],
+                                "content_preview": b["content_preview"],
+                            },
+                            "jaccard": round(score, 4),
+                            "suggestion": (
+                                "entry_a may be superseded by entry_b. "
+                                "Consider migrating entry_a to cold with SUPERSEDED prefix. "
+                                "Curator action required."
+                            ),
+                        }
+                    )
+    return candidates
+
+
+# ---------------------------------------------------------------------------
+# Module 3: Report + badge
+# ---------------------------------------------------------------------------
+
+def build_report(tier_proposals: list, dedup_candidates: list, now: int) -> dict:
+    return {
+        "timestamp": now,
+        "verdict": "PROPOSALS",
+        "tier_migration_proposals": tier_proposals,
+        "dedup_candidates": dedup_candidates,
+        "counts": {
+            "tier_migration": len(tier_proposals),
+            "dedup_candidates": len(dedup_candidates),
+        },
+    }
+
+
+def make_badge(report: dict) -> dict:
+    """shields.io endpoint badge (schemaVersion/label/message/color)."""
+    c = report["counts"]
+    tm = c["tier_migration"]
+    dedup = c["dedup_candidates"]
+    color = "brightgreen" if tm == 0 and dedup == 0 else "yellow"
+    message = f"{tm} tm + {dedup} dedup"
+    return {
+        "schemaVersion": 1,
+        "label": "vault-lint-l2",
+        "message": message,
+        "color": color,
+        "counts": c,
+        "timestamp": report["timestamp"],
+    }
+
+
+def print_human(report: dict) -> None:
+    c = report["counts"]
+    print(
+        f"\nVAULT-LINT-L2: {c['tier_migration']} tier-migration proposals, "
+        f"{c['dedup_candidates']} dedup candidates\n"
+    )
+
+    tms = report["tier_migration_proposals"]
+    if tms:
+        print("TIER-MIGRATION (proposals only -- apply via Part B when available):")
+        for p in tms:
+            preview = p["content_preview"].replace("\n", " ")
+            print(
+                f"  {p['rule']}  {p['from_category']}->{p['to_category']}"
+                f"  id={p['id']} agent={p['agent_id']}"
+                f"  {p['reason']} | {preview[:60]}..."
+            )
+    else:
+        print("TIER-MIGRATION: none")
+
+    print()
+    dups = report["dedup_candidates"]
+    if dups:
+        print("DEDUP CANDIDATES (SUGGEST only -- curator action required):")
+        for d in dups:
+            print(
+                f"  [{d['agent_id']}] id={d['entry_a']['id']} vs id={d['entry_b']['id']}"
+                f" jaccard={d['jaccard']:.2f}"
+                f" | {d['entry_a']['content_preview'][:40]} vs {d['entry_b']['content_preview'][:40]}"
+            )
+    else:
+        print("DEDUP CANDIDATES: none")
+    print()
+
+
+def write_output(report: dict, proposals_path: str, badge_path: str) -> None:
+    for path, data in ((proposals_path, report), (badge_path, make_badge(report))):
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+        except OSError as e:
+            print(f"[WARN] could not write {path}: {e}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+def run(
+    db_path: str = DB_PATH,
+    proposals_path: str = PROPOSALS_PATH,
+    badge_path: str = BADGE_PATH,
+    json_mode: bool = False,
+    now: int = 0,
+) -> dict:
+    if now == 0:
+        now = int(time.time())
+
+    memories = load_memories(db_path)
+    tier_proposals = compute_tier_migrations(memories, now)
+    dedup_candidates = compute_dedup_candidates(memories)
+    report = build_report(tier_proposals, dedup_candidates, now)
+    write_output(report, proposals_path, badge_path)
+
+    if json_mode:
+        print(json.dumps(report, indent=2))
+    else:
+        print_human(report)
+
+    return report
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    json_mode = "--json" in args
+    run(json_mode=json_mode)
+
+
+if __name__ == "__main__":
+    main()
