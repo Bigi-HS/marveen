@@ -402,10 +402,13 @@ class TestNullAccessedAt(unittest.TestCase):
         os.unlink(db)
 
     def test_both_null_skipped_with_warning(self):
-        """Both created_at and accessed_at NULL: skip with stderr warning, no crash."""
+        """created_at=0 (NULL fallback value, not a real NULL) with NULL
+        accessed_at still yields a TM-1 proposal -- the row is NOT skipped.
+        (Method name retained for history; the assertions below are canonical.)"""
         db = make_db()
-        # Bypass the NOT NULL constraint by inserting raw with NULL created_at.
-        # The real DB has NOT NULL on created_at but we test the guard anyway.
+        # Insert created_at=0 -- the fallback the linter uses when created_at is
+        # absent -- together with accessed_at=NULL. This exercises the
+        # NULL-accessed_at guard without violating created_at's NOT NULL constraint.
         con = sqlite3.connect(db)
         con.execute(
             "INSERT INTO memories (id, chat_id, content, sector, salience, "
