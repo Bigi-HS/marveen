@@ -81,6 +81,22 @@ describe('POST /api/admin/incident-response (card 456293c4)', () => {
     expect(await tryHandleAdmin(ctx)).toBe(false)
   })
 
+  it('per-agent token without admin:* scope is rejected with 403 (Chad sec-block fix)', async () => {
+    const { tryHandleAdmin } = await import('../web/routes/admin.js')
+    const url = new URL('http://localhost:3420/api/admin/incident-response')
+    let status = 200; let body = ''
+    const res = { writeHead: (s: number) => { status = s }, end: (b?: string) => { body = b || '' } }
+    const perAgentCtx = {
+      req: {} as any, res: res as any,
+      path: '/api/admin/incident-response', method: 'POST', url,
+      identity: { agentId: 'dave', scopes: ['message:send'], source: 'agent' as const },
+    }
+    const handled = await tryHandleAdmin(perAgentCtx)
+    expect(handled).toBe(true)
+    expect(status).toBe(403)
+    expect(JSON.parse(body).error).toMatch(/admin scope/)
+  })
+
   it('does not interfere with existing /api/admin/rotate-token or /api/admin/logout-all', async () => {
     const { tryHandleAdmin } = await import('../web/routes/admin.js')
     const { initDashboardToken } = await import('../web/dashboard-auth.js')

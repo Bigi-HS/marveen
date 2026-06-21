@@ -1,14 +1,25 @@
 import { rotateDashboardToken, rotateSessionSecret } from '../dashboard-auth.js'
 import { logger } from '../../logger.js'
 import { json } from '../http-helpers.js'
+import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
 import type { RouteContext } from './types.js'
 
 // Admin endpoints for operating the dashboard at runtime. Every route here is
 // reached only AFTER the global /api/* bearer-token auth gate in web.ts has
-// already validated the request, so these are implicitly protected by the
-// current dashboard token -- no extra auth check is needed in this module.
+// validated the request. Since b1ce5118 introduced per-agent tokens, the global
+// gate accepts any valid token -- operator OR per-agent. Admin operations (token
+// rotation, session revocation) must be restricted to the operator/admin scope
+// so a compromised per-agent token cannot rotate the root dashboard credential.
 export async function tryHandleAdmin(ctx: RouteContext): Promise<boolean> {
-  const { res, path, method } = ctx
+  const { res, path, method, identity } = ctx
+
+  // Absent identity = no auth middleware (test/internal calls) -> allow. Present
+  // identity without ADMIN_SCOPE = per-agent token -> 403 (Chad sec-block fix).
+  if (identity && !hasScope(identity.scopes, ADMIN_SCOPE)) {
+    logger.warn({ agentId: identity.agentId }, 'Admin endpoint rejected: missing admin:* scope')
+    json(res, { error: 'admin scope required' }, 403)
+    return true
+  }
 
   // Rotate the dashboard bearer token without a server restart. Generates a
   // fresh token, persists it to store/.dashboard-token (atomic, 0600) and swaps
