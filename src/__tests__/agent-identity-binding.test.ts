@@ -26,22 +26,29 @@ const admin: AgentIdentity = { agentId: OPERATOR_AGENT_ID, scopes: [ADMIN_SCOPE]
 const dave: AgentIdentity = { agentId: 'dave', scopes: ['message:send', 'memory:delete:own'], source: 'agent' }
 const applegate: AgentIdentity = { agentId: 'applegate', scopes: ['memory:delete:any'], source: 'agent' }
 
-describe('enforceFromBindingEnabled (env-only flag, default OFF)', () => {
-  it('defaults to OFF when the env var is unset or empty', () => {
-    expect(enforceFromBindingEnabled({})).toBe(false)
-    expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: '' })).toBe(false)
-    expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: '   ' })).toBe(false)
+describe('enforceFromBindingEnabled (env-only flag, default ON after C-BIND db9bc192)', () => {
+  it('defaults to ON when the env var is unset or empty (C-BIND flip)', () => {
+    expect(enforceFromBindingEnabled({})).toBe(true)
+    expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: '' })).toBe(true)
+    expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: '   ' })).toBe(true)
   })
 
-  it('enables only on an explicit truthy value (case-insensitive)', () => {
+  it('explicit truthy values keep enforcement ON', () => {
     expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: 'on' })).toBe(true)
     expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: 'ON' })).toBe(true)
     expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: '1' })).toBe(true)
     expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: 'true' })).toBe(true)
   })
 
-  it('treats anything else as OFF (fail-safe to legacy behaviour)', () => {
+  it('explicit falsy values disable enforcement (escape hatch for un-provisioned envs)', () => {
     expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: 'off' })).toBe(false)
+    expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: 'OFF' })).toBe(false)
+    expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: '0' })).toBe(false)
+    expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: 'false' })).toBe(false)
+    expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: 'no' })).toBe(false)
+  })
+
+  it('unrecognised values fall through to OFF (neither truthy nor falsy)', () => {
     expect(enforceFromBindingEnabled({ ENFORCE_FROM_BINDING: 'enabled-ish' })).toBe(false)
   })
 })
@@ -54,9 +61,14 @@ describe('fromBindingStatusLine (Chad #5 mandatory startup log)', () => {
 
   it('logFromBindingStatus emits the status at boot reflecting the env flag', () => {
     const lines: string[] = []
-    logFromBindingStatus((l) => lines.push(l), {})
-    logFromBindingStatus((l) => lines.push(l), { ENFORCE_FROM_BINDING: 'on' })
-    expect(lines).toEqual(['[auth] from_agent enforcement: OFF', '[auth] from_agent enforcement: ON'])
+    logFromBindingStatus((l) => lines.push(l), {})                              // default ON
+    logFromBindingStatus((l) => lines.push(l), { ENFORCE_FROM_BINDING: 'false' }) // explicit OFF
+    logFromBindingStatus((l) => lines.push(l), { ENFORCE_FROM_BINDING: 'on' })  // explicit ON
+    expect(lines).toEqual([
+      '[auth] from_agent enforcement: ON',
+      '[auth] from_agent enforcement: OFF',
+      '[auth] from_agent enforcement: ON',
+    ])
   })
 })
 

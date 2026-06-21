@@ -4,6 +4,7 @@ import { rmSync } from 'node:fs'
 import { initDatabase } from '../db.js'
 import { tryHandleGate, __setGatePrFetcher } from '../web/routes/gate.js'
 import type { GithubPrInfo } from '../web/gate-check.js'
+import { ADMIN_SCOPE, type AgentIdentity } from '../web/agent-token-registry.js'
 
 const TEST_DB = '/tmp/test-gate-route.db'
 const SHA_A = 'a'.repeat(40)
@@ -13,7 +14,7 @@ function cleanDb() {
   for (const s of ['', '-wal', '-shm']) rmSync(TEST_DB + s, { force: true })
 }
 
-async function call(method: string, fullPath: string, body?: unknown) {
+async function call(method: string, fullPath: string, body?: unknown, identity?: AgentIdentity) {
   const url = new URL('http://x' + fullPath)
   const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]) as never
   const captured: { status: number; body: any } = { status: 200, body: undefined }
@@ -26,9 +27,16 @@ async function call(method: string, fullPath: string, body?: unknown) {
       captured.body = b ? JSON.parse(b) : undefined
     },
   } as never
-  const handled = await tryHandleGate({ req, res, method, path: url.pathname, url } as never)
+  const handled = await tryHandleGate({ req, res, method, path: url.pathname, url, identity } as never)
   return { handled, ...captured }
 }
+
+// Identities for MG-SEC4 reviewer-binding tests.
+const thorId: AgentIdentity = { agentId: 'thor', scopes: ['message:send'], source: 'agent' }
+const daveId: AgentIdentity = { agentId: 'dave', scopes: ['message:send'], source: 'agent' }
+const chadId: AgentIdentity = { agentId: 'chad', scopes: ['message:send'], source: 'agent' }
+const operatorId: AgentIdentity = { agentId: 'marveen', scopes: [ADMIN_SCOPE], source: 'operator' }
+const marveenAgentToken: AgentIdentity = { agentId: 'marveen', scopes: [ADMIN_SCOPE], source: 'agent' }
 
 // Default stub: a non-security PR on SHA_A. Individual tests override.
 function stubPr(info: Partial<GithubPrInfo> = {}) {
@@ -172,5 +180,44 @@ describe('append-only enforcement (MG-SEC3)', () => {
   it('DELETE and PATCH on any gate resource return 405', async () => {
     expect((await call('DELETE', '/api/gate/approvals/42')).status).toBe(405)
     expect((await call('PATCH', '/api/gate/approve/42')).status).toBe(405)
+  })
+})
+
+describe('reviewer identity binding (MG-SEC4 BLOCK, card db9bc192)', () => {
+  const approve = (reviewer: string, identity?: AgentIdentity) =>
+    call('POST', '/api/gate/approve', { pr_number: 207, head_sha: SHA_A, reviewer, verdict: 'approved' }, identity)
+
+  it('per-agent token can approve as itself', async () => {
+    expect((await approve('thor', thorId)).status).toBe(201)
+    expect((await approve('dave', daveId)).status).toBe(201)
+    expect((await approve('chad', chadId)).status).toBe(201)
+  })
+
+  it('per-agent token cannot approve as a different reviewer (403)', async () => {
+    const r = await approve('thor', daveId)  // dave-token claiming to be thor
+    expect(r.status).toBe(403)
+    expect(r.body.error).toMatch(/dave.*thor|token identity/)
+  })
+
+  it('per-agent token cannot self-approve as all three reviewers', async () => {
+    // A compromised dave token must not be able to fill all three seats.
+    expect((await approve('thor', daveId)).status).toBe(403)
+    expect((await approve('chad', daveId)).status).toBe(403)
+  })
+
+  it('operator/admin token can relay any reviewer (NoA author-deferral relay)', async () => {
+    expect((await approve('thor', operatorId)).status).toBe(201)
+    expect((await approve('dave', operatorId)).status).toBe(201)
+    expect((await approve('chad', operatorId)).status).toBe(201)
+  })
+
+  it('per-agent token with ADMIN_SCOPE (marveen own token) can relay (admin scope wins)', async () => {
+    // marveen's per-agent token carries ADMIN_SCOPE -> relay allowed even with source='agent'.
+    expect((await approve('dave', marveenAgentToken)).status).toBe(201)
+  })
+
+  it('no identity (test call without auth middleware) treated as admin/relay', async () => {
+    // Existing tests call without identity -> MG-SEC4 check is skipped -> backward compatible.
+    expect((await approve('dave')).status).toBe(201)
   })
 })

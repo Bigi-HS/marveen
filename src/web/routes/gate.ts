@@ -1,19 +1,17 @@
 // Mechanical merge-gate enforcement -- HTTP routes (/api/gate/*).
 //
-// ADVISORY BOUNDARY (MG-SEC4): the gate_approvals table uses a caller-supplied
-// `reviewer` identity under a shared Bearer token. The `recorded_by` field
-// captures the calling agent for audit, but reviewer identity is NOT
-// cryptographically authenticated. This gate prevents ACCIDENTAL
-// merge-before-approval (the PR #206 incident: Chad PASS present, Dave eng
-// sign-off absent, merge succeeded, revert required); it does NOT stop an
-// adversarial agent from self-approving as all three reviewers. The hard fix is
-// per-agent auth tokens (card 8dac7f1d). The ONE hard enforcement here is the
-// head.sha re-verify at merge time (MG-AC6/MG-SEC5): approvals are always
-// evaluated against the live GitHub head.sha, so a rebase/new-commit silently
-// invalidates every prior approval -- exactly the #206 staleness window.
+// MG-SEC4 ENFORCED (card db9bc192, C-BIND): reviewer identity is now bound to
+// the per-agent Bearer token. A per-agent token may only record its OWN
+// approval; it cannot forge Thor's or Chad's sign-off. Admin/operator tokens
+// retain relay capability (NoA fills Dave-seat on author-deferral PRs).
+// Prior to C-BIND, reviewer was advisory (caller-supplied, not verified):
+// the PR #206 incident (stale approval merged before Dave signed off) was
+// prevented by the head.sha re-verify at merge time (MG-AC6/MG-SEC5), but
+// self-approval impersonation remained possible. C-BIND closes that gap.
 //
 // See store/specs/merge-gate-enforcement.md (card fa11eb63).
 
+import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import { getDb } from '../../db.js'
 import type { RouteContext } from './types.js'
@@ -32,6 +30,7 @@ import {
   hasActiveOverride,
   consumeOverride,
 } from '../gate-db.js'
+import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
 import { fetchPrInfo } from '../github-pr.js'
 
 // The GitHub PR reader is the only network dependency; injectable so route
@@ -87,6 +86,21 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
     if (!isValidReviewer(reviewer)) {
       json(res, { error: "reviewer must be one of 'thor', 'dave', 'chad'" }, 400)
       return true
+    }
+    // MG-SEC4 BLOCK (card db9bc192, C-BIND): a per-agent token may only record
+    // its OWN approval. Admin/operator tokens may relay any reviewer (e.g. NoA
+    // filling Dave-seat on author-deferral PRs). Absent identity (unit tests
+    // using the route directly without auth middleware) is treated as admin.
+    const { identity } = ctx
+    if (identity && identity.source !== 'operator' && !hasScope(identity.scopes, ADMIN_SCOPE)) {
+      if (identity.agentId !== reviewer) {
+        logger.warn(
+          { tokenAgent: identity.agentId, reviewer },
+          'Gate reviewer binding: token/reviewer mismatch rejected (MG-SEC4)',
+        )
+        json(res, { error: `token identity (${identity.agentId}) may not record approval as ${reviewer}` }, 403)
+        return true
+      }
     }
     if (!isValidVerdict(verdict)) {
       json(res, { error: "verdict must be one of 'approved', 'blocked'" }, 400)
