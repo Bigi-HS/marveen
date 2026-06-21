@@ -5,7 +5,16 @@ import { execSync, execFileSync } from 'node:child_process'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, PROJECT_ROOT, RESPAWN_ENABLED } from '../config.js'
-import { agentDir, listAgentNames, readAgentChannelProviderSafe } from './agent-config.js'
+import { agentDir, listAgentNames, readAgentChannelProviderSafe, readAgentModel, writeAgentModel } from './agent-config.js'
+import {
+  OPUS_FALLBACK_AGENTS,
+  SONNET_FALLBACK,
+  isOpusModel,
+  detectOpusWeeklyCapInPane,
+  decideOpusFallback,
+  readOpusFallbackState,
+  writeOpusFallbackState,
+} from './opus-fallback.js'
 import {
   agentHasChannel,
   agentSessionName,
@@ -838,6 +847,35 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         const label = t.isMarveen ? BOT_NAME : (t.agentName ?? t.session)
         logger.error({ session: t.session, agent: label }, 'Agent wedged on thinking-block API error -- manual reset needed')
         sendAlert(`🚨 A(z) ${label} agens elakadt egy thinking-block API hibaban (a session-history korrupt, minden uj prompt ugyanazt a 400-at adja). Kezi reset kell: allitsd le es inditsd ujra, friss session indul. Reszletek: tmux attach -t ${t.session}`)
+      }
+
+      // Opus weekly-cap fallback (card 339d0a36): if the pane shows a usage-
+      // limit banner AND the agent currently runs Opus, switch it to Sonnet and
+      // stop the process (watchdog restarts it from the updated agent-config.json).
+      // On Sunday >= 10:00 UTC (Anthropic weekly reset) the original Opus model
+      // is restored the same way. Only the agents in OPUS_FALLBACK_AGENTS are
+      // checked; all others already run Sonnet by default.
+      if (!t.isMarveen && t.agentName && OPUS_FALLBACK_AGENTS.includes(t.agentName)) {
+        const capSignal = pane != null && detectOpusWeeklyCapInPane(pane)
+        const allFallbackState = readOpusFallbackState()
+        const agentFallbackState = allFallbackState[t.agentName] ?? { fallbackActive: false, originalModel: null, activeSince: null }
+        const currentModel = readAgentModel(t.agentName)
+        const fallbackDecision = decideOpusFallback({ paneHasCapSignal: capSignal, currentModel, state: agentFallbackState, nowMs: Date.now() })
+        if (fallbackDecision.action === 'activate') {
+          writeOpusFallbackState({ ...allFallbackState, [t.agentName]: { fallbackActive: true, originalModel: currentModel, activeSince: Date.now() } })
+          writeAgentModel(t.agentName, SONNET_FALLBACK)
+          logger.warn({ agent: t.agentName, originalModel: currentModel }, '[opus-fallback] weekly cap detected -- switched to Sonnet, watchdog will restart')
+          sendAlert(`⚠️ ${t.agentName}: Opus weekly-cap detektálva. Sonnet-fallbackre váltva (${SONNET_FALLBACK}). Vasárnap reset után automatikusan visszaáll.`)
+          stopAgentProcess(t.agentName)
+        } else if (fallbackDecision.action === 'deactivate') {
+          const rawOrig = fallbackDecision.originalModel
+          const origModel = (rawOrig && isOpusModel(rawOrig)) ? rawOrig : 'claude-opus-4-8'
+          writeOpusFallbackState({ ...allFallbackState, [t.agentName]: { fallbackActive: false, originalModel: null, activeSince: null } })
+          writeAgentModel(t.agentName, origModel)
+          logger.info({ agent: t.agentName, model: origModel }, '[opus-fallback] Sunday reset -- restoring Opus model, watchdog will restart')
+          sendAlert(`✅ ${t.agentName}: Vasárnap reset -- visszaállítva erre: ${origModel}.`)
+          stopAgentProcess(t.agentName)
+        }
       }
     }
 
