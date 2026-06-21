@@ -7,6 +7,9 @@ import {
   decideMessageFrom,
   decideMemoryMutation,
   resolveRequestIdentity,
+  detectFromMismatch,
+  fromMismatchLogLine,
+  logFromMismatch,
 } from '../web/agent-identity-binding.js'
 import {
   migrateAgentTokenTable,
@@ -86,6 +89,70 @@ describe('decideMessageFrom', () => {
   it('flag ON: normalization matches the router (a decorated id maps to the same agent)', () => {
     // sanitizeAgentIdent strips non [A-Za-z0-9_-]; "@dave" -> "dave" must NOT 403.
     expect(decideMessageFrom(dave, '@dave', true)).toEqual({ ok: true, from: 'dave' })
+  })
+})
+
+// C-INTERIM (card 38bff392): detection-only mismatch logging that ships ahead of
+// per-agent token enforcement. The detector REUSES decideMessageFrom(enforce=true)
+// as its predicate -- it does NOT re-implement the check -- so the C-INTERIM
+// detector and the future C-BIND enforcer can never diverge, and the admin
+// exclusion (incl. marveen's per-agent admin:* token, a legit impersonator) is
+// inherited for free. It is flag-INDEPENDENT: it always evaluates with enforce=true
+// internally and logs, while real enforcement stays gated by ENFORCE_FROM_BINDING.
+describe('detectFromMismatch (C-INTERIM 38bff392, flag-independent detection)', () => {
+  // A per-agent token that still carries admin:* (marveen's own token, source=agent):
+  // a legit impersonator -- decideMessageFrom's admin branch must exclude it.
+  const marveenAgentToken: AgentIdentity = { agentId: 'marveen', scopes: [ADMIN_SCOPE], source: 'agent' }
+
+  it('flags a non-admin agent asserting another agent id (impersonation surface)', () => {
+    expect(detectFromMismatch(dave, 'thor')).toEqual({ tokenAgent: 'dave', asserted: 'thor' })
+  })
+
+  it('does not flag a self-send (from equals the token id, decorated or not)', () => {
+    expect(detectFromMismatch(dave, 'dave')).toBeNull()
+    expect(detectFromMismatch(dave, '@dave')).toBeNull()
+  })
+
+  it('does not flag a derived send (empty/absent from)', () => {
+    expect(detectFromMismatch(dave, '')).toBeNull()
+    expect(detectFromMismatch(dave, undefined)).toBeNull()
+  })
+
+  it('does not flag the operator/admin relay (NoA-as-dave is legit, would be noise)', () => {
+    expect(detectFromMismatch(admin, 'dave')).toBeNull()
+  })
+
+  it('does not flag marveen relaying with its OWN per-agent admin:* token (legit impersonator)', () => {
+    // The case a hand-rolled source=agent && from!=id check would FALSE-flag;
+    // reusing decideMessageFrom inherits the admin exclusion.
+    expect(detectFromMismatch(marveenAgentToken, 'dave')).toBeNull()
+  })
+
+  it('flags a curator (memory:delete:any, NOT admin) asserting another agent id', () => {
+    // applegate may cross-delete memories but may NOT send messages as another
+    // agent -- decideMessageFrom 403s it, so detection flags it too.
+    expect(detectFromMismatch(applegate, 'dave')).toEqual({ tokenAgent: 'applegate', asserted: 'dave' })
+  })
+
+  it('is flag-independent: a mismatch is detected regardless of ENFORCE_FROM_BINDING', () => {
+    // The detector takes no flag; it always evaluates the enforce=true predicate.
+    expect(detectFromMismatch(dave, 'thor')).not.toBeNull()
+  })
+})
+
+describe('fromMismatchLogLine / logFromMismatch (C-INTERIM, gate-checkable)', () => {
+  it('renders a stable, grep-able detection line', () => {
+    expect(fromMismatchLogLine({ tokenAgent: 'dave', asserted: 'thor' }))
+      .toBe('[auth] from_agent mismatch (detection-only): token_agent=dave asserted_from=thor')
+  })
+
+  it('emits the line on a mismatch, nothing on a clean send', () => {
+    const lines: string[] = []
+    const emit = (l: string) => lines.push(l)
+    logFromMismatch(emit, dave, 'thor') // mismatch -> one line
+    logFromMismatch(emit, dave, 'dave') // self-send -> nothing
+    logFromMismatch(emit, admin, 'dave') // operator relay -> nothing
+    expect(lines).toEqual(['[auth] from_agent mismatch (detection-only): token_agent=dave asserted_from=thor'])
   })
 })
 

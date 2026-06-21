@@ -76,6 +76,53 @@ export function decideMessageFrom(
   return { ok: false, status: 403, error: 'from must match the authenticated agent identity' }
 }
 
+// --- C-INTERIM (card 38bff392): detection-only from_agent mismatch logging ---
+//
+// Ships AHEAD of enforcement (C-BIND): surfaces the impersonation surface today
+// without blocking, so the fleet keeps running on the shared token while we
+// gather evidence before flipping ENFORCE_FROM_BINDING on.
+//
+// The detector REUSES decideMessageFrom(enforce=true) as its predicate rather
+// than re-implementing the check. Two guarantees follow:
+//   1. The C-INTERIM detector and the C-BIND enforcer share ONE condition, so
+//      they can never drift (a separate check could flag a case the enforcer
+//      would pass, or miss one it would block).
+//   2. The admin exclusion is inherited: marveen's per-agent token is
+//      source='agent' but admin:*-scoped (a legitimate impersonator); the admin
+//      branch of decideMessageFrom excludes it, so a legit operator relay is not
+//      logged as a mismatch.
+// It is flag-INDEPENDENT: it always evaluates with enforce=true and only logs;
+// real enforcement stays gated by ENFORCE_FROM_BINDING elsewhere.
+
+export interface FromMismatch {
+  tokenAgent: string
+  asserted: string
+}
+
+// Return the mismatch descriptor when the token identity may NOT send as the
+// asserted `from` (the exact condition decideMessageFrom would 403 on), else null.
+export function detectFromMismatch(identity: AgentIdentity, bodyFrom: string | undefined): FromMismatch | null {
+  const decision = decideMessageFrom(identity, bodyFrom, true)
+  if (decision.ok) return null
+  return { tokenAgent: identity.agentId, asserted: sanitizeAgentIdent(bodyFrom ?? '') }
+}
+
+// The stable, grep-able detection log line (gate-checkable like the boot log).
+export function fromMismatchLogLine(m: FromMismatch): string {
+  return `[auth] from_agent mismatch (detection-only): token_agent=${m.tokenAgent} asserted_from=${m.asserted}`
+}
+
+// Emit a detection line when (and only when) the send is an impersonation
+// mismatch. Always safe to call -- a clean/derived/admin-relay send emits nothing.
+export function logFromMismatch(
+  emit: (line: string) => void,
+  identity: AgentIdentity,
+  bodyFrom: string | undefined,
+): void {
+  const m = detectFromMismatch(identity, bodyFrom)
+  if (m) emit(fromMismatchLogLine(m))
+}
+
 export type MutationDecision = { ok: true } | { ok: false; status: number; error: string }
 
 // Authorize a memory mutation (DELETE/PUT) against the row's owner.
