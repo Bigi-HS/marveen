@@ -11,6 +11,13 @@
 // watchdogs and the d37df625 abandonment consumer use. A wedged dashboard (no
 // clears) only makes escalation MORE likely, which is the fail-safe direction.
 //
+// Boot-grace guard (card 4beb20b7 / A3'): after a restart the pending-ack trail
+// may hold pre-restart ACKs that the observer would have cleared but didn't get
+// to before the restart. To avoid false "receipt not confirmed" alerts, we skip
+// escalation during the first ESCALATION_BOOT_GRACE_MS after server start and
+// instead advance the cursor to the current high-water mark (same as baseline).
+// The server writes its boot timestamp to SERVER_BOOT_AT_PATH on startup.
+//
 // All side effects are here; the decision is pure and unit-tested. The cursor
 // advances ONLY after a successful send (or a baseline), so a failed Telegram
 // call is retried on the next tick rather than swallowed.
@@ -34,6 +41,30 @@ const PROJECT_ROOT = process.env.MARVEEN_ROOT ?? process.cwd()
 const ALERT_CHAT_ID = process.env.WATCHDOG_ALERT_CHAT_ID ?? '8643929442'
 const SENTINEL_PATH = join(PROJECT_ROOT, DELIVERY_PENDING_ACK_SENTINEL)
 const CURSOR_PATH = join(PROJECT_ROOT, 'store', '.fleet-supervisor', 'delivery-ack.cursor')
+export const SERVER_BOOT_AT_PATH = join(PROJECT_ROOT, 'store', '.fleet-supervisor', 'server-boot-at.txt')
+
+// Grace period after server restart: skip escalation and advance cursor instead.
+// 60s matches the card spec (~60s blind spot accepted; ACK_ESCALATION_WINDOW_MS=15min
+// means no real ACK is missed -- it will be escalated on the next supervisor tick
+// once the grace window has passed).
+export const ESCALATION_BOOT_GRACE_MS = 60_000
+
+// Returns true if the server started less than ESCALATION_BOOT_GRACE_MS ago.
+// bootAt = 0 means the file is absent or unreadable (treat as no grace, i.e. false).
+export function isWithinEscalationBootGrace(bootAt: number, nowMs: number): boolean {
+  return bootAt > 0 && nowMs - bootAt < ESCALATION_BOOT_GRACE_MS
+}
+
+function readBootAt(): number {
+  try {
+    if (!existsSync(SERVER_BOOT_AT_PATH)) return 0
+    const raw = readFileSync(SERVER_BOOT_AT_PATH, 'utf-8').trim()
+    const n = parseInt(raw, 10)
+    return Number.isFinite(n) && n > 0 ? n : 0
+  } catch {
+    return 0
+  }
+}
 
 function readMainToken(): string | null {
   try {
@@ -82,7 +113,8 @@ async function main(): Promise<void> {
 
   const outstanding = outstandingPendingAcks(raw)
   const cursor = readCursor()
-  const plan = selectAckEscalations(outstanding, cursor, Date.now())
+  const nowMs = Date.now()
+  const plan = selectAckEscalations(outstanding, cursor, nowMs)
 
   if (plan.baselined) {
     // First run on an existing trail: record the high-water mark, escalate
@@ -92,6 +124,21 @@ async function main(): Promise<void> {
       { through: plan.nextCursor.lastEscalatedId },
       'delivery-ack: baselined cursor past existing outstanding acks',
     )
+    return
+  }
+
+  // Boot-grace guard (card 4beb20b7): if the server recently restarted, advance
+  // the cursor past pre-restart outstanding ACKs without alerting -- the observer
+  // may not have had time to write the cleared record before the restart.
+  if (isWithinEscalationBootGrace(readBootAt(), nowMs)) {
+    const maxId = outstanding.reduce((m, e) => Math.max(m, e.id), cursor.lastEscalatedId)
+    if (maxId > cursor.lastEscalatedId) {
+      writeCursor({ lastEscalatedId: maxId })
+      logger.info(
+        { through: maxId, graceMs: ESCALATION_BOOT_GRACE_MS },
+        'delivery-ack: boot grace -- advanced cursor without escalating',
+      )
+    }
     return
   }
 
