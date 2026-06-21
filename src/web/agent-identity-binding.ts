@@ -11,11 +11,13 @@
 //                            (gap b -- impersonation).
 //   - decideMemoryMutation : DELETE/PUT /api/memories owner-only (gap a).
 //
-// The flag (ENFORCE_FROM_BINDING) defaults OFF: with it off, both helpers return
-// the legacy outcome, so b1ce5118 lands INERT on the live fleet. The flag is
-// read ONLY from the process environment, NEVER from a request body or header
-// (Chad #5): a compromised admin-scope agent must not be able to disable
-// enforcement over the API.
+// The flag (ENFORCE_FROM_BINDING) defaults ON (card db9bc192, C-BIND): per-agent
+// tokens are live fleet-wide (C-PRIMARY merged), so enforcement is now the
+// correct production state. Set ENFORCE_FROM_BINDING=false ONLY in environments
+// where per-agent tokens have not yet been provisioned. The flag is read ONLY
+// from the process environment, NEVER from a request body or header (Chad #5):
+// a compromised admin-scope agent must not be able to disable enforcement over
+// the API.
 
 import { sanitizeAgentIdent } from '../prompt-safety.js'
 import {
@@ -31,11 +33,16 @@ import type Database from 'better-sqlite3'
 const MEMORY_CURATE_SCOPE = 'memory:delete:any'
 
 const TRUTHY = new Set(['on', '1', 'true', 'yes'])
+const FALSY = new Set(['off', '0', 'false', 'no'])
 
 // Is from_agent / owner enforcement on? ENV-ONLY by design (Chad #5). `env` is
 // injectable for tests; production passes process.env.
+// Default ON (db9bc192): absent/empty env var now means enforcement IS active.
+// Set ENFORCE_FROM_BINDING=false only when per-agent tokens are not provisioned.
 export function enforceFromBindingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return TRUTHY.has((env.ENFORCE_FROM_BINDING ?? '').trim().toLowerCase())
+  const val = (env['ENFORCE_FROM_BINDING'] ?? '').trim().toLowerCase()
+  if (FALSY.has(val)) return false
+  return true // default ON: absent/empty/truthy/unrecognised all enforce (fail-safe)
 }
 
 // The mandatory startup log line (Chad #5): emitted once at boot so an operator
