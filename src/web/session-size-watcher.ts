@@ -110,6 +110,17 @@ function resolveAgentModelId(agentName: string): string {
   )
   return live ?? readAgentModel(agentName)
 }
+
+// Resolve the model ID to use for CONTEXT-WINDOW SIZING only. This MUST use
+// the configured model (agent-config.json) rather than the live transcript
+// model because the transcript drops the '[1m]' suffix for Opus-1M agents:
+// live='claude-opus-4-8' while configured='claude-opus-4-8[1m]'. Using the
+// live model would size the window at 200K instead of 1M, giving a 90K
+// threshold (0.45 * 200K) where 450K (0.45 * 1M) is intended -- too aggressive.
+// See memory 'transcript model drops [1m] suffix'.
+function resolveAgentWindowModelId(agentName: string): string {
+  return readAgentModel(agentName)
+}
 // Do not compact the same session more often than this, so /compact does not
 // interrupt a freshly-compacted agent that immediately starts heavy work again.
 export const DEFAULT_COOLDOWN_MS = 3 * 60 * 60 * 1000 // 3 hours
@@ -551,7 +562,7 @@ function checkAgent(name: string): void {
   // Sonnet/Haiku agent compacts ~150K and a 1M Opus agent ~750K. Cooldown stays
   // global. The idle-only gate below is unchanged.
   const thresholds: SessionSizeThresholds = {
-    tokenThreshold: adaptiveTokenThresholdForModel(resolveAgentModelId(name)),
+    tokenThreshold: adaptiveTokenThresholdForModel(resolveAgentWindowModelId(name)),
     cooldownMs: DEFAULT_COOLDOWN_MS,
   }
   if (!shouldCompactSession(contextTokens, last, now, thresholds)) return
@@ -589,7 +600,7 @@ function checkAgentHardCeiling(name: string): void {
   // Per-model hard ceiling = contextWindow(model) * 0.9, mirroring the soft
   // tier's per-model derivation, so a 200K-window agent's ceiling is ~180K and a
   // 1M agent's is ~900K -- both strictly above their soft trigger, never inverted.
-  const hardCeiling = adaptiveHardCeilingForModel(resolveAgentModelId(name))
+  const hardCeiling = adaptiveHardCeilingForModel(resolveAgentWindowModelId(name))
   if (!shouldHardCompact(contextTokens, hardCeiling)) return
   const now = Date.now()
 
@@ -641,7 +652,7 @@ function checkAgentHardCeiling(name: string): void {
 // /compact behind one that has not yet fired.
 function checkAgentBusyCompact(name: string): void {
   const contextTokens = latestContextTokens(name)
-  const busyCeiling = adaptiveBusyCeilingForModel(resolveAgentModelId(name))
+  const busyCeiling = adaptiveBusyCeilingForModel(resolveAgentWindowModelId(name))
   const last = lastCompactedAt.get(name) ?? null
   const now = Date.now()
 
@@ -680,7 +691,7 @@ function checkAgentBusyCompact(name: string): void {
 // surface the 13-compact pile-up taught us to respect). Escalate-only.
 function checkAgentContextEscalation(name: string): void {
   const contextTokens = latestContextTokens(name)
-  const modelId = resolveAgentModelId(name)
+  const modelId = resolveAgentWindowModelId(name)
   const escalationFloor = adaptiveEscalationFloorForModel(modelId)
   const now = Date.now()
 

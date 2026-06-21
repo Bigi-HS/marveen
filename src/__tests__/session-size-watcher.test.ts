@@ -114,7 +114,11 @@ describe('adaptiveTokenThresholdForModel', () => {
   })
 
   it('Opus non-1M (opus-4-8, 200K window) -> 90K threshold (200K * 0.45)', () => {
-    // A 200K-window Opus variant (non-1m) compacts at 45% = 90K.
+    // A true 200K-window Opus variant compacts at 45% = 90K.
+    // IMPORTANT: the live transcript drops '[1m]' from 'claude-opus-4-8[1m]',
+    // making a 1M-context Opus look like 'claude-opus-4-8' (200K). This is why
+    // checkAgent etc. use resolveAgentWindowModelId (configured, keeps [1m]) not
+    // resolveAgentModelId (live-first, drops [1m]). See source-contract test below.
     expect(adaptiveTokenThresholdForModel('claude-opus-4-8')).toBe(90_000)
   })
 
@@ -295,7 +299,20 @@ describe('session-size-watcher -- source contracts', () => {
     // agent gets a 150K threshold instead of the dead 250K no-op.
     const checkFn = SRC.slice(SRC.indexOf('function checkAgent('), SRC.indexOf('function checkAgentHardCeiling'))
     expect(checkFn).toMatch(/adaptiveTokenThresholdForModel\(/)
-    expect(checkFn).toMatch(/resolveAgentModelId\(/)
+    expect(checkFn).toMatch(/resolveAgentWindowModelId\(/)
+  })
+
+  it('window-sizing uses resolveAgentWindowModelId (configured), NOT resolveAgentModelId (live, [1m]-drop bug)', () => {
+    // Guard against regressions to the live-model path. The live transcript drops
+    // the '[1m]' suffix so a 1M-context Opus looks like 'claude-opus-4-8' (200K),
+    // yielding a 90K threshold instead of 450K. resolveAgentWindowModelId uses
+    // readAgentModel (configured) which preserves the suffix.
+    // All four check functions must use the window-sizing variant.
+    expect(SRC).toMatch(/resolveAgentWindowModelId/)
+    expect(SRC).not.toMatch(/adaptiveTokenThresholdForModel\(resolveAgentModelId/)
+    expect(SRC).not.toMatch(/adaptiveHardCeilingForModel\(resolveAgentModelId/)
+    expect(SRC).not.toMatch(/adaptiveBusyCeilingForModel\(resolveAgentModelId/)
+    expect(SRC).not.toMatch(/adaptiveEscalationFloorForModel\(resolveAgentModelId/)
   })
 
   it('the hard sweep also uses a per-model adaptive ceiling, not the fixed constant', () => {
@@ -304,7 +321,7 @@ describe('session-size-watcher -- source contracts', () => {
     // soft tier for opus-1M. It must NOT pass the fixed DEFAULT_HARD_CEILING_TOKENS.
     const hardFn = SRC.slice(SRC.indexOf('function checkAgentHardCeiling'), SRC.indexOf('function checkAgentBusyCompact'))
     expect(hardFn).toMatch(/adaptiveHardCeilingForModel\(/)
-    expect(hardFn).toMatch(/resolveAgentModelId\(/)
+    expect(hardFn).toMatch(/resolveAgentWindowModelId\(/)
     expect(hardFn).not.toMatch(/shouldHardCompact\(contextTokens, DEFAULT_HARD_CEILING_TOKENS\)/)
   })
 
@@ -561,7 +578,7 @@ describe('session-size-watcher -- busy-tier source contracts', () => {
   it('the busy tier uses a per-model adaptive ceiling (not a fixed constant)', () => {
     const busyFn = SRC.slice(SRC.indexOf('function checkAgentBusyCompact'), SRC.indexOf('export function startSessionSizeWatcher'))
     expect(busyFn).toMatch(/adaptiveBusyCeilingForModel\(/)
-    expect(busyFn).toMatch(/resolveAgentModelId\(/)
+    expect(busyFn).toMatch(/resolveAgentWindowModelId\(/)
   })
 
   it('the busy tier respects the cooldown (reads lastCompactedAt before sending)', () => {
