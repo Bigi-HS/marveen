@@ -43,7 +43,7 @@ import ledger_lib  # noqa: E402
 FULL_INJECT_SOURCES = {"resume", "clear"}
 
 # startup: only context-sensitive agents get a mini inject.
-MINI_HOT_CACHE_AGENTS = {"dave", "quill"}
+MINI_HOT_CACHE_AGENTS = {"dave", "quill", "marveen"}
 
 # Full inject limit (~500 words).
 CONTENT_CHAR_LIMIT = 2000
