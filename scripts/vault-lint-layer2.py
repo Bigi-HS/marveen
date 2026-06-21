@@ -36,15 +36,17 @@ BADGE_PATH = os.path.join(PROJECT_ROOT, "store", "vault-lint-l2-badge.json")
 
 # ---------------------------------------------------------------------------
 # Done-marker patterns (TM-2)
+# Card 73ec620c: tightened from 7 to 5 patterns (live-vault FP rate 30% -> ~11%).
+# Dropped: \bkész\b (too generic), \bclosed\b (sub-task/incident trigger).
+# Dropped: bare \bDONE\b (matched "SCOPE done", "card X done" cross-refs).
+# Added: DEPLOY DONE (unambiguous deployment-closure signal on live vault).
 # ---------------------------------------------------------------------------
 _DONE_PATTERNS = [
     r"\bMERGED\b",
-    r"\bDONE\b",
     r"\bLEZARVA\b",
-    r"\bkész\b",
-    r"\bclosed\b",
     r"PR #\d+ merged",
     r"status[: ]+done",
+    r"DEPLOY DONE\b",
 ]
 _DONE_RE = re.compile("|".join(_DONE_PATTERNS), re.IGNORECASE)
 
