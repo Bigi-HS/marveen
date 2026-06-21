@@ -933,4 +933,11 @@ describe('session-size-watcher -- escalation-floor source contracts', () => {
     expect(SRC).not.toMatch(/Number\(process\.env\.SESSION_BUSY_COMPACT_COOLDOWN_MS\)\s*\|\|/)
     expect(SRC).not.toMatch(/Number\(process\.env\.SESSION_HARD_CEILING_STUCK_WARN_MS\)\s*\|\|/)
   })
+
+  // Card cd007200: the idle-low env reads used the same foot-gun, so a negative
+  // SESSION_IDLE_LOW_SUSTAINED_MS=-1 would knock out the sustained-idle guard.
+  it('the idle-low env-reads are guarded too (card cd007200)', () => {
+    expect(SRC).not.toMatch(/Number\(process\.env\.SESSION_IDLE_LOW_THRESHOLD_TOKENS\)\s*\|\|/)
+    expect(SRC).not.toMatch(/Number\(process\.env\.SESSION_IDLE_LOW_SUSTAINED_MS\)\s*\|\|/)
+  })
 })

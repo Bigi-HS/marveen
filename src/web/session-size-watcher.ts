@@ -323,13 +323,22 @@ export function shouldBusyCompact(
 // working agent goes busy every few minutes and so never accumulates the required
 // continuous-idle window, while a parked/heartbeat agent is idle for long
 // stretches. So this can only ever fire on the parked-with-stale-tail case.
-export const IDLE_LOW_THRESHOLD_TOKENS =
-  Number(process.env.SESSION_IDLE_LOW_THRESHOLD_TOKENS) || 200_000
+// positiveEnvMs is a generic positive-number env guard (reused here for a token
+// count too): the plain `Number(env) || default` idiom let a negative value
+// (e.g. SESSION_IDLE_LOW_SUSTAINED_MS=-1) slip through and knock out the
+// sustained-idle guard, so a mid-task agent could be compacted
+// (Chad INFO[low] on PR#221, card cd007200).
+export const IDLE_LOW_THRESHOLD_TOKENS = positiveEnvMs(
+  process.env.SESSION_IDLE_LOW_THRESHOLD_TOKENS,
+  200_000,
+)
 // How long an agent must have been continuously NOT actively working before the
 // idle-low tier may compact it. Long enough that a working agent's between-turn
 // idle never qualifies; short enough to trim a parked agent promptly.
-export const IDLE_LOW_SUSTAINED_MS =
-  Number(process.env.SESSION_IDLE_LOW_SUSTAINED_MS) || 20 * 60 * 1000 // 20 min
+export const IDLE_LOW_SUSTAINED_MS = positiveEnvMs(
+  process.env.SESSION_IDLE_LOW_SUSTAINED_MS,
+  20 * 60 * 1000, // 20 min
+)
 
 /**
  * Pure IDLE-LOW decision: should we compact a sustained-idle agent that is
