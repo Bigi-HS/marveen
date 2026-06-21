@@ -9,6 +9,9 @@ import {
   recordPaneDetectorSmokePass,
   paneDetectorMismatchFile,
   paneDetectorSmokePassedFile,
+  __setDriftAlertFn,
+  __resetPaneGateState,
+  type DriftAlertFn,
 } from '../web/pane-detector-gate.js'
 
 // Card 56ad0fa3 (B1+B4): the pane-dependent wedge watchdogs must stand down on a
@@ -85,5 +88,81 @@ describe('gate IO round-trip (drift -> stand down -> smoke -> re-enable)', () =>
 
   it('rejects an empty smoke version', () => {
     expect(() => recordPaneDetectorSmokePass('   ')).toThrow()
+  })
+})
+
+describe('B1: direct Telegram drift alert on first stand-down per mismatch version', () => {
+  let root: string
+  let prevRoot: string | undefined
+  const alerts: Array<{ reason: string; version: string }> = []
+  const spyFn: DriftAlertFn = async (reason, version) => {
+    alerts.push({ reason, version })
+  }
+
+  beforeEach(() => {
+    prevRoot = process.env.MARVEEN_ROOT
+    root = mkdtempSync(join(tmpdir(), 'pane-gate-b1-'))
+    process.env.MARVEEN_ROOT = root
+    mkdirSync(join(root, 'store', '.fleet-supervisor'), { recursive: true })
+    alerts.length = 0
+    __setDriftAlertFn(spyFn)
+    __resetPaneGateState()
+    __setDriftAlertFn(spyFn) // re-inject after reset
+  })
+
+  afterEach(() => {
+    if (prevRoot === undefined) delete process.env.MARVEEN_ROOT
+    else process.env.MARVEEN_ROOT = prevRoot
+    __resetPaneGateState()
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('fires alert once when first watchdog stands down on a drift', async () => {
+    writeFileSync(paneDetectorMismatchFile(), '2.7.0\n')
+    checkPaneDetectorGate('b1-watchdog-a')
+    // Alert is async (fire-and-forget); yield the microtask queue.
+    await Promise.resolve()
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0].version).toBe('2.7.0')
+  })
+
+  it('does NOT fire a second alert for the same mismatch version (dedup)', async () => {
+    writeFileSync(paneDetectorMismatchFile(), '2.7.0\n')
+    checkPaneDetectorGate('b1-watchdog-a')
+    checkPaneDetectorGate('b1-watchdog-b') // second watchdog, same drift version
+    await Promise.resolve()
+    expect(alerts).toHaveLength(1) // only one alert despite two watchdogs
+  })
+
+  it('does NOT fire an alert when no drift is present', async () => {
+    checkPaneDetectorGate('b1-watchdog-trusted')
+    await Promise.resolve()
+    expect(alerts).toHaveLength(0)
+  })
+
+  it('fires a new alert when a new mismatch version appears after a smoke pass', async () => {
+    // First drift + smoke pass cycle.
+    writeFileSync(paneDetectorMismatchFile(), '2.7.0\n')
+    checkPaneDetectorGate('b1-cycle-wdog')
+    await Promise.resolve()
+    expect(alerts).toHaveLength(1)
+
+    recordPaneDetectorSmokePass('2.7.0') // clears mismatch, re-enables
+    checkPaneDetectorGate('b1-cycle-wdog') // now trusted again -> no alert
+
+    // New drift on a different version.
+    writeFileSync(paneDetectorMismatchFile(), '2.8.0\n')
+    checkPaneDetectorGate('b1-cycle-wdog') // transitions to !trusted again
+    await Promise.resolve()
+    expect(alerts).toHaveLength(2)
+    expect(alerts[1].version).toBe('2.8.0')
+  })
+
+  it('alert passes the reason and mismatch version to the alert function', async () => {
+    writeFileSync(paneDetectorMismatchFile(), '3.0.0\n')
+    checkPaneDetectorGate('b1-reason-check')
+    await Promise.resolve()
+    expect(alerts[0].version).toBe('3.0.0')
+    expect(alerts[0].reason).toContain('3.0.0')
   })
 })
