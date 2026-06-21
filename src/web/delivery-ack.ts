@@ -119,8 +119,16 @@ export interface PendingAckEvent {
  * pendingAckRecord) into PendingAckEvent records. Blank lines, malformed JSON
  * and non-"delivery-ack-pending" rows are skipped so a torn final write or a
  * hand-edit never throws. Pure: takes the raw file text.
+ *
+ * Pass `clearedIds` to drop pending records whose id is already cleared during
+ * the parse, so a caller after the OUTSTANDING set doesn't materialize records
+ * it will immediately discard (Thor INFO on PR#219, card f7491ad3). Omitting it
+ * returns every pending record, preserving the original contract.
  */
-export function parsePendingAckSentinel(raw: string): PendingAckEvent[] {
+export function parsePendingAckSentinel(
+  raw: string,
+  clearedIds?: ReadonlySet<number>,
+): PendingAckEvent[] {
   const out: PendingAckEvent[] = []
   for (const line of raw.split('\n')) {
     const t = line.trim()
@@ -136,6 +144,7 @@ export function parsePendingAckSentinel(raw: string): PendingAckEvent[] {
         typeof o.to === 'string' &&
         typeof o.delivered_at_ms === 'number'
       ) {
+        if (clearedIds?.has(o.id)) continue
         out.push(o as PendingAckEvent)
       }
     } catch {
@@ -201,8 +210,8 @@ export function outstandingPendingAcks(raw: string): PendingAckEvent[] {
   const cleared = parseClearedAckIds(raw)
   const seen = new Set<number>()
   const out: PendingAckEvent[] = []
-  for (const p of parsePendingAckSentinel(raw)) {
-    if (cleared.has(p.id) || seen.has(p.id)) continue
+  for (const p of parsePendingAckSentinel(raw, cleared)) {
+    if (seen.has(p.id)) continue
     seen.add(p.id)
     out.push(p)
   }
