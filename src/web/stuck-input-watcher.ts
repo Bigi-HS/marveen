@@ -5,6 +5,7 @@ import { isAgentRunning, capturePane, sendEnterToSession } from './agent-process
 import { resolveAgentSession } from './channel-mcp-reconnect.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { checkPaneDetectorGate } from './pane-detector-gate.js'
+import { checkIdlePipeRecovery, clearIdlePipeRecoveryAgent } from './idle-pipe-recovery.js'
 import {
   stuckInputSignature,
   decideStuckInputRecovery,
@@ -51,6 +52,11 @@ const watchState = new Map<string, StuckInputState>()
 
 function checkSession(label: string, session: string): void {
   const pane = capturePane(session)
+  // Piggy-back the busy->idle pipe-recovery edge on this same capture (card
+  // 667281e4): zero extra tmux work, and it only acts when the pipe is actually
+  // down at a turn-end. Runs after the CLI-drift gate (sweep guards it) since it
+  // reads detectPaneState too.
+  if (pane != null) checkIdlePipeRecovery(label, pane)
   // A failed capture is treated as "nothing parked" -- it ends any active
   // spell rather than holding stale state across a transient tmux miss.
   const sig = pane == null ? null : stuckInputSignature(pane)
@@ -99,6 +105,7 @@ export function startStuckInputWatcher(): NodeJS.Timeout {
     for (const name of listAgentNames()) {
       if (!isAgentRunning(name)) {
         watchState.delete(resolveAgentSession(name))
+        clearIdlePipeRecoveryAgent(name)
         continue
       }
       try {
