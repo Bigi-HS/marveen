@@ -1165,11 +1165,52 @@ export function getMemoryById(id: number): { id: number; agent_id: string; conte
     | undefined
 }
 
-// Category-only update (card b68b9e71 Part B): updates ONLY the category column.
-// content and accessed_at are intentionally NOT touched so TM-1/TM-3 staleness
-// signals stay accurate and vault-lint --apply can safely re-categorise entries.
-export function updateMemoryCategory(id: number, category: string): boolean {
-  return db.prepare('UPDATE memories SET category = ? WHERE id = ?').run(category, id).changes > 0
+// A subset of the mutable memory columns. Every field is optional: only the
+// ones present are written. `keywords: null` explicitly clears the column,
+// which is why it is distinguished from "absent" via `undefined`.
+export interface MemoryPatch {
+  content?: string
+  category?: string
+  keywords?: string | null
+  agentId?: string
+}
+
+// Partial update for a single memory (card e163dbf7). Persists ONLY the
+// provided fields and returns the list of columns that were written (empty
+// when nothing was provided or the id does not exist). This is the general
+// primitive behind PATCH /api/memories/<id>; it replaced the earlier
+// category-only updateMemoryCategory (card b68b9e71), whose handler silently
+// dropped content updates.
+//
+// accessed_at is deliberately NOT bumped: a PATCH is a curation edit, not an
+// access, so the TM-1/TM-3 staleness invariant (b68b9e71) is preserved for
+// every field, not just category. updateMemory (the full PUT replace) keeps
+// its accessed_at bump.
+//
+// When content changes the now-stale embedding is refreshed fire-and-forget,
+// mirroring saveAgentMemory, so a curator's corrected text becomes findable by
+// semantic recall. Failures are swallowed (best-effort, like the insert path).
+export function patchMemory(id: number, patch: MemoryPatch): string[] {
+  const sets: string[] = []
+  const cols: string[] = []
+  const params: unknown[] = []
+  if (patch.content !== undefined) { sets.push('content = ?'); cols.push('content'); params.push(patch.content) }
+  if (patch.category !== undefined) { sets.push('category = ?'); cols.push('category'); params.push(patch.category) }
+  if (patch.keywords !== undefined) { sets.push('keywords = ?'); cols.push('keywords'); params.push(patch.keywords) }
+  if (patch.agentId !== undefined) { sets.push('agent_id = ?'); cols.push('agent_id'); params.push(patch.agentId) }
+  if (sets.length === 0) return []
+  params.push(id)
+  const changes = db.prepare(`UPDATE memories SET ${sets.join(', ')} WHERE id = ?`).run(...params).changes
+  if (changes === 0) return []
+
+  if (patch.content !== undefined) {
+    const kw = patch.keywords !== undefined ? patch.keywords : getMemoryById(id)?.keywords
+    const text = patch.content + (kw ? ' ' + kw : '')
+    generateEmbedding(text).then(emb => {
+      if (emb) db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(JSON.stringify(emb), id)
+    }).catch(() => {})
+  }
+  return cols
 }
 
 // --- Daily logs ---

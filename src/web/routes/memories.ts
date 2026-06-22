@@ -1,6 +1,6 @@
 import {
   saveAgentMemory, getAgentMemories, searchAgentMemories, getMemoryStats, updateMemory,
-  updateMemoryCategory,
+  patchMemory, type MemoryPatch,
   hybridSearch, backfillEmbeddings,
   searchMemories, getMemoriesForChat, getDb, applyScopeFilter, ScopedSharedError,
   type Memory,
@@ -279,19 +279,53 @@ Respond ONLY with JSON, nothing else:
     return true
   }
 
-  // PATCH /api/memories/<id> -- category-only update (card b68b9e71 Part B).
-  // Updates ONLY the category column; content and accessed_at are intentionally
-  // unchanged so vault-lint --apply can re-tier entries without corrupting
-  // staleness signals (TM-1/TM-3 correctness invariant from the spec).
+  // PATCH /api/memories/<id> -- partial update (card e163dbf7). Persists any
+  // subset of the mutable fields and returns which ones changed. A category-only
+  // PATCH still updates ONLY the category and leaves content/accessed_at intact
+  // (the b68b9e71 TM-1/TM-3 staleness invariant), so vault-lint --apply is
+  // unaffected; a content update -- previously dropped silently -- now lands.
   if (memUpdateMatch && method === 'PATCH') {
     const id = parseInt(memUpdateMatch[1], 10)
     const body = await readBody(req)
-    const parsed = JSON.parse(body.toString()) as { category?: unknown }
-    const category = parsed.category
-    if (typeof category !== 'string' || !MEMORY_CATEGORIES.has(category)) {
-      json(res, { error: `category must be one of: ${[...MEMORY_CATEGORIES].join(', ')}` }, 400)
+    const parsed = JSON.parse(body.toString()) as
+      { content?: unknown; category?: unknown; tier?: unknown; keywords?: unknown; agent_id?: unknown }
+
+    const patch: MemoryPatch = {}
+    // `tier` is accepted as an alias for `category`, matching the PUT handler.
+    const cat = parsed.category !== undefined ? parsed.category : parsed.tier
+    if (cat !== undefined) {
+      if (typeof cat !== 'string' || !MEMORY_CATEGORIES.has(cat)) {
+        json(res, { error: `category must be one of: ${[...MEMORY_CATEGORIES].join(', ')}` }, 400)
+        return true
+      }
+      patch.category = cat
+    }
+    if (parsed.content !== undefined) {
+      if (typeof parsed.content !== 'string' || parsed.content.trim() === '') {
+        json(res, { error: 'content must be a non-empty string' }, 400)
+        return true
+      }
+      patch.content = parsed.content
+    }
+    if (parsed.keywords !== undefined) {
+      if (parsed.keywords !== null && typeof parsed.keywords !== 'string') {
+        json(res, { error: 'keywords must be a string or null' }, 400)
+        return true
+      }
+      patch.keywords = parsed.keywords
+    }
+    if (parsed.agent_id !== undefined) {
+      if (typeof parsed.agent_id !== 'string' || parsed.agent_id.trim() === '') {
+        json(res, { error: 'agent_id must be a non-empty string' }, 400)
+        return true
+      }
+      patch.agentId = parsed.agent_id
+    }
+    if (Object.keys(patch).length === 0) {
+      json(res, { error: 'no mutable fields provided (content, category/tier, keywords, agent_id)' }, 400)
       return true
     }
+
     const owner = memoryOwner(id)
     if (owner === undefined) { json(res, { error: 'Memory not found' }, 404); return true }
     const authz = decideMemoryMutation(identity, owner, enforceFromBindingEnabled())
@@ -300,7 +334,8 @@ Respond ONLY with JSON, nothing else:
       json(res, { error: authz.error }, authz.status)
       return true
     }
-    if (updateMemoryCategory(id, category)) { json(res, { ok: true }); return true }
+    const updated = patchMemory(id, patch)
+    if (updated.length > 0) { json(res, { ok: true, updated }); return true }
     json(res, { error: 'Memory not found' }, 404)
     return true
   }
