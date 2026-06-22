@@ -2,12 +2,10 @@ import { describe, it, expect } from 'vitest'
 import {
   classifyPendingMessage,
   pruneEscalationState,
-  shouldAlertInBand,
   thresholdsForPriority,
   DEFAULT_RETRY_THRESHOLDS,
   MESSAGE_ESCALATE_AFTER_MS,
   MESSAGE_HARD_TTL_MS,
-  FIRST_CROSSING_GRACE_MS,
 } from '../web/delivery-retry.js'
 
 // Card 7557a98d: a legitimately-busy recipient must NOT lose a still-valid
@@ -70,53 +68,11 @@ describe('default thresholds', () => {
   })
 })
 
-// Card 7557a98d restart-amplification fix (12-agent adversarial review finding):
-// escalationState is an in-process Map with no persistence, but pending messages
-// survive a server restart in SQLite. After a restart, an already-overdue message
-// has no in-process record, so the naive `firstEscalation = !state.has(id)` fires
-// a FRESH in-band ping to the (often deaf) main agent on EVERY restart -- exactly
-// the backlog amplification the "in-band ONCE" invariant exists to prevent, and
-// the fleet has a daily restart storm. shouldAlertInBand distinguishes a genuine
-// first crossing (age just over the threshold) from a restart rediscovery (age
-// well past it): the latter is treated as already-escalated -> sentinel-only,
-// out-of-band. No data loss either way (the 6 h give-up is age-based).
-describe('shouldAlertInBand (restart-amplification guard)', () => {
-  const T = DEFAULT_RETRY_THRESHOLDS
-
-  it('alerts in-band on a genuine first crossing (no prior state, age just over threshold)', () => {
-    expect(shouldAlertInBand(MESSAGE_ESCALATE_AFTER_MS, false)).toBe(true)
-    expect(shouldAlertInBand(MESSAGE_ESCALATE_AFTER_MS + 5000, false)).toBe(true)
-  })
-
-  it('does NOT alert in-band when this process already escalated the id (re-alert is out-of-band)', () => {
-    // hasPriorEscalation true -> the periodic re-nag rides purely on the sentinel.
-    expect(shouldAlertInBand(MESSAGE_ESCALATE_AFTER_MS, true)).toBe(false)
-    expect(shouldAlertInBand(MESSAGE_HARD_TTL_MS - 1, true)).toBe(false)
-  })
-
-  it('does NOT alert in-band on a restart rediscovery (no prior state, age well past threshold)', () => {
-    // A 3 h-overdue message with no in-process record == throttle state lost to a
-    // restart; it was almost certainly in-band-alerted before. Suppress, sentinel-only.
-    expect(shouldAlertInBand(3 * 60 * 60 * 1000, false)).toBe(false)
-    expect(shouldAlertInBand(MESSAGE_ESCALATE_AFTER_MS + FIRST_CROSSING_GRACE_MS, false)).toBe(false)
-  })
-
-  it('uses the grace window as the first-crossing/restart boundary (exclusive upper)', () => {
-    expect(shouldAlertInBand(MESSAGE_ESCALATE_AFTER_MS + FIRST_CROSSING_GRACE_MS - 1, false)).toBe(true)
-    expect(shouldAlertInBand(MESSAGE_ESCALATE_AFTER_MS + FIRST_CROSSING_GRACE_MS, false)).toBe(false)
-  })
-
-  it('honours custom thresholds and grace', () => {
-    const t = { escalateAfterMs: 100, reAlertIntervalMs: 100, hardTtlMs: 1000 }
-    expect(shouldAlertInBand(100, false, t, 10)).toBe(true)
-    expect(shouldAlertInBand(109, false, t, 10)).toBe(true)
-    expect(shouldAlertInBand(110, false, t, 10)).toBe(false)
-  })
-
-  it('grace is small relative to the re-alert interval (a restart cannot masquerade as a first crossing for long)', () => {
-    expect(FIRST_CROSSING_GRACE_MS).toBeLessThan(T.reAlertIntervalMs)
-  })
-})
+// Note: the in-band overdue alert + its restart-amplification guard
+// (shouldAlertInBand / FIRST_CROSSING_GRACE_MS, card 7557a98d) were removed in
+// card f1ea52c0 -- 'overdue' is now sentinel-only, so the in-band gate no longer
+// exists. Only a permanent 'dropped' give-up alerts in-band; see
+// delivery-alert.test.ts > alertInBand.
 
 // Card 28d2179f (DA verdict on PR #130): a flat 60-min escalate-after means
 // time-sensitive inter-agent messages (T3 triggers, deploy-GO, gate requests)
@@ -169,13 +125,6 @@ describe('thresholdsForPriority (card 28d2179f)', () => {
       const t = thresholdsForPriority(p)
       expect(t.escalateAfterMs).toBeLessThan(t.hardTtlMs)
     }
-  })
-
-  it('the first-crossing grace stays well under even the urgent re-alert interval', () => {
-    // shouldAlertInBand uses escalateAfter + grace as the first-crossing boundary;
-    // for the restart-rediscovery guard to hold for urgent too, grace must be
-    // smaller than the tightest re-alert interval.
-    expect(FIRST_CROSSING_GRACE_MS).toBeLessThan(thresholdsForPriority('urgent').reAlertIntervalMs)
   })
 
   it('falls back to DEFAULT for an unknown / undefined priority (defensive)', () => {

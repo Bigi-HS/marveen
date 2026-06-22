@@ -20,12 +20,6 @@
 export const MESSAGE_ESCALATE_AFTER_MS = 60 * 60 * 1000 // first overdue escalation
 export const MESSAGE_REALERT_INTERVAL_MS = 60 * 60 * 1000 // re-nag cadence while still pending
 export const MESSAGE_HARD_TTL_MS = 6 * 60 * 60 * 1000 // final give-up (markMessageFailed)
-// Window past escalateAfter within which a missing in-process escalation record
-// still counts as a GENUINE first crossing rather than a restart rediscovery (see
-// shouldAlertInBand). A real first crossing is caught within a tick or two of the
-// 60-min boundary, so a few minutes is ample; it must stay well under the re-alert
-// interval so a restart cannot pose as a first crossing for a whole cadence.
-export const FIRST_CROSSING_GRACE_MS = 5 * 60 * 1000
 
 export interface RetryThresholds {
   escalateAfterMs: number
@@ -109,35 +103,6 @@ export function classifyPendingMessage(
   if (lastEscalatedAtMs === undefined) return 'escalate'
   if (nowMs - lastEscalatedAtMs >= t.reAlertIntervalMs) return 'escalate'
   return 'wait'
-}
-
-/**
- * Decide whether an overdue escalation should emit an IN-BAND alert (a delivery-
- * monitor -> main agent_message) this tick, versus riding purely out-of-band on
- * the sentinel. In-band must fire AT MOST ONCE per message, on its genuine first
- * crossing of escalateAfter.
- *
- * The trap (card 7557a98d, 12-agent adversarial review): the escalation throttle
- * is an in-process Map with no persistence, but pending messages survive a server
- * restart in SQLite. So `!state.has(id)` alone cannot mean "first crossing" -- after
- * a restart EVERY still-overdue message has no record and would re-fire in-band,
- * piling fresh alerts onto the (often deaf) main agent on every restart of a fleet
- * that restarts daily. We disambiguate by AGE: a real first crossing is detected
- * within a tick or two of escalateAfter (age < escalateAfter + grace); an age well
- * past that with no record is a restart rediscovery of a message that was almost
- * certainly already alerted -> suppress the in-band ping, let the sentinel carry it.
- *
- * @param ageMs               now - created_at, in ms (caller has already classified this as overdue).
- * @param hasPriorEscalation  whether the in-process map holds a prior escalation for this id.
- */
-export function shouldAlertInBand(
-  ageMs: number,
-  hasPriorEscalation: boolean,
-  t: RetryThresholds = DEFAULT_RETRY_THRESHOLDS,
-  graceMs: number = FIRST_CROSSING_GRACE_MS,
-): boolean {
-  if (hasPriorEscalation) return false // already pinged in-band this process lifetime
-  return ageMs < t.escalateAfterMs + graceMs // genuine first crossing, not a restart rediscovery
 }
 
 /**
