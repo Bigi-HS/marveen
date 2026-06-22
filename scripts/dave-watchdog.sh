@@ -92,13 +92,17 @@ launch_fresh() {
 }
 
 # Alert marveen via inter-agent API when a crash-loop forces a fresh relaunch.
+# Token is read inside Python (not passed via argv) to avoid ps-visible secret.
 alert_crash_loop() {
   local count="$1"
-  local tok; tok=$(cat /home/domin/marveen/store/.dashboard-token 2>/dev/null) || return
-  python3 - "$count" "$tok" <<'PY' 2>/dev/null || log "WARN: alert_crash_loop could not reach dashboard API"
+  python3 - "$count" <<'PY' 2>/dev/null || log "WARN: alert_crash_loop could not reach dashboard API"
 import urllib.request, json, sys
-count, tok = sys.argv[1], sys.argv[2]
-msg = f"CRASH-LOOP alert: agent-dave had {count} consecutive sub-90s deaths -- did ONE fresh relaunch (dropped --continue). Check store/dave-watchdog.log."
+count = sys.argv[1]
+try:
+    tok = open("/home/domin/marveen/store/.dashboard-token").read().strip()
+except OSError:
+    sys.exit(1)
+msg = f"CRASH-LOOP alert: agent-dave had {count} consecutive sub-120s deaths -- did ONE fresh relaunch (dropped --continue). Check store/dave-watchdog.log."
 data = json.dumps({"from":"forge","to":"marveen","content":msg}).encode()
 req = urllib.request.Request("http://localhost:3420/api/messages", data=data,
       headers={"Content-Type":"application/json","Authorization":f"Bearer {tok}"}, method="POST")

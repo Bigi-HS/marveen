@@ -86,11 +86,14 @@ launch_fresh() {
 
 alert_crash_loop() {
   local count="$1"
-  local tok; tok=$(cat /home/domin/marveen/store/.dashboard-token 2>/dev/null) || return
-  python3 - "$count" "$NAME" "$tok" <<'PY' 2>/dev/null || log "WARN: alert_crash_loop could not reach dashboard API"
+  python3 - "$count" "$NAME" <<'PY' 2>/dev/null || log "WARN: alert_crash_loop could not reach dashboard API"
 import urllib.request, json, sys
-count, name, tok = sys.argv[1], sys.argv[2], sys.argv[3]
-msg = f"CRASH-LOOP alert: agent-{name} had {count} consecutive sub-90s deaths -- did ONE fresh relaunch (dropped --continue). Check store/{name}-watchdog.log."
+count, name = sys.argv[1], sys.argv[2]
+try:
+    tok = open("/home/domin/marveen/store/.dashboard-token").read().strip()
+except OSError:
+    sys.exit(1)
+msg = f"CRASH-LOOP alert: agent-{name} had {count} consecutive sub-120s deaths -- did ONE fresh relaunch (dropped --continue). Check store/{name}-watchdog.log."
 data = json.dumps({"from":"forge","to":"marveen","content":msg}).encode()
 req = urllib.request.Request("http://localhost:3420/api/messages", data=data,
       headers={"Content-Type":"application/json","Authorization":f"Bearer {tok}"}, method="POST")
