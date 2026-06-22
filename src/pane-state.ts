@@ -778,6 +778,44 @@ export function stuckInputSignature(pane: string): string | null {
   return sig.length > 0 ? sig : null
 }
 
+// A stable signature of a `[Pasted text #N]` placeholder parked in the live
+// input box, or null when there is no recoverable stale-paste stall.
+//
+// detectPaneState classifies a pending-paste placeholder as 'busy' (an
+// injection-avoidance measure: the scheduler must not pile prompts onto a
+// parked paste), so stuckInputSignature -- which only fires for the 'typing'
+// state -- never sees it. That left a real failure mode uncovered (card
+// 1b0f58ba): when the closing Enter is swallowed on the channel-notification
+// path, the pasted payload sits parked indefinitely and only the bounded
+// post-send retry in sendPromptToSession could ever recover it (a ~1s window).
+// This signature feeds the same decideStuckInputRecovery machinery so the
+// stuck-input watcher can re-submit a genuinely stalled paste.
+//
+// Returns null (no recovery) unless ALL of these hold, so it never fires on a
+// pane that is legitimately busy or still receiving input:
+//   - the pane is NOT actively working -- no live spinner / token stream. A
+//     spinner alongside the placeholder means the turn is really processing
+//     the paste, so an Enter would land mid-turn (adversarial fixture c).
+//   - the pane is NOT a usage-limit modal -- that is a real blocking surface
+//     owned by the usage-limit handlers, not a swallowed-Enter stall.
+//   - there IS a live input box and the placeholder is inside it -- a
+//     `[Pasted text]` echo left in scrollback is not live parked input.
+//
+// The signature is the whitespace-collapsed input box, so a growing burst
+// (the char count climbs, or a second placeholder appears between polls)
+// yields a different signature and the watcher's confirm window restarts
+// rather than recovering prematurely (adversarial fixture b).
+export function pendingPasteSignature(pane: string): string | null {
+  if (!pane || !pane.trim()) return null
+  if (isActivelyWorking(pane)) return null
+  if (detectsUsageLimitMenu(pane)) return null
+  const box = liveInputBox(pane)
+  if (box == null) return null
+  if (!PENDING_PASTE_RX.test(box)) return null
+  const sig = box.replace(/\s+/g, ' ').trim()
+  return sig.length > 0 ? sig : null
+}
+
 // Per-session bookkeeping for the stuck-input recovery watcher. A "spell"
 // is one continuous stretch of the SAME text parked in the input box.
 export interface StuckInputState {
