@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { listIdeas, createIdea, updateIdea, deleteIdea, listIdeaCategories, createKanbanCard, getDb } from '../../db.js'
 import { generateBreakdown } from '../llm-breakdown.js'
+import { parseScore } from '../idea-scoring.js'
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
@@ -35,8 +36,13 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
       description?: string
       category?: string
       source?: string
+      impact?: unknown
+      effort?: unknown
     }
     if (!data.title) { json(res, { error: 'title required' }, 400); return true }
+    const impact = parseScore(data.impact)
+    const effort = parseScore(data.effort)
+    if (!impact.ok || !effort.ok) { json(res, { error: 'impact/effort must be an integer 1-5 or null' }, 400); return true }
     const id = randomUUID().slice(0, 8)
     createIdea({
       id,
@@ -46,6 +52,8 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
       status: 'new',
       source: data.source ?? 'manual',
       kanban_id: null,
+      impact: impact.value,
+      effort: effort.value,
     })
     json(res, { ok: true, id })
     return true
@@ -56,7 +64,19 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
   if (ideaMatch && method === 'PUT') {
     const id = decodeURIComponent(ideaMatch[1])
     const body = await readBody(req)
-    const data = JSON.parse(body.toString())
+    const data = JSON.parse(body.toString()) as Record<string, unknown>
+    // Validate the scoring fields when present; only override the raw values once
+    // parsed so an out-of-range score is rejected rather than persisted.
+    if ('impact' in data) {
+      const p = parseScore(data.impact)
+      if (!p.ok) { json(res, { error: 'impact must be an integer 1-5 or null' }, 400); return true }
+      data.impact = p.value
+    }
+    if ('effort' in data) {
+      const p = parseScore(data.effort)
+      if (!p.ok) { json(res, { error: 'effort must be an integer 1-5 or null' }, 400); return true }
+      data.effort = p.value
+    }
     if (updateIdea(id, data)) { json(res, { ok: true }); return true }
     json(res, { error: 'Ötlet nem található' }, 404)
     return true

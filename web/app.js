@@ -9687,11 +9687,32 @@ function renderIdeasList() {
     if (!byCategory[idea.category]) byCategory[idea.category] = []
     byCategory[idea.category].push(idea)
   }
+  // Within a category, surface the "quick wins" first: highest impact-minus-effort
+  // on top, scored ideas before unscored ones (which fall back to recency order).
+  const score = i => (i.impact == null && i.effort == null) ? null : (i.impact || 0) - (i.effort || 0)
+  for (const items of Object.values(byCategory)) {
+    items.sort((a, b) => {
+      const sa = score(a), sb = score(b)
+      if (sa == null && sb == null) return 0
+      if (sa == null) return 1
+      if (sb == null) return -1
+      return sb - sa
+    })
+  }
   el.innerHTML = Object.entries(byCategory).map(([cat, items]) => `
     <div style="margin-bottom:8px">
       <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);padding:4px 0 6px">${escapeHtml(cat)}</div>
       ${items.map(renderIdeaCard).join('')}
     </div>`).join('')
+}
+
+function ideaScoreBadges(idea) {
+  const badge = (label, val, color) => val == null ? '' :
+    `<span style="font-size:10px;color:${color};padding:1px 5px;border:1px solid ${color};border-radius:4px">${label} ${val}</span>`
+  const impact = badge('Impact', idea.impact, '#22c55e')
+  const effort = badge('Effort', idea.effort, '#f59e0b')
+  if (!impact && !effort) return ''
+  return `<span style="display:inline-flex;gap:4px;margin-left:4px">${impact}${effort}</span>`
 }
 
 function renderIdeaCard(idea) {
@@ -9704,6 +9725,7 @@ function renderIdeaCard(idea) {
         <div style="display:flex;align-items:center;gap:8px">
           <span style="font-weight:600;font-size:14px">${escapeHtml(idea.title)}</span>
           <span style="font-size:11px;color:${statusColor};padding:2px 6px;border:1px solid ${statusColor};border-radius:4px">${statusLabel}</span>
+          ${ideaScoreBadges(idea)}
         </div>
         ${desc}
       </div>
@@ -9724,6 +9746,8 @@ function openIdeaNew() {
   document.getElementById('ideaModalTitle').textContent = 'Új ötlet'
   document.getElementById('ideaTitleInput').value = ''
   document.getElementById('ideaDescInput').value = ''
+  document.getElementById('ideaImpactInput').value = ''
+  document.getElementById('ideaEffortInput').value = ''
   openModal(document.getElementById('ideaModalOverlay'))
 }
 
@@ -9735,13 +9759,24 @@ function openIdeaEdit(id) {
   document.getElementById('ideaTitleInput').value = idea.title
   document.getElementById('ideaDescInput').value = idea.description || ''
   document.getElementById('ideaCategoryInput').value = idea.category
+  document.getElementById('ideaImpactInput').value = idea.impact != null ? String(idea.impact) : ''
+  document.getElementById('ideaEffortInput').value = idea.effort != null ? String(idea.effort) : ''
   openModal(document.getElementById('ideaModalOverlay'))
 }
 
 async function saveIdea() {
   const title = document.getElementById('ideaTitleInput').value.trim()
   if (!title) { showToast('Cím kötelező', 'error'); return }
-  const body = { title, description: document.getElementById('ideaDescInput').value.trim() || undefined, category: document.getElementById('ideaCategoryInput').value, source: 'manual' }
+  const impactRaw = document.getElementById('ideaImpactInput').value
+  const effortRaw = document.getElementById('ideaEffortInput').value
+  const body = {
+    title,
+    description: document.getElementById('ideaDescInput').value.trim() || undefined,
+    category: document.getElementById('ideaCategoryInput').value,
+    source: 'manual',
+    impact: impactRaw === '' ? null : Number(impactRaw),
+    effort: effortRaw === '' ? null : Number(effortRaw),
+  }
   if (ideaEditId) {
     await fetch(`/api/ideas/${ideaEditId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   } else {
