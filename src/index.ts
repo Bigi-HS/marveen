@@ -10,8 +10,9 @@ import { join } from 'node:path'
 import { execFileSync, execSync } from 'node:child_process'
 import type { Server as HttpServer } from 'node:http'
 import { STORE_DIR, PID_FILENAME, WEB_PORT, ALLOWED_CHAT_ID, MAIN_AGENT_ID, RESPAWN_ENABLED } from './config.js'
-import { initDatabase } from './db.js'
+import { initDatabase, deleteOldMessages } from './db.js'
 import { initCodetreeDatabase } from './web/codetree-db.js'
+import { startMessageRetentionSweep } from './web/message-retention.js'
 import { runDecaySweep, runDailyDigest } from './memory.js'
 import { initHeartbeat, stopHeartbeat } from './heartbeat.js'
 import { ensureHeartbeatAgent, HEARTBEAT_AGENT_NAME } from './web/heartbeat-agent-scaffold.js'
@@ -333,6 +334,7 @@ function releaseLock(): void {
 // acquireLock wrote the pidfile -- we still need to drop the heartbeat /
 // digest timers and release the pidfile on the way out).
 let decayInterval: NodeJS.Timeout | null = null
+let messageRetentionInterval: NodeJS.Timeout | null = null
 let digestTimer: NodeJS.Timeout | null = null
 let digestInterval: NodeJS.Timeout | null = null
 let heartbeatStarted = false
@@ -351,6 +353,7 @@ const shutdown = (): void => {
     try { stopInviteMonitor() } catch (err) { logger.warn({ err }, 'stopInviteMonitor threw during shutdown') }
     try { stopChannelRequestWatcher() } catch (err) { logger.warn({ err }, 'stopChannelRequestWatcher threw during shutdown') }
     if (decayInterval) clearInterval(decayInterval)
+    if (messageRetentionInterval) clearInterval(messageRetentionInterval)
     if (digestTimer) clearTimeout(digestTimer)
     if (digestInterval) clearInterval(digestInterval)
 
@@ -411,6 +414,13 @@ async function main(): Promise<void> {
   runDecaySweep()
   decayInterval = setInterval(runDecaySweep, 24 * 60 * 60 * 1000)
   logger.info('Memoria leepulesi ciklus beallitva (24 oras)')
+
+  // agent_messages retention sweep (card f1ea52c0): prune rows past the
+  // retention window so the table cannot grow without bound. Runs once now,
+  // then daily.
+  deleteOldMessages(Math.floor(Date.now() / 1000))
+  messageRetentionInterval = startMessageRetentionSweep()
+  logger.info('Agent-message retention sweep beallitva (24 oras)')
 
   // Daily digest at 23:00. Timer handles kept so shutdown can drop them.
   function scheduleDailyDigest() {

@@ -1961,6 +1961,23 @@ export function listAgentMessages(limit = 50): AgentMessage[] {
   return db.prepare('SELECT * FROM agent_messages ORDER BY created_at DESC LIMIT ?').all(limit) as AgentMessage[]
 }
 
+// Default retention for agent_messages rows (card f1ea52c0, layer 3). A
+// delivered/done/failed row is pure history past this, and a still-'pending'
+// row this old is unambiguously abandoned -- the message-router's delivery
+// hard-TTL gives up within hours, so 7 days is far beyond any live delivery
+// window. Without a sweep the table grows without bound (thousands of delivered
+// rows accumulated in prod; 89 eight-day-old rows were deleted by hand 06-22).
+export const MESSAGE_RETENTION_SEC = 7 * 24 * 60 * 60
+
+// Delete agent_messages whose created_at is older than the retention cutoff,
+// across all statuses. Returns the number of rows removed. Cheap and
+// opportunistic, mirroring sweepOrphanTaskStates; run on a low-frequency
+// interval (see startMessageRetentionSweep). created_at is epoch SECONDS.
+export function deleteOldMessages(nowSec: number, retentionSec: number = MESSAGE_RETENTION_SEC): number {
+  const cutoff = nowSec - retentionSec
+  return db.prepare('DELETE FROM agent_messages WHERE created_at < ?').run(cutoff).changes
+}
+
 // card 0ae61457 (A2): persist escalation timestamp for the pending-message
 // router so the in-process escalationState Map survives server restarts.
 export function updateMessageLastEscalatedAt(id: number, epochMs: number): void {
