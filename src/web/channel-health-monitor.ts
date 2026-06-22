@@ -85,6 +85,17 @@ export function getChannelHealth(agentName: string): ChannelHealthStatus {
 }
 
 function checkAgent(agentName: string, session: string, psScan: ProcEnvScan): void {
+  const pane = capturePane(session)
+  if (!pane) return
+  recoverPipeFromPane(agentName, pane, psScan)
+}
+
+// Shared pipe-recovery core, given an ALREADY-captured pane. Called by the 60s
+// health monitor (checkAgent) and by the busy->idle idle-trigger (card 667281e4)
+// so both share ONE backoff/anti-flap state (reconnectState) -- the idle path
+// must not hammer reconnect on rapid busy/idle flapping. Backoff-gated: a recent
+// attempt or an exhausted-retry cooldown short-circuits before any tmux/ps work.
+export function recoverPipeFromPane(agentName: string, pane: string, psScan: ProcEnvScan): void {
   const now = Date.now()
   const state = reconnectState.get(agentName)
 
@@ -96,9 +107,6 @@ function checkAgent(agentName: string, session: string, psScan: ProcEnvScan): vo
   }
 
   if (state && now < state.nextRetryAt) return
-
-  const pane = capturePane(session)
-  if (!pane) return
 
   const providerType = resolveAgentProviderType(agentName)
   const provider = getProvider(providerType)

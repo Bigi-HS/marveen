@@ -55,7 +55,8 @@ vi.mock('../channel-provider.js', () => ({
   }),
 }))
 
-import { getChannelHealth, startChannelHealthMonitor } from '../web/channel-health-monitor.js'
+import { getChannelHealth, startChannelHealthMonitor, recoverPipeFromPane } from '../web/channel-health-monitor.js'
+import type { ProcEnvScan } from '../web/channel-poller-reap.js'
 
 describe('getChannelHealth', () => {
   it('returns healthy when no reconnect state exists', () => {
@@ -103,5 +104,19 @@ describe('startChannelHealthMonitor', () => {
 
     expect(mockReconnect).toHaveBeenCalled()
     clearInterval(timer)
+  })
+})
+
+// recoverPipeFromPane is the shared seam the busy->idle idle-trigger calls
+// directly with an already-captured pane (card 667281e4).
+describe('recoverPipeFromPane (shared seam)', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('reconnects when given a ✘-failing pane (FN at the recover boundary)', () => {
+    // Fresh agent name: reconnectState is module-level and persists across tests,
+    // so a name with no prior backoff state isolates this assertion.
+    mockReconnect.mockReturnValue({ ok: true })
+    recoverPipeFromPane('seam-test-agent', 'plugin:telegram:telegram  ✘ failed', {} as ProcEnvScan)
+    expect(mockReconnect).toHaveBeenCalledWith('seam-test-agent')
   })
 })
