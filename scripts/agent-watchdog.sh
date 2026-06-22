@@ -22,6 +22,10 @@ COOLDOWN=60
 MAX_PER_HOUR=8
 SHORT_LIVED=180
 LONG_BACKOFF=600
+# 120s not 90s: opus-1M cold boot can take 60-80s; tighter threshold causes
+# false crash-loop detection on a slow-but-legitimate boot.
+CRASH_LOOP_THRESHOLD=120
+CRASH_LOOP_N=3
 
 log() { echo "$(date -Is) $*" >> "$LOG"; }
 read_model() {
@@ -72,6 +76,31 @@ launch() {
   answer_resume_prompt
 }
 
+launch_fresh() {
+  local model; model="$(read_model)"
+  tmux set-environment -g -u TELEGRAM_BOT_TOKEN 2>/dev/null || true
+  local cmd="export PATH=\"\$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN && export CLAUDE_CONFIG_DIR=\"$CFG\" && cd \"$AGENT_DIR\" && export FLEET_ROOT=/home/domin/marveen && . /home/domin/marveen/scripts/lib/fleet-oauth-env.sh && /usr/bin/claude --dangerously-skip-permissions --model '$model'"
+  tmux new-session -d -s "$SESSION" "$cmd"
+  log "launched $SESSION (FRESH/no --continue, model=$model) -- crash-loop recovery"
+}
+
+alert_crash_loop() {
+  local count="$1"
+  python3 - "$count" "$NAME" <<'PY' 2>/dev/null || log "WARN: alert_crash_loop could not reach dashboard API"
+import urllib.request, json, sys
+count, name = sys.argv[1], sys.argv[2]
+try:
+    tok = open("/home/domin/marveen/store/.dashboard-token").read().strip()
+except OSError:
+    sys.exit(1)
+msg = f"CRASH-LOOP alert: agent-{name} had {count} consecutive sub-120s deaths -- did ONE fresh relaunch (dropped --continue). Check store/{name}-watchdog.log."
+data = json.dumps({"from":"forge","to":"marveen","content":msg}).encode()
+req = urllib.request.Request("http://localhost:3420/api/messages", data=data,
+      headers={"Content-Type":"application/json","Authorization":f"Bearer {tok}"}, method="POST")
+urllib.request.urlopen(req, timeout=5)
+PY
+}
+
 log "watchdog started for $SESSION (pid $$)"
 declare -a STAMPS=()
 under_cap() {
@@ -80,16 +109,32 @@ under_cap() {
   STAMPS=("${kept[@]}"); [ "${#STAMPS[@]}" -lt "$MAX_PER_HOUR" ]
 }
 last_launch=0
+consecutive_short=0
 while true; do
   if ! tmux has-session -t "$SESSION" 2>/dev/null; then
     now=$(date +%s); lived=$(( now - last_launch ))
-    if [ "$last_launch" -ne 0 ] && [ "$lived" -lt "$SHORT_LIVED" ]; then
+    if [ "$last_launch" -ne 0 ] && [ "$lived" -lt "$CRASH_LOOP_THRESHOLD" ]; then
+      consecutive_short=$((consecutive_short + 1))
+      log "$SESSION sub-${CRASH_LOOP_THRESHOLD}s death #${consecutive_short} (lived ${lived}s) -- backoff ${LONG_BACKOFF}s"; sleep "$LONG_BACKOFF"
+    elif [ "$last_launch" -ne 0 ] && [ "$lived" -lt "$SHORT_LIVED" ]; then
+      consecutive_short=0
       log "$SESSION died after only ${lived}s -- backoff ${LONG_BACKOFF}s"; sleep "$LONG_BACKOFF"
     else
+      consecutive_short=0
       log "$SESSION DOWN (lived ${lived}s) -- cooldown ${COOLDOWN}s"; sleep "$COOLDOWN"
     fi
     if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-      if under_cap; then STAMPS+=("$(date +%s)"); launch; last_launch=$(date +%s)
+      if under_cap; then
+        STAMPS+=("$(date +%s)")
+        if [ "$consecutive_short" -ge "$CRASH_LOOP_N" ]; then
+          log "CRASH-LOOP: ${consecutive_short} consecutive sub-${CRASH_LOOP_THRESHOLD}s deaths -- ONE fresh relaunch (drop --continue)"
+          alert_crash_loop "$consecutive_short"
+          consecutive_short=0
+          launch_fresh
+        else
+          launch
+        fi
+        last_launch=$(date +%s)
       else log "$SESSION DOWN but cap (${MAX_PER_HOUR}/h) reached -- backoff ${LONG_BACKOFF}s"; sleep "$LONG_BACKOFF"; fi
     fi
   fi

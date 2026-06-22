@@ -82,6 +82,34 @@ launch() {
   answer_resume_prompt
 }
 
+# Fresh launch without --continue: used when a crash-loop is detected (session
+# too large or poisoned -- resuming it would just loop again immediately).
+launch_fresh() {
+  local model; model="$(read_model)"
+  local cmd="export PATH=\"/usr/local/bin:/usr/bin:/bin:\$PATH\" && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN && export CLAUDE_CONFIG_DIR=\"$CFG\" && cd \"/home/domin/marveen/agents/dave\" && export FLEET_ROOT=/home/domin/marveen && . /home/domin/marveen/scripts/lib/fleet-oauth-env.sh && /usr/bin/claude --dangerously-skip-permissions --model '$model'"
+  tmux new-session -d -s agent-dave "$cmd"
+  log "launched agent-dave (FRESH/no --continue, model=$model) -- crash-loop recovery"
+}
+
+# Alert marveen via inter-agent API when a crash-loop forces a fresh relaunch.
+# Token is read inside Python (not passed via argv) to avoid ps-visible secret.
+alert_crash_loop() {
+  local count="$1"
+  python3 - "$count" <<'PY' 2>/dev/null || log "WARN: alert_crash_loop could not reach dashboard API"
+import urllib.request, json, sys
+count = sys.argv[1]
+try:
+    tok = open("/home/domin/marveen/store/.dashboard-token").read().strip()
+except OSError:
+    sys.exit(1)
+msg = f"CRASH-LOOP alert: agent-dave had {count} consecutive sub-120s deaths -- did ONE fresh relaunch (dropped --continue). Check store/dave-watchdog.log."
+data = json.dumps({"from":"forge","to":"marveen","content":msg}).encode()
+req = urllib.request.Request("http://localhost:3420/api/messages", data=data,
+      headers={"Content-Type":"application/json","Authorization":f"Bearer {tok}"}, method="POST")
+urllib.request.urlopen(req, timeout=5)
+PY
+}
+
 log() { echo "$(date -Is) $*" >> "$LOG"; }
 log "watchdog started (pid $$)"
 
@@ -92,7 +120,16 @@ log "watchdog started (pid $$)"
 # hammer, but not for the old absurd 30min, since the frozen-menu case is gone.
 SHORT_LIVED=180
 LONG_BACKOFF=600
+# Crash-loop detection: N consecutive deaths each lived <THRESHOLD -> fresh relaunch.
+# Observed 2026-06-22: poisoned/large session hits session-limit ~60s post-launch
+# and loops forever on --continue. Ref: dave-634k-session-limit-incident.
+# Threshold is 120s (not 90s): opus-1M cold boot can take 60-80s, so a session that
+# dies at 100s from tmux-start is still within boot time and should not count as a
+# crash-loop candidate at a tighter threshold.
+CRASH_LOOP_THRESHOLD=120
+CRASH_LOOP_N=3
 last_launch=0
+consecutive_short=0
 
 # T9 (Thor stack-review): MAX_PER_HOUR was defined but never enforced, so a
 # genuine crash/429-storm could relaunch Dave without bound. Enforce an hourly
@@ -109,17 +146,31 @@ under_cap() {
 while true; do
   if ! tmux has-session -t agent-dave 2>/dev/null; then
     now=$(date +%s); lived=$(( now - last_launch ))
-    if [ "$last_launch" -ne 0 ] && [ "$lived" -lt "$SHORT_LIVED" ]; then
+    if [ "$last_launch" -ne 0 ] && [ "$lived" -lt "$CRASH_LOOP_THRESHOLD" ]; then
+      consecutive_short=$((consecutive_short + 1))
+      log "agent-dave sub-${CRASH_LOOP_THRESHOLD}s death #${consecutive_short} (lived ${lived}s) -- backoff ${LONG_BACKOFF}s"
+      sleep "$LONG_BACKOFF"
+    elif [ "$last_launch" -ne 0 ] && [ "$lived" -lt "$SHORT_LIVED" ]; then
+      consecutive_short=0
       log "agent-dave died after only ${lived}s (genuine crash or real 429) -- backoff ${LONG_BACKOFF}s"
       sleep "$LONG_BACKOFF"
     else
+      consecutive_short=0
       log "agent-dave DOWN (lived ${lived}s) -- cooldown ${COOLDOWN}s then --continue relaunch"
       sleep "$COOLDOWN"
     fi
     if ! tmux has-session -t agent-dave 2>/dev/null; then
       if under_cap; then
         STAMPS+=("$(date +%s)")
-        launch; last_launch=$(date +%s)
+        if [ "$consecutive_short" -ge "$CRASH_LOOP_N" ]; then
+          log "CRASH-LOOP: ${consecutive_short} consecutive sub-${CRASH_LOOP_THRESHOLD}s deaths -- ONE fresh relaunch (drop --continue)"
+          alert_crash_loop "$consecutive_short"
+          consecutive_short=0
+          launch_fresh
+        else
+          launch
+        fi
+        last_launch=$(date +%s)
       else
         log "agent-dave DOWN but relaunch cap (${MAX_PER_HOUR}/h) reached -- backing off ${LONG_BACKOFF}s"
         sleep "$LONG_BACKOFF"
