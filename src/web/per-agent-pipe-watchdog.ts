@@ -37,6 +37,7 @@ import { listAgentNames, agentDir } from './agent-config.js'
 import { isAgentRunning, agentHasChannel, isAgentChannelIntentionallyEnabled, isTmuxSessionAlive } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { readAgentHangState, type HangVerdict } from './pipe-hang-detector.js'
+import { classifyFreshness, DEFAULT_STALE_AFTER_MS, type Freshness } from './watchdog-freshness.js'
 import {
   assessPipeLiveness,
   reduceConflictProbes,
@@ -84,6 +85,7 @@ export function readAgentState(name: string): WatchdogState {
       consecutiveDead: parsed.consecutiveDead ?? 0,
       alerted: parsed.alerted ?? false,
       lastHealthyTs: parsed.lastHealthyTs ?? null,
+      lastCheckedTs: parsed.lastCheckedTs ?? null,
     }
   } catch {
     return { ...INITIAL_STATE }
@@ -180,15 +182,19 @@ export async function runAgentCycle(name: string, now: number = Date.now()): Pro
   let recovered = false
   let escalated = false
 
+  // Stamp lastCheckedTs on EVERY verdict (including inconclusive): we ran a real
+  // probe this cycle, so the state is fresh regardless of the outcome. This is
+  // what lets the stale-health backstop tell "checked recently, genuinely fine"
+  // from "state silently frozen" (card 35dc7d87).
   if (verdict === 'inconclusive') {
     logEvent(name, { ts: now, kind: 'inconclusive', detail: `present=${present} status=${probeStatus}` })
-    const state = nextState(prev, verdict, now)
+    const state = { ...nextState(prev, verdict, now), lastCheckedTs: now }
     writeAgentState(name, state)
     return { verdict, recovered, escalated, state }
   }
 
   if (verdict === 'healthy') {
-    const state = nextState(prev, verdict, now)
+    const state = { ...nextState(prev, verdict, now), lastCheckedTs: now }
     if (prev.consecutiveDead > 0) {
       logEvent(name, { ts: now, kind: 'recovered', detail: `after ${prev.consecutiveDead} dead cycle(s)` })
     }
@@ -197,7 +203,7 @@ export async function runAgentCycle(name: string, now: number = Date.now()): Pro
   }
 
   // verdict === 'dead'
-  let state = nextState(prev, verdict, now)
+  let state: WatchdogState = { ...nextState(prev, verdict, now), lastCheckedTs: now }
   logEvent(name, { ts: now, kind: 'drop-detected', detail: `consecutiveDead=${state.consecutiveDead} present=${present} status=${probeStatus}` })
 
   logEvent(name, { ts: now, kind: 'recovery-attempt', detail: `attempt for ${name}` })
@@ -277,6 +283,78 @@ export async function runSubAgentSweep(
     }
   }
   return { skipped: false, reason: 'swept', results }
+}
+
+// ---------------------------------------------------------------------------
+// STALE-HEALTH backstop sweep (card 35dc7d87). The liveness sweep above runs
+// ONLY when the dashboard is down, deferring to the in-process monitor while it
+// is up. That is correct for recovery ownership, but it left a blind spot: when
+// the dashboard stays up for hours, a sub-agent's per-agent state file is never
+// refreshed, so a stale `consecutiveDead=0` reads as healthy forever -- exactly
+// how hibiki's dead pipe hid for ~18h (2026-06-22), caught only by a manual ping.
+//
+// This sweep runs REGARDLESS of dashboard state, but acts surgically: it trusts
+// a FRESH state and does nothing, and only when a state is stale / never-checked
+// does it run a REAL probe (a full runAgentCycle) instead of believing the cache.
+// Because that cycle stamps lastCheckedTs, each agent is re-probed at most once
+// per stale window (~15 min) -- a low-frequency backstop, not a competing driver,
+// so it cannot churn the /mcp menu against the in-process monitor. The cache is
+// only the trigger to bother probing; the decision to recover/alert is the live
+// probe's.
+// ---------------------------------------------------------------------------
+
+export interface StaleSweepResult {
+  checked: string[]
+  // Agents whose cached state was stale/never-checked and were therefore live-probed.
+  probed: string[]
+  freshness: Record<string, Freshness>
+  results: Record<string, CycleResult>
+}
+
+export interface StaleSweepDeps {
+  listChannelSubAgents: () => string[]
+  readAgentState: (name: string) => WatchdogState
+  runAgentCycle: (name: string, now: number) => Promise<CycleResult>
+  staleAfterMs: number
+}
+
+const DEFAULT_STALE_SWEEP_DEPS: StaleSweepDeps = {
+  listChannelSubAgents,
+  readAgentState,
+  runAgentCycle,
+  staleAfterMs: DEFAULT_STALE_AFTER_MS,
+}
+
+export async function runStaleHealthSweep(
+  now: number = Date.now(),
+  deps: StaleSweepDeps = DEFAULT_STALE_SWEEP_DEPS,
+): Promise<StaleSweepResult> {
+  const checked: string[] = []
+  const probed: string[] = []
+  const freshness: Record<string, Freshness> = {}
+  const results: Record<string, CycleResult> = {}
+
+  for (const name of deps.listChannelSubAgents()) {
+    checked.push(name)
+    const state = deps.readAgentState(name)
+    const fresh = classifyFreshness(state.lastCheckedTs, now, deps.staleAfterMs)
+    freshness[name] = fresh
+    if (fresh === 'fresh') continue
+
+    // Stale or never-checked -> the cache is untrustworthy; verify it live.
+    logger.warn(
+      { agent: name, freshness: fresh, lastCheckedTs: state.lastCheckedTs ?? null },
+      'per-agent-pipe-watchdog: stale watchdog state -- running live probe (cache not trusted)',
+    )
+    try {
+      probed.push(name)
+      results[name] = await deps.runAgentCycle(name, now)
+    } catch (err) {
+      logger.warn({ err, agent: name }, 'per-agent-pipe-watchdog: stale-health probe error')
+    }
+  }
+
+  return { checked, probed, freshness, results }
 }
 
 // ---------------------------------------------------------------------------
@@ -397,11 +475,13 @@ export function runHangSweep(now: number = Date.now(), deps: HangSweepDeps = DEF
 export interface WatchdogSweepDeps {
   subSweep: () => Promise<SweepResult>
   hangSweep: () => HangSweepResult
+  staleSweep: () => Promise<StaleSweepResult>
 }
 
 const DEFAULT_WATCHDOG_SWEEP_DEPS: WatchdogSweepDeps = {
   subSweep: () => runSubAgentSweep(),
   hangSweep: () => runHangSweep(),
+  staleSweep: () => runStaleHealthSweep(),
 }
 
 function errMsg(err: unknown): string {
@@ -435,6 +515,14 @@ export async function runWatchdogSweeps(
     lines.push(`hang=done swept=${h.swept.length} hung=${hung} recovered=${h.recovered.length}`)
   } catch (err) {
     lines.push(`hang=error detail=${errMsg(err)}`)
+  }
+
+  try {
+    const s = await deps.staleSweep()
+    const dead = Object.values(s.results).filter((r) => r.verdict === 'dead').length
+    lines.push(`stale=done checked=${s.checked.length} probed=${s.probed.length} dead=${dead}`)
+  } catch (err) {
+    lines.push(`stale=error detail=${errMsg(err)}`)
   }
 
   return lines

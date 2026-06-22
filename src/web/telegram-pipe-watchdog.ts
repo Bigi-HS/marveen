@@ -122,6 +122,12 @@ export interface WatchdogState {
   consecutiveDead: number
   alerted: boolean
   lastHealthyTs: number | null
+  // When a real probe last refreshed this state, regardless of verdict. Optional
+  // so older persisted state and the orchestrator watchdog (which does not stamp
+  // it) stay valid; absence reads as never-checked. Used by the per-agent
+  // stale-health backstop (card 35dc7d87) to tell a genuinely-monitored agent
+  // from one whose state silently froze.
+  lastCheckedTs?: number | null
 }
 
 export const INITIAL_STATE: WatchdogState = {
