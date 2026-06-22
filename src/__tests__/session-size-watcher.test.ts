@@ -711,31 +711,36 @@ describe('staleContextCostTokenMinutes (measurement proxy)', () => {
 // ---------------------------------------------------------------------------
 
 describe('adaptiveEscalationFloorForModel', () => {
-  it('the floor fraction is 0.80 -- exactly the warn wall, between busy 0.78 and hard 0.90', () => {
-    expect(ESCALATION_FLOOR_FRACTION).toBe(0.8)
-    expect(ESCALATION_FLOOR_FRACTION).toBeGreaterThan(BUSY_COMPACT_FRACTION)
+  it('the floor fraction is 0.78 -- aligned with the busy ceiling, below hard 0.90 (card 71213874)', () => {
+    // Pulled down from 0.80 to 0.78 to close the 78-80% no-act gap: a
+    // non-compactable pane between the busy ceiling (0.78) and the old floor
+    // (0.80) fell through every tier. Floor == busy ceiling makes coverage
+    // seamless; the two are gated by disjoint pane states so equality cannot
+    // double-act.
+    expect(ESCALATION_FLOOR_FRACTION).toBe(0.78)
+    expect(ESCALATION_FLOOR_FRACTION).toBe(BUSY_COMPACT_FRACTION)
     expect(ESCALATION_FLOOR_FRACTION).toBeLessThan(HARD_CEILING_FRACTION)
   })
 
-  it('Sonnet/Haiku (200K window) -> 160K escalation floor', () => {
-    expect(adaptiveEscalationFloorForModel('claude-sonnet-4-6')).toBe(160_000)
-    expect(adaptiveEscalationFloorForModel('claude-haiku-4-5-20251001')).toBe(160_000)
+  it('Sonnet/Haiku (200K window) -> 156K escalation floor', () => {
+    expect(adaptiveEscalationFloorForModel('claude-sonnet-4-6')).toBe(156_000)
+    expect(adaptiveEscalationFloorForModel('claude-haiku-4-5-20251001')).toBe(156_000)
   })
 
-  it('Opus 1M (opus-4-8[1m]) -> 800K escalation floor', () => {
-    expect(adaptiveEscalationFloorForModel('claude-opus-4-8[1m]')).toBe(800_000)
+  it('Opus 1M (opus-4-8[1m]) -> 780K escalation floor', () => {
+    expect(adaptiveEscalationFloorForModel('claude-opus-4-8[1m]')).toBe(780_000)
   })
 
-  it('resolves aliases and falls back to the default window * 0.80', () => {
-    expect(adaptiveEscalationFloorForModel('opus')).toBe(800_000)
-    expect(adaptiveEscalationFloorForModel('sonnet')).toBe(160_000)
+  it('resolves aliases and falls back to the default window * 0.78', () => {
+    expect(adaptiveEscalationFloorForModel('opus')).toBe(780_000)
+    expect(adaptiveEscalationFloorForModel('sonnet')).toBe(156_000)
     const expected = Math.floor(DEFAULT_CONTEXT_WINDOW * ESCALATION_FLOOR_FRACTION)
     expect(adaptiveEscalationFloorForModel('some-future-model-x')).toBe(expected)
     expect(adaptiveEscalationFloorForModel(null)).toBe(expected)
     expect(adaptiveEscalationFloorForModel(undefined)).toBe(expected)
   })
 
-  it('INVARIANT: for every model  busy < floor < hard (no tier inversion)', () => {
+  it('INVARIANT: for every model  busy <= floor < hard (no tier inversion)', () => {
     for (const model of [
       'claude-sonnet-4-6',
       'claude-haiku-4-5-20251001',
@@ -749,16 +754,27 @@ describe('adaptiveEscalationFloorForModel', () => {
       const busy = adaptiveBusyCeilingForModel(model)
       const floor = adaptiveEscalationFloorForModel(model)
       const hard = adaptiveHardCeilingForModel(model)
-      expect(floor).toBeGreaterThan(busy)
+      // busy <= floor: equal for standard models (both 0.78), strict for Opus
+      // (busy 0.55 < floor 0.78). Never floor < busy (that would re-open a gap).
+      expect(floor).toBeGreaterThanOrEqual(busy)
       expect(hard).toBeGreaterThan(floor)
+    }
+  })
+
+  it('GAP CLOSED (card 71213874): no [busy, floor) dead band for standard models', () => {
+    // The regression: a non-compactable pane in [busyCeiling, escalationFloor)
+    // was acted on by no tier. With floor == busy ceiling that interval is empty,
+    // so any non-compactable pane at/over the busy ceiling is over the floor too.
+    for (const model of ['claude-sonnet-4-6', 'claude-haiku-4-5-20251001', 'sonnet']) {
+      expect(adaptiveEscalationFloorForModel(model)).toBe(adaptiveBusyCeilingForModel(model))
     }
   })
 
   it('decideContextExhausted fires at the FLOOR, not only at the 90% ceiling', () => {
     // The behavioural heart of the card: a sonnet agent at 86% (172K) -- the DA
-    // incident's peak -- is UNDER the 180K hard ceiling but OVER the 160K floor,
+    // incident's peak -- is UNDER the 180K hard ceiling but OVER the 156K floor,
     // so a non-compactable stuck pane there must now be escalatable.
-    const floor = adaptiveEscalationFloorForModel('claude-sonnet-4-6') // 160K
+    const floor = adaptiveEscalationFloorForModel('claude-sonnet-4-6') // 156K
     const STUCK = 30 * 60 * 1000
     expect(decideContextExhausted({
       contextTokens: 172_000, // 86% -- DA's peak, below the 180K hard ceiling

@@ -192,17 +192,23 @@ export function adaptiveBusyCeilingForModel(modelId: string | null | undefined):
 // NO compaction tier (soft+hard own idle, busy owns actively-working). Below the
 // 90% hard ceiling such a "non-compactable" pane was never even escalated: it sat
 // only-pinged by the read-only 80% warn-watchdog until it reached idle or climbed
-// to 90%. This decouples the ESCALATE-to-operator threshold (the 80% warn wall)
-// from the auto-/compact hard ceiling (0.90): we escalate a non-compactable pane
-// stuck over the floor, but send NO /compact (you cannot compact a non-compactable
-// pane, and adding /compact firing here would widen the over-fire surface). The
-// fraction sits exactly at the context-window-watchdog's 80% ALERT_THRESHOLD so
-// the actionable escalation lines up with the generic warn ping.
-export const ESCALATION_FLOOR_FRACTION = 0.8
+// to 90%. We escalate a non-compactable pane stuck over the floor, but send NO
+// /compact (you cannot compact a non-compactable pane, and adding /compact firing
+// here would widen the over-fire surface).
+//
+// Card 71213874: the floor was originally 0.80 (the 80% warn wall), which left a
+// 78-80% NO-ACT GAP -- a non-compactable pane between the busy ceiling (0.78) and
+// the floor (0.80) was owned by no tier (busy needs actively-working; the floor
+// needed >=0.80). Pulled the floor down to the busy ceiling (0.78) so coverage is
+// seamless: at/over 0.78 every pane is handled -- actively-working -> busy compact,
+// non-compactable -> floor escalate, idle -> soft/hard. The two 0.78 tiers are
+// gated by DISJOINT pane states, so an equal threshold can never double-act.
+export const ESCALATION_FLOOR_FRACTION = BUSY_COMPACT_FRACTION
 
-// Resolve the per-agent escalation floor = contextWindow(model) * 0.80. Pure given
-// the model id; its ordering (busy 0.78 < floor 0.80 < hard 0.90) is asserted in
-// the tests so the floor never inverts against the busy ceiling or hard ceiling.
+// Resolve the per-agent escalation floor = contextWindow(model) * 0.78. Pure given
+// the model id; its ordering (busy 0.78 <= floor 0.78 < hard 0.90; for Opus busy
+// 0.55 < floor 0.78) is asserted in the tests so the floor never drops below the
+// busy ceiling (which would re-open the gap) or rises above the hard ceiling.
 export function adaptiveEscalationFloorForModel(modelId: string | null | undefined): number {
   return Math.floor(contextWindowForModel(modelId) * ESCALATION_FLOOR_FRACTION)
 }
