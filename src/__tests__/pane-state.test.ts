@@ -11,8 +11,10 @@ import {
   decideSubmitFollowup,
   decidePaneErrorAlert,
   stuckInputSignature,
+  pendingPasteSignature,
   decideStuckInputRecovery,
   CLAUDE_SPINNER_LABELS,
+  type StuckInputState,
 } from '../pane-state.js'
 
 // Realistic pane fixtures modelled on actual `tmux capture-pane -p`
@@ -106,6 +108,52 @@ const PENDING_PASTE = [
   '',
   SEP,
   '❯ [Pasted text #1 +234 chars]',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n')
+
+// A paste placeholder still parked AND a live spinner rendering: the turn
+// is genuinely processing the pasted payload. Must NOT be read as a stale
+// paste stall (the recovery Enter would land mid-turn).
+const PENDING_PASTE_WITH_SPINNER = [
+  '✢ Combobulating… (12s · ↓ 480 tokens)',
+  '',
+  SEP,
+  '❯ [Pasted text #1 +234 chars]',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt',
+].join('\n')
+
+// The paste burst is still arriving: a second placeholder appears / the
+// char count grows between polls. The signature must change so the
+// confirm window restarts and no premature recovery fires.
+const PENDING_PASTE_GROWN = [
+  '',
+  SEP,
+  '❯ [Pasted text #1 +234 chars] [Pasted text #2 +88 chars]',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n')
+
+// A paste placeholder parked in the box AND a usage-limit footer in the
+// tail. The limit modal is a real blocking surface, not a swallowed-Enter
+// paste stall -- recovery must not fire (the usage-limit handlers own it).
+const PENDING_PASTE_WITH_LIMIT = [
+  '',
+  SEP,
+  '❯ [Pasted text #1 +234 chars]',
+  SEP,
+  "  You've reached your usage limit · resets at 3pm",
+].join('\n')
+
+// A `[Pasted text]` echo sitting in scrollback above the live (empty)
+// input box. Not live parked input -- must not be a paste-stall signal.
+const PENDING_PASTE_IN_SCROLLBACK = [
+  '  ❯ [Pasted text #9 +12 chars] from an old turn',
+  '  output of that turn',
+  '',
+  SEP,
+  '❯ ',
   SEP,
   '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
 ].join('\n')
@@ -1215,6 +1263,109 @@ describe('stuckInputSignature', () => {
 
   it('ignores a ❯ caret left in scrollback', () => {
     expect(stuckInputSignature(IDLE_WITH_SCROLLBACK_CARET)).toBeNull()
+  })
+})
+
+describe('pendingPasteSignature (card 1b0f58ba: stale-paste recovery)', () => {
+  it('returns a normalised signature for a parked paste placeholder', () => {
+    const sig = pendingPasteSignature(PENDING_PASTE)
+    expect(sig).not.toBeNull()
+    expect(sig).toContain('[Pasted text #1 +234 chars]')
+    // Whitespace collapsed so a re-flow / cursor blink does not look new.
+    expect(sig).not.toMatch(/\s{2,}/)
+  })
+
+  it('is null for an idle empty input box', () => {
+    expect(pendingPasteSignature(IDLE_BYPASS)).toBeNull()
+  })
+
+  it('is null for plain parked typing (that is the stuckInput path)', () => {
+    expect(pendingPasteSignature(TYPING_PARKED)).toBeNull()
+  })
+
+  // Fixture (c): a live spinner alongside the placeholder means the turn is
+  // actually processing the paste -- never recover into a running turn.
+  it('ADVERSARIAL: is null when a spinner renders with the placeholder', () => {
+    expect(pendingPasteSignature(PENDING_PASTE_WITH_SPINNER)).toBeNull()
+  })
+
+  it('is null when a usage-limit footer is showing with the placeholder', () => {
+    expect(pendingPasteSignature(PENDING_PASTE_WITH_LIMIT)).toBeNull()
+  })
+
+  it('ignores a [Pasted text] echo left in scrollback', () => {
+    expect(pendingPasteSignature(PENDING_PASTE_IN_SCROLLBACK)).toBeNull()
+  })
+
+  // Fixture (b): the burst is still arriving, so the signature differs from
+  // the earlier capture -- the watcher restarts its confirm window.
+  it('ADVERSARIAL: a growing placeholder yields a different signature', () => {
+    const a = pendingPasteSignature(PENDING_PASTE)
+    const b = pendingPasteSignature(PENDING_PASTE_GROWN)
+    expect(a).not.toBeNull()
+    expect(b).not.toBeNull()
+    expect(a).not.toBe(b)
+  })
+})
+
+// The three card-mandated adversarial scenarios, exercised end-to-end through
+// the real signature extractor + the shared decision machinery (the exact pair
+// the watcher wires together), across simulated poll sequences.
+describe('stale-paste recovery scenarios (card 1b0f58ba)', () => {
+  // Paste confirm window is minutes, not the typing path's 10s.
+  const TH = { confirmMs: 150_000, dedupMs: 30_000, maxAttempts: 2 }
+  const NONE: StuckInputState = { parkedSig: null, firstSeenAt: null, lastRecoverAt: null, attempts: 0 }
+
+  function run(panes: Array<{ pane: string; at: number }>) {
+    let state: StuckInputState = NONE
+    const recoveries: number[] = []
+    for (const { pane, at } of panes) {
+      const sig = pendingPasteSignature(pane)
+      const d = decideStuckInputRecovery(sig, state, at, TH)
+      if (d.recover) recoveries.push(at)
+      state = d.next
+    }
+    return { state, recoveries }
+  }
+
+  it('(a) the SAME placeholder unchanged past the confirm window -> recover', () => {
+    const { recoveries } = run([
+      { pane: PENDING_PASTE, at: 0 },
+      { pane: PENDING_PASTE, at: 60_000 },
+      { pane: PENDING_PASTE, at: 160_000 }, // 160s >= 150s confirm
+    ])
+    expect(recoveries).toEqual([160_000])
+  })
+
+  it('(b) a placeholder that grows between polls -> never recover', () => {
+    const { recoveries } = run([
+      { pane: PENDING_PASTE, at: 0 },
+      { pane: PENDING_PASTE_GROWN, at: 60_000 }, // signature changed: restart
+      { pane: PENDING_PASTE_GROWN, at: 160_000 }, // only 100s on the new sig
+    ])
+    expect(recoveries).toEqual([])
+  })
+
+  it('(c) a spinner appearing after the placeholder -> never recover', () => {
+    const { recoveries, state } = run([
+      { pane: PENDING_PASTE, at: 0 },
+      { pane: PENDING_PASTE, at: 60_000 },
+      { pane: PENDING_PASTE_WITH_SPINNER, at: 160_000 }, // now busy: sig null
+    ])
+    expect(recoveries).toEqual([])
+    // The spell is cleared once the pane is genuinely processing.
+    expect(state.parkedSig).toBeNull()
+  })
+
+  it('does not exceed maxAttempts even if the stall persists', () => {
+    const { recoveries } = run([
+      { pane: PENDING_PASTE, at: 0 },
+      { pane: PENDING_PASTE, at: 160_000 }, // attempt 1
+      { pane: PENDING_PASTE, at: 200_000 }, // attempt 2
+      { pane: PENDING_PASTE, at: 240_000 }, // capped
+      { pane: PENDING_PASTE, at: 300_000 }, // capped
+    ])
+    expect(recoveries).toEqual([160_000, 200_000])
   })
 })
 
