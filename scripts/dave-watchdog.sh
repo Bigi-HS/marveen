@@ -119,7 +119,10 @@ LONG_BACKOFF=600
 # Crash-loop detection: N consecutive deaths each lived <THRESHOLD -> fresh relaunch.
 # Observed 2026-06-22: poisoned/large session hits session-limit ~60s post-launch
 # and loops forever on --continue. Ref: dave-634k-session-limit-incident.
-CRASH_LOOP_THRESHOLD=90
+# Threshold is 120s (not 90s): opus-1M cold boot can take 60-80s, so a session that
+# dies at 100s from tmux-start is still within boot time and should not count as a
+# crash-loop candidate at a tighter threshold.
+CRASH_LOOP_THRESHOLD=120
 CRASH_LOOP_N=3
 last_launch=0
 consecutive_short=0

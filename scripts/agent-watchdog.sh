@@ -22,7 +22,9 @@ COOLDOWN=60
 MAX_PER_HOUR=8
 SHORT_LIVED=180
 LONG_BACKOFF=600
-CRASH_LOOP_THRESHOLD=90
+# 120s not 90s: opus-1M cold boot can take 60-80s; tighter threshold causes
+# false crash-loop detection on a slow-but-legitimate boot.
+CRASH_LOOP_THRESHOLD=120
 CRASH_LOOP_N=3
 
 log() { echo "$(date -Is) $*" >> "$LOG"; }
