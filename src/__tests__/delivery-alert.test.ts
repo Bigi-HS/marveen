@@ -3,6 +3,7 @@ import {
   DELIVERY_MONITOR_AGENT_ID,
   DELIVERY_ABANDONMENT_SENTINEL,
   shouldAlertOnAbandon,
+  alertInBand,
   abandonAlertContent,
   abandonmentRecord,
   parseAbandonmentSentinel,
@@ -47,21 +48,24 @@ describe('delivery-dropped alert (d3339db9 defense-in-depth)', () => {
   })
 })
 
-// Card 7557a98d: a busy recipient = defer, never drop. The 60-min overdue alert
-// must read as "still retrying" (no re-send), distinct from the 6h hard drop.
-describe('abandonAlertContent phase (card 7557a98d)', () => {
-  it('overdue: states it is NOT dropped and is still being retried', () => {
-    const content = abandonAlertContent({ id: 9, from_agent: 'dave', to_agent: 'marveen' }, 60 * 60 * 1000, 'overdue')
-    expect(content).toContain('#9')
-    expect(content).toContain('OVERDUE')
-    expect(content).toContain('NOT dropped')
-    expect(content.toLowerCase()).toContain('retrying')
+// Card f1ea52c0 / Boss 2026-06-22: alert noise. Only a permanent 'dropped'
+// give-up raises an in-band Boss alert; a transient 'overdue' (still retrying)
+// is sentinel-only. The recursion guard still suppresses an abandoned monitor
+// alert.
+describe('alertInBand (card f1ea52c0 alert-policy)', () => {
+  it('does NOT alert in-band for the transient overdue phase', () => {
+    expect(alertInBand('overdue', 'dave')).toBe(false)
+    expect(alertInBand('overdue', 'quill')).toBe(false)
   })
 
-  it('dropped (default): keeps the original "NOT delivered / re-send" wording', () => {
-    const content = abandonAlertContent({ id: 9, from_agent: 'dave', to_agent: 'marveen' }, 6 * 60 * 60 * 1000, 'dropped')
-    expect(content).toContain('DROPPED')
-    expect(content).toContain('NOT delivered')
+  it('alerts in-band for a permanent dropped give-up', () => {
+    expect(alertInBand('dropped', 'dave')).toBe(true)
+    expect(alertInBand('dropped', 'quill')).toBe(true)
+  })
+
+  it('never alerts about an abandoned monitor alert, even when dropped (recursion guard)', () => {
+    expect(alertInBand('dropped', DELIVERY_MONITOR_AGENT_ID)).toBe(false)
+    expect(alertInBand('overdue', DELIVERY_MONITOR_AGENT_ID)).toBe(false)
   })
 })
 

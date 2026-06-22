@@ -21,36 +21,40 @@ export function shouldAlertOnAbandon(fromAgent: string): boolean {
   return fromAgent !== DELIVERY_MONITOR_AGENT_ID
 }
 
-// An abandonment alert has two phases (card 7557a98d). 'overdue': the message
-// is still pending and the router keeps retrying (recipient merely busy) -- a
-// throttled "this is taking a while" nag. 'dropped': the hard-TTL was reached
-// and the message was given up on for real. They read differently because the
-// operator action differs: an overdue delivery needs no re-send, a dropped one
-// does.
+// An abandonment has two phases (card 7557a98d). 'overdue': the message is still
+// pending and the router keeps retrying (recipient merely busy). 'dropped': the
+// hard-TTL was reached and the message was given up on for real. Both are
+// recorded in the durable sentinel; they differ in whether they warrant a
+// Boss-facing in-band alert -- see alertInBand.
 export type AbandonmentPhase = 'overdue' | 'dropped'
 
 /**
- * Human-readable alert body for an abandoned/overdue inter-agent message. Names
- * the id, the parties, and the age so the main agent can investigate the
- * target's session. For 'dropped' it states plainly the message was NOT
- * delivered (the d3339db9 pain was that the drop was invisible); for 'overdue'
- * it makes clear the message is still being retried and needs no manual re-send.
+ * Should this abandonment phase raise a Boss-facing in-band alert (an
+ * inter-agent message to the main agent)? Only 'dropped' does -- a permanent
+ * give-up the operator may need to act on (card f1ea52c0 / Boss 2026-06-22:
+ * the 'overdue' "still retrying" nag was noise, since the router delivers the
+ * message as soon as the busy recipient frees up and the durable sentinel
+ * already records it out-of-band). 'overdue' is therefore sentinel-only. The
+ * recursion guard (an abandoned monitor alert must not spawn another) still
+ * applies via shouldAlertOnAbandon.
+ */
+export function alertInBand(phase: AbandonmentPhase, fromAgent: string): boolean {
+  return phase === 'dropped' && shouldAlertOnAbandon(fromAgent)
+}
+
+/**
+ * Human-readable alert body for a dropped (permanently abandoned) inter-agent
+ * message. Names the id, the parties, and the age so the main agent can
+ * investigate the target's session, and states plainly the message was NOT
+ * delivered (the d3339db9 pain was that the drop was invisible). Only the
+ * 'dropped' phase is alerted in-band (see alertInBand), so this no longer
+ * branches on phase.
  */
 export function abandonAlertContent(
   msg: { id: number; from_agent: string; to_agent: string },
   ageMs: number,
-  phase: AbandonmentPhase = 'dropped',
 ): string {
   const mins = Math.round(ageMs / 60000)
-  if (phase === 'overdue') {
-    return (
-      `DELIVERY OVERDUE: inter-agent message #${msg.id} from "${msg.from_agent}" ` +
-      `to "${msg.to_agent}" is still undelivered after ${mins} min (recipient session ` +
-      `busy). It is NOT dropped -- the router keeps retrying and will deliver as soon ` +
-      `as "${msg.to_agent}" is free, giving up only after a 6h hard limit. No re-send ` +
-      `needed unless it persists.`
-    )
-  }
   return (
     `DELIVERY DROPPED: inter-agent message #${msg.id} from "${msg.from_agent}" ` +
     `to "${msg.to_agent}" was abandoned after ${mins} min (target session never ` +

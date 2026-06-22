@@ -16,7 +16,7 @@ import {
 import {
   DELIVERY_MONITOR_AGENT_ID,
   DELIVERY_ABANDONMENT_SENTINEL,
-  shouldAlertOnAbandon,
+  alertInBand,
   abandonAlertContent,
   abandonmentRecord,
   type AbandonmentPhase,
@@ -29,7 +29,6 @@ import {
 import {
   classifyPendingMessage,
   pruneEscalationState,
-  shouldAlertInBand,
   thresholdsForPriority,
 } from './delivery-retry.js'
 
@@ -136,11 +135,13 @@ export function startMessageRouter(): NodeJS.Timeout {
         if (!markMessageFailed(msg.id, 'Abandoned: recipient session never ready within hard-TTL')) {
           logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
         }
-        // Never drop silently (card d3339db9): surface to the main agent.
-        // Recursion-guarded so an abandoned monitor alert does not spawn another.
-        if (shouldAlertOnAbandon(msg.from_agent)) {
+        // Never drop silently (card d3339db9): surface a PERMANENT drop to the
+        // main agent in-band. alertInBand restricts this to the 'dropped' phase
+        // (card f1ea52c0) and keeps the recursion guard (an abandoned monitor
+        // alert must not spawn another).
+        if (alertInBand('dropped', msg.from_agent)) {
           try {
-            createAgentMessage(DELIVERY_MONITOR_AGENT_ID, MAIN_AGENT_ID, abandonAlertContent(msg, ageMs, 'dropped'))
+            createAgentMessage(DELIVERY_MONITOR_AGENT_ID, MAIN_AGENT_ID, abandonAlertContent(msg, ageMs))
           } catch (err) {
             logger.warn({ err, id: msg.id }, 'Failed to enqueue delivery-dropped alert')
           }
@@ -155,28 +156,15 @@ export function startMessageRouter(): NodeJS.Timeout {
         // Overdue but still pending: nag, do NOT drop, and fall through to the
         // delivery attempt below (the recipient may have just freed up).
         //
-        // In-band alert ONCE, on the genuine first crossing only -- repeating it
-        // every round would pile up new pending messages to the (often deaf) main
-        // agent and amplify the very backlog we are escalating. The periodic
-        // re-alert is carried purely out-of-band by the sentinel below.
-        //
-        // shouldAlertInBand (not a bare !state.has(id)) is load-bearing here:
-        // escalationState is in-process only, but pending rows survive a restart
-        // in SQLite, so after a restart EVERY still-overdue message would look
-        // like a first crossing and re-fire in-band on a fleet that restarts
-        // daily. It treats a no-record message whose age is well past the
-        // threshold as a restart rediscovery (already alerted) -> sentinel-only.
-        const firstEscalation = shouldAlertInBand(ageMs, escalationState.has(msg.id), thresholds)
-        if (firstEscalation && shouldAlertOnAbandon(msg.from_agent)) {
-          try {
-            createAgentMessage(DELIVERY_MONITOR_AGENT_ID, MAIN_AGENT_ID, abandonAlertContent(msg, ageMs, 'overdue'))
-          } catch (err) {
-            logger.warn({ err, id: msg.id }, 'Failed to enqueue delivery-overdue alert')
-          }
-        }
+        // No in-band Boss-facing alert for 'overdue' (card f1ea52c0 / Boss
+        // 2026-06-22): a still-retrying message that will deliver as soon as the
+        // busy recipient frees up was alert noise. The overdue nag rides purely
+        // out-of-band on the durable sentinel; only a permanent 'dropped'
+        // give-up (the hard-fail branch above) raises an in-band alert. The
+        // escalation state is still recorded so classifyPendingMessage can pace
+        // the re-nag cadence and survive a restart (card 0ae61457, A2).
         appendAbandonmentSentinel(msg, ageMs, now, 'overdue')
         escalationState.set(msg.id, now)
-        // Persist so a restart cannot re-fire the in-band alert (card 0ae61457, A2).
         try { updateMessageLastEscalatedAt(msg.id, now) } catch { /* non-fatal */ }
       }
       // The main agent runs in `${MAIN_AGENT_ID}-channels`, not `agent-${name}`,

@@ -417,8 +417,13 @@ async function main(): Promise<void> {
 
   // agent_messages retention sweep (card f1ea52c0): prune rows past the
   // retention window so the table cannot grow without bound. Runs once now,
-  // then daily.
-  deleteOldMessages(Math.floor(Date.now() / 1000))
+  // then daily. The boot prune is guarded so a sweep error can never abort
+  // startup (the interval already swallows its own tick errors).
+  try {
+    deleteOldMessages(Math.floor(Date.now() / 1000))
+  } catch (err) {
+    logger.warn({ err }, 'message-retention: boot prune failed (non-fatal)')
+  }
   messageRetentionInterval = startMessageRetentionSweep()
   logger.info('Agent-message retention sweep beallitva (24 oras)')
 
