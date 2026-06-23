@@ -155,11 +155,16 @@ const LIMIT_MENU_TAIL_LINES = 18
 // HORIZONTAL. At least 10 in a run to ignore stray `-` glyphs.
 const BOX_SEP_RX = /^─{10,}/
 
-// Prompt line inside the input box. `❯` followed by at least one tab/
-// space and then a non-whitespace character means the user (or a
-// send-keys that didn't submit) parked text there. Single-line match
-// ([ \t] not \s) to avoid crossing into the next line.
-const PARKED_INPUT_RX = /❯[ \t]+\S/
+// Prompt line inside the input box. `❯` followed by at least one
+// horizontal whitespace and then a non-whitespace character means the
+// user (or a send-keys that didn't submit) parked text there. The live
+// box now renders the prompt as `❯` + U+00A0 (NO-BREAK SPACE), not a
+// regular space (CLI-drift verified 2026-06-23, card f1ea52c0), so the
+// class must cover ANY whitespace except newline -- `[^\S\n]` matches
+// space, tab, U+00A0 and any future unicode space glyph while staying
+// single-line (never crossing into the next line). The trailing `\S`
+// keeps an empty box (`❯` + space, nothing typed) classified idle.
+const PARKED_INPUT_RX = /❯[^\S\n]+\S/
 
 /**
  * Locate the live Claude Code input box from STRUCTURE alone: the two
