@@ -40,6 +40,16 @@ export interface ScheduledTask {
   // `agent-<name>` or MAIN_CHANNELS_SESSION. Enables dedicated
   // scheduler-only sessions in the future.
   targetSession?: string
+  // Token-outage survival (card 92f07145). When true AND the agent is in a
+  // usage-limit state (store/token-outage-state.json -> limited:true), the
+  // scheduler bypasses the frozen Claude session and fires the model-free
+  // scripts/direct-send.py, which sends the verbatim `## Direct Message`
+  // section of this task's SKILL.md over the Telegram Bot API. Use ONLY for
+  // fixed-text reminders whose text never changes (no personalisation, no
+  // live data). When absent/false the normal tmux-inject path is unchanged.
+  directSend?: boolean
+  // Optional kanban card id to mark 'done' after a successful direct-send.
+  cardId?: string
 }
 
 function readFileOr(path: string, fallback: string): string {
@@ -69,7 +79,7 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
   const skillContent = readFileOr(skillPath, '')
   const { name, description, body } = parseSkillMdFrontmatter(skillContent)
 
-  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string } = {}
+  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; directSend?: boolean; cardId?: string } = {}
   try {
     config = JSON.parse(readFileOr(configPath, '{}'))
   } catch { /* use defaults */ }
@@ -86,6 +96,8 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
     skipIfBusy: config.skipIfBusy === true,
     forceSend: config.forceSend === true,
     targetSession: config.targetSession || undefined,
+    directSend: config.directSend === true,
+    cardId: (typeof config.cardId === 'string' && config.cardId.trim()) ? config.cardId.trim() : undefined,
   }
 }
 
@@ -104,7 +116,7 @@ export function listScheduledTasks(): ScheduledTask[] {
 
 export function writeScheduledTask(
   taskName: string,
-  data: { description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string },
+  data: { description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; directSend?: boolean; cardId?: string },
 ): void {
   const dir = join(SCHEDULED_TASKS_DIR, taskName)
   mkdirSync(dir, { recursive: true })
@@ -131,6 +143,8 @@ export function writeScheduledTask(
   if (data.skipIfBusy !== undefined) config.skipIfBusy = data.skipIfBusy
   if (data.forceSend !== undefined) config.forceSend = data.forceSend
   if (data.targetSession !== undefined) config.targetSession = data.targetSession
+  if (data.directSend !== undefined) config.directSend = data.directSend
+  if (data.cardId !== undefined) config.cardId = data.cardId
   if (!config.createdAt) config.createdAt = Math.floor(Date.now() / 1000)
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
 }
