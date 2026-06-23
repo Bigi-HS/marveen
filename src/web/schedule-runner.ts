@@ -27,6 +27,7 @@ import { cronMatchesNow } from './cron.js'
 import { shouldHoldProactiveWork } from './fleet-pause-enforcer.js'
 import {
   listScheduledTasks,
+  SCHEDULED_TASKS_DIR,
   type ScheduledTask,
 } from './scheduled-tasks-io.js'
 import { listAgentNames, readFileOr } from './agent-config.js'
@@ -40,6 +41,62 @@ import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { sendTelegramMessage } from './telegram.js'
 
 const TMUX = resolveFromPath('tmux')
+const PYTHON = resolveFromPath('python3')
+
+// --- Token-outage direct-send bypass (card 92f07145) ---
+// When the shared Claude account is usage-limited, every agent freezes and the
+// normal tmux-inject path delivers nothing. A task marked directSend:true is
+// instead delivered by the model-free scripts/direct-send.py, which sends the
+// task's pre-written `## Direct Message` over the Telegram Bot API. The trigger
+// is read from the single authoritative source maintained by the
+// token-outage-bridge (spec 4.3); no pane-capture fallback.
+const TOKEN_OUTAGE_STATE_PATH = join(PROJECT_ROOT, 'store', 'token-outage-state.json')
+const DIRECT_SEND_SCRIPT = join(PROJECT_ROOT, 'scripts', 'direct-send.py')
+
+// Read the outage state file. Absent, unreadable, or malformed -> null, which
+// shouldDirectSend treats as "not limited" so the normal path fires (spec 4.3).
+export function readTokenOutageState(path: string = TOKEN_OUTAGE_STATE_PATH): { limited: boolean } | null {
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf-8'))
+    if (raw && typeof raw === 'object' && typeof raw.limited === 'boolean') {
+      return { limited: raw.limited }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+// Pure trigger predicate (AC-1): direct-send fires iff the task opts in AND the
+// agent is in a limit state. Everything else falls through to the normal path.
+export function shouldDirectSend(
+  task: Pick<ScheduledTask, 'directSend'>,
+  state: { limited: boolean } | null,
+): boolean {
+  return task.directSend === true && state?.limited === true
+}
+
+// Invoke direct-send.py as a child process (argv only, no shell -- AC-8) and
+// return its exit code: 0=sent, 1=config error, 2=delivery failure. A spawn
+// failure (e.g. python missing) is treated as a delivery failure (2).
+function runDirectSend(task: ScheduledTask): number {
+  const taskDir = join(SCHEDULED_TASKS_DIR, task.name)
+  const args = [
+    DIRECT_SEND_SCRIPT,
+    '--task-dir', taskDir,
+    '--env-file', join(PROJECT_ROOT, '.env'),
+    '--db-path', join(PROJECT_ROOT, 'store', 'claudeclaw.db'),
+  ]
+  try {
+    execFileSync(PYTHON, args, { timeout: 20000, stdio: 'pipe' })
+    return 0
+  } catch (err) {
+    const status = (err as { status?: number }).status
+    if (typeof status === 'number') return status
+    logger.warn({ err, task: task.name }, 'direct-send: spawn failed (treated as delivery failure)')
+    return 2
+  }
+}
 
 // --- Schedule Runner ---
 // Checks every minute if any scheduled task is due and injects the prompt
@@ -138,6 +195,35 @@ export function buildScheduledTaskPrompt(task: ScheduledTask, agentName: string)
 
 // pendingTaskRetries loop and the normal cron loop share one code path.
 function attemptFireTask(task: ScheduledTask, agentName: string, now: number): 'fired' | 'busy' | 'missing' | 'error' | 'paused' {
+  // Token-outage bypass (card 92f07145): when the agent is usage-limited and
+  // the task opts into directSend, deliver the pre-written reminder model-free
+  // instead of injecting into the frozen Claude session. AC-7: when not limited
+  // or not directSend, fall through to the unchanged normal path below.
+  if (shouldDirectSend(task, readTokenOutageState())) {
+    const code = runDirectSend(task)
+    if (code === 0) {
+      scheduleLastRun.set(task.name, now)
+      persistScheduleLastRun()
+      appendTaskRun(task.name, agentName)
+      logger.info({ task: task.name, agent: agentName }, 'Direct-send fired (token-outage bypass)')
+      return 'fired'
+    }
+    if (code === 1) {
+      // Permanent config error (no template / no token / invalid chat_id):
+      // consume the tick so we do not spin, but record no task run -- nothing
+      // was sent. The DB direct_send_log row carries the diagnostic.
+      scheduleLastRun.set(task.name, now)
+      persistScheduleLastRun()
+      logger.warn({ task: task.name, agent: agentName }, 'Direct-send config error (exit 1), tick consumed')
+      return 'fired'
+    }
+    // exit 2 = delivery failure (network / Telegram non-200). Leave last-run
+    // unset so a later tick in the same cron window can re-attempt; surface as
+    // an error for the caller's logging.
+    logger.warn({ task: task.name, agent: agentName, code }, 'Direct-send delivery failure (exit 2)')
+    return 'error'
+  }
+
   const isMainAgent = agentName === MAIN_AGENT_ID
   // Allow per-task session override via targetSession config field.
   // Falls back to the standard agent session name derivation.
