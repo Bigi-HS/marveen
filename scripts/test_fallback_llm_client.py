@@ -582,6 +582,22 @@ class TestHttpCompletion(unittest.TestCase):
         self.assertEqual(captured["body"]["model"], "llama")
         self.assertNotIn("tools", captured["body"])
 
+    def test_sends_realistic_user_agent_header(self):
+        # Groq sits behind Cloudflare, which 403s the default python-urllib UA
+        # (error 1010). A realistic browser UA header is required or the first
+        # provider dies in a real outage -- the whole point of Layer-2 (card
+        # b75ee367, found via live-verify). urllib stores the key capitalized as
+        # "User-agent".
+        captured = {}
+        def opener(req, timeout=None):
+            captured["ua"] = req.headers.get("User-agent")
+            return _FakeResp(json.dumps({"choices": [{"message": {"content": "ok"}}]}))
+        fl._http_completion("https://api.groq.com/openai/v1", "k", "m",
+                            [{"role": "user", "content": "x"}], None, opener=opener)
+        self.assertIsNotNone(captured["ua"])
+        self.assertNotIn("python-urllib", (captured["ua"] or "").lower())
+        self.assertIn("Mozilla", captured["ua"])
+
     def test_tool_call_returns_arguments(self):
         args_json = json.dumps({"title": "t", "description": "d", "priority": "normal", "assignee": ""})
         def opener(req, timeout=None):

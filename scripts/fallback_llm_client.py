@@ -301,6 +301,15 @@ class ProviderUnavailable(Exception):
     """Raised by a completion callable for any other transport/API failure."""
 
 
+# A realistic desktop browser UA. Groq is fronted by Cloudflare, which blocks the
+# default Python-urllib UA (error 1010); without a browser-like UA the first
+# provider 403s in a real outage (card b75ee367).
+_REQUEST_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+
 def _http_completion(base_url, api_key, model, messages, tools, opener=urllib.request.urlopen):
     """Default completion callable: ONE single-shot POST to the provider's
     OpenAI-compatible /chat/completions endpoint via stdlib urllib (AC-4). No SDK
@@ -319,7 +328,16 @@ def _http_completion(base_url, api_key, model, messages, tools, opener=urllib.re
         url,
         data=json.dumps(payload).encode("utf-8"),
         method="POST",
-        headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
+        headers={
+            "Authorization": "Bearer " + api_key,
+            "Content-Type": "application/json",
+            # Groq sits behind Cloudflare, which 403s the default urllib UA
+            # (Python-urllib/x.y -> error 1010). A realistic browser UA is
+            # required or the FIRST provider dies in a real outage, which is
+            # exactly when Layer-2 must work (card b75ee367, found via
+            # live-verify). Other allowlisted providers accept it too.
+            "User-Agent": _REQUEST_USER_AGENT,
+        },
     )
     try:
         resp = opener(req, timeout=45)
