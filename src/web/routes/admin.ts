@@ -13,6 +13,16 @@ import type { RouteContext } from './types.js'
 export async function tryHandleAdmin(ctx: RouteContext): Promise<boolean> {
   const { res, path, method, identity } = ctx
 
+  // This handler owns ONLY /api/admin/* routes. Every other request (static UI
+  // assets, the login page, any non-admin /api route) merely passes THROUGH on
+  // its way down the dispatch chain and MUST fall through untouched. The scope
+  // guard below therefore applies ONLY to admin paths -- placing it before this
+  // check (regression fe2dc87) made every non-admin path carrying a non-admin
+  // or anonymous identity (the empty placeholder identity on non-/api requests,
+  // which skip the auth gate) get a misleading "admin scope required" 403
+  // instead of being served, taking the whole browser UI down.
+  if (!path.startsWith('/api/admin/')) return false
+
   // Absent identity = no auth middleware (test/internal calls) -> allow. Present
   // identity without ADMIN_SCOPE = per-agent token -> 403 (Chad sec-block fix).
   if (identity && !hasScope(identity.scopes, ADMIN_SCOPE)) {
