@@ -1558,6 +1558,111 @@ describe('channel-less footer-tip idle surface (d3339db9)', () => {
 })
 
 // ===========================================================================
+// NBSP prompt-glyph drift (card f1ea52c0, 2026-06-23)
+// ===========================================================================
+//
+// The live Claude Code input box now renders the prompt as `❯` + U+00A0
+// (NO-BREAK SPACE) before parked text, while echoed history lines in
+// scrollback keep a regular U+0020 space. Verified on 5 live channel-less
+// panes (store/false-busy-fullpanels-0623.txt): every live box prompt is
+// `❯ …`, every scrollback echo is `❯ …`.
+//
+// PARKED_INPUT_RX was `/❯[ \t]+\S/` (space/tab only), so it went BLIND to a
+// parked draft typed at the nbsp prompt: such a pane fell through to 'idle',
+// the router would treat it ready and inject a prompt that concatenates onto
+// (and corrupts) the operator's unsent draft. This is a false-IDLE bug, the
+// OPPOSITE of the "false-busy" the card originally hypothesised (which does
+// not reproduce on any capture, truncated or full-panel).
+//
+// Adversarial-fixture-gate: parked-FN (nbsp draft must read 'typing'),
+// parked-FP (nbsp EMPTY box must stay 'idle'; a regular-space scrollback echo
+// above the box must stay 'idle'), opposing-combination (scrollback echo
+// above + live nbsp draft inside -> 'typing' from the live draft only).
+const NBSP = ' '
+
+// parked-FN (the bug): a real captured nbsp parked draft (scout/quill/bigben
+// shape). Must be 'typing', not ready.
+const NBSP_PARKED_DRAFT = [
+  '● Élek, fogadom az üzeneteket.',
+  '',
+  '✻ Worked for 7s',
+  SEP,
+  '❯' + NBSP + 'várom a Groq kulcsot, futtasd le a tesztet',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · gh auth login · ← for agents',
+].join('\n')
+
+// parked-FP guard: live box prompt is `❯` + nbsp with NO draft text after it
+// (applegate/radar shape). Must stay 'idle' / ready -- nothing parked.
+const NBSP_EMPTY_BOX = [
+  '● Jól vagyok, a restart után stabil.',
+  '',
+  SEP,
+  '❯' + NBSP,
+  SEP,
+  '  gh auth login · ← for agents',
+].join('\n')
+
+// parked-FP guard #2: a regular-space `❯ /compact` echo in scrollback above an
+// empty nbsp live box (radar shape). The echo must NOT leak in -> 'idle'.
+const NBSP_EMPTY_BOX_WITH_SCROLLBACK_ECHO = [
+  '❯ /compact',
+  '  ⎿  Not enough messages to compact.',
+  '',
+  '❯ /compact',
+  '  ⎿  Not enough messages to compact.',
+  SEP,
+  '❯' + NBSP,
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · gh auth login · ← for agents',
+].join('\n')
+
+// opposing-combination: a regular-space scrollback echo ABOVE the box AND a
+// live nbsp draft INSIDE the box. Must be 'typing' from the live draft; the
+// scrollback echo must neither cause nor suppress the classification.
+const NBSP_OPPOSING_ECHO_PLUS_DRAFT = [
+  '❯ /compact',
+  '  ⎿  Not enough messages to compact.',
+  '',
+  '✻ Brewed for 1m 1s',
+  SEP,
+  '❯' + NBSP + 'mehet Dave-nek ha Thor zöld',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · gh auth login · ← for agents',
+].join('\n')
+
+describe('nbsp prompt-glyph drift (f1ea52c0)', () => {
+  it('classifies an nbsp parked draft as typing, not ready (the false-IDLE bug)', () => {
+    expect(detectPaneState(NBSP_PARKED_DRAFT)).toBe('typing')
+    expect(isReadyForPrompt(NBSP_PARKED_DRAFT)).toBe(false)
+  })
+
+  it('merges an nbsp parked draft into busy when mergeTypingAsBusy is set', () => {
+    expect(detectPaneState(NBSP_PARKED_DRAFT, { mergeTypingAsBusy: true })).toBe('busy')
+  })
+
+  it('keeps an empty nbsp box idle/ready (parked-FP guard)', () => {
+    expect(detectPaneState(NBSP_EMPTY_BOX)).toBe('idle')
+    expect(isReadyForPrompt(NBSP_EMPTY_BOX)).toBe(true)
+  })
+
+  it('does NOT let a regular-space scrollback echo make an empty nbsp box typing', () => {
+    expect(detectPaneState(NBSP_EMPTY_BOX_WITH_SCROLLBACK_ECHO)).toBe('idle')
+    expect(isReadyForPrompt(NBSP_EMPTY_BOX_WITH_SCROLLBACK_ECHO)).toBe(true)
+  })
+
+  it('classifies echo-above + live nbsp draft as typing (opposing-combination)', () => {
+    expect(detectPaneState(NBSP_OPPOSING_ECHO_PLUS_DRAFT)).toBe('typing')
+    expect(isReadyForPrompt(NBSP_OPPOSING_ECHO_PLUS_DRAFT)).toBe(false)
+  })
+
+  it('surfaces an nbsp parked draft as a stuck-input signature', () => {
+    expect(stuckInputSignature(NBSP_PARKED_DRAFT)).not.toBeNull()
+    expect(stuckInputSignature(NBSP_EMPTY_BOX)).toBeNull()
+  })
+})
+
+// ===========================================================================
 // Usage/session-limit menu (PR #130 DA review, HIGH)
 // ===========================================================================
 //
