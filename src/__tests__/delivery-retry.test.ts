@@ -3,6 +3,8 @@ import {
   classifyPendingMessage,
   pruneEscalationState,
   thresholdsForPriority,
+  priorityRank,
+  orderPendingByPriority,
   DEFAULT_RETRY_THRESHOLDS,
   MESSAGE_ESCALATE_AFTER_MS,
   MESSAGE_HARD_TTL_MS,
@@ -159,5 +161,88 @@ describe('pruneEscalationState', () => {
     const state = new Map<number, number>([[1, NOW], [2, NOW]])
     pruneEscalationState(state, new Set<number>())
     expect(state.size).toBe(0)
+  })
+})
+
+// Card 83d9dde6 (Thread B, F1): when a busy recipient (typically the
+// orchestrator) frees up after a long stretch, its backlog drains one effective
+// delivery per idle window (an inject makes the pane busy for the turn). The
+// router previously drained that backlog strictly FIFO (created_at ASC), so a
+// fresh urgent update arrived behind stale low-priority ones. orderPendingByPriority
+// reorders the drain by priority (highest first) while keeping FIFO WITHIN a
+// priority. It is a pure reordering: it never drops, never changes per-message
+// escalation/hard-fail (those are decided independently in the loop), and the
+// hard-TTL is untouched.
+describe('priorityRank (card 83d9dde6)', () => {
+  it('ranks urgent > high > normal > low', () => {
+    expect(priorityRank('urgent')).toBeGreaterThan(priorityRank('high'))
+    expect(priorityRank('high')).toBeGreaterThan(priorityRank('normal'))
+    expect(priorityRank('normal')).toBeGreaterThan(priorityRank('low'))
+  })
+
+  it('treats unknown/undefined/null priority as normal (matches thresholdsForPriority fallback)', () => {
+    expect(priorityRank(undefined)).toBe(priorityRank('normal'))
+    expect(priorityRank(null)).toBe(priorityRank('normal'))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(priorityRank('garbage' as any)).toBe(priorityRank('normal'))
+  })
+})
+
+describe('orderPendingByPriority (card 83d9dde6)', () => {
+  it('orders by priority (highest first), FIFO within a priority', () => {
+    const msgs = [
+      { id: 1, priority: 'low' as const, created_at: 100 },
+      { id: 2, priority: 'urgent' as const, created_at: 200 },
+      { id: 3, priority: 'normal' as const, created_at: 150 },
+      { id: 4, priority: 'urgent' as const, created_at: 120 },
+      { id: 5, priority: 'high' as const, created_at: 110 },
+    ]
+    expect(orderPendingByPriority(msgs).map((m) => m.id)).toEqual([4, 2, 5, 3, 1])
+  })
+
+  it('keeps strict FIFO (created_at ASC) when all priorities are equal', () => {
+    const msgs = [
+      { id: 1, priority: 'normal' as const, created_at: 300 },
+      { id: 2, priority: 'normal' as const, created_at: 100 },
+      { id: 3, priority: 'normal' as const, created_at: 200 },
+    ]
+    expect(orderPendingByPriority(msgs).map((m) => m.id)).toEqual([2, 3, 1])
+  })
+
+  it('breaks a created_at tie deterministically by id ASC (older id first)', () => {
+    const msgs = [
+      { id: 9, priority: 'high' as const, created_at: 100 },
+      { id: 4, priority: 'high' as const, created_at: 100 },
+    ]
+    expect(orderPendingByPriority(msgs).map((m) => m.id)).toEqual([4, 9])
+  })
+
+  it('treats a missing priority as normal in the ordering', () => {
+    const msgs = [
+      { id: 1, created_at: 100 },
+      { id: 2, priority: 'high' as const, created_at: 200 },
+      { id: 3, priority: 'low' as const, created_at: 50 },
+    ]
+    expect(orderPendingByPriority(msgs).map((m) => m.id)).toEqual([2, 1, 3])
+  })
+
+  it('the core complaint: a fresh urgent jumps ahead of a stale low', () => {
+    const staleLow = { id: 1, priority: 'low' as const, created_at: 1000 }
+    const freshUrgent = { id: 2, priority: 'urgent' as const, created_at: 5000 }
+    expect(orderPendingByPriority([staleLow, freshUrgent]).map((m) => m.id)).toEqual([2, 1])
+  })
+
+  it('does NOT mutate the input array (pure)', () => {
+    const msgs = [
+      { id: 1, priority: 'low' as const, created_at: 100 },
+      { id: 2, priority: 'urgent' as const, created_at: 200 },
+    ]
+    const snapshot = msgs.map((m) => m.id)
+    orderPendingByPriority(msgs)
+    expect(msgs.map((m) => m.id)).toEqual(snapshot)
+  })
+
+  it('returns an empty array unchanged', () => {
+    expect(orderPendingByPriority([])).toEqual([])
   })
 })

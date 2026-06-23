@@ -71,6 +71,53 @@ export function thresholdsForPriority(priority: MessagePriority | undefined | nu
   }
 }
 
+// Numeric rank for ordering the delivery drain: higher = delivered first.
+// Mirrors the escalation enum (urgent most pressing). Unknown/undefined/null
+// falls back to the `normal` rank, matching thresholdsForPriority's fallback.
+const PRIORITY_RANK: Record<MessagePriority, number> = {
+  urgent: 3,
+  high: 2,
+  normal: 1,
+  low: 0,
+}
+
+/**
+ * Delivery-order rank for a message priority (higher = drained first). Unknown
+ * or missing priorities rank as `normal`, consistent with thresholdsForPriority.
+ */
+export function priorityRank(priority: MessagePriority | undefined | null): number {
+  return priority != null && priority in PRIORITY_RANK
+    ? PRIORITY_RANK[priority]
+    : PRIORITY_RANK.normal
+}
+
+/**
+ * Reorder a tick's pending messages so the router drains them by priority
+ * (highest first), keeping strict FIFO (created_at ASC, then id ASC) WITHIN a
+ * priority (card 83d9dde6, F1).
+ *
+ * The router still attempts every message every tick and an inject makes the
+ * pane busy for the turn, so in practice only the first message targeting a
+ * now-idle recipient is delivered per idle window. Draining FIFO meant a fresh
+ * urgent update waited behind a recipient's stale low-priority backlog; ordering
+ * by priority surfaces the most pressing message first. This is a PURE
+ * reordering: it returns a new array, drops nothing, and does not change the
+ * per-message escalate/hard-fail decision (classifyPendingMessage) or the
+ * invariant hard-TTL -- it only changes WHICH still-valid message is offered
+ * first when the recipient frees up. Ordering across different recipients is
+ * irrelevant (independent panes), so a single global sort is correct.
+ */
+export function orderPendingByPriority<
+  T extends { priority?: MessagePriority | null; created_at: number; id?: number },
+>(messages: readonly T[]): T[] {
+  return [...messages].sort((a, b) => {
+    const byPriority = priorityRank(b.priority) - priorityRank(a.priority)
+    if (byPriority !== 0) return byPriority
+    if (a.created_at !== b.created_at) return a.created_at - b.created_at
+    return (a.id ?? 0) - (b.id ?? 0)
+  })
+}
+
 // What the router should do with one pending message this tick:
 //   'wait'      -> still within a retry window; attempt delivery, do not escalate.
 //   'escalate'  -> overdue and due for an alert; emit the escalation, then STILL

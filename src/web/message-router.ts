@@ -30,6 +30,7 @@ import {
   classifyPendingMessage,
   pruneEscalationState,
   thresholdsForPriority,
+  orderPendingByPriority,
 } from './delivery-retry.js'
 
 // Project root for resolving the gitignored sentinel file. Mirrors
@@ -119,7 +120,13 @@ export function startMessageRouter(): NodeJS.Timeout {
     // Forget throttle state for ids no longer pending (delivered / hard-failed)
     // so the map cannot grow without bound.
     pruneEscalationState(escalationState, new Set(pending.map((m) => m.id)))
-    for (const msg of pending) {
+    // Drain by priority (highest first), FIFO within a priority (card 83d9dde6,
+    // F1). An inject makes the pane busy for the turn, so when a busy recipient
+    // (often the orchestrator) frees up, only the first message targeting it is
+    // delivered per idle window; ordering surfaces a fresh urgent ahead of a
+    // stale low-priority backlog. Pure reordering -- drops nothing, leaves the
+    // per-message escalate/hard-fail and hard-TTL untouched.
+    for (const msg of orderPendingByPriority(pending)) {
       const ageMs = now - msg.created_at * 1000
       // Priority-derived escalation timing (card 28d2179f): urgent/high messages
       // escalate sooner than the 60-min default. The hard-TTL is invariant across
