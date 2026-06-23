@@ -50,6 +50,15 @@ export interface ScheduledTask {
   directSend?: boolean
   // Optional kanban card id to mark 'done' after a successful direct-send.
   cardId?: string
+  // Token-outage survival Layer 2 (card 92f07145). When true AND the agent is
+  // usage-limited AND Layer 1 did NOT run for this task (directSend != true),
+  // the scheduler invokes scripts/fallback_llm_client.py: a single-shot, cloud-
+  // hosted reasoning call (Groq/Gemini, sensitivity-routed) for narrow
+  // structured tasks (reminder parse, kanban triage, short coaching reply).
+  // The per-task layer2_task_type + sensitivity fields live in task-config.json
+  // and are read by the Python client directly. directSend takes precedence:
+  // a task with directSend:true never falls through to Layer 2 (AC-1c).
+  layer2?: boolean
 }
 
 function readFileOr(path: string, fallback: string): string {
@@ -79,7 +88,7 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
   const skillContent = readFileOr(skillPath, '')
   const { name, description, body } = parseSkillMdFrontmatter(skillContent)
 
-  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; directSend?: boolean; cardId?: string } = {}
+  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; directSend?: boolean; cardId?: string; layer2?: boolean } = {}
   try {
     config = JSON.parse(readFileOr(configPath, '{}'))
   } catch { /* use defaults */ }
@@ -98,6 +107,7 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
     targetSession: config.targetSession || undefined,
     directSend: config.directSend === true,
     cardId: (typeof config.cardId === 'string' && config.cardId.trim()) ? config.cardId.trim() : undefined,
+    layer2: config.layer2 === true,
   }
 }
 
@@ -116,7 +126,7 @@ export function listScheduledTasks(): ScheduledTask[] {
 
 export function writeScheduledTask(
   taskName: string,
-  data: { description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; directSend?: boolean; cardId?: string },
+  data: { description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; directSend?: boolean; cardId?: string; layer2?: boolean },
 ): void {
   const dir = join(SCHEDULED_TASKS_DIR, taskName)
   mkdirSync(dir, { recursive: true })
@@ -145,6 +155,7 @@ export function writeScheduledTask(
   if (data.targetSession !== undefined) config.targetSession = data.targetSession
   if (data.directSend !== undefined) config.directSend = data.directSend
   if (data.cardId !== undefined) config.cardId = data.cardId
+  if (data.layer2 !== undefined) config.layer2 = data.layer2
   if (!config.createdAt) config.createdAt = Math.floor(Date.now() / 1000)
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
 }

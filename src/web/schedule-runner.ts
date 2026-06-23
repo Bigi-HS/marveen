@@ -52,6 +52,8 @@ const PYTHON = resolveFromPath('python3')
 // token-outage-bridge (spec 4.3); no pane-capture fallback.
 const TOKEN_OUTAGE_STATE_PATH = join(PROJECT_ROOT, 'store', 'token-outage-state.json')
 const DIRECT_SEND_SCRIPT = join(PROJECT_ROOT, 'scripts', 'direct-send.py')
+const FALLBACK_LLM_SCRIPT = join(PROJECT_ROOT, 'scripts', 'fallback_llm_client.py')
+const FALLBACK_LLM_PROVIDERS = join(PROJECT_ROOT, 'store', 'fallback-llm-providers.yaml')
 
 // Read the outage state file. Absent, unreadable, or malformed -> null, which
 // shouldDirectSend treats as "not limited" so the normal path fires (spec 4.3).
@@ -94,6 +96,44 @@ function runDirectSend(task: ScheduledTask): number {
     const status = (err as { status?: number }).status
     if (typeof status === 'number') return status
     logger.warn({ err, task: task.name }, 'direct-send: spawn failed (treated as delivery failure)')
+    return 2
+  }
+}
+
+// Pure trigger predicate (AC-1, Layer 2): the fallback-LLM client fires iff the
+// task opts into layer2 AND the agent is usage-limited AND Layer 1 did NOT run
+// for this task. Layer 1 runs when directSend === true, so Layer 2 requires
+// directSend !== true -- a directSend task is handled (or skipped) by Layer 1
+// and never double-fires here (AC-1c). The per-task layer2_task_type +
+// sensitivity are read by the Python client from task-config.json.
+export function shouldFallbackLLM(
+  task: Pick<ScheduledTask, 'layer2' | 'directSend'>,
+  state: { limited: boolean } | null,
+): boolean {
+  return task.layer2 === true && task.directSend !== true && state?.limited === true
+}
+
+// Invoke fallback_llm_client.py (argv only, no shell). Exit codes mirror the
+// script: 0=produced output, 1=config error / non-retryable skip, 2=transient
+// delivery failure. A cloud completion can take a while, so the timeout is more
+// generous than direct-send's. A spawn failure is treated as transient (2).
+function runFallbackLLM(task: ScheduledTask): number {
+  const taskDir = join(SCHEDULED_TASKS_DIR, task.name)
+  const args = [
+    FALLBACK_LLM_SCRIPT,
+    '--task-dir', taskDir,
+    '--providers-yaml', FALLBACK_LLM_PROVIDERS,
+    '--db-path', join(PROJECT_ROOT, 'store', 'claudeclaw.db'),
+    '--state-file', TOKEN_OUTAGE_STATE_PATH,
+    '--env-file', join(PROJECT_ROOT, '.env'),
+  ]
+  try {
+    execFileSync(PYTHON, args, { timeout: 60000, stdio: 'pipe' })
+    return 0
+  } catch (err) {
+    const status = (err as { status?: number }).status
+    if (typeof status === 'number') return status
+    logger.warn({ err, task: task.name }, 'fallback-llm: spawn failed (treated as delivery failure)')
     return 2
   }
 }
@@ -199,7 +239,8 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
   // the task opts into directSend, deliver the pre-written reminder model-free
   // instead of injecting into the frozen Claude session. AC-7: when not limited
   // or not directSend, fall through to the unchanged normal path below.
-  if (shouldDirectSend(task, readTokenOutageState())) {
+  const outageState = readTokenOutageState()
+  if (shouldDirectSend(task, outageState)) {
     const code = runDirectSend(task)
     if (code === 0) {
       scheduleLastRun.set(task.name, now)
@@ -221,6 +262,33 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
     // unset so a later tick in the same cron window can re-attempt; surface as
     // an error for the caller's logging.
     logger.warn({ task: task.name, agent: agentName, code }, 'Direct-send delivery failure (exit 2)')
+    return 'error'
+  }
+
+  // Token-outage bypass Layer 2 (card 92f07145): when usage-limited and the task
+  // opts into layer2 (and is not a Layer-1 directSend task), route it to the
+  // single-shot cloud fallback-LLM client instead of the frozen Claude session.
+  if (shouldFallbackLLM(task, outageState)) {
+    const code = runFallbackLLM(task)
+    if (code === 0) {
+      scheduleLastRun.set(task.name, now)
+      persistScheduleLastRun()
+      appendTaskRun(task.name, agentName)
+      logger.info({ task: task.name, agent: agentName }, 'Fallback-LLM fired (token-outage Layer 2)')
+      return 'fired'
+    }
+    if (code === 1) {
+      // Non-retryable skip / config error (unknown task type, no usable
+      // provider, budget exhausted, invalid response): consume the tick, record
+      // no run. The layer2_call_log row carries the diagnostic.
+      scheduleLastRun.set(task.name, now)
+      persistScheduleLastRun()
+      logger.warn({ task: task.name, agent: agentName }, 'Fallback-LLM skip/config error (exit 1), tick consumed')
+      return 'fired'
+    }
+    // exit 2 = transient (provider/Telegram/DB). Leave last-run unset to allow a
+    // later tick in the same window to retry.
+    logger.warn({ task: task.name, agent: agentName, code }, 'Fallback-LLM transient failure (exit 2)')
     return 'error'
   }
 
