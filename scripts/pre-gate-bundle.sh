@@ -7,11 +7,13 @@
 # of ad-hoc "I ran the tests" claims.
 #
 # Checks:
-#   typecheck  `npx tsc --noEmit`               -- type errors -> BLOCK; tooling missing -> WARN
-#   tests      `npx vitest run` (worktrees excl) -- any failure -> BLOCK; runner missing -> WARN
-#   diff-size  `git diff --numstat base...head`  -- additions count; over threshold -> WARN
-#   static     secret + unused-export grep       -- hardcoded secret -> BLOCK; unused export -> WARN
-#   gitleaks   gitleaks diff scan (card ea3720b3) -- secret found -> BLOCK; binary missing -> WARN
+#   typecheck    `npx tsc --noEmit`               -- type errors -> BLOCK; tooling missing -> WARN
+#   tests        `npx vitest run` (worktrees excl) -- any failure -> BLOCK; runner missing -> WARN
+#   diff-size    `git diff --numstat base...head`  -- additions count; over threshold -> WARN
+#   static       secret + unused-export grep       -- hardcoded secret -> BLOCK; unused export -> WARN
+#   gitleaks     gitleaks diff scan (card ea3720b3) -- secret found -> BLOCK; binary missing -> WARN
+#   c12-pane     pane-state.ts detector-pattern change requires c12 chameleon smoke PASS (card 6f763ea8);
+#                cli-version-mismatch.txt present is a standalone WARN
 #
 # Usage:
 #   scripts/pre-gate-bundle.sh <base-branch> <head-sha> [--json] [--notify[=agent]]
@@ -41,6 +43,10 @@ VITEST_EXCLUDE='.claude/worktrees/**'
 # DA T1 sentinel directory (spec: store/specs/devil-advocate-agent.md, M2). Overridable
 # for hermetic tests. The check is "any T1 sentinel present" -- not spec-id specific.
 DA_RUNS_DIR="${DA_RUNS_DIR:-$INSTALL_DIR/store/da-runs}"
+
+# c12 smoke sentinel base directory (card 6f763ea8). Overridable for hermetic tests.
+# Sentinel file format: c12-smoke-pane-<head-sha>.pass (written by Buster on smoke PASS).
+C12_SMOKE_DIR="${C12_SMOKE_DIR:-$INSTALL_DIR/store}"
 
 # --------------------------------------------------------------------------- #
 # Pure helpers (sourced + unit-tested without running the checks)              #
@@ -560,6 +566,31 @@ check_da_sentinel() {
   fi
 }
 
+# Pane-state.ts detector gate (card 6f763ea8).
+# SPINNER_NAMES / BUSY_INDICATOR / PANE_DETECTOR_BASELINE_CLI_VERSION changes require a
+# c12 chameleon smoke PASS (NOT advisory -- BLOCKs the verdict when sentinel is absent).
+# cli-version-mismatch.txt present is a separate WARN (baseline may be stale).
+# Sentinel written by Buster: store/c12-smoke-pane-<head-sha>.pass
+check_c12_pane_state() {
+  # 1. cli-version-mismatch.txt -- WARN regardless of diff content
+  if [ -f "$INSTALL_DIR/store/cli-version-mismatch.txt" ]; then
+    record c12-pane WARN "cli-version-mismatch.txt present -- pane detector baseline may be stale; review before merge"
+  fi
+
+  # 2. Detector pattern change requires c12 smoke; BLOCK if sentinel absent
+  local diff_out
+  diff_out="$(git -C "$INSTALL_DIR" diff "$BASE"..."$HEAD" -- src/pane-state.ts 2>/dev/null)"
+  [ -n "$diff_out" ] || return 0
+  printf '%s\n' "$diff_out" | grep -qE '^\+.*(SPINNER_NAMES|BUSY_INDICATOR|PANE_DETECTOR_BASELINE_CLI_VERSION)' || return 0
+
+  local sentinel="$C12_SMOKE_DIR/c12-smoke-pane-${HEAD}.pass"
+  if [ -f "$sentinel" ]; then
+    record c12-pane PASS "c12 chameleon smoke verified (${sentinel##*/})"
+  else
+    record c12-pane BLOCK "pane-state.ts detector patterns changed but no c12 smoke sentinel (store/c12-smoke-pane-${HEAD}.pass); run Buster c12 chameleon smoke before merge"
+  fi
+}
+
 # --------------------------------------------------------------------------- #
 # Notify (inter-agent message; never affects the verdict/exit code)            #
 # --------------------------------------------------------------------------- #
@@ -627,6 +658,7 @@ main() {
   [ "$cross_model" -eq 1 ] && check_cross_model
   [ "$skill_check" -eq 1 ] && check_skill_regression
   check_da_sentinel
+  check_c12_pane_state
 
   local verdict; verdict="$(pgb_verdict "${CHECK_STATUSES[@]}")"
   local summary
