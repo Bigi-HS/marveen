@@ -44,13 +44,19 @@ describe('isBlockedHost (SSRF guard)', () => {
     '192.168.1.1',
     '169.254.169.254', // cloud metadata
     '0.0.0.0',
-    '100.64.0.1', // CGNAT
+    '100.64.0.1', // CGNAT lower bound
+    '100.127.255.255', // CGNAT upper bound (M1 BVA)
     '::1',
     '::',
     'fe80::1',
     'fc00::1',
     'fd12:3456::1',
-    '::ffff:127.0.0.1', // IPv4-mapped loopback
+    '::ffff:127.0.0.1', // IPv4-mapped loopback (dotted form)
+    '::ffff:7f00:1', // IPv4-mapped loopback (HEX form -- the URL-normalized shape; Thor S1 / Chad)
+    '::ffff:a9fe:a9fe', // IPv4-mapped 169.254.169.254 metadata (hex form)
+    '::ffff:a00:1', // IPv4-mapped 10.0.0.1 (hex form, private)
+    '::ffff:c0a8:101', // IPv4-mapped 192.168.1.1 (hex form, private)
+    '[::ffff:7f00:1]', // bracketed (URL.hostname returns brackets for IPv6)
   ]
   for (const h of blocked) {
     it(`blocks ${h}`, () => expect(isBlockedHost(h)).toBe(true))
@@ -65,7 +71,11 @@ describe('isBlockedHost (SSRF guard)', () => {
     '172.32.0.1', // just above it
     '192.169.0.1', // not 192.168
     '11.0.0.1',
+    '100.63.255.255', // just below CGNAT 100.64/10 (M1 BVA)
+    '100.128.0.0', // just above CGNAT 100.64/10 (M1 BVA)
     '2606:4700:4700::1111', // public IPv6 (Cloudflare)
+    '::ffff:808:808', // IPv4-mapped 8.8.8.8 (hex form, public -> allowed; Thor's allowed example)
+    '::ffff:c000:201', // IPv4-mapped 192.0.2.1 = TEST-NET-1 (RFC 5737), NOT private -> allowed by scope (see re-gate note to Thor)
   ]
   for (const h of allowed) {
     it(`allows ${h}`, () => expect(isBlockedHost(h)).toBe(false))
@@ -90,6 +100,24 @@ describe('validateTargetUrl', () => {
   it('accepts a public https URL and returns a URL object', () => {
     const u = validateTargetUrl('https://www.reddit.com/r/programming')
     expect(u.hostname).toBe('www.reddit.com')
+  })
+
+  // End-to-end through the WHATWG URL parser, which normalizes [::ffff:a.b.c.d]
+  // to the hex form -- the real path the SSRF guard must catch (Thor S1 / Chad).
+  it('rejects [::ffff:169.254.169.254] (metadata) via validateTargetUrl', () => {
+    expect(() => validateTargetUrl('http://[::ffff:169.254.169.254]/latest/meta-data/')).toThrow(/SSRF guard/)
+  })
+
+  it('rejects [::ffff:127.0.0.1] (loopback) via validateTargetUrl', () => {
+    expect(() => validateTargetUrl('http://[::ffff:127.0.0.1]:3420/')).toThrow(/SSRF guard/)
+  })
+
+  it('rejects [::1] via validateTargetUrl', () => {
+    expect(() => validateTargetUrl('http://[::1]/')).toThrow(/SSRF guard/)
+  })
+
+  it('accepts a public IPv4-mapped host [::ffff:8.8.8.8] via validateTargetUrl', () => {
+    expect(() => validateTargetUrl('http://[::ffff:8.8.8.8]/')).not.toThrow()
   })
 })
 

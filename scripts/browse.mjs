@@ -100,10 +100,25 @@ export function isBlockedHost(hostname) {
   // IPv6 forms.
   if (host.includes(':')) {
     if (host === '::1' || host === '::') return true // loopback / unspecified
-    // IPv4-mapped (::ffff:127.0.0.1) -> check the embedded v4.
-    const mapped = host.split(':').pop()
-    const embedded = mapped && parseIpv4(mapped)
-    if (embedded && isPrivateIpv4(embedded)) return true
+    // IPv4-mapped IPv6: ::ffff:a.b.c.d (dotted) OR ::ffff:HHHH:HHHH (hex). Node's
+    // WHATWG URL normalizes the dotted form to hex (`::ffff:127.0.0.1` ->
+    // `::ffff:7f00:1`), so the hex branch is the one that actually fires through
+    // a parsed URL -- the old `split(':').pop()` only matched dotted-quad and let
+    // `::ffff:a9fe:a9fe` (169.254.169.254 metadata) through (Thor S1 / Chad). Decode
+    // the embedded IPv4 from EITHER form and apply the v4 rules.
+    if (host.startsWith('::ffff:')) {
+      const rest = host.slice('::ffff:'.length)
+      let v4 = parseIpv4(rest)
+      if (!v4) {
+        const hx = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(rest)
+        if (hx) {
+          const hi = parseInt(hx[1], 16)
+          const lo = parseInt(hx[2], 16)
+          v4 = [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff]
+        }
+      }
+      if (v4) return isPrivateIpv4(v4)
+    }
     if (host.startsWith('fe80')) return true // link-local fe80::/10
     if (host.startsWith('fc') || host.startsWith('fd')) return true // ULA fc00::/7
     return false
