@@ -13,8 +13,10 @@ import {
   stuckInputSignature,
   pendingPasteSignature,
   decideStuckInputRecovery,
+  isQuiescentlyIdle,
   CLAUDE_SPINNER_LABELS,
   type StuckInputState,
+  type QuiescenceSample,
 } from '../pane-state.js'
 
 // Realistic pane fixtures modelled on actual `tmux capture-pane -p`
@@ -2162,5 +2164,80 @@ describe('positive input-affordance required for idle (card d978f8bd)', () => {
   // No box AND no footer -> still unknown (unchanged baseline negative).
   it('no box and no footer -> unknown (unchanged)', () => {
     expect(detectPaneState('  just some raw shell output\n  $ ls -la')).toBe('unknown')
+  })
+})
+
+describe('isQuiescentlyIdle (L2 delivery backstop, card d4aa1d14)', () => {
+  // The orthogonal "is anything happening?" idle proof. detectPaneState cannot
+  // self-heal a PERSISTENT false-not-ready (same captured pane -> same wrong
+  // answer, recomputed fresh each poll -- there is no sticky state to clear). A
+  // live turn ALWAYS mutates the at-or-above-box region (spinner frames cycle,
+  // the token counter ticks, tokens stream), so a byte-stable region across
+  // samples + an empty/ghost composer + no busy signal proves a finished turn,
+  // regardless of what the content heuristics say. NEVER true for a real draft
+  // (that would concatenate a prompt -- the destructive #284 false-IDLE).
+
+  const footer = '  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+  const emptyBox = ['done: last output', SEP, '❯ ', SEP, footer].join('\n')
+  const ghostBox = ['done: last output', SEP, '❯ merge PR #283', SEP, footer].join('\n')
+  const draftBox = ['done: last output', SEP, '❯ git status', SEP, footer].join('\n')
+  const s = (pane: string, cursor?: { x: number; y: number }): QuiescenceSample => ({ pane, cursor })
+
+  it('stable empty composer across samples -> quiescently idle', () => {
+    expect(isQuiescentlyIdle([s(emptyBox), s(emptyBox), s(emptyBox)])).toBe(true)
+  })
+
+  it('stable ghost-only composer (cursor at suggestion start) -> idle', () => {
+    const c = { x: 2, y: 2 }
+    expect(isQuiescentlyIdle([s(ghostBox, c), s(ghostBox, c), s(ghostBox, c)])).toBe(true)
+  })
+
+  it('CRITICAL: a real parked draft (cursor after text) is NEVER quiescently idle', () => {
+    const c = { x: 12, y: 2 }
+    expect(isQuiescentlyIdle([s(draftBox, c), s(draftBox, c), s(draftBox, c)])).toBe(false)
+  })
+
+  it('a ghost line WITHOUT a cursor is not provable idle (safe -> false)', () => {
+    expect(isQuiescentlyIdle([s(ghostBox), s(ghostBox)])).toBe(false)
+  })
+
+  it('above-box mutation (streaming output) -> not quiescent', () => {
+    const a = ['thinking a', SEP, '❯ ', SEP, footer].join('\n')
+    const b = ['thinking ab', SEP, '❯ ', SEP, footer].join('\n')
+    expect(isQuiescentlyIdle([s(a), s(b), s(b)])).toBe(false)
+  })
+
+  it('only the rotating-tip footer changes (above-box stable) -> still idle', () => {
+    const tip1 = ['done: last output', SEP, '❯ ', SEP, '  ← for agents'].join('\n')
+    const tip2 = ['done: last output', SEP, '❯ ', SEP, '  gh auth login · ← for agents'].join('\n')
+    expect(isQuiescentlyIdle([s(tip1), s(tip2), s(tip1)])).toBe(true)
+  })
+
+  it('a live spinner anywhere -> not idle (busy signal wins)', () => {
+    const spin = ['✢ Combobulating… (3s · ↓ 1.2k tokens)', SEP, '❯ ', SEP, footer].join('\n')
+    expect(isQuiescentlyIdle([s(spin), s(spin), s(spin)])).toBe(false)
+  })
+
+  it('a usage-limit modal is static but NEVER idle (must not inject into it)', () => {
+    const modal = ['Stop and wait for limit to reset', SEP, '❯ ', SEP, footer].join('\n')
+    expect(isQuiescentlyIdle([s(modal), s(modal), s(modal)])).toBe(false)
+  })
+
+  it('a pending-paste placeholder -> not idle', () => {
+    const paste = ['done', SEP, '❯ [Pasted text #1 +200 chars]', SEP, footer].join('\n')
+    expect(isQuiescentlyIdle([s(paste), s(paste), s(paste)])).toBe(false)
+  })
+
+  it('no structural box in the latest sample -> not idle (c88bc682 boundary)', () => {
+    const noBox = '  just raw shell output\n  $ ls -la'
+    expect(isQuiescentlyIdle([s(emptyBox), s(noBox)])).toBe(false)
+  })
+
+  it('a single sample cannot prove stability -> false', () => {
+    expect(isQuiescentlyIdle([s(emptyBox)])).toBe(false)
+  })
+
+  it('empty sample list -> false', () => {
+    expect(isQuiescentlyIdle([])).toBe(false)
   })
 })

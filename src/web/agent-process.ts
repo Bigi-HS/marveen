@@ -8,6 +8,8 @@ import {
   detectPaneState,
   decideSubmitFollowup,
   shouldClearTruncatedPreamble,
+  isQuiescentlyIdle,
+  type QuiescenceSample,
 } from '../pane-state.js'
 import { agentDir, readAgentModel, readAgentSecurityProfile, readAgentClaudeConfigDir, readAgentChannelProviderSafe, readAgentAuthMode, readAgentDisplayName } from './agent-config.js'
 import { ensureAgentConfigDir } from './agent-config-dir.js'
@@ -828,6 +830,17 @@ export function sendPromptToSession(session: string, text: string): void {
 // spinner lands; a quarter-second settle window is well past that.
 const PANE_READY_CONFIRM_DELAY_S = '0.25'
 
+// L2 delivery backstop (card d4aa1d14). The quiescence proof samples the pane
+// several times over a short window to confirm "nothing is happening". A live
+// turn mutates the pane many times a second (spinner frames, token counter,
+// stream), and its busy indicator is present regardless of motion, so 3 samples
+// ~0.6 s apart (a ~1.2 s window) reliably distinguishes a finished turn from an
+// active one. This is the slow path: it runs only for a message the normal gate
+// has already stranded past QUIESCENT_REDELIVER_AFTER_MS, throttled to once per
+// message per minute in the router.
+const QUIESCENCE_SAMPLES = 3
+const QUIESCENCE_SAMPLE_GAP_S = '0.6'
+
 // Send a bare Enter to a session. Used by the stuck-input watcher to
 // re-submit a prompt whose trailing Enter was swallowed on the channel-
 // notification path (where the plugin, not sendPromptToSession, delivered
@@ -923,5 +936,30 @@ export function isSessionReadyForPrompt(session: string): boolean {
   const second = capturePane(session)
   if (second == null) return false
   return detectPaneState(second, { cursor: captureCursor(session) ?? undefined }) === 'idle'
+}
+
+// L2 delivery backstop (card d4aa1d14): prove a pane is idle by an ORTHOGONAL
+// signal so a PERSISTENT false-not-ready (which isSessionReadyForPrompt would
+// keep returning, since detectPaneState is recomputed fresh and gives the same
+// wrong answer every poll) self-heals instead of stranding the recipient until
+// restart. Captures QUIESCENCE_SAMPLES snapshots (+cursor) over a short window
+// and defers the verdict to the pure isQuiescentlyIdle: true ONLY when no busy
+// signal is present, the composer is empty/ghost (never a real draft), and the
+// at-or-above-box region is byte-stable across all samples. A failed capture
+// aborts to false (cannot prove idle -> do not override the gate). The proven
+// idle state preserves the router's idle-only-inject ACK invariant: the pane is
+// genuinely idle at inject, so a later busy turn is still correctly read as
+// receipt of our message.
+export function proveQuiescentlyIdle(session: string): boolean {
+  const samples: QuiescenceSample[] = []
+  for (let i = 0; i < QUIESCENCE_SAMPLES; i++) {
+    if (i > 0) {
+      try { execFileSync('/bin/sleep', [QUIESCENCE_SAMPLE_GAP_S], { timeout: 2000 }) } catch { /* best effort */ }
+    }
+    const pane = capturePane(session)
+    if (pane == null) return false
+    samples.push({ pane, cursor: captureCursor(session) ?? undefined })
+  }
+  return isQuiescentlyIdle(samples)
 }
 

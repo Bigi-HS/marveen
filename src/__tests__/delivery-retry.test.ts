@@ -5,6 +5,8 @@ import {
   thresholdsForPriority,
   priorityRank,
   orderPendingByPriority,
+  shouldQuiescentRedeliver,
+  QUIESCENT_REDELIVER_AFTER_MS,
   DEFAULT_RETRY_THRESHOLDS,
   MESSAGE_ESCALATE_AFTER_MS,
   MESSAGE_HARD_TTL_MS,
@@ -244,5 +246,27 @@ describe('orderPendingByPriority (card 83d9dde6)', () => {
 
   it('returns an empty array unchanged', () => {
     expect(orderPendingByPriority([])).toEqual([])
+  })
+})
+
+describe('shouldQuiescentRedeliver (L2 backstop age gate, card d4aa1d14)', () => {
+  it('does not engage before the redeliver-after window', () => {
+    expect(shouldQuiescentRedeliver(0)).toBe(false)
+    expect(shouldQuiescentRedeliver(QUIESCENT_REDELIVER_AFTER_MS - 1)).toBe(false)
+  })
+
+  it('engages once the message has been undeliverable past the window', () => {
+    expect(shouldQuiescentRedeliver(QUIESCENT_REDELIVER_AFTER_MS)).toBe(true)
+    expect(shouldQuiescentRedeliver(QUIESCENT_REDELIVER_AFTER_MS + 1)).toBe(true)
+  })
+
+  it('honours a custom after-window', () => {
+    expect(shouldQuiescentRedeliver(5000, 10_000)).toBe(false)
+    expect(shouldQuiescentRedeliver(10_000, 10_000)).toBe(true)
+  })
+
+  it('fires well BELOW the earliest (urgent) escalate window, so it acts before escalation noise', () => {
+    expect(QUIESCENT_REDELIVER_AFTER_MS).toBeLessThan(15 * 60 * 1000)
+    expect(QUIESCENT_REDELIVER_AFTER_MS).toBeLessThan(MESSAGE_ESCALATE_AFTER_MS)
   })
 })

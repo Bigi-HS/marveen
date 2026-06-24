@@ -455,6 +455,102 @@ export function detectPaneState(
   return 'idle'
 }
 
+// One pane capture for the quiescence proof: the captured string plus the live
+// cursor (for the empty-vs-ghost-vs-draft discrimination on the latest sample).
+export interface QuiescenceSample {
+  pane: string
+  cursor?: { x: number; y: number }
+}
+
+// Every hard busy/blocked signal detectPaneState treats as "do not inject",
+// collapsed into one predicate. A live turn (spinner/`esc to interrupt`/token
+// counter), a usage-limit modal, a wedged thinking-block error, or a pending
+// paste must ALL veto the quiescence proof -- a static usage-limit modal is the
+// dangerous one: it does not mutate, so byte-stability alone would pass it.
+function hasHardBusySignal(pane: string): boolean {
+  if (!pane) return false
+  for (const rx of BUSY_INDICATORS) if (rx.test(pane)) return true
+  if (detectsUsageLimitMenu(pane)) return true
+  if (detectsThinkingBlockError(pane)) return true
+  if (PENDING_PASTE_RX.test(pane)) return true
+  return false
+}
+
+/**
+ * Heuristic-INDEPENDENT "is this pane idle?" proof for the L2 delivery backstop
+ * (card d4aa1d14). The cursor-guard (#284) is the belt: it fixes the one known
+ * false-not-ready shape (an empty composer showing a dim autosuggestion). This
+ * is the suspenders: a signal ORTHOGONAL to the parked-input / cursor heuristics
+ * so a PERSISTENT false-not-ready (a future ghost variant, a resize echo, an
+ * unforeseen surface) self-heals instead of stranding a recipient until restart.
+ *
+ * Why orthogonal and not just a re-read: detectPaneState is pure over the
+ * captured string and is recomputed fresh every poll -- there is no sticky busy
+ * state to clear, so a persistent misclassification returns the SAME wrong
+ * answer on every retry. The independent question is "is anything happening?": a
+ * live Claude Code turn ALWAYS mutates the at-or-above-box region (spinner frames
+ * cycle, the `(Ns · ↓ tokens · esc to interrupt)` counter ticks, tokens stream).
+ * A region that is byte-identical across several samples spanning a short window
+ * is therefore a finished turn, regardless of what the content heuristics say.
+ *
+ * Returns true ONLY when ALL hold (false on any doubt -- a false-IDLE that
+ * concatenates a prompt into a real draft is the destructive direction, the very
+ * failure #284 guards against):
+ *   1. >= 2 samples (need at least two to prove stability).
+ *   2. NO sample carries a hard busy/blocked signal (hasHardBusySignal).
+ *   3. The latest sample has a structural input box (no box -> 'unknown' surface;
+ *      the documented c88bc682 boundary, deliberately NOT covered here).
+ *   4. CRITICAL INVARIANT: the composer is EMPTY, or holds ONLY a ghost
+ *      autosuggestion (cursor at/before the first glyph, per #284). A real parked
+ *      draft (cursor past the text, or multiple parked lines) returns false.
+ *   5. The at-or-above-box region (lines up to and including the box bottom
+ *      separator -- excludes the rotating-tip footer rendered below it) is
+ *      byte-identical across EVERY sample.
+ */
+export function isQuiescentlyIdle(samples: QuiescenceSample[]): boolean {
+  if (samples.length < 2) return false
+
+  // (2) a live or blocked turn must never be overridden.
+  for (const s of samples) {
+    if (hasHardBusySignal(s.pane)) return false
+  }
+
+  // (3) the latest sample must be a promptable Claude Code surface.
+  const latest = samples[samples.length - 1]!
+  const latestLines = latest.pane.split('\n')
+  const box = findInputBoxBounds(latestLines)
+  if (box === null) return false
+
+  // (4) empty or ghost-only composer -- NEVER redeliver into a real draft.
+  const inputLines = latestLines.slice(box.topSep + 1, box.bottomSep)
+  const parkedLines = inputLines.filter(l => PARKED_INPUT_RX.test(l))
+  if (parkedLines.length > 0) {
+    const ghostOnly =
+      parkedLines.length === 1 &&
+      latest.cursor != null &&
+      isGhostSuggestionOnly(latestLines, box, latest.cursor)
+    if (!ghostOnly) return false
+  }
+
+  // (5) the at-or-above-box region is byte-stable across all samples. The
+  // rotating-tip footer sits BELOW the bottom separator, so slicing at
+  // bottomSep+1 excludes the one element that legitimately changes while idle.
+  // A sample whose box cannot be located keys to null and fails the match
+  // (conservative: a vanished box between samples is not "stable idle").
+  const regionKey = (pane: string): string | null => {
+    const lines = pane.split('\n')
+    const b = findInputBoxBounds(lines)
+    if (b === null) return null
+    return lines.slice(0, b.bottomSep + 1).join('\n')
+  }
+  const ref = regionKey(latest.pane)
+  if (ref === null) return false
+  for (const s of samples) {
+    if (regionKey(s.pane) !== ref) return false
+  }
+  return true
+}
+
 /**
  * True when the pane is in the specific "accepting a new prompt" state.
  * 'typing' counts as not-ready because the user has unsubmitted text
