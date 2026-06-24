@@ -337,9 +337,8 @@ type FireResult = 'fired' | 'busy' | 'missing' | 'error'
 
 function attemptFireTask(task: ScheduledTask, agentName: string, db = getNoaDb()): FireResult {
   const isMainAgent = agentName === MAIN_AGENT_ID
-  const session = task.target_session
-    ? task.target_session
-    : isMainAgent ? MAIN_CHANNELS_SESSION : agentSessionName(agentName)
+  // target_session is a B-block column: stored during migration but inert in A4 sweep.
+  const session = isMainAgent ? MAIN_CHANNELS_SESSION : agentSessionName(agentName)
 
   let sessionExists = false
   try {

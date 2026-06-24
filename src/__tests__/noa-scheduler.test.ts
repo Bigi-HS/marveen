@@ -319,6 +319,29 @@ describe('runSweepTick', () => {
     ).all()
     expect(retries).toHaveLength(0)
   })
+
+  it('OQ-1 B-block: task with target_session is inert -- fires to agent own session', () => {
+    // target_session is a B-block column: stored but NEVER branched on in A4 sweep.
+    // Proof: if old code ran it would use target_session='custom-override' which is NOT
+    // in the mock tmux list -> task returns 'missing' -> sendPromptToSession not called
+    // -> test would fail. New code ignores target_session; marveen is the main agent so
+    // session resolves to MAIN_CHANNELS_SESSION='marveen-channels' (IS in mock) -> fires.
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    db.prepare(`
+      INSERT INTO scheduled_tasks
+        (id, agent, type, description, prompt, schedule, next_run, status, created_at, target_session)
+      VALUES ('bblock-target', 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?, 'custom-override')
+    `).run(nowS - 10, nowS - 100)
+
+    vi.mocked(sendPromptToSession).mockReset()
+    runSweepTick(60000, db)
+
+    expect(vi.mocked(sendPromptToSession)).toHaveBeenCalledOnce()
+    const [calledSession] = vi.mocked(sendPromptToSession).mock.calls[0]!
+    // Must route to 'marveen-channels' (main-agent session), NOT 'custom-override'
+    expect(calledSession).toBe('marveen-channels')
+  })
 })
 
 // ---------------------------------------------------------------------------
