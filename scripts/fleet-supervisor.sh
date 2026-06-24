@@ -232,7 +232,7 @@ ensure_dave_watchdog() {
 # they were given per-agent Telegram bots, so they need the channel-aware watchdog
 # (fresh launch + --channels + TELEGRAM_STATE_DIR), not the channel-less one.
 ensure_agent_watchdogs() {
-  for n in gauge quill scout applegate radar; do
+  for n in gauge quill scout applegate radar blackbeard morgan roberts kidd rackham bonny avery vane bellamy; do
     pgrep -f "scripts/agent-watchdog.sh $n\$" >/dev/null 2>&1 && continue
     if [ -x "$INSTALL_DIR/scripts/agent-watchdog.sh" ]; then
       if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start agent-watchdog.sh $n"; continue; fi
