@@ -17,6 +17,12 @@
 // Pure (clock + state injected) so it is unit-tested without tmux / the DB; the
 // IO and the in-process escalation-state map live in message-router.ts.
 
+import { toPriorityInt, PRIORITY_INT, type MessagePriority, type PriorityValue } from '../priority.js'
+
+// Re-exported so existing importers keep resolving these types from here; the
+// canonical definition now lives in priority.ts (card 88849f24).
+export type { MessagePriority, PriorityValue }
+
 export const MESSAGE_ESCALATE_AFTER_MS = 60 * 60 * 1000 // first overdue escalation
 export const MESSAGE_REALERT_INTERVAL_MS = 60 * 60 * 1000 // re-nag cadence while still pending
 export const MESSAGE_HARD_TTL_MS = 6 * 60 * 60 * 1000 // final give-up (markMessageFailed)
@@ -38,32 +44,32 @@ export const DEFAULT_RETRY_THRESHOLDS: RetryThresholds = {
 // deploy-GO, gate requests) sit silently for an hour. We now shout sooner for more
 // urgent messages -- but ONLY the alert timing moves. The hard-TTL (true give-up)
 // stays MESSAGE_HARD_TTL_MS for EVERY priority, so priority can never DROP a still-
-// valid message earlier than before; it can only surface it earlier. The message
-// priority comes from agent_messages.priority (same enum as kanban_cards).
-export type MessagePriority = 'low' | 'normal' | 'high' | 'urgent'
-
-const PRIORITY_ESCALATE_AFTER_MS: Record<MessagePriority, number> = {
-  urgent: 15 * 60 * 1000,
-  high: 30 * 60 * 1000,
-  normal: MESSAGE_ESCALATE_AFTER_MS, // 60 min -- legacy behaviour
-  low: MESSAGE_ESCALATE_AFTER_MS, // "low" is not "low latency" -- same as normal
-}
+// valid message earlier than before; it can only surface it earlier.
+//
+// Priority is normalized to a canonical integer (card 88849f24): low=25 normal=50
+// high=75 urgent=100. toPriorityInt accepts BOTH the legacy TEXT enum (live
+// claudeclaw.db, pre-cutover) and the migrated INTEGER column (noa.db,
+// post-cutover), so the thresholds below are numeric `>=` gates and behave
+// identically across the cutover; an off-tier integer maps to the nearest
+// behaviour at or below it.
+const URGENT_ESCALATE_AFTER_MS = 15 * 60 * 1000
+const HIGH_ESCALATE_AFTER_MS = 30 * 60 * 1000
 
 /**
- * The retry thresholds for a message of the given priority. Unknown or undefined
- * priorities (e.g. a row from before the column existed) fall back to the default
- * 60-min behaviour. The re-alert interval mirrors escalate-after so a more urgent
- * message also re-nags more often; the hard-TTL is invariant across priorities.
+ * The retry thresholds for a message of the given priority (TEXT enum or the
+ * migrated integer). Unknown/undefined normalizes (via toPriorityInt) to the
+ * normal default and thus the legacy 60-min behaviour. The re-alert interval
+ * mirrors escalate-after so a more urgent message also re-nags more often; the
+ * hard-TTL is invariant across priorities.
  */
-export function thresholdsForPriority(priority: MessagePriority | undefined | null): RetryThresholds {
-  // `in`-guard rather than `(x && map[x]) || fallback`: the latter would also
-  // fall back if a mapped value were ever 0 (Thor gate, PR #146). Membership is
-  // explicit, so a future 0-valued threshold maps correctly and a bad DB string
-  // still falls through to the default.
+export function thresholdsForPriority(priority: PriorityValue | undefined | null): RetryThresholds {
+  const p = toPriorityInt(priority)
   const escalateAfterMs =
-    priority != null && priority in PRIORITY_ESCALATE_AFTER_MS
-      ? PRIORITY_ESCALATE_AFTER_MS[priority]
-      : MESSAGE_ESCALATE_AFTER_MS
+    p >= PRIORITY_INT.urgent
+      ? URGENT_ESCALATE_AFTER_MS
+      : p >= PRIORITY_INT.high
+        ? HIGH_ESCALATE_AFTER_MS
+        : MESSAGE_ESCALATE_AFTER_MS // normal/low/unknown -> legacy 60-min
   return {
     escalateAfterMs,
     reAlertIntervalMs: escalateAfterMs,
@@ -71,24 +77,14 @@ export function thresholdsForPriority(priority: MessagePriority | undefined | nu
   }
 }
 
-// Numeric rank for ordering the delivery drain: higher = delivered first.
-// Mirrors the escalation enum (urgent most pressing). Unknown/undefined/null
-// falls back to the `normal` rank, matching thresholdsForPriority's fallback.
-const PRIORITY_RANK: Record<MessagePriority, number> = {
-  urgent: 3,
-  high: 2,
-  normal: 1,
-  low: 0,
-}
-
 /**
- * Delivery-order rank for a message priority (higher = drained first). Unknown
- * or missing priorities rank as `normal`, consistent with thresholdsForPriority.
+ * Delivery-order rank for a message priority (higher = drained first). The
+ * canonical integer IS the rank (urgent 100 > high 75 > normal 50 > low 25);
+ * unknown/missing normalizes to the normal default, consistent with
+ * thresholdsForPriority. Works for both the TEXT enum and the migrated integer.
  */
-export function priorityRank(priority: MessagePriority | undefined | null): number {
-  return priority != null && priority in PRIORITY_RANK
-    ? PRIORITY_RANK[priority]
-    : PRIORITY_RANK.normal
+export function priorityRank(priority: PriorityValue | undefined | null): number {
+  return toPriorityInt(priority)
 }
 
 /**
@@ -108,7 +104,7 @@ export function priorityRank(priority: MessagePriority | undefined | null): numb
  * irrelevant (independent panes), so a single global sort is correct.
  */
 export function orderPendingByPriority<
-  T extends { priority?: MessagePriority | null; created_at: number; id?: number },
+  T extends { priority?: PriorityValue | null; created_at: number; id?: number },
 >(messages: readonly T[]): T[] {
   return [...messages].sort((a, b) => {
     const byPriority = priorityRank(b.priority) - priorityRank(a.priority)

@@ -1,14 +1,23 @@
 import Database from 'better-sqlite3'
-import { join } from 'node:path'
-import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync } from 'node:fs'
-import { STORE_DIR, DB_FILENAME, ALLOWED_CHAT_ID, OLLAMA_URL } from './config.js'
+import { join, sep } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync, realpathSync } from 'node:fs'
+import { STORE_DIR, DB_FILENAME, PROJECT_ROOT, ALLOWED_CHAT_ID, OLLAMA_URL } from './config.js'
 import { logger } from './logger.js'
 import { emitDashboardEvent, type DashboardEvent } from './event-bus.js'
+import { priorityForColumn, columnTypeIsInteger, type PriorityValue } from './priority.js'
+import { resolveNoaDbPath } from './db-path.js'
 import { migrateGateTables } from './web/gate-db.js'
 import { migrateAgentTokenTable } from './web/agent-token-registry.js'
 import { migrateAckRegistry } from './web/ack-registry.js'
 
 let db: Database.Database
+
+// Cached storage type of agent_messages.priority (card 88849f24). The column is
+// TEXT on claudeclaw.db and INTEGER on noa.db; the write side must persist the
+// matching representation (TEXT is CHECK-constrained, so a number would 500).
+// Probed lazily once per DB handle via PRAGMA table_info and reset on every
+// initDatabase so a cutover (new handle) re-detects.
+let agentMessagePriorityIsInteger: boolean | undefined
 
 // Dashboard event emission (card 7c7ea226) is transaction-aware. A write inside
 // runInTransaction() buffers its event and only emits AFTER the transaction
@@ -145,7 +154,22 @@ export function initDatabase(dbPathOverride?: string): void {
   if (db) {
     try { db.close() } catch { /* already closed */ }
   }
-  const dbPath = useOverride ? dbPathOverride! : join(STORE_DIR, DB_FILENAME)
+  // The live DB path is store/claudeclaw.db unless NOA_DB_PATH points elsewhere
+  // (the noa.db cutover switch, card 88849f24). resolveNoaDbPath enforces a .db
+  // suffix + project-root containment (rejects ../ escapes and out-of-root
+  // absolutes); for an existing target we additionally realpath-check to defeat
+  // symlink escape. A test override bypasses both (it picks its own path).
+  const dbPath = useOverride
+    ? dbPathOverride!
+    : resolveNoaDbPath(process.env['NOA_DB_PATH'], PROJECT_ROOT, join(STORE_DIR, DB_FILENAME))
+  if (!useOverride && process.env['NOA_DB_PATH']?.trim() && existsSync(dbPath)) {
+    const realDb = realpathSync(dbPath)
+    const realRoot = realpathSync(PROJECT_ROOT)
+    const rootWithSep = realRoot.endsWith(sep) ? realRoot : realRoot + sep
+    if (!realDb.startsWith(rootWithSep)) {
+      throw new Error(`NOA_DB_PATH resolves via symlink outside the project root: ${process.env['NOA_DB_PATH']}`)
+    }
+  }
   // Step 1: close the TOCTOU window on fresh installs. openSync with 'wx'
   // + 0o600 creates the file ONLY if it doesn't exist and sets the strict
   // mode atomically. better-sqlite3 then opens the existing file rather
@@ -163,6 +187,8 @@ export function initDatabase(dbPathOverride?: string): void {
     }
   }
   db = new Database(dbPath)
+  // New handle: forget the previous DB's priority-column probe (card 88849f24).
+  agentMessagePriorityIsInteger = undefined
   db.pragma('journal_mode = WAL')
   // ~16 agents + dashboard + watchdogs write concurrently; auto-retry on lock
   // instead of throwing "database is locked", and relax fsync (safe under WAL).
@@ -1876,11 +1902,28 @@ export interface AgentMessage {
   // Same enum as kanban_cards; 'normal' is the default and keeps the legacy 60-min
   // escalate-after. Higher urgency only shortens the ALERT timing, never the 6 h
   // hard-TTL -- see thresholdsForPriority in web/delivery-retry.ts.
-  priority: 'low' | 'normal' | 'high' | 'urgent'
+  // TEXT enum on claudeclaw.db, migrated INTEGER (25/50/75/100) on noa.db. Read
+  // sites normalize either form via toPriorityInt (card 88849f24).
+  priority: PriorityValue
   // Sender-side parent: the id of the message this one replies to, or null for
   // an unthreaded message. Lets the router auto-correlate a reply to its ask
   // (ACK auto-correlation enabler, card d4fe794f). Additive + fail-open.
   in_reply_to: number | null
+}
+
+/**
+ * Whether agent_messages.priority is an INTEGER column on the live DB (card
+ * 88849f24). Probed once per handle from PRAGMA table_info and cached. Determines
+ * which representation createAgentMessage persists so a write is valid against
+ * both the pre-cutover TEXT (CHECK) column and the post-cutover INTEGER column.
+ */
+function isAgentMessagePriorityInteger(): boolean {
+  if (agentMessagePriorityIsInteger === undefined) {
+    const col = (db.prepare('PRAGMA table_info(agent_messages)').all() as Array<{ name: string; type: string }>)
+      .find((c) => c.name === 'priority')
+    agentMessagePriorityIsInteger = columnTypeIsInteger(col?.type)
+  }
+  return agentMessagePriorityIsInteger
 }
 
 export function createAgentMessage(
@@ -1888,21 +1931,25 @@ export function createAgentMessage(
   to: string,
   content: string,
   ackExpected = false,
-  priority: AgentMessage['priority'] = 'normal',
+  priority: PriorityValue = 'normal',
   inReplyTo: number | null = null,
 ): AgentMessage {
   const now = Math.floor(Date.now() / 1000)
   const ack = ackExpected ? 1 : 0
+  // Persist the representation matching the live column type: an integer for the
+  // migrated noa.db column, the CHECK-safe tier string for the legacy TEXT column
+  // (card 88849f24). The returned object reflects what was stored.
+  const storedPriority = priorityForColumn(priority, isAgentMessagePriorityInteger())
   const info = db.prepare(
     'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, ack_expected, priority, in_reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(from, to, content, 'pending', now, ack, priority, inReplyTo)
+  ).run(from, to, content, 'pending', now, ack, storedPriority, inReplyTo)
   const id = Number(info.lastInsertRowid)
   emitOrDefer({ type: 'message', id: String(id), action: 'created' })
   return {
     id,
     from_agent: from, to_agent: to, content, status: 'pending',
     result: null, created_at: now, delivered_at: null, completed_at: null,
-    ack_expected: ack, priority, in_reply_to: inReplyTo,
+    ack_expected: ack, priority: storedPriority, in_reply_to: inReplyTo,
   }
 }
 
