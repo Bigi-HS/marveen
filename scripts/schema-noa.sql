@@ -63,18 +63,26 @@ CREATE TABLE sessions (
 
 -- scheduled_tasks: cron-based task registry.
 -- Changed: chat_id removed; agent + type + description added.
+-- A4: B-block columns added (skip_if_busy/force_send/direct_send/layer2/target_session/card_id).
+--     A4 sweep ignores them at runtime; B-block activates the behaviors.
 CREATE TABLE scheduled_tasks (
-  id          TEXT    PRIMARY KEY,       -- task name (kebab-case)
-  agent       TEXT    NOT NULL,          -- which agent runs this
-  type        TEXT    NOT NULL,          -- task | heartbeat
-  description TEXT,
-  prompt      TEXT    NOT NULL,
-  schedule    TEXT    NOT NULL,          -- cron expression
-  next_run    INTEGER NOT NULL,
-  last_run    INTEGER,
-  last_result TEXT,
-  status      TEXT    NOT NULL DEFAULT 'active',  -- active | paused | deleted
-  created_at  INTEGER NOT NULL
+  id             TEXT    PRIMARY KEY,       -- task name (kebab-case)
+  agent          TEXT    NOT NULL,          -- which agent runs this
+  type           TEXT    NOT NULL,          -- task | heartbeat
+  description    TEXT,
+  prompt         TEXT    NOT NULL,
+  schedule       TEXT    NOT NULL,          -- cron expression
+  next_run       INTEGER NOT NULL,
+  last_run       INTEGER,
+  last_result    TEXT,
+  status         TEXT    NOT NULL DEFAULT 'active',  -- active | paused | deleted
+  created_at     INTEGER NOT NULL,
+  skip_if_busy   INTEGER NOT NULL DEFAULT 0,
+  force_send     INTEGER NOT NULL DEFAULT 0,
+  direct_send    INTEGER NOT NULL DEFAULT 0,
+  layer2         INTEGER NOT NULL DEFAULT 0,
+  target_session TEXT,
+  card_id        TEXT
 );
 
 -- ============================================================================
