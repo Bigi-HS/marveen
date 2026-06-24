@@ -1,0 +1,36 @@
+/*
+ * NoA design tokens -- single source of the palette hex values.
+ * Derived from store/dashboard-palette-noa.md (Boss directive, NoA avatar colours).
+ *
+ * This file lives OUTSIDE src/ on purpose: the DoD hex-grep runs on dashboard-new/src
+ * and must return zero matches, so the literal palette hex must live here, not in any
+ * component. Tailwind (tailwind.config.ts) references these vars by name; components
+ * use the Tailwind colour keys. This is the one place a colour value is written.
+ */
+:root {
+  /* surfaces */
+  --bg-deep: #152528;
+  --bg-surface: #1e3236;
+  --bg-elevated: #2a3f44;
+  --border: #37535a;
+
+  /* brand orange (dominant -- CTA, active tab, focal accents; max 1-2 per page) */
+  --primary: #de6f23;
+  --primary-hover: #e8823a;
+  --primary-press: #c75c18;
+
+  /* electric cyan (data, live motion, focus, graph glow) */
+  --accent: #2fc4ed;
+  --accent-glow: #53e9ff;
+
+  /* neutrals + text */
+  --neutral: #8a929b;
+  --text: #e6eef0;
+  --text-muted: #9fb0b3;
+
+  /* kanban status (AC-T2) */
+  --status-planned: var(--neutral);
+  --status-in-progress: var(--accent);
+  --status-waiting: var(--primary);
+  --status-done: #4fb477;
+}
