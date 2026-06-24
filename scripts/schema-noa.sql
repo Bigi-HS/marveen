@@ -23,7 +23,7 @@
 CREATE TABLE memories (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   agent_id    TEXT    NOT NULL,
-  category    TEXT    NOT NULL,          -- hot | warm | cold | shared | general
+  category    TEXT    NOT NULL,          -- hot | warm | cold | shared
   content     TEXT    NOT NULL,
   keywords    TEXT,
   topic_key   TEXT,
