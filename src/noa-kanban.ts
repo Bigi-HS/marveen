@@ -187,6 +187,8 @@ function assertValidTransition(fromStatus: string, toStatus: string): void {
   // Validate against board_columns cache -- 'archived' is not a column so it fails here (AC-1, AC-2a)
   const validIds = getValidStatusIds()
   if (!validIds.has(toStatus)) throw new InvalidStatusError(toStatus)
+  // Same-status is a valid no-op move (spec section 5 edge case)
+  if (fromStatus === toStatus) return
 
   // For builtin source statuses: check the explicit allowed-targets list.
   // If toStatus is also a builtin and not in the allowed set -> forbidden.

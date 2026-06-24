@@ -142,6 +142,25 @@ describe('AC-2: state machine', () => {
     // planned -> planned is not a real transition; AC-2e: no validation if status unchanged
     expect(() => updateCard(card.id, { status: 'planned' })).not.toThrow()
   })
+
+  it('moveCard to same status is a no-op move: allowed, updated_at refreshed, dispatch NOT re-fired (spec section 5)', () => {
+    const card = createCard({ title: 'In progress', status: 'in_progress', suppressIntake: true })
+    // Stamp dispatched_at to simulate prior dispatch
+    const now = Math.floor(Date.now() / 1000)
+    getNoaDb().prepare('UPDATE kanban_cards SET dispatched_at=? WHERE id=?').run(now, card.id)
+
+    const before = getCard(card.id)!.updated_at
+    // Small delay to ensure updated_at changes
+    const msgsBefore = (getNoaDb().prepare('SELECT COUNT(*) as n FROM agent_messages').get() as { n: number }).n
+
+    expect(() => moveCard(card.id, 'in_progress', 2)).not.toThrow()
+
+    const after = getCard(card.id)!
+    expect(after.updated_at).toBeGreaterThanOrEqual(before)
+    // No new dispatch message (dispatched_at was set, AC-3a guard)
+    const msgsAfter = (getNoaDb().prepare('SELECT COUNT(*) as n FROM agent_messages').get() as { n: number }).n
+    expect(msgsAfter).toBe(msgsBefore)
+  })
 })
 
 // ---------------------------------------------------------------------------
