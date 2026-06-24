@@ -1,0 +1,12 @@
+{
+  "model": "claude-sonnet-4-6",
+  "securityProfile": "developer-senior",
+  "claudeConfigDir": "/home/domin/marveen/agents/bellamy/.claude-config",
+  "team": {
+    "role": "member",
+    "reportsTo": "thor",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": []
+  }
+}
