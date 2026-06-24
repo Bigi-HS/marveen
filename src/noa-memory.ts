@@ -2,10 +2,12 @@ import Database from 'better-sqlite3'
 import * as crypto from 'crypto'
 import { join } from 'path'
 import { logger } from './logger.js'
-import { STORE_DIR } from './config.js'
+import { STORE_DIR, PROJECT_ROOT } from './config.js'
+import { resolveNoaDbPath } from './db-path.js'
 
 // --- Environment ---
-const NOA_DB_PATH = process.env.NOA_DB_PATH ?? join(STORE_DIR, 'noa.db')
+// E1 guard: .db-suffix + project-root containment + ../-rejection (Chad finding on PR#290)
+const NOA_DB_PATH = resolveNoaDbPath(process.env.NOA_DB_PATH, PROJECT_ROOT, join(STORE_DIR, 'noa.db'))
 const OLLAMA_URL_RAW = process.env.OLLAMA_URL ?? 'http://localhost:11434'
 export const EMBED_MODEL = process.env.EMBED_MODEL ?? 'nomic-embed-text'
 
@@ -216,6 +218,7 @@ export async function getEmbedding(text: string): Promise<Float32Array | null> {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: EMBED_MODEL, prompt: text.slice(0, 2000) }),
       signal: controller.signal,
+      redirect: 'error',  // I1 reinforcement: a 302 to a remote host must not silently bypass the localhost guard
     })
     const data = await resp.json() as { embedding?: number[] }
     if (!data.embedding) return null
