@@ -93,9 +93,11 @@ CREATE TABLE embedding_cache (
 -- Unchanged core tables (verbatim from claudeclaw.db)
 -- ============================================================================
 
+-- A3: status CHECK removed -- validation is application-layer (board_columns cache, AC-1).
+-- Custom columns added via AC-10 must be valid status targets without DDL changes.
 CREATE TABLE kanban_cards (
   id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT,
-  status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','in_progress','waiting','done','someday')),
+  status TEXT NOT NULL DEFAULT 'planned',
   assignee TEXT, priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
   project TEXT, parent_id TEXT REFERENCES kanban_cards(id), due_date INTEGER,
   sort_order REAL NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
@@ -357,3 +359,24 @@ CREATE INDEX idx_task_runs_ts                ON task_runs(ts);
 CREATE INDEX idx_todo_owner                  ON todo_items(owner, created_at);
 CREATE INDEX idx_tool_log_session            ON tool_call_log(session_id, created_at);
 CREATE INDEX idx_tool_log_ts                 ON tool_call_log(created_at);
+
+-- ============================================================================
+-- A3 DDL patch: configurable board columns (AC-9)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS board_columns (
+  id          TEXT    PRIMARY KEY,
+  label       TEXT    NOT NULL,
+  sort_order  REAL    NOT NULL,
+  is_terminal INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_columns_order ON board_columns(sort_order);
+
+INSERT OR IGNORE INTO board_columns (id, label, sort_order, is_terminal, created_at, updated_at) VALUES
+  ('planned',     'Tervezett',    1.0, 0, unixepoch(), unixepoch()),
+  ('in_progress', 'Folyamatban',  2.0, 0, unixepoch(), unixepoch()),
+  ('waiting',     'Varakozik',    3.0, 0, unixepoch(), unixepoch()),
+  ('someday',     'Egyszer majd', 4.0, 0, unixepoch(), unixepoch()),
+  ('done',        'Kesz',         5.0, 1, unixepoch(), unixepoch());
