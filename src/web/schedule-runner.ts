@@ -2,7 +2,6 @@ import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { execSync, execFileSync } from 'node:child_process'
 import { resolveFromPath } from '../platform.js'
-import { atomicWriteFileSync } from './atomic-write.js'
 import { logger } from '../logger.js'
 import {
   PROJECT_ROOT,
@@ -165,30 +164,7 @@ export const SKIP_IF_BUSY_RETRY_INTERVAL_MS = 10 * 60 * 1000 // 10 min
 
 // When a task fires we record its time here so the catch-up window (30 min on
 // the first tick after a restart) does not re-run it. This map is in-memory, so
-// a dashboard restart that lands inside a task's catch-up window used to re-fire
-// an already-run task (observed: a restart re-sent a second vmd-report). Persist
-// it to disk and reload on startup so the skip-check survives restarts.
-const SCHEDULE_LAST_RUN_PATH = join(PROJECT_ROOT, 'store', 'schedule-last-run.json')
-const scheduleLastRun: Map<string, number> = new Map()
-
-function loadScheduleLastRun(): void {
-  try {
-    const raw = JSON.parse(readFileSync(SCHEDULE_LAST_RUN_PATH, 'utf-8'))
-    if (raw && typeof raw === 'object') {
-      for (const [name, ts] of Object.entries(raw)) {
-        if (typeof ts === 'number' && Number.isFinite(ts)) scheduleLastRun.set(name, ts)
-      }
-    }
-  } catch { /* no file yet / unreadable -- start empty */ }
-}
-
-function persistScheduleLastRun(): void {
-  try {
-    atomicWriteFileSync(SCHEDULE_LAST_RUN_PATH, JSON.stringify(Object.fromEntries(scheduleLastRun), null, 2))
-  } catch (err) {
-    logger.warn({ err }, 'schedule-runner: failed to persist last-run map')
-  }
-}
+// scheduleLastRun Map removed (A4): noa.db last_run is the single source of truth (AC-8).
 
 // Try to fire a task at a single target agent. Returns the outcome so the
 // caller can decide whether to queue a retry. Splitting this out means the
@@ -243,8 +219,6 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
   if (shouldDirectSend(task, outageState)) {
     const code = runDirectSend(task)
     if (code === 0) {
-      scheduleLastRun.set(task.name, now)
-      persistScheduleLastRun()
       appendTaskRun(task.name, agentName)
       logger.info({ task: task.name, agent: agentName }, 'Direct-send fired (token-outage bypass)')
       return 'fired'
@@ -253,8 +227,6 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
       // Permanent config error (no template / no token / invalid chat_id):
       // consume the tick so we do not spin, but record no task run -- nothing
       // was sent. The DB direct_send_log row carries the diagnostic.
-      scheduleLastRun.set(task.name, now)
-      persistScheduleLastRun()
       logger.warn({ task: task.name, agent: agentName }, 'Direct-send config error (exit 1), tick consumed')
       return 'fired'
     }
@@ -271,8 +243,6 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
   if (shouldFallbackLLM(task, outageState)) {
     const code = runFallbackLLM(task)
     if (code === 0) {
-      scheduleLastRun.set(task.name, now)
-      persistScheduleLastRun()
       appendTaskRun(task.name, agentName)
       logger.info({ task: task.name, agent: agentName }, 'Fallback-LLM fired (token-outage Layer 2)')
       return 'fired'
@@ -281,8 +251,6 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
       // Non-retryable skip / config error (unknown task type, no usable
       // provider, budget exhausted, invalid response): consume the tick, record
       // no run. The layer2_call_log row carries the diagnostic.
-      scheduleLastRun.set(task.name, now)
-      persistScheduleLastRun()
       logger.warn({ task: task.name, agent: agentName }, 'Fallback-LLM skip/config error (exit 1), tick consumed')
       return 'fired'
     }
@@ -336,8 +304,6 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
   try {
     const fullPrompt = buildScheduledTaskPrompt(task, agentName)
     sendPromptToSession(session, fullPrompt)
-    scheduleLastRun.set(task.name, now)
-    persistScheduleLastRun()
     appendTaskRun(task.name, agentName)
     logger.info({ task: task.name, agent: agentName, session }, 'Scheduled task fired')
 
@@ -471,140 +437,5 @@ function sendSkipIfBusyExhaustedAlert(taskName: string, agentName: string, first
   })()
 }
 
-export function startScheduleRunner(): NodeJS.Timeout {
-  // Reload the persisted last-run times so a restart inside a task's catch-up
-  // window does not re-fire an already-run task.
-  loadScheduleLastRun()
-  let firstRun = true
-
-  function runCheck() {
-    const tasks = listScheduledTasks()
-    const now = Date.now()
-    // On first run after restart, catch up missed tasks from last 30 min
-    const catchUp = firstRun ? 30 * 60000 : 60000
-    firstRun = false
-
-    // Retry tasks that were busy-skipped on earlier ticks (persisted in
-    // pending_task_retries so they survive dashboard restart). cronMatchesNow
-    // only fires on an exact minute boundary, so without this the noon
-    // check skipped because the session was busy at 12:00:50 would never
-    // run that day. We NEVER abandon -- the operator can cancel from the
-    // UI if a retry has become obsolete.
-    const pendingRows = listPendingTaskRetries()
-    const pendingKeys = new Set<string>()
-    for (const row of pendingRows) {
-      // Locate the task definition. If it was deleted meanwhile, drop the
-      // retry silently -- nothing to fire.
-      const taskDef = tasks.find(t => t.name === row.task_name)
-      if (!taskDef) {
-        deletePendingTaskRetry(row.task_name, row.agent_name)
-        continue
-      }
-      // Honor the operator's disable action: if the task was toggled off
-      // while the retry sat in the queue, drop the retry so a long-stuck
-      // task doesn't surprise-fire the moment the session frees up.
-      if (!taskDef.enabled) {
-        deletePendingTaskRetry(row.task_name, row.agent_name)
-        continue
-      }
-
-      // Register the key only once we know the retry is live, so the cron
-      // loop below doesn't treat a dead row as a reason to skip.
-      const key = `${row.task_name}@${row.agent_name}`
-      pendingKeys.add(key)
-
-      // skipIfBusy tasks use a bounded retry: max SKIP_IF_BUSY_MAX_RETRIES
-      // attempts, spaced SKIP_IF_BUSY_RETRY_INTERVAL_MS apart. Exhausted
-      // retries trigger an HTTPS fallback alert and the row is deleted.
-      if (taskDef.skipIfBusy) {
-        if (now - row.last_attempt < SKIP_IF_BUSY_RETRY_INTERVAL_MS) continue // throttle
-        const result = attemptFireTask(taskDef, row.agent_name, now)
-        // Fleet paused: hold without burning a retry attempt or alerting. The
-        // self-expiring pause clears on resume and the row is re-attempted then.
-        if (result === 'paused') continue
-        if (result === 'fired' || result === 'missing') {
-          deletePendingTaskRetry(row.task_name, row.agent_name)
-          continue
-        }
-        const newCount = row.attempt_count + 1
-        if (newCount > SKIP_IF_BUSY_MAX_RETRIES) {
-          sendSkipIfBusyExhaustedAlert(row.task_name, row.agent_name, row.first_attempt)
-          deletePendingTaskRetry(row.task_name, row.agent_name)
-          logger.info({ task: row.task_name, agent: row.agent_name, attempts: newCount }, 'skipIfBusy: retries exhausted, row deleted after HTTPS alert')
-        } else {
-          updatePendingTaskRetry(row.task_name, row.agent_name, now, result)
-          logger.info({ task: row.task_name, agent: row.agent_name, attempt: newCount, maxRetries: SKIP_IF_BUSY_MAX_RETRIES }, 'skipIfBusy: retry queued')
-        }
-        continue
-      }
-
-      const view = toPendingRetryView(row, now)
-      const result = attemptFireTask(taskDef, row.agent_name, now)
-      // Fleet paused: hold this retry without refreshing the row or alerting.
-      if (result === 'paused') continue
-      if (result === 'fired' || result === 'missing') {
-        deletePendingTaskRetry(row.task_name, row.agent_name)
-        continue
-      }
-      // Still busy or errored: refresh the retry row and alert ONCE if
-      // the age crossed the threshold. `updatePendingTaskRetry` returns
-      // false when the row has been cancelled between load and now --
-      // in that case, do not re-insert (the operator's cancel wins) and
-      // do not alert.
-      const stillPresent = updatePendingTaskRetry(row.task_name, row.agent_name, now, result)
-      if (stillPresent && view.alertDue) sendPendingRetryAlert(view, now)
-    }
-
-    for (const task of tasks) {
-      if (!task.enabled) continue
-      if (!cronMatchesNow(task.schedule, catchUp)) continue
-
-      // Prevent double-firing: skip if already ran within the catch-up window
-      const lastRun = scheduleLastRun.get(task.name) || 0
-      if (now - lastRun < catchUp) continue
-
-      let targetAgents: string[]
-
-      if (task.agent === 'all') {
-        // Broadcast to all running agents + main
-        const running = listAgentNames().filter(a => isAgentRunning(a))
-        targetAgents = [MAIN_AGENT_ID, ...running]
-      } else {
-        targetAgents = [task.agent || MAIN_AGENT_ID]
-      }
-
-      for (const agentName of targetAgents) {
-        const key = `${task.name}@${agentName}`
-        // If already queued for retry from an earlier tick, leave it to
-        // the retry handler -- don't re-queue or double-fire.
-        if (pendingKeys.has(key)) continue
-        const result = attemptFireTask(task, agentName, now)
-        // Fleet paused: skip this tick entirely. Do NOT requeue into the
-        // bounded-retry machinery (that is for genuinely-busy agents) -- the
-        // normal cron + catch-up window re-fires once the pause self-clears.
-        if (result === 'paused') continue
-        if (result === 'busy') {
-          if (task.skipIfBusy) {
-            // Bounded re-queue instead of silent drop (card 92f763a2):
-            // a single busy tick on a short-cadence heartbeat is still
-            // retried up to SKIP_IF_BUSY_MAX_RETRIES times at 10-min
-            // intervals. If all retries exhaust, an HTTPS fallback alert
-            // goes to the operator so the silence window is bounded to
-            // ~30 minutes instead of potentially 10 hours.
-            insertPendingTaskRetryIfNew(task.name, agentName, now, 'busy')
-            logger.info({ task: task.name, agent: agentName, maxRetries: SKIP_IF_BUSY_MAX_RETRIES }, 'Schedule busy, skipIfBusy=true: requeued for bounded retry')
-            continue
-          }
-          // First encounter -- insert a new pending row. If somehow a
-          // row already exists (race with a just-cancelled retry), do
-          // nothing so the cancel wins the tiebreak.
-          insertPendingTaskRetryIfNew(task.name, agentName, now, 'busy')
-        }
-      }
-    }
-  }
-
-  // Run immediately on start (catches missed tasks)
-  setTimeout(runCheck, 5000)
-  return setInterval(runCheck, 60000)
-}
+// Sweep entrypoint moved to noa-scheduler.ts (A4). Re-export so callers are unaffected.
+export { startScheduleRunner } from '../noa-scheduler.js'
