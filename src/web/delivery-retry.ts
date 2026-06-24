@@ -118,6 +118,29 @@ export function orderPendingByPriority<
   })
 }
 
+// L2 delivery backstop (card d4aa1d14). How long a message must have been
+// undeliverable before the router is allowed to fall back to the orthogonal
+// quiescence proof (isQuiescentlyIdle) to override a PERSISTENT false-not-ready
+// gate. Set well BELOW the earliest (urgent, 15 min) escalate window so the
+// backstop heals a stranded message BEFORE it ever becomes escalation noise, yet
+// comfortably above the 5 s router cadence so a normally-busy recipient is not
+// quiescence-sampled on every tick (the router additionally throttles the sample
+// itself to at most once per message per minute).
+export const QUIESCENT_REDELIVER_AFTER_MS = 2 * 60 * 1000
+
+/**
+ * Whether a still-pending message is old enough for the quiescence backstop.
+ * Pure age gate (the pane proof and the per-message sample throttle live in the
+ * router); `ageMs` is now - created_at, the same value classifyPendingMessage
+ * consumes. Below the window: leave it to the normal idle-only delivery gate.
+ */
+export function shouldQuiescentRedeliver(
+  ageMs: number,
+  afterMs: number = QUIESCENT_REDELIVER_AFTER_MS,
+): boolean {
+  return ageMs >= afterMs
+}
+
 // What the router should do with one pending message this tick:
 //   'wait'      -> still within a retry window; attempt delivery, do not escalate.
 //   'escalate'  -> overdue and due for an alert; emit the escalation, then STILL

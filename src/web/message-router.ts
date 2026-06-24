@@ -31,6 +31,7 @@ import {
   pruneEscalationState,
   thresholdsForPriority,
   orderPendingByPriority,
+  shouldQuiescentRedeliver,
 } from './delivery-retry.js'
 
 // Project root for resolving the gitignored sentinel file. Mirrors
@@ -52,6 +53,7 @@ import { readAgentTeam } from './agent-team.js'
 import {
   agentSessionName,
   isSessionReadyForPrompt,
+  proveQuiescentlyIdle,
   sendPromptToSession,
 } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
@@ -80,6 +82,13 @@ const escalationState: Map<number, number> = new Map()
 // Log "skipping, target not ready" at most once per message id so a busy
 // receiver over many 5s ticks does not spam the log.
 const routerLoggedMisses: Set<number> = new Set()
+
+// L2 delivery backstop throttle (card d4aa1d14): id -> epoch-ms of the last
+// quiescence proof attempted for it. The proof captures several pane snapshots
+// over ~1.2s, so we run it at most once per message per QUIESCENCE_RECHECK_MS to
+// keep the 5s tick cheap when a recipient is legitimately busy for a long turn.
+const quiescenceCheckedAt: Map<number, number> = new Map()
+const QUIESCENCE_RECHECK_MS = 60 * 1000
 
 // Durable, delivery-independent trail (PR #130 DA review, MEDIUM): the in-band
 // alert is itself an inter-agent message and can also be lost -- acutely when
@@ -119,7 +128,10 @@ export function startMessageRouter(): NodeJS.Timeout {
     const now = Date.now()
     // Forget throttle state for ids no longer pending (delivered / hard-failed)
     // so the map cannot grow without bound.
-    pruneEscalationState(escalationState, new Set(pending.map((m) => m.id)))
+    const pendingIds = new Set(pending.map((m) => m.id))
+    pruneEscalationState(escalationState, pendingIds)
+    // Same bounded-growth prune for the L2 backstop throttle map (card d4aa1d14).
+    pruneEscalationState(quiescenceCheckedAt, pendingIds)
     // Drain by priority (highest first), FIFO within a priority (card 83d9dde6,
     // F1). An inject makes the pane busy for the turn, so when a busy recipient
     // (often the orchestrator) frees up, only the first message targeting it is
@@ -206,11 +218,37 @@ export function startMessageRouter(): NodeJS.Timeout {
       // and clear a pending-ack prematurely. Revisit selectAcksToClear's
       // invariant in delivery-ack.ts before changing this gate.
       if (!isSessionReadyForPrompt(session)) {
-        if (!routerLoggedMisses.has(msg.id)) {
-          logger.warn({ id: msg.id, to: msg.to_agent, session }, 'Agent message target session busy, will retry')
-          routerLoggedMisses.add(msg.id)
+        // L2 backstop (card d4aa1d14): the readiness gate is recomputed fresh
+        // every tick, so a PERSISTENT false-not-ready (a ghost variant the #284
+        // cursor-guard misses, a resize echo, an unforeseen surface) returns the
+        // same wrong answer forever and would strand this message until the 6h
+        // hard-TTL. Once a message has waited past QUIESCENT_REDELIVER_AFTER_MS,
+        // fall back to an ORTHOGONAL idle proof (proveQuiescentlyIdle: no busy
+        // signal + empty/ghost composer + a pane byte-stable across samples). If
+        // it proves idle, override the gate and deliver; the pane is genuinely
+        // idle at inject, so the idle-only-inject ACK invariant above holds. The
+        // proof is throttled to once per message per minute (it samples the pane
+        // over ~1.2s). A real parked draft can NEVER pass the proof, so this
+        // never concatenates into a draft (the destructive false-IDLE direction).
+        const dueForCheck =
+          shouldQuiescentRedeliver(ageMs) &&
+          now - (quiescenceCheckedAt.get(msg.id) ?? 0) >= QUIESCENCE_RECHECK_MS
+        let backstopDeliver = false
+        if (dueForCheck) {
+          quiescenceCheckedAt.set(msg.id, now)
+          backstopDeliver = proveQuiescentlyIdle(session)
         }
-        continue
+        if (!backstopDeliver) {
+          if (!routerLoggedMisses.has(msg.id)) {
+            logger.warn({ id: msg.id, to: msg.to_agent, session }, 'Agent message target session busy, will retry')
+            routerLoggedMisses.add(msg.id)
+          }
+          continue
+        }
+        logger.warn(
+          { id: msg.id, to: msg.to_agent, session, ageMs },
+          'L2 backstop: pane proven quiescently idle despite not-ready gate -> redelivering (card d4aa1d14)',
+        )
       }
 
       // Fleet-pause gate (card fd30873b): while the rate-limit governor has paused
