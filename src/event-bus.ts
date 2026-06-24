@@ -10,7 +10,7 @@ import { logger } from './logger.js'
 // cycle. In-process only -- the dashboard is a single node server, so a process
 // EventEmitter is the whole mechanism.
 
-export type DashboardEventType = 'kanban' | 'message'
+export type DashboardEventType = 'kanban' | 'message' | 'board'
 
 export interface DashboardEvent {
   /** Which resource family changed; the SSE `event:` topic. */
@@ -19,6 +19,8 @@ export interface DashboardEvent {
   id: string
   /** Optional finer action for client-side handling, e.g. 'created' | 'moved'. */
   action?: string
+  /** Intake event payload (AC-7a): card snapshot for orchestrator clarification check. */
+  card?: { id: string; title: string; description: string | null; assignee: string | null; priority: string; status: string }
 }
 
 const EVENT = 'dashboard-event'
