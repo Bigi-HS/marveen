@@ -119,16 +119,29 @@ export function selectSentinelEscalations(
     : DEFAULT_MAX_PER_RUN
   const baselineOnFirstRun = opts.baselineOnFirstRun ?? true
 
-  // Recursion guard (card 6774b3db): the out-of-band path must not escalate the
-  // delivery-monitor's OWN abandoned alerts. When the main agent is busy for the
-  // whole window, the monitor's hourly "X is overdue" alerts pile up undelivered
-  // and would otherwise flood the operator with backstop-about-backstop pings
-  // (47% of the 2026-06-14 overnight flood). The same recognition the in-band
-  // path uses (shouldAlertOnAbandon) excludes them here. The JSONL row is still
-  // written upstream for forensics; the underlying real message is traced and
-  // escalated on its own row, so dropping the monitor row only removes the
-  // double-count -- never a genuine signal.
-  const latest = latestPerId(events.filter((e) => shouldAlertOnAbandon(e.from)))
+  // Two exclusions are applied before selection; both keep the upstream JSONL row
+  // for forensics and only narrow what reaches the operator out-of-band.
+  //
+  // (1) Recursion guard (card 6774b3db): the out-of-band path must not escalate
+  // the delivery-monitor's OWN abandoned alerts. When the main agent is busy for
+  // the whole window, the monitor's hourly "X is overdue" alerts pile up
+  // undelivered and would otherwise flood the operator with backstop-about-
+  // backstop pings (47% of the 2026-06-14 overnight flood). The same recognition
+  // the in-band path uses (shouldAlertOnAbandon) excludes them here. The
+  // underlying real message is traced and escalated on its own row, so dropping
+  // the monitor row only removes the double-count -- never a genuine signal.
+  //
+  // (2) Phase filter (card a1392f44, Dominik 2026-06-24): only a 'dropped'
+  // (hard-TTL give-up) abandonment warrants a Boss-facing ping. An 'overdue' row
+  // means the recipient is merely busy and the router keeps retrying -- the
+  // message lands as soon as the recipient frees up, so the ping is pure noise
+  // ("Recipient busy; delivery keeps retrying. No action needed"). The in-band
+  // channel already restricts itself to 'dropped' (alertInBand, Boss 2026-06-22);
+  // this aligns the out-of-band channel with that policy. Overdue rows are still
+  // written to the JSONL trail upstream for forensics, just never escalated.
+  const latest = latestPerId(
+    events.filter((e) => shouldAlertOnAbandon(e.from) && e.phase === 'dropped'),
+  )
 
   // First run on a non-empty sentinel: baseline past history.
   if (baselineOnFirstRun && isEmptyCursor(cursor) && latest.size > 0) {

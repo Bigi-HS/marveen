@@ -150,6 +150,72 @@ describe('selectSentinelEscalations recursion guard (monitor-origin rows)', () =
   })
 })
 
+// Card a1392f44 (Dominik 2026-06-24): the out-of-band Boss ping was firing for
+// BOTH overdue ("still retrying, no action needed") and dropped (hard-limit
+// give-up) abandonments, so a recipient that was merely busy (e.g. sitting on a
+// permission prompt) produced a Telegram alert the operator could do nothing
+// about. The in-band channel already restricts itself to 'dropped' (alertInBand,
+// Boss 2026-06-22); this extends the same policy to the out-of-band sentinel
+// escalation. The JSONL trail still records both phases upstream for forensics.
+describe('selectSentinelEscalations phase filter (card a1392f44: out-of-band only on hard-drop)', () => {
+  it('does NOT escalate an overdue (still-retrying) abandonment', () => {
+    const plan = selectSentinelEscalations(
+      [ev(30, T0, { phase: 'overdue' })],
+      { lastEscalatedTs: {} },
+      { baselineOnFirstRun: false },
+    )
+    expect(plan.escalations).toEqual([])
+    expect(plan.nextCursor.lastEscalatedTs).toEqual({})
+  })
+
+  it('escalates a dropped (hard-limit) abandonment', () => {
+    const plan = selectSentinelEscalations(
+      [ev(30, T0, { phase: 'dropped' })],
+      { lastEscalatedTs: {} },
+      { baselineOnFirstRun: false },
+    )
+    expect(plan.escalations.map((e) => e.id)).toEqual([30])
+  })
+
+  it('in a mixed batch, escalates only the dropped ids', () => {
+    const plan = selectSentinelEscalations(
+      [ev(30, T0, { phase: 'overdue' }), ev(31, T0, { phase: 'dropped' })],
+      { lastEscalatedTs: {} },
+      { baselineOnFirstRun: false },
+    )
+    expect(plan.escalations.map((e) => e.id)).toEqual([31])
+    expect(plan.nextCursor.lastEscalatedTs).toEqual({ 31: ms(T0) })
+  })
+
+  it('escalates a message only once it hard-drops, not while it is still overdue', () => {
+    // Round A: the message is overdue -> no out-of-band ping, cursor untouched.
+    const runA = selectSentinelEscalations(
+      [ev(30, T0, { phase: 'overdue' })],
+      { lastEscalatedTs: {} },
+      { baselineOnFirstRun: false },
+    )
+    expect(runA.escalations).toEqual([])
+    // Round B: the hard-TTL is hit -> the dropped row escalates.
+    const runB = selectSentinelEscalations(
+      [ev(30, T0, { phase: 'overdue' }), ev(30, T1, { phase: 'dropped' })],
+      runA.nextCursor,
+      { baselineOnFirstRun: false },
+    )
+    expect(runB.escalations.map((e) => e.id)).toEqual([30])
+    expect(runB.escalations[0]!.phase).toBe('dropped')
+  })
+
+  it('baseline on first run ignores overdue rows, baselining only dropped history', () => {
+    const plan = selectSentinelEscalations(
+      [ev(30, T0, { phase: 'overdue' }), ev(31, T0, { phase: 'dropped' })],
+      EMPTY_SENTINEL_CURSOR,
+    )
+    expect(plan.baselined).toBe(true)
+    expect(plan.escalations).toEqual([])
+    expect(plan.nextCursor.lastEscalatedTs).toEqual({ 31: ms(T0) })
+  })
+})
+
 describe('normalizeCursor (migration)', () => {
   it('migrates a pre-7557a98d scalar { lastEscalatedId } to an empty per-id cursor (baseline next run)', () => {
     expect(normalizeCursor({ lastEscalatedId: 2152 })).toEqual({ lastEscalatedTs: {} })
