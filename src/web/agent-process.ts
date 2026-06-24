@@ -869,6 +869,29 @@ export function capturePane(session: string): string | null {
   }
 }
 
+// Read the pane cursor position (0-indexed column,row) for ghost/autosuggestion
+// discrimination (card c8d13cc0). The TUI draws a dim autosuggestion into an
+// EMPTY composer to the right of the cursor; `capture-pane -p` strips the dim
+// attribute, so the cursor column is what tells a real draft (text LEFT of the
+// cursor) from a suggestion (text RIGHT of it). cursor_x/cursor_y share the
+// visible-pane origin with capture-pane -p, so cursor.y indexes the captured
+// lines directly. Returns null on any failure -> detectPaneState falls back to
+// its safe content-only heuristic (no regression).
+export function captureCursor(session: string): { x: number; y: number } | null {
+  try {
+    const raw = execFileSync(
+      TMUX,
+      ['display-message', '-p', '-t', session, '#{cursor_x},#{cursor_y}'],
+      { timeout: 3000, encoding: 'utf-8' },
+    ).trim()
+    const m = /^(\d+),(\d+)$/.exec(raw)
+    if (!m) return null
+    return { x: Number(m[1]), y: Number(m[2]) }
+  } catch {
+    return null
+  }
+}
+
 // Check if a Claude Code tmux session is ready to accept a new prompt.
 //
 // The detection has two layers, both needed to close the frame-level
@@ -890,12 +913,15 @@ export function capturePane(session: string): string | null {
 export function isSessionReadyForPrompt(session: string): boolean {
   const first = capturePane(session)
   if (first == null) return false
-  if (detectPaneState(first) !== 'idle') return false
+  // Pass the cursor so an empty composer showing only a dim ghost/autosuggestion
+  // reads as idle (promptable), not as a parked draft (card c8d13cc0). Cursor
+  // capture failure -> undefined -> safe content-only heuristic.
+  if (detectPaneState(first, { cursor: captureCursor(session) ?? undefined }) !== 'idle') return false
 
   try { execFileSync('/bin/sleep', [PANE_READY_CONFIRM_DELAY_S], { timeout: 2000 }) } catch { /* best effort */ }
 
   const second = capturePane(session)
   if (second == null) return false
-  return detectPaneState(second) === 'idle'
+  return detectPaneState(second, { cursor: captureCursor(session) ?? undefined }) === 'idle'
 }
 

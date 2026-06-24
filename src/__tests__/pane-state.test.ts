@@ -542,6 +542,68 @@ describe('detectPaneState', () => {
     expect(detectPaneState(TYPING_PARKED, { mergeTypingAsBusy: true })).toBe('busy')
   })
 
+  describe('ghost-text cursor guard (card c8d13cc0)', () => {
+    // The TUI draws a dim autosuggestion into an EMPTY composer to the RIGHT of
+    // the cursor; `capture-pane -p` strips the dim attribute so it is
+    // byte-identical to a real draft. Without the cursor, PARKED_INPUT_RX reads
+    // the suggestion as parked input -> 'typing', and an idle agent becomes
+    // permanently undeliverable (the delivery deadlock). The cursor column is
+    // the version-independent discriminator: real typed text sits to the LEFT
+    // of the cursor, the suggestion is drawn to the RIGHT.
+
+    // ❯(col0) + NBSP(col1) + suggestion 'merge PR #283' starting at col2.
+    // Prompt line is row 2; the suggestion's first glyph is column 2.
+    const GHOST_SUGGESTION = [
+      '',
+      SEP,
+      '❯ merge PR #283',
+      SEP,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    const GHOST_CURSOR = { x: 2, y: 2 }
+
+    // A real typed draft: 'git status' typed, cursor AFTER the text.
+    // ❯(0) space(1) g(2) ... 'git status' is 10 chars -> caret at col 12.
+    const REAL_DRAFT = [
+      '',
+      SEP,
+      '❯ git status',
+      SEP,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    const REAL_CURSOR = { x: 12, y: 2 }
+
+    // Ghost suggestion AND a live spinner: a turn is genuinely running.
+    const GHOST_WITH_SPINNER = [
+      '✢ Combobulating… (3s · ↓ 1.2k tokens)',
+      '',
+      SEP,
+      '❯ merge PR #283',
+      SEP,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+
+    it('FP: a ghost suggestion (cursor at suggestion start) is idle', () => {
+      expect(detectPaneState(GHOST_SUGGESTION, { cursor: GHOST_CURSOR })).toBe('idle')
+    })
+
+    it('FN (critical): a real typed draft (cursor after text) stays typing', () => {
+      expect(detectPaneState(REAL_DRAFT, { cursor: REAL_CURSOR })).toBe('typing')
+    })
+
+    it('OC: a spinner with a ghost suggestion stays busy (busy guard wins)', () => {
+      expect(detectPaneState(GHOST_WITH_SPINNER, { cursor: GHOST_CURSOR })).toBe('busy')
+    })
+
+    it('without cursor info a ghost line keeps the safe legacy state (typing)', () => {
+      expect(detectPaneState(GHOST_SUGGESTION)).toBe('typing')
+    })
+
+    it('a cursor not on the prompt row leaves a ghost line as typing (safe)', () => {
+      expect(detectPaneState(GHOST_SUGGESTION, { cursor: { x: 2, y: 0 } })).toBe('typing')
+    })
+  })
+
   it('treats a pending-paste placeholder as busy', () => {
     expect(detectPaneState(PENDING_PASTE)).toBe('busy')
   })

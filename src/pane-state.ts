@@ -207,6 +207,48 @@ function findInputBoxBounds(lines: string[]): { topSep: number; bottomSep: numbe
   return null
 }
 
+/**
+ * Cursor-aware ghost/autosuggestion discrimination (card c8d13cc0).
+ *
+ * The Claude Code TUI draws a dim autosuggestion into an EMPTY composer to the
+ * RIGHT of the cursor; a real draft sits to the LEFT. `tmux capture-pane -p`
+ * strips the dim attribute, so the suggestion and a real draft are
+ * byte-identical in the captured string -- the cursor column is the only
+ * reliable, version-independent discriminator (the standard shell-autosuggest
+ * shape). Returns true when the parked text on the cursor's prompt line is
+ * PURELY a suggestion: the cursor sits at (or before) the first visible glyph,
+ * so nothing has actually been typed and the composer is empty (promptable).
+ *
+ * Conservative by design: any ambiguity (cursor on another row, cursor past the
+ * prompt content, no caret) returns false so the caller keeps the safe 'typing'
+ * classification. A false-IDLE is the destructive direction -- a prompt would
+ * concatenate into a real draft -- so the guard only fires on the unambiguous
+ * empty-composer-with-suggestion shape. Residual edge: a real draft whose
+ * cursor was manually moved to the line start (Home) is indistinguishable here
+ * and would read as ghost; autonomous panes never do this, and the structural
+ * redeliver layer (follow-up) catches any such miss.
+ */
+function isGhostSuggestionOnly(
+  lines: string[],
+  box: { topSep: number; bottomSep: number },
+  cursor: { x: number; y: number },
+): boolean {
+  // The cursor must sit on a prompt line strictly inside the live box.
+  if (cursor.y <= box.topSep || cursor.y >= box.bottomSep) return false
+  const line = lines[cursor.y]
+  if (line === undefined) return false
+  const caret = line.indexOf('❯')
+  if (caret < 0) return false
+  // Content starts at the first non-whitespace glyph after the caret marker
+  // (the prompt renders `❯` + a space or U+00A0 before any text/suggestion).
+  let start = caret + 1
+  while (start < line.length && /[^\S\n]/.test(line[start]!)) start++
+  if (start >= line.length) return false // no visible text on this line
+  // Cursor at/before the first glyph -> nothing typed -> the visible text is a
+  // suggestion drawn to the right of the cursor (empty composer).
+  return cursor.x <= start
+}
+
 // Persistent Anthropic thinking-block API error. When an assistant turn
 // ends with a 400 about thinking/redacted_thinking blocks that "cannot
 // be modified", the session is wedged: every subsequent prompt re-sends
@@ -318,6 +360,16 @@ export interface DetectPaneStateOptions {
    * merged into 'busy'. Default false -- callers that care about
    * "user actively composing" vs "mid-turn" can distinguish. */
   mergeTypingAsBusy?: boolean
+  /** Pane cursor position (0-indexed column,row), sampled with the same
+   * capture via `tmux display-message -p '#{cursor_x},#{cursor_y}'`. When
+   * provided, the parked-input check uses it to tell a real typed draft from
+   * a dim ghost/autosuggestion drawn into an EMPTY composer (card c8d13cc0):
+   * the TUI draws the suggestion to the RIGHT of the cursor, a real draft to
+   * the LEFT. `tmux capture-pane -p` strips the dim attribute, so ghost and
+   * draft are byte-identical in the string and the cursor column is the only
+   * reliable, version-independent discriminator. Omitted -> the content-only
+   * heuristic (PARKED_INPUT_RX) is used (safe legacy behaviour). */
+  cursor?: { x: number; y: number }
 }
 
 /**
@@ -383,8 +435,20 @@ export function detectPaneState(
   // the box is never mistaken for live parked input.
   if (box !== null) {
     const inputLines = lines.slice(box.topSep + 1, box.bottomSep)
-    if (inputLines.some(l => PARKED_INPUT_RX.test(l))) {
-      return opts.mergeTypingAsBusy ? 'busy' : 'typing'
+    const parkedLines = inputLines.filter(l => PARKED_INPUT_RX.test(l))
+    if (parkedLines.length > 0) {
+      // Cursor-aware ghost guard (card c8d13cc0): an empty composer showing
+      // ONLY a dim autosuggestion is promptable, not a parked draft. Applied
+      // only to the unambiguous single-parked-line shape with the cursor for
+      // discrimination; a multi-line draft or absent cursor keeps the safe
+      // 'typing' classification (a false-IDLE would concatenate into a draft).
+      const ghostOnly =
+        opts.cursor != null &&
+        parkedLines.length === 1 &&
+        isGhostSuggestionOnly(lines, box, opts.cursor)
+      if (!ghostOnly) {
+        return opts.mergeTypingAsBusy ? 'busy' : 'typing'
+      }
     }
   }
 
