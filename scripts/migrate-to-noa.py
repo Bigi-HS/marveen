@@ -183,7 +183,7 @@ def migrate_sessions(src, dst, chat_to_agent):
         agent_id = chat_to_agent.get(chat_id)
         if not agent_id:
             agent_id = DEFAULT_AGENT
-            warn(f"session {r.get('session_id')} (chat_id={chat_id}) agent defaulted to {DEFAULT_AGENT} -- REVIEW")
+            warn(f"session {r.get('session_id')} agent defaulted to {DEFAULT_AGENT} -- REVIEW")
         out.append(
             (agent_id, r.get("session_id"), r.get("updated_at") or 0, r.get("message_count") or 0)
         )

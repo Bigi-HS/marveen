@@ -270,3 +270,63 @@ describe('shouldQuiescentRedeliver (L2 backstop age gate, card d4aa1d14)', () =>
     expect(QUIESCENT_REDELIVER_AFTER_MS).toBeLessThan(MESSAGE_ESCALATE_AFTER_MS)
   })
 })
+
+// Card 88849f24 (A1->B1 cutover gate): once agent_messages.priority is the
+// INTEGER column (25/50/75/100), the delivery logic reads integers instead of
+// the TEXT enum. The pure functions must produce IDENTICAL behaviour for an
+// integer as for its TEXT tier, and must keep working when a tick mixes both
+// representations (the migrated rows are integers, a freshly-POSTed row may
+// still be a string until the write side is cut over too).
+describe('integer priority inputs (card 88849f24)', () => {
+  it('thresholdsForPriority: each canonical integer matches its TEXT tier', () => {
+    expect(thresholdsForPriority(100)).toEqual(thresholdsForPriority('urgent'))
+    expect(thresholdsForPriority(75)).toEqual(thresholdsForPriority('high'))
+    expect(thresholdsForPriority(50)).toEqual(thresholdsForPriority('normal'))
+    expect(thresholdsForPriority(25)).toEqual(thresholdsForPriority('low'))
+  })
+
+  it('thresholdsForPriority: integer urgent escalates at 15 min, high at 30 min', () => {
+    expect(thresholdsForPriority(100).escalateAfterMs).toBe(15 * 60 * 1000)
+    expect(thresholdsForPriority(75).escalateAfterMs).toBe(30 * 60 * 1000)
+    expect(thresholdsForPriority(50).escalateAfterMs).toBe(MESSAGE_ESCALATE_AFTER_MS)
+  })
+
+  it('thresholdsForPriority: an off-tier integer uses the highest threshold it reaches', () => {
+    // 80 is >= high (75) but < urgent (100): high timing.
+    expect(thresholdsForPriority(80)).toEqual(thresholdsForPriority('high'))
+    // 110 is >= urgent: urgent timing.
+    expect(thresholdsForPriority(110)).toEqual(thresholdsForPriority('urgent'))
+  })
+
+  it('thresholdsForPriority: hard-TTL stays invariant for integers too', () => {
+    for (const p of [25, 50, 75, 100, 0, 999]) {
+      expect(thresholdsForPriority(p).hardTtlMs).toBe(MESSAGE_HARD_TTL_MS)
+    }
+  })
+
+  it('priorityRank: integers rank in the same order as their TEXT tiers', () => {
+    expect(priorityRank(100)).toBeGreaterThan(priorityRank(75))
+    expect(priorityRank(75)).toBeGreaterThan(priorityRank(50))
+    expect(priorityRank(50)).toBeGreaterThan(priorityRank(25))
+    expect(priorityRank(100)).toBeGreaterThan(priorityRank('high'))
+    expect(priorityRank('urgent')).toBeGreaterThan(priorityRank(50))
+  })
+
+  it('orderPendingByPriority: a fresh urgent INTEGER jumps ahead of a stale low INTEGER', () => {
+    const staleLow = { id: 1, priority: 25, created_at: 1000 }
+    const freshUrgent = { id: 2, priority: 100, created_at: 5000 }
+    expect(orderPendingByPriority([staleLow, freshUrgent]).map((m) => m.id)).toEqual([2, 1])
+  })
+
+  it('orderPendingByPriority: a tick mixing TEXT and INTEGER priorities orders correctly', () => {
+    const msgs = [
+      { id: 1, priority: 25, created_at: 100 }, // low (int)
+      { id: 2, priority: 'urgent' as const, created_at: 200 }, // urgent (text)
+      { id: 3, priority: 'normal' as const, created_at: 150 }, // normal (text)
+      { id: 4, priority: 100, created_at: 120 }, // urgent (int)
+      { id: 5, priority: 75, created_at: 110 }, // high (int)
+    ]
+    // urgent(120) < urgent(200) by FIFO, then high, normal, low.
+    expect(orderPendingByPriority(msgs).map((m) => m.id)).toEqual([4, 2, 5, 3, 1])
+  })
+})
