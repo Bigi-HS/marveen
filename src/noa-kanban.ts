@@ -1,10 +1,36 @@
 import { randomUUID } from 'node:crypto'
 import { getNoaDb } from './noa-memory.js'
-import { emitDashboardEvent } from './event-bus.js'
+import { emitDashboardEvent, type DashboardEvent } from './event-bus.js'
 import { MAIN_AGENT_ID, OWNER_NAME, BOT_NAME } from './config.js'
 import { listAgentNames } from './web/agent-config.js'
 import { resolveKanbanDispatchTarget } from './kanban-dispatch.js'
 import { logger } from './logger.js'
+
+// ---------------------------------------------------------------------------
+// Transaction-aware event buffering (mirrors db.ts runInTransaction pattern)
+// ---------------------------------------------------------------------------
+
+let txEventBuffer: DashboardEvent[] | null = null
+
+function emitOrDefer(event: DashboardEvent): void {
+  if (txEventBuffer) txEventBuffer.push(event)
+  else emitDashboardEvent(event)
+}
+
+export function runInTransaction<T>(fn: () => T): T {
+  if (txEventBuffer) return getNoaDb().transaction(fn)() // nested: outer owns the buffer
+  txEventBuffer = []
+  try {
+    const result = getNoaDb().transaction(fn)()
+    const buffered = txEventBuffer
+    txEventBuffer = null
+    for (const e of buffered) emitDashboardEvent(e)
+    return result
+  } catch (err) {
+    txEventBuffer = null
+    throw err
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -223,7 +249,7 @@ function checkAllChildrenDone(parentId: string): void {
     "SELECT COUNT(*) as n FROM kanban_cards WHERE parent_id = ? AND status != 'done' AND archived_at IS NULL"
   ).get(parentId) as { n: number }).n
   if (active === 0) {
-    emitDashboardEvent({ type: 'kanban', id: parentId, action: 'children_all_done' })
+    emitOrDefer({ type: 'kanban', id: parentId, action: 'children_all_done' })
   }
 }
 
@@ -233,7 +259,7 @@ function maybeEmitIntake(card: KanbanCard): void {
     const knownAgents = new Set([MAIN_AGENT_ID, ...(_agentNamesOverride ?? listAgentNames())])
     if (knownAgents.has(card.assignee)) return
   }
-  emitDashboardEvent({
+  emitOrDefer({
     type: 'kanban',
     id: card.id,
     action: 'intake',
@@ -275,7 +301,7 @@ function dispatchCard(card: KanbanCard): void {
       'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, ack_expected, priority, in_reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(MAIN_AGENT_ID, target, content, 'pending', now, 0, 50, null)
 
-    emitDashboardEvent({ type: 'message', id: String(now), action: 'created' })
+    emitOrDefer({ type: 'message', id: String(now), action: 'created' })
   } catch (err) {
     logger.warn({ err, cardId: card.id }, 'Kanban dispatch failed (fire-and-forget)')
   }
@@ -313,7 +339,7 @@ export function createCard(params: CreateCardParams): KanbanCard {
     sortOrder, now, now,
   )
 
-  emitDashboardEvent({ type: 'kanban', id, action: 'created' })
+  emitOrDefer({ type: 'kanban', id, action: 'created' })
 
   const card = getCard(id)!
 
@@ -360,7 +386,7 @@ export function updateCard(id: string, params: UpdateCardParams): boolean {
 
   if (!changed) return false
 
-  emitDashboardEvent({ type: 'kanban', id, action: 'updated' })
+  emitOrDefer({ type: 'kanban', id, action: 'updated' })
 
   // Dispatch if entered in_progress
   if (f.status === 'in_progress' && card.status !== 'in_progress') {
@@ -402,7 +428,7 @@ export function moveCard(id: string, toStatus: string, sortOrder: number): boole
 
   if (!changed) return false
 
-  emitDashboardEvent({ type: 'kanban', id, action: 'moved' })
+  emitOrDefer({ type: 'kanban', id, action: 'moved' })
 
   // Dispatch on entering in_progress (fire-and-forget)
   if (toStatus === 'in_progress') {
@@ -425,7 +451,7 @@ export function archiveCard(id: string): boolean {
 
   const now = Math.floor(Date.now() / 1000)
   getNoaDb().prepare('UPDATE kanban_cards SET archived_at=?, updated_at=? WHERE id=?').run(now, now, id)
-  emitDashboardEvent({ type: 'kanban', id, action: 'archived' })
+  emitOrDefer({ type: 'kanban', id, action: 'archived' })
 
   // Check all children done (archiving a child counts as removing it from active)
   if (card.parent_id) checkAllChildrenDone(card.parent_id)
@@ -444,7 +470,7 @@ export function unarchiveCard(id: string): boolean {
     'UPDATE kanban_cards SET archived_at=NULL, sort_order=?, updated_at=? WHERE id=?'
   ).run(newSortOrder, now, id).changes > 0
 
-  if (changed) emitDashboardEvent({ type: 'kanban', id, action: 'unarchived' })
+  if (changed) emitOrDefer({ type: 'kanban', id, action: 'unarchived' })
   return changed
 }
 
@@ -468,7 +494,7 @@ export function deleteCard(id: string): boolean {
 
   db.prepare('DELETE FROM kanban_comments WHERE card_id = ?').run(id)
   db.prepare('DELETE FROM kanban_cards WHERE id = ?').run(id)
-  emitDashboardEvent({ type: 'kanban', id, action: 'deleted' })
+  emitOrDefer({ type: 'kanban', id, action: 'deleted' })
   return true
 }
 
@@ -564,7 +590,7 @@ export function createColumn(label: string, sortOrder?: number): BoardColumn {
   ).run(id, label, finalSortOrder, now, now)
 
   invalidateColumnsCache()
-  emitDashboardEvent({ type: 'board', id, action: 'column_created' })
+  emitOrDefer({ type: 'board', id, action: 'column_created' })
 
   return { id, label, sort_order: finalSortOrder, is_terminal: 0, created_at: now, updated_at: now }
 }
@@ -574,7 +600,7 @@ export function renameColumn(id: string, label: string): boolean {
   const changed = getNoaDb().prepare(
     'UPDATE board_columns SET label=?, updated_at=? WHERE id=?'
   ).run(label, now, id).changes > 0
-  if (changed) emitDashboardEvent({ type: 'board', id, action: 'column_renamed' })
+  if (changed) emitOrDefer({ type: 'board', id, action: 'column_renamed' })
   return changed
 }
 
@@ -603,4 +629,46 @@ export function deleteColumn(id: string): boolean {
   db.prepare('DELETE FROM board_columns WHERE id=?').run(id)
   invalidateColumnsCache()
   return true
+}
+
+// ---------------------------------------------------------------------------
+// W0b gap-fill exports (route-wiring prerequisites)
+// ---------------------------------------------------------------------------
+
+export function listProjects(): string[] {
+  const rows = getNoaDb().prepare(
+    "SELECT DISTINCT project FROM kanban_cards WHERE project IS NOT NULL AND project != '' AND archived_at IS NULL ORDER BY project"
+  ).all() as Array<{ project: string }>
+  return rows.map((r) => r.project)
+}
+
+export function markCardDispatched(id: string): boolean {
+  const now = Math.floor(Date.now() / 1000)
+  return getNoaDb().prepare('UPDATE kanban_cards SET dispatched_at=? WHERE id=?').run(now, id).changes > 0
+}
+
+export interface HeartbeatKanbanSummary {
+  urgent: KanbanCard[]
+  in_progress: KanbanCard[]
+  waiting: KanbanCard[]
+}
+
+export function listKanbanCardsSummary(): Array<{ id: string; title: string; status: string; assignee: string | null; priority: string }> {
+  return getNoaDb().prepare(
+    'SELECT id, title, status, assignee, priority FROM kanban_cards WHERE archived_at IS NULL ORDER BY status, sort_order ASC'
+  ).all() as Array<{ id: string; title: string; status: string; assignee: string | null; priority: string }>
+}
+
+export function getHeartbeatKanbanSummary(): HeartbeatKanbanSummary {
+  const db = getNoaDb()
+  const urgent = db.prepare(
+    "SELECT * FROM kanban_cards WHERE archived_at IS NULL AND priority = 'urgent' AND status != 'done'"
+  ).all() as KanbanCard[]
+  const in_progress = db.prepare(
+    "SELECT * FROM kanban_cards WHERE archived_at IS NULL AND status = 'in_progress'"
+  ).all() as KanbanCard[]
+  const waiting = db.prepare(
+    "SELECT * FROM kanban_cards WHERE archived_at IS NULL AND status = 'waiting'"
+  ).all() as KanbanCard[]
+  return { urgent, in_progress, waiting }
 }
