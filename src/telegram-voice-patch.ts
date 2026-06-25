@@ -6,9 +6,12 @@
 //
 // This patch replaces the bot.on('message:voice') handler with a version that:
 //   1. Downloads the .oga file from Telegram's file API (async, non-blocking).
-//   2. Converts to 16 kHz mono WAV with ffmpeg (store/whisper-env/env/bin/ffmpeg).
-//   3. Transcribes with faster-whisper (store/whisper-env/env/bin/python).
+//   2. Converts to 16 kHz mono WAV with ffmpeg (/home/domin/marveen/store/whisper-env/env/bin/ffmpeg).
+//   3. Transcribes with faster-whisper (/home/domin/marveen/store/whisper-env/env/bin/python).
 //   4. Injects "[Hang átirat]: <text>" as the message content before handleInbound.
+//
+// Absolute paths are used throughout: the plugin is MCP-spawned and its CWD is
+// NOT /home/domin/marveen, so relative paths would silently fail to the fail-safe.
 //
 // Fail-safe: any error in steps 1-3 is silently caught and the original
 // "(voice message)" string is used instead -- a voice message is NEVER lost.
@@ -33,8 +36,14 @@ export interface PatchResult {
 
 // Matches the entire message:voice handler block, anchored on code tokens
 // that are stable across plugin prose/message wording changes.
+//
+// End-anchor is `\n\}\)` (newline + column-0 `})`) to match the HANDLER close,
+// not the indented `  })` that closes the handleInbound call one line earlier.
+// The real plugin handler ends with `  })\n})` (two closing lines); a lazy
+// `\}\)` would stop at the first one and leave a leftover `\n})` that causes
+// a syntax error after replacement. Verified against server.ts:830-839 v0.0.6.
 const VOICE_HANDLER_RE =
-  /bot\.on\('message:voice',\s*async ctx => \{[\s\S]*?const text = ctx\.message\.caption \?\? '\(voice message\)'[\s\S]*?\}\)/
+  /bot\.on\('message:voice',\s*async ctx => \{[\s\S]*?const text = ctx\.message\.caption \?\? '\(voice message\)'[\s\S]*?\n\}\)/
 
 const REPLACEMENT = `bot.on('message:voice', async ctx => {
   const voice = ctx.message.voice
@@ -61,19 +70,19 @@ const REPLACEMENT = `bot.on('message:voice', async ctx => {
           const outBase = join(dir, 'out')
           writeFileSync(ogaPath, Buffer.from(await res.arrayBuffer()))
           await execFileAsync(
-            'store/whisper-env/env/bin/ffmpeg',
+            '/home/domin/marveen/store/whisper-env/env/bin/ffmpeg',
             ['-y', '-i', ogaPath, '-ar', '16000', '-ac', '1', wavPath],
             { stdio: 'ignore' } as Parameters<typeof execFile>[2],
           )
           await execFileAsync(
-            'store/whisper-env/env/bin/python',
+            '/home/domin/marveen/store/whisper-env/env/bin/python',
             [
-              'scripts/_video_transcribe.py',
+              '/home/domin/marveen/scripts/_video_transcribe.py',
               '--audio', wavPath,
               '--out-base', outBase,
               '--model', 'medium',
               '--lang', 'hu',
-              '--download-root', 'store/whisper-env/models',
+              '--download-root', '/home/domin/marveen/store/whisper-env/models',
             ],
           )
           const raw = readFileSync(outBase + '.txt', 'utf-8')

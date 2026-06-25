@@ -40,13 +40,13 @@ describe('parseTranscript', () => {
 })
 
 describe('buildFfmpegArgs', () => {
-  it('returns the correct binary path and conversion arguments', () => {
+  it('returns the correct absolute binary path and conversion arguments', () => {
     const { bin, args } = buildFfmpegArgs('/tmp/voice/in.oga', '/tmp/voice/in.wav')
-    expect(bin).toBe('store/whisper-env/env/bin/ffmpeg')
+    expect(bin).toBe('/home/domin/marveen/store/whisper-env/env/bin/ffmpeg')
     expect(args).toEqual(['-y', '-i', '/tmp/voice/in.oga', '-ar', '16000', '-ac', '1', '/tmp/voice/in.wav'])
   })
 
-  it('uses the provided paths verbatim (no normalisation)', () => {
+  it('uses the provided input/output paths verbatim (no normalisation)', () => {
     const { args } = buildFfmpegArgs('/a/b.oga', '/c/d.wav')
     expect(args).toContain('/a/b.oga')
     expect(args).toContain('/c/d.wav')
@@ -54,20 +54,20 @@ describe('buildFfmpegArgs', () => {
 })
 
 describe('buildWhisperArgs', () => {
-  it('returns the correct binary path and whisper arguments', () => {
+  it('returns the correct absolute binary path and whisper arguments', () => {
     const { bin, args } = buildWhisperArgs('/tmp/voice/in.wav', '/tmp/voice/out')
-    expect(bin).toBe('store/whisper-env/env/bin/python')
+    expect(bin).toBe('/home/domin/marveen/store/whisper-env/env/bin/python')
     expect(args).toEqual([
-      'scripts/_video_transcribe.py',
+      '/home/domin/marveen/scripts/_video_transcribe.py',
       '--audio', '/tmp/voice/in.wav',
       '--out-base', '/tmp/voice/out',
       '--model', 'medium',
       '--lang', 'hu',
-      '--download-root', 'store/whisper-env/models',
+      '--download-root', '/home/domin/marveen/store/whisper-env/models',
     ])
   })
 
-  it('uses the provided paths verbatim', () => {
+  it('uses the provided audio/out-base paths verbatim', () => {
     const { args } = buildWhisperArgs('/x/y.wav', '/x/y')
     expect(args).toContain('/x/y.wav')
     expect(args).toContain('/x/y')

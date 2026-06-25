@@ -2,6 +2,11 @@ import { describe, it, expect } from 'vitest'
 import { VOICE_PATCH_MARKER, patchVoiceHandler } from '../telegram-voice-patch.js'
 
 // Faithful reproduction of the voice handler block from telegram plugin server.ts v0.0.6 (~830-839).
+// IMPORTANT: the handler ends with TWO closing lines:
+//   line 838:   })       <- indented, closes the handleInbound object arg + call
+//   line 839: })         <- column-0, closes the bot.on() callback
+// This two-line ending is what the end-anchor `\n\}\)` in VOICE_HANDLER_RE targets.
+// A fixture with only one `})` would not catch the under-match bug (Dave review 2026-06-25).
 const ORIGINAL_HANDLER = `bot.on('message:voice', async ctx => {
   const voice = ctx.message.voice
   const text = ctx.message.caption ?? '(voice message)'
@@ -47,6 +52,32 @@ describe('patchVoiceHandler', () => {
     expect(r.patched).toContain('file_id: voice.file_id')
   })
 
+  it('produces no leftover closing brace after the handler (no extra `})` from under-match)', () => {
+    // The real plugin handler ends with two closing lines:
+    //   `  })`  -- indented, closes the handleInbound object arg + call
+    //   `})`    -- column-0, closes the bot.on() callback
+    // An end-anchor that stops at the indented `  })` leaves a leftover `\n})`, producing
+    // three consecutive closing lines (unbalanced) that fail the syntax gate.
+    // This test catches that regression by checking the last two non-empty lines exactly.
+    const r = patchVoiceHandler(ORIGINAL_HANDLER)
+    const nonEmptyLines = r.patched.split('\n').filter(l => l.trim())
+    const last2 = nonEmptyLines.slice(-2)
+    // Must be: handleInbound-close (indented) then handler-close (column-0), NOT 3x `})`
+    expect(last2).toEqual(['  })', '})'])
+  })
+
+  it('uses absolute paths for ffmpeg and whisper (plugin CWD is not the project root)', () => {
+    const r = patchVoiceHandler(ORIGINAL_HANDLER)
+    expect(r.patched).toContain('/home/domin/marveen/store/whisper-env/env/bin/ffmpeg')
+    expect(r.patched).toContain('/home/domin/marveen/store/whisper-env/env/bin/python')
+    expect(r.patched).toContain('/home/domin/marveen/scripts/_video_transcribe.py')
+    expect(r.patched).toContain('/home/domin/marveen/store/whisper-env/models')
+    // Must NOT use relative paths
+    expect(r.patched).not.toContain("'store/whisper-env/env/bin/ffmpeg'")
+    expect(r.patched).not.toContain("'store/whisper-env/env/bin/python'")
+    expect(r.patched).not.toContain("'scripts/_video_transcribe.py'")
+  })
+
   it('is idempotent: re-patching an already-patched source is a no-op', () => {
     const once = patchVoiceHandler(ORIGINAL_HANDLER)
     const twice = patchVoiceHandler(once.patched)
@@ -66,7 +97,6 @@ describe('patchVoiceHandler', () => {
 
   it('does not log or expose the bot token', () => {
     const r = patchVoiceHandler(ORIGINAL_HANDLER)
-    // The patch must never print/log the TOKEN variable value
     expect(r.patched).not.toContain('console.log(TOKEN)')
     expect(r.patched).not.toContain('process.stdout.write(TOKEN)')
     expect(r.patched).not.toContain('stderr.write(TOKEN)')
@@ -80,8 +110,6 @@ describe('patchVoiceHandler', () => {
 
   it('treats transcript content as untrusted user input (no special escaping bypass)', () => {
     const r = patchVoiceHandler(ORIGINAL_HANDLER)
-    // The injected text must flow through handleInbound the same way a text message does --
-    // it is prefixed with [Hang átirat]: and handed as the `text` arg, no special wrapper.
     expect(r.patched).toContain('handleInbound(ctx, text, undefined,')
   })
 })

@@ -13,21 +13,21 @@ export interface ExecArgs {
 
 export function buildFfmpegArgs(ogaPath: string, wavPath: string): ExecArgs {
   return {
-    bin: 'store/whisper-env/env/bin/ffmpeg',
+    bin: '/home/domin/marveen/store/whisper-env/env/bin/ffmpeg',
     args: ['-y', '-i', ogaPath, '-ar', '16000', '-ac', '1', wavPath],
   }
 }
 
 export function buildWhisperArgs(wavPath: string, outBase: string): ExecArgs {
   return {
-    bin: 'store/whisper-env/env/bin/python',
+    bin: '/home/domin/marveen/store/whisper-env/env/bin/python',
     args: [
-      'scripts/_video_transcribe.py',
+      '/home/domin/marveen/scripts/_video_transcribe.py',
       '--audio', wavPath,
       '--out-base', outBase,
       '--model', 'medium',
       '--lang', 'hu',
-      '--download-root', 'store/whisper-env/models',
+      '--download-root', '/home/domin/marveen/store/whisper-env/models',
     ],
   }
 }
