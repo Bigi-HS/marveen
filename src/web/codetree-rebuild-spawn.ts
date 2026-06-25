@@ -14,22 +14,56 @@ function isRebuildSummary(v: unknown): v is RebuildSummary {
   )
 }
 
+// Extract the balanced, string-aware JSON object that starts at `start` (a '{').
+// Returns the slice end index (exclusive) or -1 if no balanced object is found.
+// String-aware so a brace inside a JSON string value never miscounts depth.
+function balancedObjectEnd(s: string, start: number): number {
+  let depth = 0
+  let inStr = false
+  let esc = false
+  for (let i = start; i < s.length; i++) {
+    const c = s[i]
+    if (inStr) {
+      if (esc) esc = false
+      else if (c === '\\') esc = true
+      else if (c === '"') inStr = false
+      continue
+    }
+    if (c === '"') inStr = true
+    else if (c === '{') depth++
+    else if (c === '}') {
+      depth--
+      if (depth === 0) return i + 1
+    }
+  }
+  return -1
+}
+
 // The worker shares stdout between its data channel (the summary JSON) and pino,
 // which also logs to stdout: rebuildIndex() emits "codetree index rebuilt", and
 // the pino-pretty transport flushes from a worker thread, so that line can land
-// AFTER the JSON. A JSON.parse over the whole blob then throws and the daily
-// rebuild 500s (card ee546ed2). Recover the summary by scanning lines for the
-// one JSON object that has the summary shape -- robust to log noise on either
-// side and to pino's production JSON mode (whose log line is valid JSON but is
-// not a RebuildSummary, so the shape check rejects it).
+// AFTER the JSON -- and, because the summary was written WITHOUT a trailing
+// newline, the pino tail can land on the SAME line right after the closing brace
+// (`{...}[03:01:51] INFO codetree index rebuilt`). A JSON.parse over the whole
+// line then throws and the daily rebuild 500s (cards ee546ed2 + 2026-06-25).
+// Recover the summary by scanning EVERY '{' in the blob for the one balanced,
+// string-aware JSON object that has the summary shape -- robust to log noise
+// before, after, or fused onto the summary's line, and to pino's production JSON
+// mode (whose log line is valid JSON but is not a RebuildSummary, so the shape
+// check rejects it). Scan bottom-up / right-to-left so the summary wins over any
+// earlier log object when both are present.
 export function extractRebuildSummary(stdout: string): RebuildSummary {
-  const lines = stdout.split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim()
-    if (line.length === 0 || line[0] !== '{') continue
+  const starts: number[] = []
+  for (let i = 0; i < stdout.length; i++) {
+    if (stdout[i] === '{') starts.push(i)
+  }
+  for (let k = starts.length - 1; k >= 0; k--) {
+    const start = starts[k]
+    const end = balancedObjectEnd(stdout, start)
+    if (end < 0) continue
     let parsed: unknown
     try {
-      parsed = JSON.parse(line)
+      parsed = JSON.parse(stdout.slice(start, end))
     } catch {
       continue
     }
