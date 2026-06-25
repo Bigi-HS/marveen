@@ -52,6 +52,26 @@ describe('extractRebuildSummary', () => {
     expect(extractRebuildSummary(pinoJson + '\n' + JSON_LINE)).toEqual(SUMMARY)
   })
 
+  it('recovers when a pino-pretty line is appended to the SAME line (no newline after summary)', () => {
+    // The real production failure (Forge 2026-06-25): the worker wrote the
+    // summary with process.stdout.write(JSON.stringify(summary)) -- no trailing
+    // newline -- and pino-pretty flushed its log line right after the closing
+    // brace, on the SAME line: `{...}[03:01:51.016] INFO (4137): codetree...`.
+    // The line starts with '{' but whole-line JSON.parse fails on the pino tail,
+    // so the previous scan rejected it -> 500 "no parseable summary".
+    const stdout =
+      JSON_LINE +
+      '[03:01:51.016] [32mINFO[39m (4137): [36mcodetree index rebuilt[39m\n' +
+      '    files: 204\n    symbols: 2415\n    imports: 1066\n'
+    expect(extractRebuildSummary(stdout)).toEqual(SUMMARY)
+  })
+
+  it('recovers a same-line summary even with a leading pino partial line', () => {
+    const stdout =
+      'INFO partial-no-newline ' + JSON_LINE + '[03:01:51.016] INFO codetree index rebuilt\n'
+    expect(extractRebuildSummary(stdout)).toEqual(SUMMARY)
+  })
+
   it('throws a descriptive error when no summary line is present', () => {
     expect(() => extractRebuildSummary('INFO something happened\n')).toThrow(/no parseable summary/)
     expect(() => extractRebuildSummary('')).toThrow(/no parseable summary/)
