@@ -13,6 +13,9 @@ export default defineConfig({
       '**/.claude/worktrees/**',
       '**/marveen-wt/**',
       '/tmp/wt-*/**',
+      // Exclude deploy-time dist backups (store/dist-backup-YYYYMMDD-HHMMSS/):
+      // the backup dir contains __tests__ which vitest would otherwise glob.
+      'store/dist-backup-*/**',
     ],
   },
 })
