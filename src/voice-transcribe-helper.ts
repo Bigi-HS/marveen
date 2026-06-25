@@ -1,5 +1,10 @@
 // Pure helpers for voice transcription: command assembly and transcript parsing.
 // No subprocess or network calls -- fully unit-testable with DI.
+//
+// Runtime note: these helpers are NOT called directly at runtime. The REPLACEMENT
+// string in telegram-voice-patch.ts contains equivalent inline logic (the
+// string-inject constraint prevents module imports from injected plugin code).
+// Keep this file in sync with that inline logic manually when arguments change.
 
 export interface ExecArgs {
   bin: string
