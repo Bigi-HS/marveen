@@ -290,6 +290,44 @@ export function deleteTask(id: string, db = getNoaDb()): ScheduledTask {
   return db.prepare('SELECT * FROM scheduled_tasks WHERE id = ?').get(id) as ScheduledTask
 }
 
+// Idempotent UPSERT: INSERT if new, UPDATE (revive) if exists (any status incl. deleted).
+// Called by /api/schedules CRUD to keep noa.db in sync with the file-store during dual-write.
+export function syncTaskToNoa(params: CreateTaskParams, db = getNoaDb()): ScheduledTask {
+  validateId(params.id)
+  validateAgent(params.agent)
+  validateType(params.type)
+  validateSchedule(params.schedule)
+  validatePromptLen(params.prompt)
+
+  const existing = db.prepare('SELECT id FROM scheduled_tasks WHERE id = ?').get(params.id)
+  const now = Math.floor(Date.now() / 1000)
+  const nextRun = computeNextRun(params.schedule)
+  const status = params.status ?? 'active'
+  const description = params.description ?? ''
+
+  if (!existing) {
+    db.prepare(`
+      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(params.id, params.agent, params.type, description, params.prompt, params.schedule, nextRun, status, now)
+  } else {
+    db.prepare(`
+      UPDATE scheduled_tasks
+      SET agent = ?, type = ?, description = ?, prompt = ?, schedule = ?, status = ?, next_run = ?
+      WHERE id = ?
+    `).run(params.agent, params.type, description, params.prompt, params.schedule, status, nextRun, params.id)
+  }
+
+  return db.prepare('SELECT * FROM scheduled_tasks WHERE id = ?').get(params.id) as ScheduledTask
+}
+
+// Soft-delete from noa.db. No-op if the id does not exist (tolerates file-only legacy tasks).
+export function removeTaskFromNoa(id: string, db = getNoaDb()): void {
+  const existing = db.prepare('SELECT id FROM scheduled_tasks WHERE id = ?').get(id)
+  if (!existing) return
+  db.prepare(`UPDATE scheduled_tasks SET status = 'deleted' WHERE id = ?`).run(id)
+}
+
 export function getTask(id: string, db = getNoaDb()): ScheduledTask | null {
   return (db.prepare(
     'SELECT * FROM scheduled_tasks WHERE id = ?'
