@@ -1,3 +1,7 @@
+// MUST stay first: loads <root>/.env into process.env before any module reads an
+// env var at import time (config.ts, db.ts, noa-memory.ts -> NOA_DB_PATH). See
+// env-boot.ts / load-env.ts (card 46b3bd75).
+import './env-boot.js'
 import {
   readFileSync,
   unlinkSync,
