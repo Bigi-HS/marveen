@@ -59,7 +59,10 @@ describe('detectOpusWeeklyCapInPane', () => {
   })
 
   it('detects usage-limit phrase + reset time (two-tier)', () => {
-    expect(detectOpusWeeklyCapInPane(limitPhrasePane)).toBe(true)
+    // Inject a clock before the banner's "5pm" reset so the staleness guard
+    // (card c7987f52) treats it as an ACTIVE limit deterministically.
+    const beforeReset = Date.parse('2026-06-28T16:00:00+02:00')
+    expect(detectOpusWeeklyCapInPane(limitPhrasePane, beforeReset)).toBe(true)
   })
 
   it('returns false for a normal idle pane', () => {

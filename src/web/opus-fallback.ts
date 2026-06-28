@@ -64,9 +64,11 @@ export function isOpusModel(modelId: string): boolean {
  * Distinguishes 5h-limit (resets after ~5h) from weekly-cap (resets Sunday noon).
  * 5h-limit takes precedence when both signals are present (conservative).
  */
-export function detectOpusCapReason(pane: string): CapReason | null {
+export function detectOpusCapReason(pane: string, nowMs?: number): CapReason | null {
   if (!pane) return null
-  if (detectsUsageLimitMenu(pane)) return '5h-limit'
+  // nowMs ages out a STALE 5h-limit banner (reset already passed) so a leftover
+  // footer cannot keep Opus pinned to the fallback model. card c7987f52.
+  if (detectsUsageLimitMenu(pane, nowMs)) return '5h-limit'
   const tail = pane.split('\n').slice(-18).join('\n')
   if (CREDITS_REQUIRED_RX.test(tail)) return 'weekly-cap'
   return null
@@ -79,8 +81,8 @@ export function detectOpusCapReason(pane: string): CapReason | null {
  * (covers the five-hour limit menu) and adds the "Usage credits required"
  * banner (weekly Opus-cap CLI signal).
  */
-export function detectOpusWeeklyCapInPane(pane: string): boolean {
-  return detectOpusCapReason(pane) !== null
+export function detectOpusWeeklyCapInPane(pane: string, nowMs?: number): boolean {
+  return detectOpusCapReason(pane, nowMs) !== null
 }
 
 /**
