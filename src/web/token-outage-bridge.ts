@@ -28,7 +28,8 @@ import { capturePane } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { sendFallbackAlert } from './telegram-pipe-watchdog.js'
 import { resumeMarveenSession } from './channel-monitor.js'
-import { getPendingMessages, createKanbanCard, type AgentMessage } from '../db.js'
+import { getPendingMessages, type AgentMessage } from '../db.js'
+import { createCard } from '../noa-kanban.js'
 
 const PROVIDER: ChannelProviderType = 'telegram'
 const PROJECT_ROOT = process.env.MARVEEN_ROOT ?? process.cwd()
@@ -145,7 +146,7 @@ function defaultCreateCard(pending: AgentMessage[], resetAtText: string | null, 
   const head = pending.length
     ? pending.map((m) => `- ${m.content.slice(0, 200)}`).join('\n')
     : '(no queued inbound captured -- operator notified)'
-  createKanbanCard({
+  createCard({
     id,
     title: `[Token-outage] ${pending.length} queued msg${pending.length === 1 ? '' : 's'} during Claude-limit`,
     description:

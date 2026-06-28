@@ -8,7 +8,8 @@ import { execFileSync } from 'node:child_process'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PROJECT_ROOT, STORE_DIR } from '../config.js'
-import { getKanbanCard, searchAgentMemories } from '../db.js'
+import { getCard } from '../noa-kanban.js'
+import { searchAgentMemories } from '../noa-memory.js'
 import { queryImporters, queryAllSymbols, getIndexedAtEpoch } from './codetree-db.js'
 import type { ImpactDeps } from './codetree-impact.js'
 
@@ -60,7 +61,7 @@ export function realImpactDeps(opts: { agent?: string } = {}): ImpactDeps {
         .map((m) => ({ id: m.id, content: m.content, category: m.category, keywords: m.keywords }))
     },
     getCard: (id) => {
-      const card = getKanbanCard(id)
+      const card = getCard(id)
       return card ? { title: card.title, description: card.description } : null
     },
     getCardFiles: (id) => {
