@@ -48,7 +48,6 @@ import { tryHandleKanban } from './web/routes/kanban.js'
 import { tryHandleTodos } from './web/routes/todos.js'
 import { tryHandleSchedules } from './web/routes/schedules.js'
 import { tryHandleConnectors } from './web/routes/connectors.js'
-import { tryHandleConnectorsHu } from './web/routes/connectors-hu.js'
 import { tryHandleAgentsSkills } from './web/routes/agents-skills.js'
 import { tryHandleSkills } from './web/routes/skills.js'
 import { tryHandleAgents } from './web/routes/agents.js'
@@ -274,7 +273,6 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleKanban(routeCtx)) return
       if (await tryHandleTodos(routeCtx)) return
       if (await tryHandleSchedules(routeCtx)) return
-      if (await tryHandleConnectorsHu(routeCtx)) return
       if (await tryHandleConnectors(routeCtx)) return
       if (await tryHandleAgentsSkills(routeCtx)) return
       if (await tryHandleSkills(routeCtx)) return
