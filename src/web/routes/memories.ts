@@ -253,6 +253,21 @@ Respond ONLY with JSON, nothing else:
     return true
   }
 
+  // POST /api/memories/reembed: targeted backfill with optional category filter.
+  // Body: { categories?: string[] }  (undefined = default hot/warm/shared; [] = all)
+  if (path === '/api/memories/reembed' && method === 'POST') {
+    try {
+      const raw = await readBody(req)
+      const body = raw.length ? (JSON.parse(raw.toString()) as { categories?: string[] }) : {}
+      const r = await backfillEmbeddings({ categories: body.categories })
+      json(res, { ok: !r.aborted, count: r.succeeded, ...r })
+    } catch (err) {
+      logger.error({ err }, 'Reembed failed')
+      json(res, { error: 'Reembed failed' }, 500)
+    }
+    return true
+  }
+
   if (path === '/api/memories/stats' && method === 'GET') {
     json(res, getMemoryStats())
     return true
