@@ -408,6 +408,26 @@ async function main(): Promise<void> {
     logger.error({ err: reason }, 'unhandledRejection')
   })
 
+  // W5 cutover dry-run: a SAFE non-live boot smoke. When NOA_BOOT_SMOKE=<port> is
+  // set, boot ONLY the database + web listener on that exact port and skip
+  // everything with live side effects. Crucially it NEVER calls acquireLock()
+  // (whose startup race-guard SIGTERMs the process holding :3420 -- that is what
+  // killed the live dashboard on the first dry-run attempt), and starts NO
+  // scheduler / heartbeat / agent-spawn / daily-digest / watchers. Used by
+  // scripts/_noa-cutover-dryrun.sh to prove the build boots + writes against a
+  // freshly-migrated noa.db COPY without ever touching the live fleet.
+  // NOTE: read from process.env directly -- config.ts WEB_PORT is sourced from the
+  // .env FILE (readEnvFile), not process.env, so it cannot repoint the port here.
+  const bootSmokePort = parseInt(process.env['NOA_BOOT_SMOKE'] ?? '', 10)
+  if (Number.isFinite(bootSmokePort) && bootSmokePort > 0) {
+    logger.info({ port: bootSmokePort }, 'BOOT SMOKE: db + web only (no peer-kill, no schedulers/agents/watchers)')
+    initDatabase()
+    initCodetreeDatabase()
+    webServer = startWebServer(bootSmokePort)
+    logger.info(`BOOT SMOKE listening on http://localhost:${bootSmokePort}`)
+    return
+  }
+
   await acquireLock()
 
   // Database
