@@ -172,13 +172,12 @@ describe('W4: token-outage-bridge createCard routed through noa-kanban interface
   })
 
   it('createCard receives pending messages in the description', async () => {
-    const createCard = vi.fn(() => 'card-abc')
     const pending = [msg('hello from queue'), msg('another message')]
+    const createCard = vi.fn((_p: AgentMessage[], _r: string | null, _n: number) => 'card-abc')
     const deps = makeDeps({ limited: true, createCard, getQueue: () => pending })
     await runCycle(NOW, deps)
     expect(createCard).toHaveBeenCalledTimes(1)
-    // first arg is the pending array, second is resetAtText, third is now
-    const [pendingArg] = createCard.mock.calls[0] as [typeof pending, string | null, number]
+    const pendingArg = createCard.mock.calls[0][0]
     expect(pendingArg).toHaveLength(2)
   })
 })
