@@ -2,10 +2,10 @@ import {
   saveAgentMemory, getAgentMemories, searchAgentMemories, getMemoryStats, updateMemory,
   patchMemory, type MemoryPatch,
   hybridSearch, backfillEmbeddings,
-  searchMemories, getMemoriesForChat, getDb, applyScopeFilter, ScopedSharedError,
-  type Memory,
-} from '../../db.js'
-import { MAIN_AGENT_ID, ALLOWED_CHAT_ID, OLLAMA_URL } from '../../config.js'
+  searchAgentMemories as searchMemoriesGlobal, applyScopeFilter, ScopedSharedError,
+  deleteMemory, getNoaDb, type NoaMemory,
+} from '../../noa-memory.js'
+import { MAIN_AGENT_ID, OLLAMA_URL } from '../../config.js'
 import { logger } from '../../logger.js'
 import { decideMemoryMutation, enforceFromBindingEnabled } from '../agent-identity-binding.js'
 import { readBody, json } from '../http-helpers.js'
@@ -15,7 +15,7 @@ import type { RouteContext } from './types.js'
 // Returns undefined when the id does not exist, so the caller can 404 cleanly
 // before any authorization decision.
 function memoryOwner(id: number): string | undefined {
-  const row = getDb().prepare('SELECT agent_id FROM memories WHERE id = ?').get(id) as { agent_id: string } | undefined
+  const row = getNoaDb().prepare('SELECT agent_id FROM memories WHERE id = ?').get(id) as { agent_id: string } | undefined
   return row?.agent_id
 }
 
@@ -97,26 +97,28 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200)
     const mode = url.searchParams.get('mode') || 'fts'
 
-    let results: Memory[]
+    let results: NoaMemory[]
     if (q && mode === 'hybrid') {
       results = await hybridSearch(agentId || MAIN_AGENT_ID, q, limit)
     } else if (q && agentId) {
       results = searchAgentMemories(agentId, q, limit)
       if (results.length === 0) {
-        const db2 = getDb()
+        const db2 = getNoaDb()
         results = db2.prepare("SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?")
-          .all(agentId, `%${q}%`, `%${q}%`, limit) as Memory[]
+          .all(agentId, `%${q}%`, `%${q}%`, limit) as NoaMemory[]
       }
     } else if (q) {
-      results = searchMemories(q, ALLOWED_CHAT_ID, limit)
+      // q-only path: chat_id retired (W1); search as MAIN_AGENT_ID (includes shared).
+      results = searchMemoriesGlobal(MAIN_AGENT_ID, q, limit)
       if (results.length === 0) {
-        const db2 = getDb()
-        results = db2.prepare('SELECT * FROM memories WHERE content LIKE ? ORDER BY accessed_at DESC LIMIT ?').all(`%${q}%`, limit) as Memory[]
+        const db2 = getNoaDb()
+        results = db2.prepare('SELECT * FROM memories WHERE content LIKE ? ORDER BY accessed_at DESC LIMIT ?').all(`%${q}%`, limit) as NoaMemory[]
       }
     } else if (agentId) {
       results = getAgentMemories(agentId, limit)
     } else {
-      results = getMemoriesForChat(ALLOWED_CHAT_ID, limit)
+      // no-agent, no-q: chat_id retired (W1); return recent memories for MAIN_AGENT_ID (includes shared).
+      results = getAgentMemories(MAIN_AGENT_ID, limit)
     }
 
     // PM-AC3 single enforcement point (covers the q-only/neither leak paths and
@@ -350,8 +352,8 @@ Respond ONLY with JSON, nothing else:
       json(res, { error: authz.error }, authz.status)
       return true
     }
-    const changes = getDb().prepare('DELETE FROM memories WHERE id = ?').run(id).changes
-    if (changes > 0) { json(res, { ok: true }); return true }
+    const deleted = deleteMemory(id, owner)
+    if (deleted) { json(res, { ok: true }); return true }
     json(res, { error: 'Memory not found' }, 404)
     return true
   }
