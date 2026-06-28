@@ -298,9 +298,15 @@ describe('(d) rate-limit -- 61st request -> 429', () => {
 
 // ── (e) Kill-switch ──────────────────────────────────────────────────────────
 
-describe('(e) kill-switch -- PUBLIC_DIGEST_ENABLED=false -> 503, no DB query', () => {
-  it('returns 503 immediately when kill-switch is set', async () => {
-    process.env.PUBLIC_DIGEST_ENABLED = 'false'
+describe('(e) kill-switch -- falsy values -> 503, no DB query (spec 4.5 v1.2)', () => {
+  it.each([
+    ['false'],
+    ['FALSE'],
+    ['0'],
+    ['no'],
+    ['off'],
+  ])('returns 503 for PUBLIC_DIGEST_ENABLED=%s (case-insensitive)', async (val) => {
+    process.env.PUBLIC_DIGEST_ENABLED = val
     const getSpy = vi.spyOn(getNoaDb(), 'prepare')
 
     const ctx = makeCtx()
@@ -322,6 +328,13 @@ describe('(e) kill-switch -- PUBLIC_DIGEST_ENABLED=false -> 503, no DB query', (
 
   it('returns 200 when PUBLIC_DIGEST_ENABLED=true', async () => {
     process.env.PUBLIC_DIGEST_ENABLED = 'true'
+    const ctx = makeCtx()
+    await tryHandlePublicDigest(ctx)
+    expect(mockStatusCode).toBe(200)
+  })
+
+  it('returns 200 when PUBLIC_DIGEST_ENABLED=yes', async () => {
+    process.env.PUBLIC_DIGEST_ENABLED = 'yes'
     const ctx = makeCtx()
     await tryHandlePublicDigest(ctx)
     expect(mockStatusCode).toBe(200)

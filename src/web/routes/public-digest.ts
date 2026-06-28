@@ -42,8 +42,9 @@ export async function tryHandlePublicDigest(ctx: RouteContext): Promise<boolean>
   if (path !== '/api/public-digest' || method !== 'GET') return false
 
   // Kill-switch: read FRESH per request so Forge can flip without a full restart.
-  const killSwitch = process.env.PUBLIC_DIGEST_ENABLED
-  if (killSwitch === 'false') {
+  // Spec 4.5 v1.2: falsy = false/0/no/off (case-insensitive). Absent or any other value = enabled.
+  const killVal = (process.env.PUBLIC_DIGEST_ENABLED ?? '').toLowerCase()
+  if (['false', '0', 'no', 'off'].includes(killVal)) {
     json(res, { error: 'Public digest disabled' }, 503)
     return true
   }
