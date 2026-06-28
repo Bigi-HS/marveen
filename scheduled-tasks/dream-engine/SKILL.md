@@ -13,7 +13,7 @@ Generálj egy `{{INSTALL_DIR}}/DREAM.md` fájlt az alábbi 5 bucket alapján. A 
 
 ### Bucket 1 — 💡 Skill-javaslatok (flotta-szintű)
 
-Nézz végig MINDEN agent (marveen + sub-agentek: dave, thor, chad, scout, forge, gauge, quill, applegate, claudia, big-ben, hibiki, radar, buster, blackbeard, morgan, roberts, kidd, rackham) tegnapi (24h) memóriáit és napi naplóját. Kerítsd ki:
+Nézz végig MINDEN agent (marveen + sub-agentek: dave, thor, chad, scout, forge, gauge, quill, applegate, claudia, bigben, hibiki, radar, buster, blackbeard, morgan, roberts, kidd, rackham) tegnapi (24h) memóriáit és napi naplóját. Kerítsd ki:
 - Volt-e 3+ szor visszatérő, manuálisan ismételt művelet ami skill-be illeszthető?
 - Új, NEM lefedett pattern amit érdemes lenne skillbe önteni?
 
