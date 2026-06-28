@@ -46,7 +46,12 @@ export class InvalidTypeError extends Error {
   constructor(t: unknown) { super(`Invalid task type: "${t}"`); this.name = 'InvalidTypeError' }
 }
 export class InvalidAgentError extends Error {
-  constructor() { super('Agent must be a non-empty string'); this.name = 'InvalidAgentError' }
+  constructor(agent?: unknown) {
+    super(agent !== undefined
+      ? `Invalid agent name: "${agent}" (only [a-z0-9-] allowed)`
+      : 'Agent must be a non-empty string')
+    this.name = 'InvalidAgentError'
+  }
 }
 export class TaskNotFoundError extends Error {
   constructor(id: string) { super(`Task not found: "${id}"`); this.name = 'TaskNotFoundError' }
@@ -137,8 +142,11 @@ function validateType(type: unknown): void {
   if (type !== 'task' && type !== 'heartbeat') throw new InvalidTypeError(type)
 }
 
+// Agent name charset: only [a-z0-9-] (kebab) to block tmux metacharacters (Chad #292).
+const AGENT_RE = /^[a-z0-9][a-z0-9-]*$/
 function validateAgent(agent: unknown): void {
   if (typeof agent !== 'string' || !agent.trim()) throw new InvalidAgentError()
+  if (!AGENT_RE.test(agent)) throw new InvalidAgentError(agent)
 }
 
 function validatePromptLen(prompt: string): void {

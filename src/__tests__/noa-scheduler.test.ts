@@ -202,6 +202,36 @@ describe('createTask / listTasks / deleteTask', () => {
     ).toThrowError(InvalidAgentError)
   })
 
+  // Kebab-charset guard (card 8c088adf, Chad #292 finding): only [a-z0-9-] allowed
+  // in agent names -- tmux metacharacters and path separators must be rejected.
+  it.each([
+    ['agent with space', 'my agent'],
+    ['agent with semicolon (tmux metachar)', 'agent;rm -rf /'],
+    ['agent with newline', 'agent\ninjection'],
+    ['agent with dollar (shell expand)', 'agent$HOME'],
+    ['agent with slash (path traversal)', 'agent/../../etc'],
+    ['agent with uppercase', 'Agent'],
+    ['agent with underscore', 'my_agent'],
+    ['agent starting with hyphen', '-agent'],
+  ])('rejects %s', (_label, badAgent) => {
+    const db = getNoaDb()
+    expect(() =>
+      createTask({ id: 'charset-test', agent: badAgent, type: 'task', prompt: 'x', schedule: '0 9 * * *' }, db)
+    ).toThrowError(InvalidAgentError)
+  })
+
+  it.each([
+    ['simple lowercase', 'marveen'],
+    ['with hyphen', 'dr-stone'],
+    ['alphanumeric', 'agent42'],
+    ['multi-segment kebab', 'sub-agent-7'],
+  ])('accepts valid agent name: %s', (_label, goodAgent) => {
+    const db = getNoaDb()
+    expect(() =>
+      createTask({ id: `valid-${goodAgent.replace(/[^a-z0-9]/g, '-')}`, agent: goodAgent, type: 'task', prompt: 'x', schedule: '0 9 * * *' }, db)
+    ).not.toThrow()
+  })
+
   it('updateTask changes schedule and recomputes next_run', () => {
     const db = getNoaDb()
     createTask({ id: 'upd-me', agent: 'marveen', type: 'task', prompt: 'x', schedule: '0 9 * * *' }, db)
