@@ -1,16 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { applyScopeFilter } from '../db.js'
-import type { Memory } from '../db.js'
+import { applyScopeFilter } from '../noa-memory.js'
+import type { NoaMemory } from '../noa-memory.js'
 
-// Build a minimal Memory-shaped row for filter tests. Only the fields the
-// filter reads (access_scope) plus identity fields matter; the rest are
-// padded so the object satisfies the Memory type at the boundary.
-function row(over: Partial<Memory>): Memory {
+// Build a minimal NoaMemory-shaped row for filter tests (slim schema: no chat_id/sector/salience).
+function row(over: Partial<NoaMemory>): NoaMemory {
   return {
-    id: 1, chat_id: 'c', topic_key: null, content: '', sector: 'semantic',
-    salience: 1, created_at: 0, accessed_at: 0, agent_id: 'claudia',
-    category: 'hot', auto_generated: 0, keywords: null, embedding: null,
-    access_scope: null,
+    id: 1, topic_key: null, content: '', created_at: 0, accessed_at: 0, agent_id: 'claudia',
+    category: 'hot', keywords: null, embedding: null, access_scope: null,
     ...over,
   }
 }
