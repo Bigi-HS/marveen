@@ -348,11 +348,59 @@ export function detectsThinkingBlockError(pane: string): boolean {
  * fuller matcher used by the separate token-free auto-ACK bridge; this inline
  * copy keeps pane-state.ts dependency-free.
  */
-export function detectsUsageLimitMenu(pane: string): boolean {
+// Grace (minutes) past a banner's reset clock-time before it counts as STALE.
+// A small slack avoids un-tripping right on the boundary while the limit is
+// still lifting.
+const LIMIT_RESET_STALE_GRACE_MIN = 3
+
+// Minute-of-day (0..1439) of `nowMs` in the fleet's canonical TZ (Europe/Budapest),
+// so a banner's wall-clock reset time ("6:50pm") is compared in the same frame the
+// CLI rendered it in. Pure given nowMs; Intl is a built-in (keeps the zero-import design).
+function budapestMinuteOfDay(nowMs: number): number {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Budapest',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(nowMs))
+  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? '0') % 24
+  const min = Number(parts.find((p) => p.type === 'minute')?.value ?? '0')
+  return h * 60 + min
+}
+
+// True when the WEAK-path banner's reset clock-time is already in the PAST (the
+// scrolled-back leftover of a limit that has since reset). A usage-limit reset is
+// always within ~5h, so across the midnight wrap the NEAREST interpretation is the
+// correct one. Fail-safe: an unparseable time returns false (keep tripping) so an
+// odd render never silently suppresses a real limit. STRONG-path (active modal)
+// callers never reach this.
+function limitResetTimeIsStale(tail: string, nowMs: number): boolean {
+  const m = tail.match(/resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i)
+  if (!m) return false
+  let h = parseInt(m[1]!, 10)
+  const min = m[2] ? parseInt(m[2], 10) : 0
+  if (h < 1 || h > 12 || min > 59) return false
+  if (h === 12) h = 0
+  if (m[3]!.toLowerCase() === 'pm') h += 12
+  const resetMinOfDay = h * 60 + min
+  let delta = resetMinOfDay - budapestMinuteOfDay(nowMs) // minutes until reset
+  if (delta >= 720) delta -= 1440
+  if (delta < -720) delta += 1440
+  return delta <= -LIMIT_RESET_STALE_GRACE_MIN
+}
+
+export function detectsUsageLimitMenu(pane: string, nowMs: number = Date.now()): boolean {
   if (!pane) return false
   const tail = pane.split('\n').slice(-LIMIT_MENU_TAIL_LINES).join('\n')
+  // STRONG: the menu action line is UI chrome of an ACTIVE blocking modal you are
+  // sitting in -- always a limit, regardless of any reset time shown.
   if (LIMIT_MENU_OPTION_RX.test(tail)) return true
-  return LIMIT_PHRASE_RX.test(tail) && LIMIT_RESET_TIME_RX.test(tail)
+  // WEAK: phrase + reset-time corroboration. Suppress a STALE banner (reset already
+  // passed) so a leftover footer cannot pin an otherwise-idle pane 'busy' forever
+  // (the self-reinforcing limit-deadlock: busy -> no prompt -> no fresh output ->
+  // banner stays in tail -> busy). card c7987f52.
+  if (!(LIMIT_PHRASE_RX.test(tail) && LIMIT_RESET_TIME_RX.test(tail))) return false
+  return !limitResetTimeIsStale(tail, nowMs)
 }
 
 export interface DetectPaneStateOptions {
@@ -370,6 +418,11 @@ export interface DetectPaneStateOptions {
    * reliable, version-independent discriminator. Omitted -> the content-only
    * heuristic (PARKED_INPUT_RX) is used (safe legacy behaviour). */
   cursor?: { x: number; y: number }
+  /** Wall-clock (epoch ms) used to age out a STALE usage-limit banner whose reset
+   * time has already passed. Defaults to Date.now() so live callers inherit the
+   * staleness guard with no change; tests inject a fixed instant for determinism.
+   * card c7987f52. */
+  nowMs?: number
 }
 
 /**
@@ -406,7 +459,7 @@ export function detectPaneState(
   // a structural input box or an idle-looking footer. Checked before the
   // surface/idle/typing returns so the message-router and scheduler never
   // inject a prompt into a limited session (PR #130 DA review, HIGH).
-  if (detectsUsageLimitMenu(pane)) return 'busy'
+  if (detectsUsageLimitMenu(pane, opts.nowMs)) return 'busy'
 
   // Surface recognition by POSITIVE input-affordance (card d978f8bd). 'idle'
   // (promptable) must be PROVEN by a live structural input box -- the two
@@ -556,8 +609,8 @@ export function isQuiescentlyIdle(samples: QuiescenceSample[]): boolean {
  * 'typing' counts as not-ready because the user has unsubmitted text
  * in the input box and a new prompt would concatenate into it.
  */
-export function isReadyForPrompt(pane: string): boolean {
-  return detectPaneState(pane) === 'idle'
+export function isReadyForPrompt(pane: string, opts: DetectPaneStateOptions = {}): boolean {
+  return detectPaneState(pane, opts) === 'idle'
 }
 
 /**
@@ -970,10 +1023,10 @@ export function stuckInputSignature(pane: string): string | null {
 // (the char count climbs, or a second placeholder appears between polls)
 // yields a different signature and the watcher's confirm window restarts
 // rather than recovering prematurely (adversarial fixture b).
-export function pendingPasteSignature(pane: string): string | null {
+export function pendingPasteSignature(pane: string, nowMs?: number): string | null {
   if (!pane || !pane.trim()) return null
   if (isActivelyWorking(pane)) return null
-  if (detectsUsageLimitMenu(pane)) return null
+  if (detectsUsageLimitMenu(pane, nowMs)) return null
   const box = liveInputBox(pane)
   if (box == null) return null
   if (!PENDING_PASTE_RX.test(box)) return null

@@ -26,6 +26,15 @@ import {
 
 const SEP = '─'.repeat(80)
 
+// Fixed wall-clock instants (epoch ms; Europe/Budapest = CEST +02:00 in June) for
+// the usage-limit staleness guard (card c7987f52). The WEAK-path classification
+// (limit phrase + reset time) trips only while the reset clock-time is still
+// AHEAD of "now"; a reset already PAST (> grace) is a stale leftover banner that
+// must NOT pin an idle pane busy. These make the formerly-implicit "now" explicit
+// so the assertions are deterministic regardless of the real run clock.
+const NOW_BEFORE_RESETS = Date.parse('2026-06-28T14:00:00+02:00') // 14:00 -- before "3pm"/"7:40pm"
+const NOW_AFTER_RESETS = Date.parse('2026-06-28T20:00:00+02:00') // 20:00 -- past "6:50pm"/"3pm"/"7:40pm"
+
 const IDLE_BYPASS = [
   '',
   SEP,
@@ -1354,7 +1363,7 @@ describe('pendingPasteSignature (card 1b0f58ba: stale-paste recovery)', () => {
   })
 
   it('is null when a usage-limit footer is showing with the placeholder', () => {
-    expect(pendingPasteSignature(PENDING_PASTE_WITH_LIMIT)).toBeNull()
+    expect(pendingPasteSignature(PENDING_PASTE_WITH_LIMIT, NOW_BEFORE_RESETS)).toBeNull()
   })
 
   it('ignores a [Pasted text] echo left in scrollback', () => {
@@ -1803,8 +1812,8 @@ describe('usage/session-limit menu (PR #130 DA HIGH)', () => {
   })
 
   it('classifies the empty-box limit footer as busy, closing the false-ready gap', () => {
-    expect(detectPaneState(LIMIT_SOFT_EMPTY_BOX)).toBe('busy')
-    expect(isReadyForPrompt(LIMIT_SOFT_EMPTY_BOX)).toBe(false)
+    expect(detectPaneState(LIMIT_SOFT_EMPTY_BOX, { nowMs: NOW_BEFORE_RESETS })).toBe('busy')
+    expect(isReadyForPrompt(LIMIT_SOFT_EMPTY_BOX, { nowMs: NOW_BEFORE_RESETS })).toBe(false)
   })
 
   it('does NOT trip on prose that mentions a single limit phrase', () => {
@@ -1818,10 +1827,61 @@ describe('usage/session-limit menu (PR #130 DA HIGH)', () => {
 
   it('detects phrase + reset-time, and phrase + wait-option', () => {
     expect(
-      detectsUsageLimitMenu("You've hit your session limit · resets 7:40pm (Europe/Budapest)"),
+      detectsUsageLimitMenu(
+        "You've hit your session limit · resets 7:40pm (Europe/Budapest)",
+        NOW_BEFORE_RESETS,
+      ),
     ).toBe(true)
     expect(
       detectsUsageLimitMenu('usage limit reached\nStop and wait for limit to reset'),
+    ).toBe(true)
+  })
+
+  // card c7987f52: the self-reinforcing limit-deadlock. A limit that has SINCE
+  // reset leaves its banner in the 18-line tail; the WEAK path used to keep
+  // reading it as an active limit -> 'busy' -> the router/scheduler never deliver
+  // -> the pane produces no fresh output -> the banner stays in the tail forever.
+  // A reset clock-time already in the PAST must age the banner out.
+  it('ages out a STALE banner whose reset time has already passed (WEAK path)', () => {
+    const staleBanner = "You've hit your session limit · resets 6:50pm (Europe/Budapest)"
+    // Active while the reset is still ahead...
+    expect(detectsUsageLimitMenu(staleBanner, NOW_BEFORE_RESETS)).toBe(true)
+    // ...stale (and ignored) once it has passed.
+    expect(detectsUsageLimitMenu(staleBanner, NOW_AFTER_RESETS)).toBe(false)
+  })
+
+  it('an empty-box pane with a STALE limit footer is NOT busy (deadlock break)', () => {
+    // The exact shape that pinned NoA busy: empty composer + a past-reset footer.
+    expect(detectPaneState(LIMIT_SOFT_EMPTY_BOX, { nowMs: NOW_AFTER_RESETS })).not.toBe('busy')
+    expect(isReadyForPrompt(LIMIT_SOFT_EMPTY_BOX, { nowMs: NOW_AFTER_RESETS })).toBe(true)
+  })
+
+  it('the STRONG menu-option path ignores staleness (active modal you sit in)', () => {
+    // "Stop and wait for limit to reset" is chrome of a live blocking modal --
+    // it must classify busy even with a past reset time and a future-clock.
+    expect(detectsUsageLimitMenu(LIMIT_IN_BOX, NOW_AFTER_RESETS)).toBe(true)
+    expect(detectsUsageLimitMenu(LIMIT_MENU_MODAL, NOW_AFTER_RESETS)).toBe(true)
+  })
+
+  it('default clock (no nowMs arg) applies staleness live: a far-future reset trips', () => {
+    // No injected clock -> live Date.now(). Derive the reset time from Budapest
+    // "now" + 3h so the assertion is correct regardless of the host TZ (the guard
+    // compares in Europe/Budapest). A reset ~3h out is the realistic active case.
+    const bpHour =
+      Number(
+        new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Europe/Budapest',
+          hour: '2-digit',
+          hour12: false,
+        })
+          .formatToParts(new Date())
+          .find((p) => p.type === 'hour')!.value,
+      ) % 24
+    const futureH = (bpHour + 3) % 24
+    const hh = ((futureH + 11) % 12) + 1
+    const ampm = futureH >= 12 ? 'pm' : 'am'
+    expect(
+      detectsUsageLimitMenu(`You've hit your session limit · resets ${hh}:00${ampm}`),
     ).toBe(true)
   })
 
