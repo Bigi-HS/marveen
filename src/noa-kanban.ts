@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { getNoaDb } from './noa-memory.js'
+import { getNoaDb } from './noa-db.js'
 import { emitDashboardEvent, type DashboardEvent } from './event-bus.js'
 import { MAIN_AGENT_ID, OWNER_NAME, BOT_NAME } from './config.js'
 import { listAgentNames } from './web/agent-config.js'

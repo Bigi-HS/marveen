@@ -1,13 +1,12 @@
 import Database from 'better-sqlite3'
 import * as crypto from 'crypto'
-import { join } from 'path'
 import { logger } from './logger.js'
-import { STORE_DIR, PROJECT_ROOT } from './config.js'
-import { resolveNoaDbPath } from './db-path.js'
+import { getNoaDb, initNoaDb } from './noa-db.js'
+
+// Re-export so existing callers (tests, web/) can keep their current import path.
+export { getNoaDb, initNoaDb }
 
 // --- Environment ---
-// E1 guard: .db-suffix + project-root containment + ../-rejection (Chad finding on PR#290)
-const NOA_DB_PATH = resolveNoaDbPath(process.env.NOA_DB_PATH, PROJECT_ROOT, join(STORE_DIR, 'noa.db'))
 const OLLAMA_URL_RAW = process.env.OLLAMA_URL ?? 'http://localhost:11434'
 export const EMBED_MODEL = process.env.EMBED_MODEL ?? 'nomic-embed-text'
 
@@ -151,34 +150,6 @@ export interface DailyLogEntry {
   date: string
   content: string
   created_at: number
-}
-
-// --- DB connection factory (AC-13) ---
-let _db: Database.Database | null = null
-
-export function initNoaDb(path: string): void {
-  if (_db) _db.close()
-  _db = openNoaDb(path)
-}
-
-function openNoaDb(path: string): Database.Database {
-  const db = new Database(path)
-  // AC-13: 5 pragmas applied in order
-  // journal_mode = WAL requires a file-backed DB; :memory: returns 'memory' (expected in tests)
-  const jm = (db.pragma('journal_mode = WAL') as Array<{ journal_mode: string }>)[0]?.journal_mode
-  if (path !== ':memory:' && jm !== 'wal') {
-    throw new Error(`journal_mode expected 'wal', got '${jm}'`)
-  }
-  db.pragma('synchronous = NORMAL')
-  db.pragma('foreign_keys = ON')
-  db.pragma('busy_timeout = 5000')
-  db.pragma('wal_autocheckpoint = 1000')
-  return db
-}
-
-export function getNoaDb(): Database.Database {
-  if (!_db) _db = openNoaDb(NOA_DB_PATH)
-  return _db
 }
 
 // --- Embedding buffer helpers ---
