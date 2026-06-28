@@ -61,10 +61,16 @@ curl -s -o /dev/null -X DELETE -H "Authorization: Bearer $TOKEN" "$BASE/api/memo
   || { echo "[verify] FAIL (C): memory write not on noa.db (noa=$m_noa claw=$m_claw)" >&2; exit 1; }
 
 echo "[verify] (D) a live MESSAGE write lands in noa.db (not claudeclaw.db)"
-# Sentinel target -> the row INSERTs (proof) but never delivers / wakes anyone.
+# Recipient MUST be a real agent -- the route's normalizeRecipient() returns null
+# for an unknown name and the POST 400s (so the row would never land). Use marveen
+# (always valid). On the LIVE server the delivery loop is active, so this probe is a
+# real (harmless) inter-agent message to marveen; we delete it right after the count,
+# racing delivery -- a one-line probe wake during the deliberate cutover verify is
+# acceptable. (In the dryrun the boot-smoke build runs NO delivery loop, so it never
+# wakes anyone there.)
 PROBE="__cutover-verify-msg-probe-$$"
 curl -s -o /dev/null -X POST "$BASE/api/messages" -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
-  -d "{\"from\":\"dave\",\"to\":\"__cutover_probe_sink__\",\"content\":\"$PROBE\"}"
+  -d "{\"from\":\"dave\",\"to\":\"marveen\",\"content\":\"$PROBE\"}"
 g_noa=$(count_in store/noa.db agent_messages content "$PROBE")
 g_claw=$(count_in store/claudeclaw.db agent_messages content "$PROBE")
 echo "  in noa.db=$g_noa  claudeclaw.db=$g_claw"
