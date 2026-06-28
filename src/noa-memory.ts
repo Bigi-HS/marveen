@@ -517,9 +517,11 @@ export function searchAgentMemories(
         ).all(terms, agentId, limit) as NoaMemory[]
     return bypass ? rows : applyScopeFilter(rows, agentId)
   } catch {
+    const escaped = escapeLike(query)
+    const pat = `%${escaped}%`
     const rows = bypass
-      ? db.prepare('SELECT * FROM memories WHERE (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?').all(`%${query}%`, `%${query}%`, limit) as NoaMemory[]
-      : db.prepare("SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?").all(agentId, `%${query}%`, `%${query}%`, limit) as NoaMemory[]
+      ? db.prepare("SELECT * FROM memories WHERE (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') ORDER BY accessed_at DESC LIMIT ?").all(pat, pat, limit) as NoaMemory[]
+      : db.prepare("SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') ORDER BY accessed_at DESC LIMIT ?").all(agentId, pat, pat, limit) as NoaMemory[]
     return bypass ? rows : applyScopeFilter(rows, agentId)
   }
 }

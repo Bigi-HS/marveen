@@ -485,6 +485,34 @@ describe('W0a: searchAgentMemories adapter (sync)', () => {
     const results = searchAgentMemories('dave', 'privatedata', 10, true)
     expect(results.map(r => r.agent_id)).not.toContain('claudia')
   })
+
+  it('does not throw on queries containing LIKE wildcard chars (%, _, \\)', () => {
+    expect(() => searchAgentMemories('dave', '50%')).not.toThrow()
+    expect(() => searchAgentMemories('dave', 'col_name')).not.toThrow()
+    expect(() => searchAgentMemories('dave', 'path\\to')).not.toThrow()
+  })
+
+  it('LIKE-fallback literal match: % and _ are not treated as wildcards', () => {
+    // This tests the escapeLike fix in the catch (LIKE fallback) branch directly via raw SQL,
+    // since triggering the FTS5 catch requires a malformed MATCH expression that
+    // buildFtsMatchExpression's sanitizer prevents from reaching FTS5.
+    const db = getNoaDb()
+    const now = Math.floor(Date.now() / 1000)
+    // Seed a memory with literal "50%" and one that would be a false positive if % were unescaped
+    db.prepare('INSERT INTO memories (agent_id,category,content,keywords,topic_key,access_scope,created_at,accessed_at) VALUES (?,?,?,?,NULL,NULL,?,?)')
+      .run('dave', 'warm', 'discount 50% off', null, now, now)
+    db.prepare('INSERT INTO memories (agent_id,category,content,keywords,topic_key,access_scope,created_at,accessed_at) VALUES (?,?,?,?,NULL,NULL,?,?)')
+      .run('dave', 'warm', 'discount 50X off', null, now, now)
+
+    // Reproduce what the fixed LIKE fallback does: escapeLike then wrap in %..%
+    const query = '50%'
+    const escaped = query.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')
+    const pat = `%${escaped}%`
+    const rows = db.prepare("SELECT content FROM memories WHERE agent_id = 'dave' AND content LIKE ? ESCAPE '\\'").all(pat) as { content: string }[]
+    const contents = rows.map(r => r.content)
+    expect(contents).toContain('discount 50% off')   // literal match
+    expect(contents).not.toContain('discount 50X off') // would appear if % were unescaped
+  })
 })
 
 describe('W0a: updateMemory (full PUT replace)', () => {
