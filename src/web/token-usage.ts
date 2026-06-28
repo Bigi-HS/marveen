@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { createReadStream } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { getDb } from '../db.js'
+import { getNoaDb } from '../noa-memory.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import { costForUsageDetailedUsd, readAgentModel } from './agent-config.js'
@@ -490,6 +491,7 @@ export function getTokenDetails(
 
 export function correlateWithKanban(): void {
   const db = getDb()
+  const noaDb = getNoaDb()
   const uncorrelated = db.prepare(`
     SELECT DISTINCT agent, MIN(timestamp) as minTs, MAX(timestamp) as maxTs
     FROM token_usage
@@ -498,7 +500,7 @@ export function correlateWithKanban(): void {
   `).all() as { agent: string; minTs: number; maxTs: number }[]
 
   for (const row of uncorrelated) {
-    const cards = db.prepare(`
+    const cards = noaDb.prepare(`
       SELECT id, title, project, assignee, updated_at
       FROM kanban_cards
       WHERE (assignee = ? OR assignee LIKE '%' || ? || '%')
