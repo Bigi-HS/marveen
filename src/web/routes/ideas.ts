@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { listIdeas, createIdea, updateIdea, deleteIdea, listIdeaCategories, createKanbanCard, getDb } from '../../db.js'
+import { listIdeas, createIdea, updateIdea, deleteIdea, listIdeaCategories, getDb } from '../../db.js'
+import { createCard } from '../../noa-kanban.js'
 import { generateBreakdown } from '../llm-breakdown.js'
 import { parseScore } from '../idea-scoring.js'
 import { logger } from '../../logger.js'
@@ -103,7 +104,7 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
     const cardId = randomUUID().slice(0, 8)
     const status = phase === 'plan' ? 'planned' : 'waiting'
     const title = phase === 'plan' ? idea.title : `[Részlet kidolgozás] ${idea.title}`
-    createKanbanCard({
+    createCard({
       id: cardId,
       title,
       description: idea.description ?? '',
@@ -150,7 +151,7 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
       return true
     }
     const parentId = randomUUID().slice(0, 8)
-    createKanbanCard({
+    createCard({
       id: parentId,
       title: idea.title,
       description: idea.description ?? '',
@@ -163,7 +164,7 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
     for (const st of subtasks) {
       if (!st.title) continue
       const childId = randomUUID().slice(0, 8)
-      createKanbanCard({
+      createCard({
         id: childId,
         title: String(st.title).slice(0, 120),
         description: (st.description ?? '').slice(0, 500),
