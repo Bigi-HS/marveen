@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { CronExpressionParser } from 'cron-parser'
 import { logger } from './logger.js'
 import { MAIN_AGENT_ID, ALLOWED_CHAT_ID, PROJECT_ROOT } from './config.js'
-import { getNoaDb } from './noa-memory.js'
+import { getNoaDb } from './noa-db.js'
 import { UNTRUSTED_PREAMBLE, wrapUntrusted } from './prompt-safety.js'
 import { SCHEDULED_TASKS_DIR, parseSkillMdFrontmatter } from './web/scheduled-tasks-io.js'
 import {
