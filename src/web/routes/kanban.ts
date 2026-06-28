@@ -1,45 +1,16 @@
 import { randomUUID } from 'node:crypto'
 import {
-  listKanbanCards, listArchivedKanbanCards, createKanbanCard, updateKanbanCard,
-  deleteKanbanCard, moveKanbanCard, archiveKanbanCard,
-  getKanbanComments, addKanbanComment, listKanbanProjects,
-  getKanbanCard, getChildCards, runInTransaction,
-  createAgentMessage, markKanbanCardDispatched,
-} from '../../db.js'
-import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID } from '../../config.js'
+  listCards, listArchived, createCard, updateCard, deleteCard, moveCard, archiveCard,
+  listComments, addComment, listProjects, getCard, getChildCards, runInTransaction,
+  InvalidTransitionError, InvalidStatusError, InvalidSortOrderError, HasActiveChildrenError,
+  ParentNotFoundError,
+} from '../../noa-kanban.js'
+import { OWNER_NAME, BOT_NAME } from '../../config.js'
 import { listAgentNames, readAgentDisplayName, findAvatarForAgent } from '../agent-config.js'
-import { isAgentRunning } from '../agent-process.js'
-import { resolveKanbanDispatchTarget } from '../../kanban-dispatch.js'
 import { generateBreakdown } from '../llm-breakdown.js'
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
-
-// Option D: kanban -> agent dispatch. When a card moves to in_progress, wake the
-// assigned agent once via the inter-agent message router (createAgentMessage),
-// which gives retry / dedup / trust-wrapping / busy-receiver handling for free.
-// dispatched_at is the once-only guard; errors never block the card move.
-function fireKanbanDispatch(id: string): void {
-  try {
-    const card = getKanbanCard(id)
-    if (!card || card.dispatched_at) return
-    const target = resolveKanbanDispatchTarget(card.assignee, {
-      ownerName: OWNER_NAME,
-      botName: BOT_NAME,
-      mainAgentId: MAIN_AGENT_ID,
-      agentNames: listAgentNames(),
-      isRunning: isAgentRunning,
-    })
-    if (!target) return
-    const desc = (card.description ?? '').trim()
-    const content = `[Kanban feladat #${id}]: ${card.title}${desc ? ' — ' + desc : ''}\n\nA kártyát in_progress-re húzták. Ha kész vagy, húzd "done"-ra.`
-    createAgentMessage(MAIN_AGENT_ID, target, content)
-    markKanbanCardDispatched(id)
-    logger.info({ id, target, assignee: card.assignee }, 'Kanban in_progress dispatch fired')
-  } catch (err) {
-    logger.warn({ err, id }, 'Kanban dispatch failed (card move still succeeded)')
-  }
-}
 
 export interface AssigneeEntry {
   name: string
@@ -89,17 +60,17 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method } = ctx
 
   if (path === '/api/kanban' && method === 'GET') {
-    json(res, listKanbanCards())
+    json(res, listCards())
     return true
   }
 
   if (path === '/api/kanban/archived' && method === 'GET') {
-    json(res, listArchivedKanbanCards())
+    json(res, listArchived())
     return true
   }
 
   if (path === '/api/kanban-projects' && method === 'GET') {
-    json(res, listKanbanProjects())
+    json(res, listProjects())
     return true
   }
 
@@ -121,7 +92,13 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     const body = await readBody(req)
     const data = JSON.parse(body.toString())
     const id = randomUUID().slice(0, 8)
-    createKanbanCard({ id, ...data })
+    try {
+      createCard({ id, ...data })
+    } catch (err) {
+      if (err instanceof InvalidStatusError) { json(res, { error: err.message }, 400); return true }
+      if (err instanceof ParentNotFoundError) { json(res, { error: err.message }, 404); return true }
+      throw err
+    }
     json(res, { ok: true, id })
     return true
   }
@@ -131,14 +108,27 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     const id = decodeURIComponent(kanbanCardMatch[1])
     const body = await readBody(req)
     const data = JSON.parse(body.toString())
-    if (updateKanbanCard(id, data)) { json(res, { ok: true }); return true }
+    try {
+      if (updateCard(id, data)) { json(res, { ok: true }); return true }
+    } catch (err) {
+      if (err instanceof InvalidTransitionError || err instanceof InvalidStatusError) {
+        json(res, { error: (err as Error).message }, 400)
+        return true
+      }
+      throw err
+    }
     json(res, { error: 'Kártya nem található' }, 404)
     return true
   }
 
   if (kanbanCardMatch && method === 'DELETE') {
     const id = decodeURIComponent(kanbanCardMatch[1])
-    if (deleteKanbanCard(id)) { json(res, { ok: true }); return true }
+    try {
+      if (deleteCard(id)) { json(res, { ok: true }); return true }
+    } catch (err) {
+      if (err instanceof HasActiveChildrenError) { json(res, { error: err.message }, 409); return true }
+      throw err
+    }
     json(res, { error: 'Kártya nem található' }, 404)
     return true
   }
@@ -148,11 +138,23 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     const id = decodeURIComponent(kanbanMoveMatch[1])
     const body = await readBody(req)
     const { status, sort_order } = JSON.parse(body.toString())
-    if (moveKanbanCard(id, status, sort_order ?? 0)) {
-      // Wake the assigned agent once when the card enters in_progress.
-      if (status === 'in_progress') fireKanbanDispatch(id)
-      json(res, { ok: true })
-      return true
+    // Dispatch on in_progress is handled internally by noa-kanban.moveCard()
+    // (dispatched_at one-shot guard, fire-and-forget). Do not call legacy dispatch.
+    try {
+      if (moveCard(id, status, sort_order ?? 1)) {
+        json(res, { ok: true })
+        return true
+      }
+    } catch (err) {
+      if (
+        err instanceof InvalidTransitionError ||
+        err instanceof InvalidStatusError ||
+        err instanceof InvalidSortOrderError
+      ) {
+        json(res, { error: (err as Error).message }, 400)
+        return true
+      }
+      throw err
     }
     json(res, { error: 'Kártya nem található' }, 404)
     return true
@@ -161,7 +163,7 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   const kanbanArchiveMatch = path.match(/^\/api\/kanban\/([^/]+)\/archive$/)
   if (kanbanArchiveMatch && method === 'POST') {
     const id = decodeURIComponent(kanbanArchiveMatch[1])
-    if (archiveKanbanCard(id)) { json(res, { ok: true }); return true }
+    if (archiveCard(id)) { json(res, { ok: true }); return true }
     json(res, { error: 'Kártya nem található' }, 404)
     return true
   }
@@ -169,7 +171,7 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   const kanbanCommentsMatch = path.match(/^\/api\/kanban\/([^/]+)\/comments$/)
   if (kanbanCommentsMatch && method === 'GET') {
     const cardId = decodeURIComponent(kanbanCommentsMatch[1])
-    json(res, getKanbanComments(cardId))
+    json(res, listComments(cardId))
     return true
   }
   if (kanbanCommentsMatch && method === 'POST') {
@@ -177,14 +179,14 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     const body = await readBody(req)
     const { author, content } = JSON.parse(body.toString())
     if (!author || !content) { json(res, { error: 'Szerző és tartalom kötelező' }, 400); return true }
-    json(res, addKanbanComment(cardId, author, content))
+    json(res, addComment(cardId, author, content))
     return true
   }
 
   const breakdownMatch = path.match(/^\/api\/kanban\/([^/]+)\/breakdown$/)
   if (breakdownMatch && method === 'POST') {
     const cardId = decodeURIComponent(breakdownMatch[1])
-    const card = getKanbanCard(cardId)
+    const card = getCard(cardId)
     if (!card) { json(res, { error: 'Kártya nem található' }, 404); return true }
     const existing = getChildCards(cardId)
     if (existing.length > 0) { json(res, { error: 'A kártya már rendelkezik subtask-okkal' }, 409); return true }
@@ -201,7 +203,7 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   const acceptMatch = path.match(/^\/api\/kanban\/([^/]+)\/breakdown\/accept$/)
   if (acceptMatch && method === 'POST') {
     const parentId = decodeURIComponent(acceptMatch[1])
-    const parent = getKanbanCard(parentId)
+    const parent = getCard(parentId)
     if (!parent) { json(res, { error: 'Szülő kártya nem található' }, 404); return true }
     const body = await readBody(req)
     const { subtasks } = JSON.parse(body.toString()) as {
@@ -211,14 +213,13 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'Subtask lista kötelező' }, 400)
       return true
     }
-    // runInTransaction (not getDb().transaction) so the kanban events emitted by
-    // these writes flush only on commit -- a rolled-back breakdown emits nothing
-    // (card 7c7ea226).
+    // runInTransaction buffers kanban events and flushes only on commit -- a
+    // rolled-back breakdown emits nothing (card 7c7ea226).
     const created = runInTransaction(() => {
       const ids: string[] = []
       for (const st of subtasks) {
         const id = randomUUID().slice(0, 8).toUpperCase()
-        createKanbanCard({
+        createCard({
           id,
           title: st.title,
           description: st.description,
@@ -226,10 +227,11 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
           priority: (st.priority as any) ?? 'normal',
           project: parent.project ?? undefined,
           parent_id: parentId,
+          suppressIntake: true,
         })
         ids.push(id)
       }
-      addKanbanComment(parentId, BOT_NAME, `Auto-breakdown: ${ids.length} subtask létrehozva (${ids.join(', ')})`)
+      addComment(parentId, BOT_NAME, `Auto-breakdown: ${ids.length} subtask létrehozva (${ids.join(', ')})`)
       return ids
     })
     json(res, { ok: true, created })
