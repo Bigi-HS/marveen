@@ -6,7 +6,7 @@
 // silently stuck -- an operator can see it is paused for the weekly reset and
 // will auto-resume on Sunday.
 
-import { listKanbanCards, updateKanbanCard, addKanbanComment, type KanbanCard } from '../db.js'
+import { listCards, updateCard as noaUpdateCard, addComment, type KanbanCard, type UpdateCardParams } from '../noa-kanban.js'
 
 export const OPUS_LIMIT_COMMENT =
   'Opus-limit: automatikusan Sonnet-fallbackre valtva. Folytatodik vasarnap reset utan.'
@@ -38,9 +38,9 @@ export function markAgentCardsWaiting(
   agentName: string,
   comment: string,
   deps: KanbanDeps = {
-    listCards: listKanbanCards,
-    updateCard: (id, fields) => { updateKanbanCard(id, fields as Partial<KanbanCard>) },
-    addComment: addKanbanComment,
+    listCards,
+    updateCard: (id, fields) => { noaUpdateCard(id, fields as UpdateCardParams) },
+    addComment,
   },
 ): number {
   const affected = filterAgentInProgressCards(deps.listCards(), agentName)

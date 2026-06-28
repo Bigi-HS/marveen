@@ -10,7 +10,8 @@ import {
   DB_FILENAME,
   PROJECT_ROOT,
 } from './config.js'
-import { getHeartbeatKanbanSummary, getActiveScheduledTaskCount } from './db.js'
+import { getActiveScheduledTaskCount } from './db.js'
+import { getHeartbeatKanbanSummary } from './noa-kanban.js'
 import { getCalendarEvents, type CalendarEvent } from './google-api.js'
 import { runAgent } from './agent.js'
 import { readFleetOauthToken } from './fleet-oauth-token.js'

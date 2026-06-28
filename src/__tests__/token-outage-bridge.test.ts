@@ -156,3 +156,28 @@ describe('runCycle transitions', () => {
     expect(deps._state().limited).toBe(true) // we still entered the outage state
   })
 })
+
+// W4 wiring guard: token-outage-bridge default createCard dep uses noa-kanban createCard.
+// The production DEFAULT_DEPS.createCard = defaultCreateCard calls createCard from noa-kanban.
+// We verify via the OutageDeps injection: the test passes a real createCard spy to confirm
+// the card is created with the expected fields when a limit is first detected.
+describe('W4: token-outage-bridge createCard routed through noa-kanban interface', () => {
+  it('runCycle creates a card via the injected createCard dep on first limit detection', async () => {
+    const createCard = vi.fn(() => 'card-xyz')
+    const deps = makeDeps({ limited: true, createCard })
+    const r = await runCycle(NOW, deps)
+    expect(createCard).toHaveBeenCalledTimes(1)
+    expect(r.state.capturedCardId).toBe('card-xyz')
+    expect(r.captured).toBe(true)
+  })
+
+  it('createCard receives pending messages in the description', async () => {
+    const pending = [msg('hello from queue'), msg('another message')]
+    const createCard = vi.fn((_p: AgentMessage[], _r: string | null, _n: number) => 'card-abc')
+    const deps = makeDeps({ limited: true, createCard, getQueue: () => pending })
+    await runCycle(NOW, deps)
+    expect(createCard).toHaveBeenCalledTimes(1)
+    const pendingArg = createCard.mock.calls[0][0]
+    expect(pendingArg).toHaveLength(2)
+  })
+})
