@@ -67,6 +67,7 @@ import { tryHandleGithub } from './web/routes/github.js'
 import { tryHandleAck } from './web/routes/ack.js'
 import { tryHandleAgentCategories } from './web/routes/agent-categories.js'
 import { tryHandleAdmin } from './web/routes/admin.js'
+import { tryHandlePublicDigest } from './web/routes/public-digest.js'
 import { tryHandleStatic } from './web/routes/static.js'
 import type { RouteContext } from './web/routes/types.js'
 
@@ -297,6 +298,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleCodetree(routeCtx)) return
       if (await tryHandleGate(routeCtx)) return
       if (await tryHandleGithub(routeCtx)) return
+      if (await tryHandlePublicDigest(routeCtx)) return
       if (await tryHandleStatic(routeCtx, WEB_DIR)) return
 
       res.writeHead(404)
