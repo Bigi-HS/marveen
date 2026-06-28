@@ -26,6 +26,11 @@ import {
   deleteColumn,
   invalidateColumnsCache,
   configureKanban,
+  listProjects,
+  markCardDispatched,
+  runInTransaction,
+  listKanbanCardsSummary,
+  getHeartbeatKanbanSummary,
   InvalidStatusError,
   InvalidTransitionError,
   InvalidSortOrderError,
@@ -572,5 +577,165 @@ describe('configureKanban / dispatch wiring', () => {
 
     // Reset
     configureKanban({ isRunning: () => false, agentNames: [] })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W0b: listProjects
+// ---------------------------------------------------------------------------
+
+describe('listProjects', () => {
+  it('returns empty array when no cards have projects', () => {
+    expect(listProjects()).toEqual([])
+  })
+
+  it('returns distinct project names sorted alphabetically', () => {
+    createCard({ title: 'A', project: 'zebra', suppressIntake: true })
+    createCard({ title: 'B', project: 'alpha', suppressIntake: true })
+    createCard({ title: 'C', project: 'zebra', suppressIntake: true })
+    expect(listProjects()).toEqual(['alpha', 'zebra'])
+  })
+
+  it('excludes null and empty-string projects', () => {
+    createCard({ title: 'No project', suppressIntake: true })
+    createCard({ title: 'Has project', project: 'valid', suppressIntake: true })
+    expect(listProjects()).toEqual(['valid'])
+  })
+
+  it('excludes archived cards', () => {
+    const card = createCard({ title: 'Archived', project: 'secret', suppressIntake: true })
+    archiveCard(card.id)
+    expect(listProjects()).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W0b: markCardDispatched
+// ---------------------------------------------------------------------------
+
+describe('markCardDispatched', () => {
+  it('stamps dispatched_at on a card that has none', () => {
+    const card = createCard({ title: 'Test', suppressIntake: true })
+    expect(card.dispatched_at).toBeNull()
+    const ok = markCardDispatched(card.id)
+    expect(ok).toBe(true)
+    const refreshed = getCard(card.id)!
+    expect(refreshed.dispatched_at).toBeGreaterThan(0)
+  })
+
+  it('returns false for a non-existent card id', () => {
+    expect(markCardDispatched('no-such-id')).toBe(false)
+  })
+
+  it('does not overwrite dispatched_at on second call (COALESCE guard)', () => {
+    const card = createCard({ title: 'Test', suppressIntake: true })
+    markCardDispatched(card.id)
+    // Force a sentinel value to detect any overwrite
+    getNoaDb().prepare('UPDATE kanban_cards SET dispatched_at=? WHERE id=?').run(99999, card.id)
+    markCardDispatched(card.id)
+    expect(getCard(card.id)!.dispatched_at).toBe(99999)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W0b: runInTransaction
+// ---------------------------------------------------------------------------
+
+describe('runInTransaction', () => {
+  it('commits the result of the callback', () => {
+    const result = runInTransaction(() => {
+      createCard({ id: 'tx-test-1', title: 'TX Card', suppressIntake: true })
+      return 'done'
+    })
+    expect(result).toBe('done')
+    expect(getCard('tx-test-1')).toBeDefined()
+  })
+
+  it('rolls back on throw and card is not persisted', () => {
+    expect(() =>
+      runInTransaction(() => {
+        createCard({ id: 'tx-test-2', title: 'Will rollback', suppressIntake: true })
+        throw new Error('intentional rollback')
+      })
+    ).toThrow('intentional rollback')
+    expect(getCard('tx-test-2')).toBeUndefined()
+  })
+
+  it('supports multiple writes in one transaction', () => {
+    runInTransaction(() => {
+      createCard({ id: 'tx-multi-1', title: 'Multi 1', suppressIntake: true })
+      createCard({ id: 'tx-multi-2', title: 'Multi 2', suppressIntake: true })
+    })
+    expect(getCard('tx-multi-1')).toBeDefined()
+    expect(getCard('tx-multi-2')).toBeDefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W0b: listKanbanCardsSummary
+// ---------------------------------------------------------------------------
+
+describe('listKanbanCardsSummary', () => {
+  it('returns summary rows for active cards', () => {
+    createCard({ title: 'Alpha', priority: 'urgent', suppressIntake: true })
+    createCard({ title: 'Beta', status: 'in_progress', suppressIntake: true })
+    const rows = listKanbanCardsSummary()
+    expect(rows.length).toBe(2)
+    const keys = Object.keys(rows[0]).sort()
+    expect(keys).toEqual(['assignee', 'id', 'priority', 'status', 'title'])
+  })
+
+  it('excludes archived cards', () => {
+    const card = createCard({ title: 'Archived', suppressIntake: true })
+    archiveCard(card.id)
+    expect(listKanbanCardsSummary()).toHaveLength(0)
+  })
+
+  it('returns assignee when set', () => {
+    createCard({ title: 'Assigned', assignee: 'dave', suppressIntake: true })
+    const rows = listKanbanCardsSummary()
+    expect(rows[0].assignee).toBe('dave')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W0b: getHeartbeatKanbanSummary
+// ---------------------------------------------------------------------------
+
+describe('getHeartbeatKanbanSummary', () => {
+  it('returns empty arrays when board is empty', () => {
+    const summary = getHeartbeatKanbanSummary()
+    expect(summary.urgent).toHaveLength(0)
+    expect(summary.in_progress).toHaveLength(0)
+    expect(summary.waiting).toHaveLength(0)
+  })
+
+  it('puts urgent non-done cards in .urgent', () => {
+    createCard({ title: 'Urgent planned', priority: 'urgent', suppressIntake: true })
+    createCard({ title: 'Urgent done', priority: 'urgent', status: 'done', suppressIntake: true })
+    const summary = getHeartbeatKanbanSummary()
+    expect(summary.urgent).toHaveLength(1)
+    expect(summary.urgent[0].title).toBe('Urgent planned')
+  })
+
+  it('puts in_progress cards in .in_progress', () => {
+    createCard({ title: 'WIP', status: 'in_progress', suppressIntake: true })
+    const summary = getHeartbeatKanbanSummary()
+    expect(summary.in_progress).toHaveLength(1)
+    expect(summary.in_progress[0].title).toBe('WIP')
+  })
+
+  it('puts waiting cards in .waiting', () => {
+    createCard({ title: 'Blocked', status: 'waiting', suppressIntake: true })
+    const summary = getHeartbeatKanbanSummary()
+    expect(summary.waiting).toHaveLength(1)
+    expect(summary.waiting[0].title).toBe('Blocked')
+  })
+
+  it('excludes archived cards from all buckets', () => {
+    const card = createCard({ title: 'Archived WIP', status: 'in_progress', suppressIntake: true })
+    archiveCard(card.id)
+    const summary = getHeartbeatKanbanSummary()
+    expect(summary.in_progress).toHaveLength(0)
   })
 })
