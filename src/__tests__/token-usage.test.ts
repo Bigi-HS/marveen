@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest'
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { getDb, initDatabase } from '../db.js'
+import { getNoaDb, initNoaDb } from '../noa-memory.js'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const SCHEMA_SQL = readFileSync(join(__dirname, '..', '..', 'scripts', 'schema-noa.sql'), 'utf8')
 
 const TEST_DIR = '/tmp/test-token-usage'
 const PROJECTS_DIR = join(TEST_DIR, '.claude', 'projects')
@@ -297,15 +302,22 @@ describe('deduplication', () => {
 })
 
 describe('correlateWithKanban', () => {
+  beforeAll(() => {
+    // correlateWithKanban reads kanban_cards from getNoaDb(); use in-memory noa.db for test isolation
+    initNoaDb(':memory:')
+    getNoaDb().exec(SCHEMA_SQL)
+  })
+
   it('links token_usage rows to kanban cards by agent and time range', async () => {
     const db = getDb()
+    const noaDb = getNoaDb()  // kanban_cards now lives in noa.db
     const baseTs = 1716200000
 
-    // Insert a kanban card (created_at is NOT NULL)
-    db.prepare(`
-      INSERT OR IGNORE INTO kanban_cards (id, title, status, priority, assignee, project, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run('test-kanban-1', 'Test Task', 'in_progress', 'normal', 'test-main', 'test-project', baseTs, baseTs)
+    // Insert a kanban card into noa.db (correlateWithKanban reads from there)
+    noaDb.prepare(`
+      INSERT OR IGNORE INTO kanban_cards (id, title, status, priority, assignee, project, created_at, updated_at, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('test-kanban-1', 'Test Task', 'in_progress', 'normal', 'test-main', 'test-project', baseTs, baseTs, 0)
 
     const { correlateWithKanban } = await import('../web/token-usage.js')
     correlateWithKanban()
@@ -318,7 +330,7 @@ describe('correlateWithKanban', () => {
     expect(rows[0].task_title).toBe('Test Task')
 
     // Cleanup
-    db.prepare("DELETE FROM kanban_cards WHERE id = 'test-kanban-1'").run()
+    noaDb.prepare("DELETE FROM kanban_cards WHERE id = 'test-kanban-1'").run()
   })
 })
 

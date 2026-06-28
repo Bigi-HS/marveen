@@ -1,29 +1,46 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest'
+import { readFileSync } from 'fs'
+import { join, dirname } from 'path'
+import { fileURLToPath } from 'url'
 import {
   initDatabase,
-  createKanbanCard,
-  updateKanbanCard,
-  moveKanbanCard,
-  archiveKanbanCard,
-  deleteKanbanCard,
-  addKanbanComment,
   createAgentMessage,
   markMessageDelivered,
   markMessageDone,
   markMessageFailed,
-  runInTransaction,
 } from '../db.js'
+import { initNoaDb, getNoaDb } from '../noa-memory.js'
+import {
+  createCard,
+  updateCard,
+  moveCard,
+  archiveCard,
+  deleteCard,
+  addComment,
+  runInTransaction,
+  invalidateColumnsCache,
+  configureKanban,
+} from '../noa-kanban.js'
 import { subscribeDashboardEvents, type DashboardEvent } from '../event-bus.js'
 
-// Card 7c7ea226 fork E: emits live at the db.ts chokepoint, so EVERY write path
-// (REST API, kanban dispatch, scripts) broadcasts -- not just the route layer.
-// These tests subscribe to the real singleton bus and assert each write fn
-// emits the right typed event, and that a throwing subscriber never breaks the
-// underlying write.
+// Card 7c7ea226 fork E: emits live at the db chokepoints (db.ts for messages,
+// noa-kanban.ts for kanban), so EVERY write path broadcasts -- not just the
+// route layer. These tests subscribe to the real singleton bus and assert each
+// write fn emits the right typed event, and that a throwing subscriber never
+// breaks the underlying write.
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const SCHEMA_SQL = readFileSync(join(__dirname, '..', '..', 'scripts', 'schema-noa.sql'), 'utf8')
 
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
+  // db.ts in-memory for agent_messages
   initDatabase(':memory:')
+  // noa-kanban in-memory for kanban ops
+  initNoaDb(':memory:')
+  getNoaDb().exec(SCHEMA_SQL)
+  // suppress kanban dispatch (no agents running in test) to avoid extra message/created events
+  configureKanban({ isRunning: () => false })
 })
 
 let seen: DashboardEvent[]
@@ -31,6 +48,8 @@ let off: () => void
 beforeEach(() => {
   seen = []
   off = subscribeDashboardEvents((e) => seen.push(e))
+  // keep noa-kanban column cache fresh
+  invalidateColumnsCache()
 })
 afterEach(() => off())
 
@@ -38,54 +57,54 @@ let n = 0
 const freshId = (): string => `c-${++n}`
 
 describe('kanban emits (card 7c7ea226)', () => {
-  it('createKanbanCard emits kanban/created with the card id', () => {
+  it('createCard emits kanban/created with the card id', () => {
     const id = freshId()
-    createKanbanCard({ id, title: 'T' })
+    createCard({ id, title: 'T', suppressIntake: true })
     expect(seen).toEqual([{ type: 'kanban', id, action: 'created' }])
   })
 
-  it('updateKanbanCard emits kanban/updated on success', () => {
+  it('updateCard emits kanban/updated on success', () => {
     const id = freshId()
-    createKanbanCard({ id, title: 'T' })
+    createCard({ id, title: 'T', suppressIntake: true })
     seen = []
-    updateKanbanCard(id, { title: 'T2' })
+    updateCard(id, { title: 'T2', suppressIntake: true })
     expect(seen).toEqual([{ type: 'kanban', id, action: 'updated' }])
   })
 
-  it('updateKanbanCard on a missing card emits nothing', () => {
-    updateKanbanCard('nope', { title: 'x' })
+  it('updateCard on a missing card emits nothing', () => {
+    updateCard('nope', { title: 'x' })
     expect(seen).toEqual([])
   })
 
-  it('moveKanbanCard emits kanban/moved on success', () => {
+  it('moveCard emits kanban/moved on success', () => {
     const id = freshId()
-    createKanbanCard({ id, title: 'T' })
+    createCard({ id, title: 'T', suppressIntake: true })
     seen = []
-    moveKanbanCard(id, 'in_progress', 0)
+    moveCard(id, 'in_progress', 1.0)
     expect(seen).toEqual([{ type: 'kanban', id, action: 'moved' }])
   })
 
-  it('archiveKanbanCard emits kanban/archived on success', () => {
+  it('archiveCard emits kanban/archived on success', () => {
     const id = freshId()
-    createKanbanCard({ id, title: 'T' })
+    createCard({ id, title: 'T', suppressIntake: true })
     seen = []
-    archiveKanbanCard(id)
+    archiveCard(id)
     expect(seen).toEqual([{ type: 'kanban', id, action: 'archived' }])
   })
 
-  it('addKanbanComment emits kanban/comment with the card id', () => {
+  it('addComment emits kanban/comment with the card id', () => {
     const id = freshId()
-    createKanbanCard({ id, title: 'T' })
+    createCard({ id, title: 'T', suppressIntake: true })
     seen = []
-    addKanbanComment(id, 'dave', 'hi')
+    addComment(id, 'dave', 'hi')
     expect(seen).toEqual([{ type: 'kanban', id, action: 'comment' }])
   })
 
-  it('deleteKanbanCard emits kanban/deleted on success', () => {
+  it('deleteCard emits kanban/deleted on success', () => {
     const id = freshId()
-    createKanbanCard({ id, title: 'T' })
+    createCard({ id, title: 'T', suppressIntake: true })
     seen = []
-    deleteKanbanCard(id)
+    deleteCard(id)
     expect(seen).toEqual([{ type: 'kanban', id, action: 'deleted' }])
   })
 })
@@ -115,8 +134,8 @@ describe('transaction-aware emit (card 7c7ea226, NoA focus #2)', () => {
     const a = freshId()
     const b = freshId()
     runInTransaction(() => {
-      createKanbanCard({ id: a, title: 'A' })
-      createKanbanCard({ id: b, title: 'B' })
+      createCard({ id: a, title: 'A', suppressIntake: true })
+      createCard({ id: b, title: 'B', suppressIntake: true })
       // events are buffered, not yet emitted, while the txn is open
       expect(seen).toEqual([])
     })
@@ -129,13 +148,13 @@ describe('transaction-aware emit (card 7c7ea226, NoA focus #2)', () => {
   it('discards buffered events when the transaction rolls back', () => {
     const a = freshId()
     expect(() => runInTransaction(() => {
-      createKanbanCard({ id: a, title: 'A' })
+      createCard({ id: a, title: 'A', suppressIntake: true })
       throw new Error('rollback')
     })).toThrow('rollback')
     // no event for the rolled-back write...
     expect(seen).toEqual([])
     // ...and the row really was rolled back
-    expect(updateKanbanCard(a, { title: 'x' })).toBe(false)
+    expect(updateCard(a, { title: 'x' })).toBe(false)
   })
 })
 
@@ -143,9 +162,9 @@ describe('emit never breaks the write (card 7c7ea226)', () => {
   it('a throwing subscriber does not prevent the kanban write', () => {
     const offBad = subscribeDashboardEvents(() => { throw new Error('boom') })
     const id = freshId()
-    expect(() => createKanbanCard({ id, title: 'T' })).not.toThrow()
+    expect(() => createCard({ id, title: 'T', suppressIntake: true })).not.toThrow()
     offBad()
     // the write landed despite the faulty subscriber
-    expect(updateKanbanCard(id, { title: 'T2' })).toBe(true)
+    expect(updateCard(id, { title: 'T2', suppressIntake: true })).toBe(true)
   })
 })

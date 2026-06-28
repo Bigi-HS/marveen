@@ -546,6 +546,7 @@ export function addComment(cardId: string, author: string, content: string): Kan
   const info = getNoaDb().prepare(
     'INSERT INTO kanban_comments (card_id, author, content, created_at) VALUES (?, ?, ?, ?)'
   ).run(cardId, author, content, now)
+  emitOrDefer({ type: 'kanban', id: cardId, action: 'comment' })
   return { id: Number(info.lastInsertRowid), card_id: cardId, author, content, created_at: now }
 }
 
