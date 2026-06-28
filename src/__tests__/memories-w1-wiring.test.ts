@@ -6,7 +6,7 @@
  * The PATCH content round-trip is the explicit regression guard mandated
  * by spec (commit 61063e6 must stay working after the import swap).
  */
-import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,6 +26,7 @@ const {
   searchAgentMemories,
   applyScopeFilter,
   getMemoryStats,
+  backfillEmbeddings,
 } = await import('../noa-memory.js')
 import type { NoaMemory } from '../noa-memory.js'
 
@@ -249,5 +250,38 @@ describe('updateMemory (PUT path)', () => {
     expect(row.content).toBe('replaced content')
     expect(row.category).toBe('hot')
     expect(row.accessed_at).toBeGreaterThanOrEqual(before)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// b32abe01: /api/memories/reembed -- thin wrapper contract
+// ---------------------------------------------------------------------------
+
+describe('b32abe01: backfillEmbeddings called by reembed route (contract)', () => {
+  beforeEach(wipe)
+
+  it('categories filter: only warm processed', async () => {
+    // Seed raw rows (no embedding) across tiers
+    const db = getNoaDb()
+    const now = Math.floor(Date.now() / 1000)
+    db.prepare(
+      'INSERT INTO memories (agent_id, category, content, keywords, topic_key, access_scope, embedding, created_at, accessed_at) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)'
+    ).run('dave', 'warm', 'warm target', now, now)
+    db.prepare(
+      'INSERT INTO memories (agent_id, category, content, keywords, topic_key, access_scope, embedding, created_at, accessed_at) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)'
+    ).run('dave', 'cold', 'cold bystander', now, now)
+
+    const embed = vi.fn().mockResolvedValue([0.1, 0.2])
+    const r = await backfillEmbeddings({ categories: ['warm'], embed })
+    expect(r.total).toBe(1)
+    expect(r.succeeded).toBe(1)
+    // cold row still NULL
+    const cold = db.prepare("SELECT embedding FROM memories WHERE content = 'cold bystander'").get() as { embedding: Buffer | null }
+    expect(cold.embedding).toBeNull()
+  })
+
+  it('BackfillResult shape: ok=true when not aborted', async () => {
+    const r = await backfillEmbeddings({ embed: vi.fn().mockResolvedValue([0.1]) })
+    expect(r).toMatchObject({ total: expect.any(Number), succeeded: expect.any(Number), failed: expect.any(Number), aborted: false })
   })
 })

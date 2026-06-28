@@ -593,16 +593,31 @@ export interface BackfillResult {
   aborted: boolean
 }
 
+// Default categories covered by backfill: hot, warm, shared.
+// Cold is archival and excluded unless explicitly requested (pass categories: []).
+const BACKFILL_DEFAULT_CATEGORIES = ['hot', 'warm', 'shared']
+
 export async function backfillEmbeddings(
   opts: {
     embed?: (text: string) => Promise<number[] | null>
     onProgress?: (done: number, total: number, succeeded: number) => void
+    /** Categories to backfill. Undefined = default (hot/warm/shared). Empty array = all. */
+    categories?: string[]
   } = {},
 ): Promise<BackfillResult> {
   const db = getNoaDb()
-  const rows = db.prepare(
-    'SELECT id, content, keywords FROM memories WHERE embedding IS NULL'
-  ).all() as { id: number; content: string; keywords: string | null }[]
+  const cats = opts.categories === undefined ? BACKFILL_DEFAULT_CATEGORIES : opts.categories
+  let rows: { id: number; content: string; keywords: string | null }[]
+  if (cats.length === 0) {
+    rows = db.prepare(
+      'SELECT id, content, keywords FROM memories WHERE embedding IS NULL'
+    ).all() as typeof rows
+  } else {
+    const placeholders = cats.map(() => '?').join(', ')
+    rows = db.prepare(
+      `SELECT id, content, keywords FROM memories WHERE embedding IS NULL AND category IN (${placeholders})`
+    ).all(...cats) as typeof rows
+  }
   const total = rows.length
   const update = db.prepare('UPDATE memories SET embedding = ? WHERE id = ?')
 

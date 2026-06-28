@@ -755,6 +755,59 @@ describe('W0a: recallByDateRange', () => {
   })
 })
 
+describe('b32abe01: backfillEmbeddings categories filter', () => {
+  beforeEach(wipeMemories)
+
+  it('default (no categories) skips cold memories', async () => {
+    seedRaw({ agent_id: 'dave', content: 'hot mem', embedding: null, category: 'hot' })
+    seedRaw({ agent_id: 'dave', content: 'cold mem', embedding: null, category: 'cold' })
+    const embed = vi.fn().mockResolvedValue([0.1, 0.2, 0.3])
+    const result = await backfillEmbeddings({ embed })
+    // only the hot memory was processed (cold excluded by default)
+    expect(result.total).toBe(1)
+    expect(result.succeeded).toBe(1)
+    const rows = getNoaDb().prepare('SELECT content, embedding FROM memories').all() as { content: string; embedding: Buffer | null }[]
+    const hot = rows.find(r => r.content === 'hot mem')!
+    const cold = rows.find(r => r.content === 'cold mem')!
+    expect(hot.embedding).not.toBeNull()
+    expect(cold.embedding).toBeNull()
+  })
+
+  it('categories: ["warm"] only processes warm, skips hot/cold/shared', async () => {
+    seedRaw({ agent_id: 'dave', content: 'hot mem', embedding: null, category: 'hot' })
+    seedRaw({ agent_id: 'dave', content: 'warm mem', embedding: null, category: 'warm' })
+    seedRaw({ agent_id: 'dave', content: 'cold mem', embedding: null, category: 'cold' })
+    const embed = vi.fn().mockResolvedValue([0.1, 0.2, 0.3])
+    const result = await backfillEmbeddings({ categories: ['warm'], embed })
+    expect(result.total).toBe(1)
+    expect(result.succeeded).toBe(1)
+    const rows = getNoaDb().prepare('SELECT content, embedding FROM memories').all() as { content: string; embedding: Buffer | null }[]
+    expect(rows.find(r => r.content === 'warm mem')!.embedding).not.toBeNull()
+    expect(rows.find(r => r.content === 'hot mem')!.embedding).toBeNull()
+    expect(rows.find(r => r.content === 'cold mem')!.embedding).toBeNull()
+  })
+
+  it('categories: [] processes all categories including cold', async () => {
+    seedRaw({ agent_id: 'dave', content: 'hot mem', embedding: null, category: 'hot' })
+    seedRaw({ agent_id: 'dave', content: 'cold mem', embedding: null, category: 'cold' })
+    const embed = vi.fn().mockResolvedValue([0.1, 0.2, 0.3])
+    const result = await backfillEmbeddings({ categories: [], embed })
+    expect(result.total).toBe(2)
+    expect(result.succeeded).toBe(2)
+  })
+
+  it('hot/warm/shared all processed by default', async () => {
+    seedRaw({ agent_id: 'dave', content: 'hot', embedding: null, category: 'hot' })
+    seedRaw({ agent_id: 'dave', content: 'warm', embedding: null, category: 'warm' })
+    seedRaw({ agent_id: 'dave', content: 'shared', embedding: null, category: 'shared' })
+    seedRaw({ agent_id: 'dave', content: 'cold', embedding: null, category: 'cold' })
+    const embed = vi.fn().mockResolvedValue([0.1, 0.2])
+    const result = await backfillEmbeddings({ embed })
+    expect(result.total).toBe(3)
+    expect(result.succeeded).toBe(3)
+  })
+})
+
 describe('W0a: recallSearch', () => {
   beforeEach(() => { wipeMemories(); wipeLogs() })
 
