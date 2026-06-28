@@ -13,11 +13,12 @@ import {
 import { join } from 'node:path'
 import { execFileSync, execSync } from 'node:child_process'
 import type { Server as HttpServer } from 'node:http'
-import { STORE_DIR, PID_FILENAME, WEB_PORT, ALLOWED_CHAT_ID, MAIN_AGENT_ID, RESPAWN_ENABLED } from './config.js'
+import { STORE_DIR, PID_FILENAME, WEB_PORT, MAIN_AGENT_ID, RESPAWN_ENABLED } from './config.js'
 import { initDatabase, deleteOldMessages } from './db.js'
 import { initCodetreeDatabase } from './web/codetree-db.js'
 import { startMessageRetentionSweep } from './web/message-retention.js'
-import { runDecaySweep, runDailyDigest } from './memory.js'
+import { runTierDemotionSweep } from './noa-memory.js'
+import { runDailyDigest } from './memory.js'
 import { initHeartbeat, stopHeartbeat } from './heartbeat.js'
 import { ensureHeartbeatAgent, HEARTBEAT_AGENT_NAME } from './web/heartbeat-agent-scaffold.js'
 import { startAgentProcess } from './web/agent-process.js'
@@ -414,10 +415,11 @@ async function main(): Promise<void> {
   initCodetreeDatabase()
   logger.info('Adatbazis inicializalva')
 
-  // Memory decay (24h cycle)
-  runDecaySweep()
-  decayInterval = setInterval(runDecaySweep, 24 * 60 * 60 * 1000)
-  logger.info('Memoria leepulesi ciklus beallitva (24 oras)')
+  // Memory tier demotion (24h cycle): hot -> warm -> cold on the slim noa.db
+  // schema (replaces the legacy salience-based decayMemories sweep, retired in W5).
+  runTierDemotionSweep()
+  decayInterval = setInterval(runTierDemotionSweep, 24 * 60 * 60 * 1000)
+  logger.info('Memoria tier-demotion ciklus beallitva (24 oras)')
 
   // agent_messages retention sweep (card f1ea52c0): prune rows past the
   // retention window so the table cannot grow without bound. Runs once now,
@@ -439,11 +441,11 @@ async function main(): Promise<void> {
     if (target <= now) target.setDate(target.getDate() + 1)
     const msUntil = target.getTime() - now.getTime()
     digestTimer = setTimeout(() => {
-      runDailyDigest(ALLOWED_CHAT_ID).catch((err) =>
+      runDailyDigest().catch((err) =>
         logger.error({ err }, 'Napi naplo hiba')
       )
       digestInterval = setInterval(() => {
-        runDailyDigest(ALLOWED_CHAT_ID).catch((err) =>
+        runDailyDigest().catch((err) =>
           logger.error({ err }, 'Napi naplo hiba')
         )
       }, 24 * 60 * 60 * 1000)
