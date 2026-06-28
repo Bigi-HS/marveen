@@ -1,12 +1,14 @@
 #!/usr/bin/env tsx
-// pipe-RCA #2 (card 81cf42b2): apply the 409-give-up -> capped-exponential-backoff
-// fix to the locally-installed Telegram channel plugin.
+// Applies two idempotent transforms to the locally-installed Telegram channel plugin:
+//   1. pipe-RCA #2 (card 81cf42b2): 409 permanent give-up -> capped exponential backoff.
+//   2. voice-in auto-transcription (card 45478ca7): message:voice -> whisper "[Hang átirat]:" inject.
 //
-// The fix lives in a third-party plugin file outside this repo
-// (~/.claude/plugins/.../telegram/.../server.ts), so we cannot ship it as a
-// normal source edit. This idempotent patcher carries the change in-repo and
-// applies it to every cached + marketplace copy of the plugin. The transform
-// itself is the unit-tested pure function in src/telegram-plugin-patch.ts.
+// The fixes live in third-party plugin files outside this repo
+// (~/.claude/plugins/.../telegram/.../server.ts), so we cannot ship them as
+// normal source edits. This idempotent patcher carries the changes in-repo and
+// applies them to every cached + marketplace copy of the plugin. The transforms
+// themselves are unit-tested pure functions in src/telegram-plugin-patch.ts and
+// src/telegram-voice-patch.ts.
 //
 //   tsx scripts/patch-telegram-plugin.ts            apply (idempotent)
 //   tsx scripts/patch-telegram-plugin.ts --check     report only; exit 1 if any
@@ -23,6 +25,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { createRequire } from 'node:module'
 import { PATCH_MARKER, patchPollingGiveUp } from '../src/telegram-plugin-patch.js'
+import { VOICE_PATCH_MARKER, patchVoiceHandler } from '../src/telegram-voice-patch.js'
 
 const require = createRequire(import.meta.url)
 
@@ -76,10 +79,19 @@ function syntaxError(src: string, file: string): string | null {
 
 function applyOne(file: string): 'patched' | 'already' | 'not-found' | 'gate-failed' {
   const src = readFileSync(file, 'utf-8')
-  const r = patchPollingGiveUp(src)
-  if (r.alreadyPatched) return 'already'
-  if (!r.found || !r.changed) return 'not-found'
-  const err = syntaxError(r.patched, file)
+
+  // Chain both transforms. Each is idempotent; apply them sequentially so a
+  // single backup + syntax-gate pass covers both changes atomically.
+  const r1 = patchPollingGiveUp(src)
+  const r2 = patchVoiceHandler(r1.patched)
+
+  const anyFound = r1.found || r2.found
+  const anyChanged = r1.changed || r2.changed
+
+  if (!anyFound) return 'not-found'
+  if (!anyChanged) return 'already'
+
+  const err = syntaxError(r2.patched, file)
   if (err) {
     process.stderr.write(`  ! syntax gate FAILED, not writing: ${err}\n`)
     return 'gate-failed'
@@ -89,7 +101,7 @@ function applyOne(file: string): 'patched' | 'already' | 'not-found' | 'gate-fai
   // Atomic write: stage to a temp file then rename, so a crash mid-write can
   // never leave a half-written (corrupt) plugin file behind.
   const tmp = file + '.patch-tmp'
-  writeFileSync(tmp, r.patched)
+  writeFileSync(tmp, r2.patched)
   renameSync(tmp, file)
   return 'patched'
 }
@@ -113,9 +125,15 @@ function main(): void {
     let unpatched = 0
     for (const f of files) {
       const src = readFileSync(f, 'utf-8')
-      const patched = src.includes(PATCH_MARKER)
-      const patchable = !patched && patchPollingGiveUp(src).found
-      process.stdout.write(`  ${patched ? 'PATCHED ' : patchable ? 'UNPATCHED' : 'n/a      '}  ${f}\n`)
+      const p1 = src.includes(PATCH_MARKER)
+      const p2 = src.includes(VOICE_PATCH_MARKER)
+      const patched = p1 && p2
+      const patchable1 = !p1 && patchPollingGiveUp(src).found
+      const patchable2 = !p2 && patchVoiceHandler(src).found
+      const patchable = patchable1 || patchable2
+      const label = patched ? 'PATCHED  ' : patchable ? 'UNPATCHED' : 'n/a      '
+      const detail = patched ? '' : ` [${[!p1 && 'pipe-rca2', !p2 && 'voice'].filter(Boolean).join(',')}]`
+      process.stdout.write(`  ${label}  ${f}${detail}\n`)
       if (patchable) unpatched++
     }
     if (unpatched > 0) {
