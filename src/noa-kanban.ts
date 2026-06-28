@@ -644,7 +644,7 @@ export function listProjects(): string[] {
 
 export function markCardDispatched(id: string): boolean {
   const now = Math.floor(Date.now() / 1000)
-  return getNoaDb().prepare('UPDATE kanban_cards SET dispatched_at=? WHERE id=?').run(now, id).changes > 0
+  return getNoaDb().prepare('UPDATE kanban_cards SET dispatched_at=COALESCE(dispatched_at, ?) WHERE id=?').run(now, id).changes > 0
 }
 
 export interface HeartbeatKanbanSummary {

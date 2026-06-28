@@ -627,13 +627,13 @@ describe('markCardDispatched', () => {
     expect(markCardDispatched('no-such-id')).toBe(false)
   })
 
-  it('is idempotent (second call still returns true, timestamp unchanged)', () => {
+  it('does not overwrite dispatched_at on second call (COALESCE guard)', () => {
     const card = createCard({ title: 'Test', suppressIntake: true })
     markCardDispatched(card.id)
-    const ts1 = getCard(card.id)!.dispatched_at
+    // Force a sentinel value to detect any overwrite
+    getNoaDb().prepare('UPDATE kanban_cards SET dispatched_at=? WHERE id=?').run(99999, card.id)
     markCardDispatched(card.id)
-    const ts2 = getCard(card.id)!.dispatched_at
-    expect(ts1).toBe(ts2)
+    expect(getCard(card.id)!.dispatched_at).toBe(99999)
   })
 })
 
