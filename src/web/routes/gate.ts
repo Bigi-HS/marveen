@@ -14,6 +14,7 @@
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import { getDb } from '../../db.js'
+import { emitDashboardEvent } from '../../event-bus.js'
 import type { RouteContext } from './types.js'
 import {
   isValidSha,
@@ -133,6 +134,11 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
       { pr_number, head_sha, reviewer, verdict, recorded_by: recordedBy, note },
       nowEpoch(),
     )
+    // F1 realtime (card 513b8fd6): broadcast a thin-notify gate event so the
+    // dashboard refreshes its gate panel live. ID-ONLY -- pr_number + verdict
+    // action, never the note/sha/reviewer content (Trap-2: the SSE frame is a
+    // refetch trigger, not a content channel). Mirrors the kanban/board emits.
+    emitDashboardEvent({ type: 'gate', id: String(pr_number), action: verdict })
     json(res, row, 201)
     return true
   }

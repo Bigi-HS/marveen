@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest'
 import { Readable } from 'node:stream'
 import { rmSync } from 'node:fs'
 import { initDatabase } from '../db.js'
+import { subscribeDashboardEvents, type DashboardEvent } from '../event-bus.js'
 import { tryHandleGate, __setGatePrFetcher } from '../web/routes/gate.js'
 import { insertPrAuthor } from '../web/gate-db.js'
 import { getDb } from '../db.js'
@@ -256,5 +257,48 @@ describe('POST /api/gate/approve -- MG-SEC5: self-approval block', () => {
     // PR 9999 has no author record -> no block
     const r = await call('POST', '/api/gate/approve', { pr_number: 9999, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved' }, daveId)
     expect(r.status).toBe(201)
+  })
+})
+
+// F1 realtime (card 513b8fd6): a recorded approval broadcasts a thin-notify
+// 'gate' event so the dashboard refreshes the gate panel live. ID-ONLY -- the
+// frame carries pr_number + verdict action, NEVER the note/sha/reviewer content
+// (Trap-2 egress posture: the SSE is a refetch trigger, not a content channel).
+describe('POST /api/gate/approve emits a thin-notify gate event (F1, card 513b8fd6)', () => {
+  let seen: DashboardEvent[]
+  let off: () => void
+  beforeEach(() => {
+    seen = []
+    off = subscribeDashboardEvents((e) => seen.push(e))
+  })
+  afterEach(() => off())
+
+  it('a successful approval emits exactly one gate event keyed by pr_number', async () => {
+    const r = await call('POST', '/api/gate/approve', {
+      pr_number: 207, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved', note: 'looks good',
+    })
+    expect(r.status).toBe(201)
+    const gateEvents = seen.filter((e) => e.type === 'gate')
+    expect(gateEvents).toHaveLength(1)
+    expect(gateEvents[0]).toEqual({ type: 'gate', id: '207', action: 'approved' })
+  })
+
+  it('the frame carries NO content (no note/sha/reviewer) -- egress-safe', async () => {
+    await call('POST', '/api/gate/approve', {
+      pr_number: 208, head_sha: SHA_B, reviewer: 'chad', verdict: 'blocked', note: 'secret detail',
+    })
+    const gate = seen.find((e) => e.type === 'gate')!
+    const serialized = JSON.stringify(gate)
+    expect(serialized).not.toContain('secret detail')
+    expect(serialized).not.toContain(SHA_B)
+    expect(serialized).not.toContain('chad')
+    // Only the three thin-notify keys exist.
+    expect(Object.keys(gate).sort()).toEqual(['action', 'id', 'type'])
+  })
+
+  it('a rejected (400) approval emits NO gate event', async () => {
+    const r = await call('POST', '/api/gate/approve', { pr_number: 0, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved' })
+    expect(r.status).toBe(400)
+    expect(seen.filter((e) => e.type === 'gate')).toHaveLength(0)
   })
 })

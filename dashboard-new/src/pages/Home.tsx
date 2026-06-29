@@ -1,4 +1,5 @@
 import { usePolling } from '@/hooks/usePolling'
+import { useEventStream } from '@/hooks/useEventStream'
 import { mergeAgentStatus } from '@/lib/agent-grid'
 import { isAuthError } from '@/lib/auth-error'
 import { AgentGrid } from '@/components/AgentGrid'
@@ -13,10 +14,15 @@ function SectionTitle({ children }: { children: string }) {
 }
 
 export function Home() {
-  const agents = usePolling<AgentSummary[]>('/api/agents')
-  const health = usePolling<AgentHealth[]>('/api/agents/health')
-  const kanban = usePolling<KanbanCard[]>('/api/kanban')
-  const messages = usePolling<AgentMessage[]>('/api/messages?limit=5')
+  // F1 realtime (card 513b8fd6): SSE revisions drive immediate refetch; each
+  // poll keeps a slow safety backstop. Agent status has no push event yet (it is
+  // computed live per request) so it stays on a short poll; kanban/message
+  // refresh on their SSE revision. The activity feed keeps its own short poll.
+  const { revisions } = useEventStream()
+  const agents = usePolling<AgentSummary[]>('/api/agents', { intervalMs: 5000 })
+  const health = usePolling<AgentHealth[]>('/api/agents/health', { intervalMs: 5000 })
+  const kanban = usePolling<KanbanCard[]>('/api/kanban', { refreshSignal: revisions.kanban + revisions.board })
+  const messages = usePolling<AgentMessage[]>('/api/messages?limit=5', { refreshSignal: revisions.message })
 
   if ([agents, health, kanban, messages].some((s) => isAuthError(s.error))) {
     return <AuthRequired />
