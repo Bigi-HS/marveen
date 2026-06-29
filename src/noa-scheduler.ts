@@ -104,8 +104,13 @@ export function applyBBlockColumns(db = getNoaDb()): void {
 // Cron helpers (AC-3): TZ option on EVERY parse call
 // ---------------------------------------------------------------------------
 
-export function computeNextRun(schedule: string): number {
-  const expr = CronExpressionParser.parse(schedule, { tz: TZ })
+// Resolve the next cron occurrence strictly after `fromMs`. The basis is
+// parametrized (default: wall clock) so the sweep can roll a fired task forward
+// from its scheduled slot rather than from "now": when a task fires inside the
+// look-ahead window (next_run is still seconds in the future), a Date.now() basis
+// re-resolves to the SAME slot and the task self-refires on the next tick (295c94f2).
+export function computeNextRun(schedule: string, fromMs: number = Date.now()): number {
+  const expr = CronExpressionParser.parse(schedule, { tz: TZ, currentDate: new Date(fromMs) })
   return Math.floor(expr.next().getTime() / 1000)
 }
 
@@ -577,9 +582,12 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb()): void {
 
     const result = attemptFireTask(taskDef, row.agent_name, db)
     if (result === 'fired') {
+      // Roll forward from the fired slot, not from "now" -- a look-ahead fire is
+      // still before its cron minute and a now-basis would re-pick the same slot (295c94f2).
+      const basisMs = Math.max(nowMs, taskDef.next_run * 1000)
       db.prepare(
         `UPDATE scheduled_tasks SET last_run=?, last_result='fired', next_run=? WHERE id=?`
-      ).run(nowS, computeNextRun(taskDef.schedule), taskDef.id)
+      ).run(nowS, computeNextRun(taskDef.schedule, basisMs), taskDef.id)
       deletePendingRetry(row.task_name, row.agent_name, db)
     } else if (result === 'missing') {
       deletePendingRetry(row.task_name, row.agent_name, db)
@@ -605,9 +613,11 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb()): void {
     const result = attemptFireTask(task, agentName, db)
 
     if (result === 'fired') {
+      // See Step 1: base the roll-forward on the fired slot to avoid look-ahead self-refire (295c94f2).
+      const basisMs = Math.max(nowMs, task.next_run * 1000)
       db.prepare(
         `UPDATE scheduled_tasks SET last_run=?, last_result='fired', next_run=? WHERE id=?`
-      ).run(nowS, computeNextRun(task.schedule), task.id)
+      ).run(nowS, computeNextRun(task.schedule, basisMs), task.id)
     } else if (result === 'busy') {
       insertPendingRetryIfNew(task.id, agentName, nowS, 'busy', db)
     } else if (result === 'missing') {
