@@ -20,6 +20,7 @@ import { compactDeliverySentinelsOnBoot, startDeliverySentinelMaintenance } from
 import { startUpdateChecker } from './web/update-checker.js'
 import { startMcpListChecker } from './web/mcp-list.js'
 import { startScheduleRunner } from './web/schedule-runner.js'
+import { applyKanbanMigrations } from './noa-kanban.js'
 import { startChannelPluginMonitor } from './web/channel-monitor.js'
 import { startInboundProber } from './web/inbound-probe.js'
 import { startChannelHealthMonitor } from './web/channel-health-monitor.js'
@@ -396,6 +397,11 @@ export function startWebServer(port = 3420): http.Server {
   // file is absent otherwise); the out-of-band escalation is the gated part.
   const ackObserverInterval = startAckClearObserver()
   logger.info('Delivery ACK clear-observer started (5s poll)')
+
+  // Kanban schema migration (card 65afc67e): additive priority_score column +
+  // someday->icebox parked-lane reconcile + bucket-centre backfill. Idempotent.
+  applyKanbanMigrations()
+  logger.info('Kanban migrations applied (priority_score + icebox lane)')
 
   const scheduleInterval = startScheduleRunner()
   logger.info('Schedule runner started (60s poll)')

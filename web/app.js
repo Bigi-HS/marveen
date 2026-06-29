@@ -425,7 +425,7 @@ function setupAssigneeFilter() {
 }
 
 function renderKanban() {
-  const grouped = { planned: [], in_progress: [], waiting: [], done: [], someday: [] }
+  const grouped = { planned: [], in_progress: [], waiting: [], done: [], icebox: [] }
   const assigneeFilter = kanbanAssigneeFilter.toLowerCase()
   for (const card of kanbanCards) {
     if (kanbanProjectFilter && (card.project || '') !== kanbanProjectFilter) continue
@@ -437,7 +437,9 @@ function renderKanban() {
   for (const [status, cards] of Object.entries(grouped)) {
     const col = document.querySelector(`.kanban-col-body[data-status="${status}"]`)
     col.innerHTML = ''
-    cards.sort((a, b) => a.sort_order - b.sort_order)
+    // Attention order (card 65afc67e): lowest priority_score first (1 = top);
+    // unscored (parked/legacy) cards fall back to sort_order.
+    cards.sort((a, b) => (a.priority_score ?? 99) - (b.priority_score ?? 99) || a.sort_order - b.sort_order)
 
     for (const card of cards) {
       col.appendChild(createCardEl(card))
@@ -449,7 +451,7 @@ function renderKanban() {
   document.getElementById('countInProgress').textContent = grouped.in_progress.length
   document.getElementById('countWaiting').textContent = grouped.waiting.length
   document.getElementById('countDone').textContent = grouped.done.length
-  document.getElementById('countSomeday').textContent = grouped.someday.length
+  document.getElementById('countIcebox').textContent = grouped.icebox.length
 
   // Async parent-badge: fetch children count per card, show badge if any
   loadSubtaskBadges()
@@ -478,6 +480,14 @@ async function loadSubtaskBadges() {
       }
     } catch { /* ignore */ }
   }))
+}
+
+// Urgency-band colour for a 1-10 priority_score badge (card 65afc67e).
+function priorityScoreStyle(score) {
+  if (score <= 2) return 'background:#4a1d1d;color:#ff7a7a;border:1px solid #ff7a7a55'   // SEV1 / urgent
+  if (score <= 4) return 'background:#4a341d;color:#ffb259;border:1px solid #ffb25955'   // high
+  if (score <= 7) return 'background:var(--border);color:var(--fg)'                       // normal
+  return 'background:transparent;color:var(--muted);opacity:.65;border:1px solid var(--border)' // low
 }
 
 function createCardEl(card) {
@@ -530,10 +540,16 @@ function createCardEl(card) {
     ? `<span class="kanban-card-seq" style="font-family:monospace;font-size:11px;color:var(--muted);margin-right:5px">#${card.seq}</span>`
     : ''
 
+  // priority_score digit badge (card 65afc67e): 1 = top attention. Urgency bands
+  // 1-2 red / 3-4 orange / 5-7 neutral / 8-10 faint. Parked (NULL) shows nothing.
+  const scoreHtml = card.priority_score != null
+    ? `<span class="kanban-card-score" title="Prioritás ${card.priority_score}/10" style="${priorityScoreStyle(card.priority_score)};font-family:monospace;font-size:11px;font-weight:600;min-width:16px;text-align:center;border-radius:4px;padding:1px 4px;margin-right:5px">${card.priority_score}</span>`
+    : ''
+
   el.innerHTML = `
     ${projectHtml}
     <div class="kanban-card-title">${seqHtml}${escapeHtml(card.title)}</div>
-    <div class="kanban-card-footer">${assigneeHtml}${dueHtml}</div>
+    <div class="kanban-card-footer">${scoreHtml}${assigneeHtml}${dueHtml}</div>
     <div class="kanban-card-actions">
       <button class="card-breakdown-btn" title="AI szétbont" aria-label="AI szétbont">⚡</button>
     </div>
@@ -708,7 +724,7 @@ async function showCardDetail(card) {
     : null
   const assigneeDisplay = assignee ? (assignee.displayName || assignee.name) : (rawDetailAssignee || '-- nincs --')
   const priorityLabels = { low: 'Alacsony', normal: 'Normál', high: 'Magas', urgent: 'Sürgős' }
-  const statusLabels = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Várakozik', done: 'Kész', someday: 'Valamikor' }
+  const statusLabels = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Várakozik', done: 'Kész', icebox: 'Jegelve' }
 
   const meta = document.getElementById('cardDetailMeta')
   const idLabel = (card.seq != null ? `#${card.seq} · ` : '') + card.id
@@ -897,7 +913,7 @@ async function showCardDetail(card) {
     if (children.length > 0) {
       section.style.display = ''
       list.innerHTML = ''
-      const statusLabelsShort = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Vár', done: 'Kész', someday: 'Valamikor' }
+      const statusLabelsShort = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Vár', done: 'Kész', icebox: 'Jegelve' }
       for (const ch of children) {
         const div = document.createElement('div')
         div.className = 'comment-item'
