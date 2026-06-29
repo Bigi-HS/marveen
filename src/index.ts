@@ -35,6 +35,7 @@ import {
   DeferToPeerError,
   type ProcessLockContext,
   type PidfileLockContext,
+  parseLsofListeningPorts,
 } from './process-lock.js'
 
 const BANNER = `
@@ -145,6 +146,29 @@ function buildProcessLockContext(): ProcessLockContext {
       info: (obj, msg) => logger.info(obj, msg),
       warn: (obj, msg) => logger.warn(obj, msg),
       error: (obj, msg) => logger.error(obj, msg),
+    },
+    listeningPortsOf(pid: number): number[] | null {
+      // LISTEN-only lsof probe (AC-3, C-4): `lsof -aPp <pid> -iTCP -sTCP:LISTEN`.
+      // This is DIFFERENT from listPortHolders's `lsof -ti :PORT` form (which
+      // matches ESTABLISHED too and is keyed by port, not pid).
+      // lsof exits 1 when no matching sockets found (definitive empty = []).
+      // Other errors (ENOENT, timeout, EPERM) = probe failure = null (AC-7 SPARE).
+      try {
+        const raw = execFileSync('lsof', ['-aPp', String(pid), '-iTCP', '-sTCP:LISTEN'], {
+          timeout: 3000,
+          encoding: 'utf-8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        })
+        return parseLsofListeningPorts(raw)
+      } catch (err) {
+        const e = err as { status?: number; stdout?: string }
+        if (e.status === 1) {
+          // lsof exit 1 = no matching files found = no LISTEN ports = zombie
+          return parseLsofListeningPorts(e.stdout ?? '')
+        }
+        // Real probe failure (lsof not found, timeout, EPERM) -> spare (AC-7)
+        return null
+      }
     },
   }
 }

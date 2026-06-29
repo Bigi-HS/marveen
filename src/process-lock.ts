@@ -47,6 +47,18 @@ export interface ProcessLockContext {
   signal(pid: number, sig: 'SIGTERM' | 'SIGKILL' | 0): SignalOutcome
   sleep(ms: number): Promise<void>
   log: { info: LogFn; warn: LogFn; error: LogFn }
+  /**
+   * Return the TCP ports the pid holds in LISTEN state, or null if the probe
+   * failed (lsof error / timeout / permission). MUST use LISTEN-only filtering
+   * so a zombie with open client sockets is not wrongly classified as "holding"
+   * a port (AC-3, C-4). Real impl: lsof -aPp <pid> -iTCP -sTCP:LISTEN.
+   *
+   * Fail-safe contract (AC-7):
+   *   null  => probe FAILED; SPARE the pid (unknown is safer than false-killing)
+   *   []    => definitive success, no LISTEN ports; genuine zombie, kill it
+   *   [N…]  => holds these LISTEN ports
+   */
+  listeningPortsOf(pid: number): number[] | null
 }
 
 export interface AcquirePortLockOptions {
@@ -161,10 +173,36 @@ export async function terminateProcesses(
 }
 
 /**
+ * Parse the stdout of `lsof -aPp <pid> -iTCP -sTCP:LISTEN` into a list of
+ * LISTEN port numbers. Ignores ESTABLISHED and other connection-state lines so
+ * a zombie with open client sockets is not confused with a live server.
+ * Deduplicates (IPv4 + IPv6 binds on the same port appear as one entry).
+ */
+export function parseLsofListeningPorts(output: string): number[] {
+  const ports = new Set<number>()
+  for (const line of output.split('\n')) {
+    // Match lines ending with ":PORT (LISTEN)" -- the NAME column format.
+    const m = line.match(/:(\d+)\s*\(LISTEN\)\s*$/)
+    if (!m) continue
+    const port = parseInt(m[1], 10)
+    if (Number.isFinite(port) && port > 0) ports.add(port)
+  }
+  return [...ports]
+}
+
+/**
  * Make sure we are the only node/tsx dashboard process. If any own-UID
  * holders exist (listening on `port` OR matching `binaryPattern`), SIGTERM
  * then SIGKILL them. Returns once every holder is dead; the caller is free
  * to call server.listen() afterwards.
+ *
+ * FIX-2 (card 5b993df2, AC-3/AC-7): binary-pattern matches are filtered via
+ * ctx.listeningPortsOf before entering the victim set. A match that holds a
+ * DIFFERENT LISTEN port (and NOT `port`) is SPARED -- it is a live server on
+ * another port, not a zombie. A match with no LISTEN ports ([] = definitive
+ * success) is a genuine zombie and is still killed. A match where the probe
+ * failed (null) is also spared (fail-safe: unknown is safer than false-kill).
+ * A match that holds `port` itself is always a kill victim (target-port-wins).
  */
 export async function acquirePortLock(
   port: number,
@@ -175,7 +213,17 @@ export async function acquirePortLock(
   const drainMs = opts.postKillDrainMs ?? DEFAULT_POST_KILL_DRAIN_MS
   const pollMs = opts.postKillPollMs ?? DEFAULT_POST_KILL_POLL_MS
   const byPort = findOwnNodeHolders(port, ctx)
-  const byBinary = opts.binaryPattern ? findOwnBinaryMatches(opts.binaryPattern, ctx) : []
+  const rawByBinary = opts.binaryPattern ? findOwnBinaryMatches(opts.binaryPattern, ctx) : []
+
+  // Filter byBinary: spare pids that are definitely live cross-port servers.
+  const byBinary = rawByBinary.filter(pid => {
+    const ports = ctx.listeningPortsOf(pid)
+    if (ports === null) return false  // probe failed -> spare (AC-7)
+    if (ports.length === 0) return true  // no LISTEN ports -> zombie -> kill (AC-4b)
+    if (ports.includes(port)) return true  // holds target port -> kill (AC-4d target-port-wins)
+    return false  // holds only foreign ports -> spare (AC-3)
+  })
+
   const victims = Array.from(new Set([...byPort, ...byBinary]))
   if (!victims.length) return
   ctx.log.warn({ port, victims, matchedBy: { byPort, byBinary } }, 'Previous dashboard instance(s) detected, taking over')

@@ -2,6 +2,7 @@ import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readEnvFile } from './env.js'
+import { logger } from './logger.js'
 import { getProviderType, getChannelToken, getChannelChatId, type ChannelProviderType } from './channel-provider.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -13,6 +14,47 @@ export const PID_FILENAME = 'claudeclaw.pid'
 
 const env = readEnvFile()
 
+// ── Boot-knob env resolution helpers (AC-1, AC-1b, AC-2) ────────────────────
+// These helpers implement process.env > .env-file > default precedence ONLY for
+// the boot-network knobs (WEB_PORT, WEB_HOST). Secrets/tokens keep their .env-file
+// source (AC-2) and MUST NOT use these helpers.
+
+export type EnvSource = 'process' | 'file' | 'default'
+
+/** Resolve an integer knob: process.env > file env > fallback.
+ *  Invalid process.env values (NaN, <=0) fall through to file/default. */
+export function resolveIntEnv(
+  key: string,
+  fileEnv: Record<string, string | undefined>,
+  fallback: number,
+): { value: number; source: EnvSource } {
+  const processVal = process.env[key]
+  if (processVal !== undefined) {
+    const n = parseInt(processVal, 10)
+    if (Number.isFinite(n) && n > 0) return { value: n, source: 'process' }
+  }
+  const fileVal = fileEnv[key]
+  if (fileVal !== undefined) {
+    const n = parseInt(fileVal, 10)
+    if (Number.isFinite(n)) return { value: n, source: 'file' }
+  }
+  return { value: fallback, source: 'default' }
+}
+
+/** Resolve a string knob: process.env > file env > fallback. */
+export function resolveStrEnv(
+  key: string,
+  fileEnv: Record<string, string | undefined>,
+  fallback: string,
+): { value: string; source: EnvSource } {
+  const processVal = process.env[key]
+  if (processVal !== undefined) return { value: processVal, source: 'process' }
+  const fileVal = fileEnv[key]
+  if (fileVal !== undefined) return { value: fileVal, source: 'file' }
+  return { value: fallback, source: 'default' }
+}
+
+// ── Secrets: .env-file ONLY (AC-2, no process.env override path) ─────────────
 export const TELEGRAM_BOT_TOKEN = env['TELEGRAM_BOT_TOKEN'] ?? ''
 export const ALLOWED_CHAT_ID = env['ALLOWED_CHAT_ID'] ?? ''
 
@@ -29,9 +71,22 @@ export const BOT_NAME = env['BOT_NAME'] ?? 'Marveen'
 // fall back to "marveen" so nothing breaks when upgrading in place.
 export const MAIN_AGENT_ID = env['MAIN_AGENT_ID'] ?? 'marveen'
 
-export const WEB_PORT = parseInt(env['WEB_PORT'] ?? '3420', 10)
+// ── Boot-network knobs: process.env > .env-file > default (AC-1) ─────────────
+const webPortResult = resolveIntEnv('WEB_PORT', env, 3420)
+export const WEB_PORT = webPortResult.value
+// AC-1b tripwire: warn when process.env wins so a stray `tmux set-environment -g
+// WEB_PORT` or supervisor edit is visible in dashboard.log immediately on boot.
+if (webPortResult.source === 'process') {
+  logger.warn({ key: 'WEB_PORT', source: 'process.env', port: WEB_PORT },
+    'Boot knob WEB_PORT sourced from process environment (AC-1b tripwire) -- verify this is intentional')
+}
 
-export const WEB_HOST = env['WEB_HOST'] ?? '127.0.0.1'
+const webHostResult = resolveStrEnv('WEB_HOST', env, '127.0.0.1')
+export const WEB_HOST = webHostResult.value
+if (webHostResult.source === 'process') {
+  logger.warn({ key: 'WEB_HOST', source: 'process.env', host: WEB_HOST },
+    'Boot knob WEB_HOST sourced from process environment (AC-1b tripwire) -- verify this is intentional')
+}
 export const DASHBOARD_PUBLIC_URL = env['DASHBOARD_PUBLIC_URL'] ?? ''
 export const OLLAMA_URL = env['OLLAMA_URL'] ?? 'http://localhost:11434'
 
