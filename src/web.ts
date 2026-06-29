@@ -32,6 +32,7 @@ import { startReauthHealer } from './web/reauth-healer.js'
 import { startAutoRestartRunner } from './web/auto-restart-runner.js'
 import { startSessionSizeWatcher } from './web/session-size-watcher.js'
 import { startTmuxTitleWatcher } from './web/tmux-title.js'
+import { startAgentStatusWatcher } from './web/agent-status-watcher.js'
 import { startSupervisorSentinel } from './web/supervisor-sentinel.js'
 import { logger } from './logger.js'
 import { tryHandleProfiles } from './web/routes/profiles.js'
@@ -462,6 +463,9 @@ export function startWebServer(port = 3420): http.Server {
   const tmuxTitleInterval = startTmuxTitleWatcher()
   logger.info('tmux-title watcher started (30s poll) -- per-agent window title = id + state + ctx%')
 
+  const agentStatusInterval = startAgentStatusWatcher()
+  logger.info('Agent-status watcher started (2.5s poll, 7s offset) -- pushes agent-status SSE on a stabilised activity transition')
+
   const supervisorSentinelInterval = startSupervisorSentinel()
   logger.info('Supervisor sentinel started (60s poll, 60s offset) -- who-watches-the-watcher')
 
@@ -531,6 +535,7 @@ export function startWebServer(port = 3420): http.Server {
     clearInterval(autoRestartInterval)
     clearInterval(sessionSizeInterval)
     clearInterval(tmuxTitleInterval)
+    clearInterval(agentStatusInterval)
     clearInterval(updateCheckerInterval)
     clearInterval(rateLimitPruneInterval)
     return origClose(cb)

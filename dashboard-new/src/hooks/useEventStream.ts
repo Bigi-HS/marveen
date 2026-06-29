@@ -12,10 +12,10 @@ import { useEffect, useRef, useState } from 'react'
 // cookie automatically (withCredentials), so no Authorization header / token-in-URL
 // is needed (verified live: the :3421 preview proxy streams frames incrementally).
 
-export type DashboardEventType = 'kanban' | 'message' | 'board' | 'gate'
+export type DashboardEventType = 'kanban' | 'message' | 'board' | 'gate' | 'agent-status'
 
 const STREAM_PATH = '/api/events/stream'
-const EVENT_TYPES: DashboardEventType[] = ['kanban', 'message', 'board', 'gate']
+const EVENT_TYPES: DashboardEventType[] = ['kanban', 'message', 'board', 'gate', 'agent-status']
 
 // Coalesce a write-burst (dispatch+move+comment emit several events) into one
 // revision bump so the SSE + safety poll never create a fetch-storm (mirrors the
@@ -34,7 +34,7 @@ export interface EventStreamState {
 }
 
 function zeroRevisions(): Revisions {
-  return { kanban: 0, message: 0, board: 0, gate: 0 }
+  return { kanban: 0, message: 0, board: 0, gate: 0, 'agent-status': 0 }
 }
 
 export function useEventStream(): EventStreamState {

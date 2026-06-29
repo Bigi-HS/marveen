@@ -113,6 +113,20 @@ describe('useEventStream event -> revision (thin-notify trigger)', () => {
     expect(result.current.revisions.board).toBe(0)
     expect(result.current.revisions.message).toBe(0)
   })
+
+  it('an agent-status event bumps revisions["agent-status"] (card edf73bd7 F2)', () => {
+    const { result } = renderHook(() => useEventStream())
+    act(() => MockEventSource.last().emitOpen())
+    expect(result.current.revisions['agent-status']).toBe(0)
+    act(() => {
+      // Strict id-only frame, exactly what the server watcher emits.
+      MockEventSource.last().dispatch('agent-status', { type: 'agent-status', id: 'dave' })
+      vi.advanceTimersByTime(__TESTING.COALESCE_MS)
+    })
+    expect(result.current.revisions['agent-status']).toBe(1)
+    // Independent of the other counters.
+    expect(result.current.revisions.kanban).toBe(0)
+  })
 })
 
 describe('useEventStream reconnect-on-drop', () => {

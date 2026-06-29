@@ -10,7 +10,7 @@ import { logger } from './logger.js'
 // cycle. In-process only -- the dashboard is a single node server, so a process
 // EventEmitter is the whole mechanism.
 
-export type DashboardEventType = 'kanban' | 'message' | 'board' | 'gate'
+export type DashboardEventType = 'kanban' | 'message' | 'board' | 'gate' | 'agent-status'
 
 export interface DashboardEvent {
   /** Which resource family changed; the SSE `event:` topic. */

@@ -14,13 +14,14 @@ function SectionTitle({ children }: { children: string }) {
 }
 
 export function Home() {
-  // F1 realtime (card 513b8fd6): SSE revisions drive immediate refetch; each
-  // poll keeps a slow safety backstop. Agent status has no push event yet (it is
-  // computed live per request) so it stays on a short poll; kanban/message
-  // refresh on their SSE revision. The activity feed keeps its own short poll.
+  // Realtime (cards 513b8fd6 F1 + edf73bd7 F2): SSE revisions drive immediate
+  // refetch; each poll keeps a slow safety backstop. F2 added an agent-status
+  // push (server-side pane-diff watcher) so the fleet grid now refetches on a
+  // stabilised activity transition instead of a 5s poll; kanban/message refresh
+  // on their own SSE revision.
   const { revisions } = useEventStream()
-  const agents = usePolling<AgentSummary[]>('/api/agents', { intervalMs: 5000 })
-  const health = usePolling<AgentHealth[]>('/api/agents/health', { intervalMs: 5000 })
+  const agents = usePolling<AgentSummary[]>('/api/agents', { refreshSignal: revisions['agent-status'], intervalMs: 30000 })
+  const health = usePolling<AgentHealth[]>('/api/agents/health', { refreshSignal: revisions['agent-status'], intervalMs: 30000 })
   const kanban = usePolling<KanbanCard[]>('/api/kanban', { refreshSignal: revisions.kanban + revisions.board })
   const messages = usePolling<AgentMessage[]>('/api/messages?limit=5', { refreshSignal: revisions.message })
 

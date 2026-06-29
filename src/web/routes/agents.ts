@@ -85,7 +85,7 @@ import {
 import { addDesiredAgent, removeDesiredAgent } from '../agent-desired-state.js'
 import { readActiveModelFromProjectDir, readContextTokensFromProjectDir } from '../active-model.js'
 import { collectFleetHealth } from '../agent-health.js'
-import { detectPaneState } from '../../pane-state.js'
+import { computeAgentActivityLabel } from '../../pane-state.js'
 import { detectReauthNeeded } from '../reauth-detect.js'
 import { readAutoRestartConfig, writeAutoRestartConfig } from '../auto-restart-store.js'
 import type { AutoRestartConfig } from '../../auto-restart.js'
@@ -429,14 +429,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   // fleet, not just sub-agents. Restored after #226 dropped this route while the
   // frontend kept calling /api/agents/activity (which then 404'd the panel).
   if (path === '/api/agents/activity' && method === 'GET') {
-    const label = (running: boolean, pane: string | null): string => {
-      if (!running) return 'stopped'
-      if (pane === null) return 'unknown'
-      const s = detectPaneState(pane)
-      if (s === 'busy' || s === 'typing') return 'working'
-      if (s === 'idle') return 'idle'
-      return s // 'unknown' | 'error'
-    }
+    // Coarse activity label shared with the agent-status watcher (card edf73bd7 F2)
+    // via computeAgentActivityLabel -- one source of truth, no poll/push drift.
+    const label = (running: boolean, pane: string | null): string =>
+      computeAgentActivityLabel(running, pane)
     const tailOf = (pane: string | null): string[] =>
       pane === null
         ? []

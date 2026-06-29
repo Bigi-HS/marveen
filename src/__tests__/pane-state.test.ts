@@ -14,6 +14,7 @@ import {
   pendingPasteSignature,
   decideStuckInputRecovery,
   isQuiescentlyIdle,
+  computeAgentActivityLabel,
   CLAUDE_SPINNER_LABELS,
   type StuckInputState,
   type QuiescenceSample,
@@ -777,6 +778,44 @@ describe('isReadyForPrompt', () => {
     // A wedged thinking-block error is not idle, so it is not ready --
     // this is what stops the router/scheduler injecting doomed prompts.
     expect(isReadyForPrompt(ERROR_THINKING_BLOCK)).toBe(false)
+  })
+})
+
+describe('computeAgentActivityLabel (card edf73bd7 F2)', () => {
+  it('maps a stopped agent to "stopped" regardless of pane', () => {
+    expect(computeAgentActivityLabel(false, null)).toBe('stopped')
+    expect(computeAgentActivityLabel(false, IDLE_STRICT)).toBe('stopped')
+    expect(computeAgentActivityLabel(false, BUSY_FULL_FOOTER)).toBe('stopped')
+  })
+
+  it('maps a running agent with no capturable pane to "unknown"', () => {
+    expect(computeAgentActivityLabel(true, null)).toBe('unknown')
+  })
+
+  it('maps busy/typing panes to "working"', () => {
+    expect(computeAgentActivityLabel(true, BUSY_FULL_FOOTER)).toBe('working')
+    expect(computeAgentActivityLabel(true, BUSY_TOKENS_ONLY)).toBe('working')
+    expect(computeAgentActivityLabel(true, TYPING_PARKED)).toBe('working')
+  })
+
+  it('maps an idle pane to "idle"', () => {
+    expect(computeAgentActivityLabel(true, IDLE_STRICT)).toBe('idle')
+    expect(computeAgentActivityLabel(true, IDLE_BYPASS)).toBe('idle')
+  })
+
+  it('passes through error/unknown pane states verbatim', () => {
+    expect(computeAgentActivityLabel(true, ERROR_THINKING_BLOCK)).toBe('error')
+    expect(computeAgentActivityLabel(true, NON_CLAUDE)).toBe('unknown')
+  })
+
+  it('is the single source of truth shared with the /api/agents/activity route', () => {
+    // The route previously inlined this exact mapping; both now call this helper.
+    // Parity spot-check: the four enum branches a running agent can take.
+    const running = true
+    expect(computeAgentActivityLabel(running, BUSY_FULL_FOOTER)).toBe('working')
+    expect(computeAgentActivityLabel(running, IDLE_STRICT)).toBe('idle')
+    expect(computeAgentActivityLabel(running, ERROR_THINKING_BLOCK)).toBe('error')
+    expect(computeAgentActivityLabel(running, null)).toBe('unknown')
   })
 })
 
