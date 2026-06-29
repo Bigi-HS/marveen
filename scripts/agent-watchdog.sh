@@ -24,8 +24,8 @@ SHORT_LIVED=180
 LONG_BACKOFF=600
 # 120s not 90s: opus-1M cold boot can take 60-80s; tighter threshold causes
 # false crash-loop detection on a slow-but-legitimate boot.
-CRASH_LOOP_THRESHOLD=120
-CRASH_LOOP_N=3
+CRASH_LOOP_THRESHOLD=${CRASH_LOOP_THRESHOLD:-120}
+CRASH_LOOP_N=${CRASH_LOOP_N:-3}
 
 log() { echo "$(date -Is) $*" >> "$LOG"; }
 read_model() {
@@ -86,15 +86,16 @@ launch_fresh() {
 
 alert_crash_loop() {
   local count="$1"
-  python3 - "$count" "$NAME" <<'PY' 2>/dev/null || log "WARN: alert_crash_loop could not reach dashboard API"
+  python3 - "$count" "$NAME" "$CRASH_LOOP_THRESHOLD" <<'PY' 2>/dev/null || log "WARN: alert_crash_loop could not reach dashboard API"
 import urllib.request, json, sys
 count, name = sys.argv[1], sys.argv[2]
 try:
     tok = open("/home/domin/marveen/store/.dashboard-token").read().strip()
 except OSError:
     sys.exit(1)
-msg = f"CRASH-LOOP alert: agent-{name} had {count} consecutive sub-120s deaths -- did ONE fresh relaunch (dropped --continue). Check store/{name}-watchdog.log."
-data = json.dumps({"from":"forge","to":"marveen","content":msg}).encode()
+threshold = sys.argv[3] if len(sys.argv) > 3 else "120"
+msg = f"CRASH-LOOP alert: agent-{name} had {count} consecutive sub-{threshold}s deaths -- did ONE fresh relaunch (dropped --continue). Check store/{name}-watchdog.log."
+data = json.dumps({"from":name,"to":"marveen","content":msg}).encode()
 req = urllib.request.Request("http://localhost:3420/api/messages", data=data,
       headers={"Content-Type":"application/json","Authorization":f"Bearer {tok}"}, method="POST")
 urllib.request.urlopen(req, timeout=5)
