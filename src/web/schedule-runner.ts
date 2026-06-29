@@ -38,6 +38,7 @@ import {
 } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { sendTelegramMessage } from './telegram.js'
+import { evaluateEmergencyRouting } from './emergency-routing-policy.js'
 
 const TMUX = resolveFromPath('tmux')
 const PYTHON = resolveFromPath('python3')
@@ -112,11 +113,73 @@ export function shouldFallbackLLM(
   return task.layer2 === true && task.directSend !== true && state?.limited === true
 }
 
+// Read the per-task Layer-2 routing fields from task-config.json. The python
+// client reads these directly; the node-side policy gate (card d1ccf1d9) needs
+// them too, to apply the per-agent emergency-routing policy BEFORE any egress.
+// Absent/unreadable/malformed -> empty fields, which the gate treats fail-safe
+// (unknown_task_type / high sensitivity -> deny).
+export function readLayer2TaskConfig(
+  taskName: string,
+  baseDir: string = SCHEDULED_TASKS_DIR,
+): { taskType?: string; sensitivity?: string } {
+  const configPath = join(baseDir, taskName, 'task-config.json')
+  try {
+    const cfg = JSON.parse(readFileSync(configPath, 'utf-8')) as {
+      layer2_task_type?: unknown
+      sensitivity?: unknown
+    }
+    return {
+      taskType: typeof cfg.layer2_task_type === 'string' ? cfg.layer2_task_type : undefined,
+      sensitivity: typeof cfg.sensitivity === 'string' ? cfg.sensitivity : undefined,
+    }
+  } catch {
+    return {}
+  }
+}
+
+// Per-agent emergency-routing egress decision (card d1ccf1d9). The SINGLE
+// chokepoint that decides whether a Layer-2 task may egress to an external LLM.
+// It is FAIL-CLOSED: if reading the task config or evaluating the policy throws
+// (import/IO error), the egress is BLOCKED (reason 'policy_error_failclosed'),
+// never silent-passed -- a broken policy layer must not open an egress path.
+// The config reader is injectable so the fail-closed branch is unit-testable.
+export function fallbackEgressDecision(
+  agentName: string,
+  taskName: string,
+  readConfig: (n: string, d?: string) => { taskType?: string; sensitivity?: string } = readLayer2TaskConfig,
+): { allowed: boolean; reason: string } {
+  try {
+    const { taskType, sensitivity } = readConfig(taskName)
+    return evaluateEmergencyRouting(agentName, taskType ?? '', sensitivity)
+  } catch (err) {
+    logger.warn(
+      { err, agent: agentName, task: taskName },
+      'Fallback-LLM policy evaluation threw -- failing closed (no egress)',
+    )
+    return { allowed: false, reason: 'policy_error_failclosed' }
+  }
+}
+
 // Invoke fallback_llm_client.py (argv only, no shell). Exit codes mirror the
 // script: 0=produced output, 1=config error / non-retryable skip, 2=transient
 // delivery failure. A cloud completion can take a while, so the timeout is more
 // generous than direct-send's. A spawn failure is treated as transient (2).
-function runFallbackLLM(task: ScheduledTask): number {
+function runFallbackLLM(task: ScheduledTask, agentName: string): number {
+  // SECURITY (card d1ccf1d9): the per-agent emergency-routing policy gate is the
+  // FIRST step here -- inside the egress function, NOT the caller's job -- so no
+  // call path can bypass it. PII-local agents (hibiki, claudia) and out-of-policy
+  // task-types/sensitivities are blocked before any external request is made.
+  // This is a SECOND, independent layer over the python client's own sensitivity
+  // routing; it can only ever be stricter, never looser.
+  const gate = fallbackEgressDecision(agentName, task.name)
+  if (!gate.allowed) {
+    logger.warn(
+      { task: task.name, agent: agentName, reason: gate.reason },
+      'Fallback-LLM blocked by per-agent emergency-routing policy (no egress)',
+    )
+    return 1 // non-retryable skip: tick consumed, nothing egressed
+  }
+
   const taskDir = join(SCHEDULED_TASKS_DIR, task.name)
   const args = [
     FALLBACK_LLM_SCRIPT,
@@ -241,7 +304,10 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
   // opts into layer2 (and is not a Layer-1 directSend task), route it to the
   // single-shot cloud fallback-LLM client instead of the frozen Claude session.
   if (shouldFallbackLLM(task, outageState)) {
-    const code = runFallbackLLM(task)
+    // The per-agent emergency-routing policy gate (card d1ccf1d9) lives INSIDE
+    // runFallbackLLM as its first step -- no call path can bypass it. A policy
+    // block returns exit code 1 (non-retryable skip), handled below.
+    const code = runFallbackLLM(task, agentName)
     if (code === 0) {
       appendTaskRun(task.name, agentName)
       logger.info({ task: task.name, agent: agentName }, 'Fallback-LLM fired (token-outage Layer 2)')
