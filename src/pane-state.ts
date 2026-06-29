@@ -614,6 +614,25 @@ export function isReadyForPrompt(pane: string, opts: DetectPaneStateOptions = {}
 }
 
 /**
+ * Coarse, operator-facing activity label for an agent: the value the dashboard
+ * shows ("working / idle / stopped"). This is the SINGLE source of truth shared
+ * by the `/api/agents/activity` route and the agent-status realtime watcher
+ * (card edf73bd7 F2) -- both call this helper so the polled value and the pushed
+ * transition can never drift. Pure over (running, pane); `pane === null` means
+ * the session could not be captured (running but unreadable).
+ */
+export type AgentActivityLabel = 'working' | 'idle' | 'stopped' | 'unknown' | 'error'
+
+export function computeAgentActivityLabel(running: boolean, pane: string | null): AgentActivityLabel {
+  if (!running) return 'stopped'
+  if (pane === null) return 'unknown'
+  const s = detectPaneState(pane)
+  if (s === 'busy' || s === 'typing') return 'working'
+  if (s === 'idle') return 'idle'
+  return s // 'unknown' | 'error'
+}
+
+/**
  * True when a turn is ACTIVELY in progress -- a live spinner / token-stream
  * indicator is rendering RIGHT NOW. This is a strict subset of the coarse
  * 'busy' state: `detectPaneState` also returns 'busy' for a usage-limit menu
