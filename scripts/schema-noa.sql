@@ -10,8 +10,10 @@
 --   * NEW: embedding_cache.
 --   * UNCHANGED + CARRIED-OVER: reproduced VERBATIM from claudeclaw.db so the
 --     migration is byte-faithful and preserves every CHECK / UNIQUE / FK
---     constraint (e.g. kanban_cards keeps the 'someday' status + parent FK that
+--     constraint (e.g. kanban_cards keeps the parked-lane status + parent FK that
 --     the simplified spec DDL omits). Zero data loss is the binding constraint.
+--   * RENAMED: the legacy 'someday' parked lane is now 'icebox' (card 65afc67e,
+--     Boss wording); runtime applyKanbanMigrations() migrates live someday rows.
 
 -- ============================================================================
 -- Redesigned core tables
@@ -109,7 +111,10 @@ CREATE TABLE kanban_cards (
   assignee TEXT, priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
   project TEXT, parent_id TEXT REFERENCES kanban_cards(id), due_date INTEGER,
   sort_order REAL NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-  archived_at INTEGER, dispatched_at INTEGER
+  archived_at INTEGER, dispatched_at INTEGER,
+  -- 1-10 fine-grained attention rank (1 = top, 10 = lowest active). NULL = parked
+  -- (icebox lane), excluded from drain/heartbeat ordering. Card 65afc67e.
+  priority_score INTEGER CHECK(priority_score IS NULL OR priority_score BETWEEN 1 AND 10)
 );
 
 CREATE TABLE kanban_comments (
@@ -386,5 +391,5 @@ INSERT OR IGNORE INTO board_columns (id, label, sort_order, is_terminal, created
   ('planned',     'Tervezett',    1.0, 0, unixepoch(), unixepoch()),
   ('in_progress', 'Folyamatban',  2.0, 0, unixepoch(), unixepoch()),
   ('waiting',     'Varakozik',    3.0, 0, unixepoch(), unixepoch()),
-  ('someday',     'Egyszer majd', 4.0, 0, unixepoch(), unixepoch()),
+  ('icebox',      'Jegelve',      4.0, 0, unixepoch(), unixepoch()),
   ('done',        'Kesz',         5.0, 1, unixepoch(), unixepoch());

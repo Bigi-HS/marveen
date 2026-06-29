@@ -43,7 +43,7 @@ function wipe(): void {
   db.prepare('DELETE FROM kanban_comments').run()
   db.prepare('DELETE FROM kanban_cards').run()
   db.prepare('DELETE FROM agent_messages').run()
-  db.prepare("DELETE FROM board_columns WHERE id NOT IN ('planned','in_progress','waiting','done','someday')").run()
+  db.prepare("DELETE FROM board_columns WHERE id NOT IN ('planned','in_progress','waiting','done','icebox')").run()
   invalidateColumnsCache()
 }
 
@@ -112,8 +112,8 @@ describe('W3-dispatch: single agent_messages on in_progress', () => {
 // ---------------------------------------------------------------------------
 
 describe('W3-errors: noa-kanban throws for route to catch', () => {
-  it('InvalidTransitionError: someday -> done (route maps to 400)', () => {
-    const card = createCard({ title: 'T', status: 'someday', suppressIntake: true })
+  it('InvalidTransitionError: icebox -> done (route maps to 400)', () => {
+    const card = createCard({ title: 'T', status: 'icebox', suppressIntake: true })
     expect(() => moveCard(card.id, 'done', 1)).toThrow(InvalidTransitionError)
   })
 
@@ -136,7 +136,7 @@ describe('W3-errors: noa-kanban throws for route to catch', () => {
   })
 
   it('InvalidTransitionError: updateCard with invalid status change (route maps to 400)', () => {
-    const card = createCard({ title: 'T', status: 'someday', suppressIntake: true })
+    const card = createCard({ title: 'T', status: 'icebox', suppressIntake: true })
     expect(() => updateCard(card.id, { status: 'done' })).toThrow(InvalidTransitionError)
   })
 })

@@ -39,6 +39,10 @@ import {
   HasActiveChildrenError,
   ColumnNotEmptyError,
   BuiltinColumnError,
+  InvalidPriorityScoreError,
+  applyKanbanMigrations,
+  staleThresholdSeconds,
+  isCardStale,
 } from '../noa-kanban.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -56,7 +60,7 @@ function wipe(): void {
   db.prepare('DELETE FROM kanban_cards').run()
   db.prepare('DELETE FROM agent_messages').run()
   // Restore builtin columns only (wipe custom columns)
-  db.prepare("DELETE FROM board_columns WHERE id NOT IN ('planned','in_progress','waiting','done','someday')").run()
+  db.prepare("DELETE FROM board_columns WHERE id NOT IN ('planned','in_progress','waiting','done','icebox')").run()
   invalidateColumnsCache()
 }
 
@@ -75,7 +79,7 @@ describe('AC-9: board_columns schema', () => {
 
   it('has the expected builtin ids', () => {
     const ids = (getNoaDb().prepare('SELECT id FROM board_columns ORDER BY sort_order').all() as { id: string }[]).map((r) => r.id)
-    expect(ids).toEqual(['planned', 'in_progress', 'waiting', 'someday', 'done'])
+    expect(ids).toEqual(['planned', 'in_progress', 'waiting', 'icebox', 'done'])
   })
 
   it('idx_board_columns_order index exists', () => {
@@ -111,8 +115,8 @@ describe('AC-1: status validation', () => {
 // ---------------------------------------------------------------------------
 
 describe('AC-2: state machine', () => {
-  it('someday -> done throws InvalidTransitionError (AC-2c)', () => {
-    const card = createCard({ title: 'Test', status: 'someday', suppressIntake: true })
+  it('icebox -> done throws InvalidTransitionError (AC-2c)', () => {
+    const card = createCard({ title: 'Test', status: 'icebox', suppressIntake: true })
     expect(() => moveCard(card.id, 'done', 1)).toThrow(InvalidTransitionError)
   })
 
@@ -138,7 +142,7 @@ describe('AC-2: state machine', () => {
   })
 
   it('updateCard validates status if changed', () => {
-    const card = createCard({ title: 'Test', status: 'someday', suppressIntake: true })
+    const card = createCard({ title: 'Test', status: 'icebox', suppressIntake: true })
     expect(() => updateCard(card.id, { status: 'done' })).toThrow(InvalidTransitionError)
   })
 
@@ -418,11 +422,11 @@ describe('AC-7: intake event', () => {
     off()
   })
 
-  it('createCard with status=someday: NO intake event (AC-7d)', () => {
+  it('createCard with status=icebox: NO intake event (AC-7d)', () => {
     const received: DashboardEvent[] = []
     const off = subscribeDashboardEvents((e) => received.push(e))
 
-    createCard({ title: 'Future idea', status: 'someday' })
+    createCard({ title: 'Future idea', status: 'icebox' })
 
     expect(received.some((e) => e.action === 'intake')).toBe(false)
     off()
@@ -486,7 +490,7 @@ describe('AC-10: column management', () => {
   })
 
   it('deleteColumn on any builtin throws BuiltinColumnError', () => {
-    for (const id of ['planned', 'in_progress', 'waiting', 'someday', 'done']) {
+    for (const id of ['planned', 'in_progress', 'waiting', 'icebox', 'done']) {
       expect(() => deleteColumn(id)).toThrow(BuiltinColumnError)
     }
   })
@@ -682,7 +686,7 @@ describe('listKanbanCardsSummary', () => {
     const rows = listKanbanCardsSummary()
     expect(rows.length).toBe(2)
     const keys = Object.keys(rows[0]).sort()
-    expect(keys).toEqual(['assignee', 'id', 'priority', 'status', 'title'])
+    expect(keys).toEqual(['assignee', 'id', 'priority', 'priority_score', 'status', 'title'])
   })
 
   it('excludes archived cards', () => {
@@ -737,5 +741,200 @@ describe('getHeartbeatKanbanSummary', () => {
     archiveCard(card.id)
     const summary = getHeartbeatKanbanSummary()
     expect(summary.in_progress).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Priority score 1-10 + icebox lane (card 65afc67e)
+// ---------------------------------------------------------------------------
+
+describe('priority_score: createCard defaults to bucket centre', () => {
+  it.each([
+    ['urgent', 2],
+    ['high', 4],
+    ['normal', 6],
+    ['low', 9],
+  ])('priority=%s -> score %i', (priority, expected) => {
+    const card = createCard({ title: 'T', priority, suppressIntake: true })
+    expect(card.priority_score).toBe(expected)
+  })
+
+  it('defaults to 6 when no priority is given (normal)', () => {
+    const card = createCard({ title: 'T', suppressIntake: true })
+    expect(card.priority_score).toBe(6)
+  })
+
+  it('an explicit priority_score overrides the bucket centre', () => {
+    const card = createCard({ title: 'T', priority: 'normal', priority_score: 1, suppressIntake: true })
+    expect(card.priority_score).toBe(1)
+  })
+})
+
+describe('priority_score: validation', () => {
+  it.each([0, 11, -1, 5.5, NaN])('rejects out-of-range / non-integer %s', (bad) => {
+    expect(() => createCard({ title: 'T', priority_score: bad as number, suppressIntake: true })).toThrow(InvalidPriorityScoreError)
+  })
+
+  it('accepts the boundary values 1 and 10', () => {
+    expect(createCard({ title: 'A', priority_score: 1, suppressIntake: true }).priority_score).toBe(1)
+    expect(createCard({ title: 'B', priority_score: 10, suppressIntake: true }).priority_score).toBe(10)
+  })
+})
+
+describe('priority_score: icebox lane carries no score', () => {
+  it('a card created in icebox has NULL score', () => {
+    const card = createCard({ title: 'Parked', status: 'icebox', suppressIntake: true })
+    expect(card.priority_score).toBeNull()
+  })
+
+  it('an explicit score is ignored for an icebox card', () => {
+    const card = createCard({ title: 'Parked', status: 'icebox', priority_score: 3, suppressIntake: true })
+    expect(card.priority_score).toBeNull()
+  })
+
+  it('moving an active card to icebox clears its score', () => {
+    const card = createCard({ title: 'T', priority: 'high', suppressIntake: true })
+    expect(card.priority_score).toBe(4)
+    moveCard(card.id, 'icebox', 1)
+    expect(getCard(card.id)!.priority_score).toBeNull()
+  })
+
+  it('reviving an icebox card to an active lane assigns a bucket-centre score', () => {
+    const card = createCard({ title: 'T', priority: 'urgent', status: 'icebox', suppressIntake: true })
+    expect(card.priority_score).toBeNull()
+    moveCard(card.id, 'in_progress', 1)
+    expect(getCard(card.id)!.priority_score).toBe(2) // urgent centre
+  })
+})
+
+describe('priority_score: updateCard', () => {
+  it('an explicit score updates the card', () => {
+    const card = createCard({ title: 'T', priority: 'normal', suppressIntake: true })
+    updateCard(card.id, { priority_score: 3 })
+    expect(getCard(card.id)!.priority_score).toBe(3)
+  })
+
+  it('re-centres the score when the priority bucket changes (no explicit score)', () => {
+    const card = createCard({ title: 'T', priority: 'low', suppressIntake: true })
+    expect(card.priority_score).toBe(9)
+    updateCard(card.id, { priority: 'urgent' })
+    expect(getCard(card.id)!.priority_score).toBe(2)
+  })
+
+  it('keeps a custom score when an unrelated field changes', () => {
+    const card = createCard({ title: 'T', priority: 'normal', priority_score: 5, suppressIntake: true })
+    updateCard(card.id, { title: 'T2' })
+    expect(getCard(card.id)!.priority_score).toBe(5)
+  })
+
+  it('moving to icebox via updateCard clears the score', () => {
+    const card = createCard({ title: 'T', priority: 'high', suppressIntake: true })
+    updateCard(card.id, { status: 'icebox' })
+    expect(getCard(card.id)!.priority_score).toBeNull()
+  })
+
+  it('rejects an invalid explicit score', () => {
+    const card = createCard({ title: 'T', suppressIntake: true })
+    expect(() => updateCard(card.id, { priority_score: 99 })).toThrow(InvalidPriorityScoreError)
+  })
+})
+
+describe('priority_score: attention ordering', () => {
+  it('listKanbanCardsSummary orders by score ASC within a status', () => {
+    createCard({ id: 'lo', title: 'low', status: 'planned', priority_score: 8, suppressIntake: true })
+    createCard({ id: 'hi', title: 'high', status: 'planned', priority_score: 1, suppressIntake: true })
+    createCard({ id: 'mid', title: 'mid', status: 'planned', priority_score: 5, suppressIntake: true })
+    const planned = listKanbanCardsSummary().filter((r) => r.status === 'planned')
+    expect(planned.map((r) => r.id)).toEqual(['hi', 'mid', 'lo'])
+  })
+
+  it('heartbeat summary orders in_progress by score ASC and excludes icebox', () => {
+    createCard({ id: 'b', title: 'b', status: 'in_progress', priority_score: 7, suppressIntake: true })
+    createCard({ id: 'a', title: 'a', status: 'in_progress', priority_score: 2, suppressIntake: true })
+    createCard({ id: 'park', title: 'park', status: 'icebox', priority: 'urgent', suppressIntake: true })
+    const summary = getHeartbeatKanbanSummary()
+    expect(summary.in_progress.map((c) => c.id)).toEqual(['a', 'b'])
+    // an icebox card with priority=urgent must NOT leak into the urgent bucket
+    expect(summary.urgent.map((c) => c.id)).not.toContain('park')
+  })
+})
+
+describe('staleThresholdSeconds (per-level rubric)', () => {
+  it.each([
+    [1, 2 * 3600],
+    [2, 12 * 3600],
+    [3, 24 * 3600],
+    [4, 24 * 3600],
+    [5, 3 * 86400],
+    [7, 3 * 86400],
+    [8, 7 * 86400],
+    [10, 7 * 86400],
+  ])('score %i -> %i seconds', (score, secs) => {
+    expect(staleThresholdSeconds(score)).toBe(secs)
+  })
+
+  it('a null score (parked) has no threshold', () => {
+    expect(staleThresholdSeconds(null)).toBeNull()
+  })
+})
+
+describe('isCardStale', () => {
+  const now = 1_000_000_000
+
+  it('an active card past its level threshold is stale', () => {
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400 } // normal = 3d
+    expect(isCardStale(card, now)).toBe(true)
+  })
+
+  it('an active card within its threshold is not stale', () => {
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 1 * 86400 }
+    expect(isCardStale(card, now)).toBe(false)
+  })
+
+  it('a SEV1 (score 1) card goes stale after just 2h', () => {
+    expect(isCardStale({ status: 'in_progress', priority_score: 1, updated_at: now - 3 * 3600 }, now)).toBe(true)
+    expect(isCardStale({ status: 'in_progress', priority_score: 1, updated_at: now - 1 * 3600 }, now)).toBe(false)
+  })
+
+  it('icebox and done cards never go stale', () => {
+    expect(isCardStale({ status: 'icebox', priority_score: null, updated_at: 0 }, now)).toBe(false)
+    expect(isCardStale({ status: 'done', priority_score: 6, updated_at: 0 }, now)).toBe(false)
+  })
+})
+
+describe('applyKanbanMigrations', () => {
+  it('is idempotent (safe to run twice)', () => {
+    expect(() => { applyKanbanMigrations(); applyKanbanMigrations() }).not.toThrow()
+  })
+
+  it('backfills a bucket-centre score for an active card missing one', () => {
+    const db = getNoaDb()
+    db.prepare(
+      `INSERT INTO kanban_cards (id, title, status, priority, sort_order, created_at, updated_at, priority_score)
+       VALUES ('legacy', 'Old', 'planned', 'high', 1, 0, 0, NULL)`
+    ).run()
+    applyKanbanMigrations()
+    expect(getCard('legacy')!.priority_score).toBe(4) // high centre
+  })
+
+  it('reconciles a legacy someday column + cards into the icebox lane', () => {
+    const db = getNoaDb()
+    const now = Math.floor(Date.now() / 1000)
+    db.prepare(
+      "INSERT INTO board_columns (id, label, sort_order, is_terminal, created_at, updated_at) VALUES ('someday', 'Egyszer majd', 4.5, 0, ?, ?)"
+    ).run(now, now)
+    db.prepare(
+      `INSERT INTO kanban_cards (id, title, status, priority, sort_order, created_at, updated_at, priority_score)
+       VALUES ('park1', 'Parked', 'someday', 'normal', 1, 0, 0, NULL)`
+    ).run()
+    invalidateColumnsCache()
+    applyKanbanMigrations()
+    // the card moved to icebox, the legacy column id is gone
+    expect(getCard('park1')!.status).toBe('icebox')
+    const colIds = (db.prepare('SELECT id FROM board_columns').all() as Array<{ id: string }>).map((r) => r.id)
+    expect(colIds).toContain('icebox')
+    expect(colIds).not.toContain('someday')
+    // a parked card stays unscored even after backfill
+    expect(getCard('park1')!.priority_score).toBeNull()
   })
 })
