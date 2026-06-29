@@ -7,13 +7,33 @@ export interface PollState<T> {
   loading: boolean
 }
 
+export interface PollOptions {
+  /** Safety-backstop poll interval. With SSE driving freshness (F1), this is a
+   *  slow backstop (default 30s), not the primary refresh path. */
+  intervalMs?: number
+  /** A monotonically changing value (e.g. a useEventStream revision). Each change
+   *  forces an immediate refetch -- this is how an SSE event refreshes the data
+   *  without waiting for the interval. */
+  refreshSignal?: number
+}
+
+const DEFAULT_INTERVAL_MS = 30_000
+
+function normalizeOpts(opts?: number | PollOptions): Required<Pick<PollOptions, 'intervalMs'>> & { refreshSignal?: number } {
+  // Back-compat: a bare number is the legacy intervalMs positional arg.
+  if (typeof opts === 'number') return { intervalMs: opts }
+  return { intervalMs: opts?.intervalMs ?? DEFAULT_INTERVAL_MS, refreshSignal: opts?.refreshSignal }
+}
+
 /**
- * Poll a read-only GET endpoint on an interval (F0 has no SSE yet -- that lands
- * in F1). Fires immediately, then every `intervalMs`. Aborts the in-flight request
- * on unmount and skips state updates after unmount. GET-only by construction
- * (apiGet), so no mutation can leak through this hook (AC-G2).
+ * Read-only GET poller with SSE-driven refetch (F1, card 513b8fd6). Fires
+ * immediately, then every `intervalMs` as a backstop, AND whenever `refreshSignal`
+ * changes (an SSE event bumped it). Aborts the in-flight request on unmount and
+ * skips state updates after unmount. GET-only by construction (apiGet), so no
+ * mutation can leak through this hook (AC-G2).
  */
-export function usePolling<T>(path: string, intervalMs = 5000): PollState<T> {
+export function usePolling<T>(path: string, opts?: number | PollOptions): PollState<T> {
+  const { intervalMs, refreshSignal } = normalizeOpts(opts)
   const [state, setState] = useState<PollState<T>>({ data: null, error: null, loading: true })
   const aliveRef = useRef(true)
 
@@ -42,7 +62,8 @@ export function usePolling<T>(path: string, intervalMs = 5000): PollState<T> {
       controller?.abort()
       clearInterval(id)
     }
-  }, [path, intervalMs])
+    // refreshSignal in deps: a change re-runs the effect -> immediate refetch.
+  }, [path, intervalMs, refreshSignal])
 
   return state
 }

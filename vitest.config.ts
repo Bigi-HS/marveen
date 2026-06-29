@@ -16,6 +16,13 @@ export default defineConfig({
       // Exclude deploy-time dist backups (store/dist-backup-YYYYMMDD-HHMMSS/):
       // the backup dir contains __tests__ which vitest would otherwise glob.
       'store/dist-backup-*/**',
+      // dashboard-new is a separate Vite project with its OWN vitest config
+      // (jsdom + React Testing Library setup). This root runner is node-env, so
+      // globbing its tests here runs them under the wrong environment (no jsdom
+      // -> EventSource / localStorage / renderHook fail -- the source of the
+      // long-standing "4 pre-existing dashboard-new env failures"). Run them via
+      // `cd dashboard-new && npm test`. (card 513b8fd6 F1)
+      'dashboard-new/**',
     ],
   },
 })
