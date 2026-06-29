@@ -350,6 +350,50 @@ describe('runSweepTick', () => {
     expect(retries).toHaveLength(0)
   })
 
+  // Regression: bb034b08 -- single-cron triple-fire (dual-source ghost, eliminated by eb6ab3c7).
+  // Proof: busy on tick1 -> pending retry on tick2 -> EXACTLY 1 send total; next_run rolls forward.
+  // The cron sweep on tick2 skips the task (pendingKeys guard), so no double-fire.
+  it('single-fire regression (bb034b08): busy tick1 + retry-success tick2 = exactly 1 send, next_run advanced', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+
+    db.prepare(`
+      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES ('triple-fire-task', 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?)
+    `).run(nowS - 10, nowS - 100)
+
+    // Tick 1: session busy -> no send, pending retry inserted
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(false)
+    vi.mocked(sendPromptToSession).mockReset()
+    runSweepTick(60000, db)
+
+    expect(vi.mocked(sendPromptToSession)).not.toHaveBeenCalled()
+    const retryRows = db.prepare(
+      `SELECT * FROM pending_task_retries WHERE task_name='triple-fire-task'`
+    ).all()
+    expect(retryRows).toHaveLength(1)
+
+    // Tick 2: session free -> retry fires; cron sweep skips (pendingKeys guard)
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+    vi.mocked(sendPromptToSession).mockReset()
+    runSweepTick(60000, db)
+
+    // (a) Exactly ONE fire across both paths (retry succeeded, cron sweep was skipped)
+    expect(vi.mocked(sendPromptToSession)).toHaveBeenCalledOnce()
+
+    // (b) next_run advanced beyond nowS (not stuck at the original due time)
+    const updated = db.prepare(
+      `SELECT next_run FROM scheduled_tasks WHERE id='triple-fire-task'`
+    ).get() as { next_run: number }
+    expect(updated.next_run).toBeGreaterThan(nowS)
+
+    // Pending retry row removed after success
+    const retryRowsAfter = db.prepare(
+      `SELECT * FROM pending_task_retries WHERE task_name='triple-fire-task'`
+    ).all()
+    expect(retryRowsAfter).toHaveLength(0)
+  })
+
   it('OQ-1 B-block: task with target_session is inert -- fires to agent own session', () => {
     // target_session is a B-block column: stored but NEVER branched on in A4 sweep.
     // Proof: if old code ran it would use target_session='custom-override' which is NOT
