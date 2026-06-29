@@ -394,6 +394,43 @@ describe('runSweepTick', () => {
     expect(retryRowsAfter).toHaveLength(0)
   })
 
+  // Regression: 295c94f2 -- look-ahead self-refire (chad-daily-security fired 3x).
+  // The cron sweep fires a task up to catchUp (60s) BEFORE its slot (next_run <= now+catchUp).
+  // When it fires inside that window, the wall clock is still BEFORE the cron minute, so a
+  // computeNextRun() basis of Date.now() re-resolves to the SAME slot -- next_run never
+  // advances and the next tick (now past the slot) fires it a second time. The fix bases
+  // the roll-forward on max(now, next_run) so it always lands on the slot AFTER the one fired.
+  it('look-ahead refire (295c94f2): firing in the pre-slot window does not double-fire on the next tick', () => {
+    const db = getNoaDb()
+    // Cron slot 09:00:00 CEST (UTC+2) on a fixed date == 07:00:00Z.
+    const slotS = Math.floor(Date.parse('2026-06-29T07:00:00Z') / 1000)
+    db.prepare(`
+      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES ('lookahead-task', 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?)
+    `).run(slotS, slotS - 100)
+
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+    vi.mocked(sendPromptToSession).mockReset()
+    vi.useFakeTimers()
+    try {
+      // Tick 1 at 08:59:30 -- 30s BEFORE the slot, inside the 60s look-ahead window.
+      vi.setSystemTime(new Date('2026-06-29T06:59:30Z'))
+      runSweepTick(60000, db)
+
+      // Tick 2 at 09:00:35 -- just AFTER the slot.
+      vi.setSystemTime(new Date('2026-06-29T07:00:35Z'))
+      runSweepTick(60000, db)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    // Exactly ONE send across both ticks (no self-refire).
+    expect(vi.mocked(sendPromptToSession)).toHaveBeenCalledOnce()
+    // next_run advanced past the slot that fired (to the following day's slot).
+    const after = getTask('lookahead-task', db)!
+    expect(after.next_run).toBeGreaterThan(slotS)
+  })
+
   it('OQ-1 B-block: task with target_session is inert -- fires to agent own session', () => {
     // target_session is a B-block column: stored but NEVER branched on in A4 sweep.
     // Proof: if old code ran it would use target_session='custom-override' which is NOT
