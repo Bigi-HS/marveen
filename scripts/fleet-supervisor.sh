@@ -88,6 +88,10 @@ IDLE_NUDGE_TEXT="Please continue your current task."
 # CLI version watch (card b1739f30): how often to compare `claude --version` against the
 # stored baseline. 1-hour default keeps alert latency short without flooding the API.
 CLI_VERSION_CHECK_THROTTLE_SECONDS="${CLI_VERSION_CHECK_THROTTLE_SECONDS:-3600}"
+# Hot-cache auto-refresh (card fedb4b5f Phase 2): how often to SPAWN the refresher.
+# The script self-throttles per agent (mtime, ~4h) and is idempotent, so this only
+# bounds python spawns -- 30 min keeps a freshly-due cache picked up promptly.
+HOT_CACHE_REFRESH_THROTTLE_SECONDS="${HOT_CACHE_REFRESH_THROTTLE_SECONDS:-1800}"
 
 DRY_RUN=0
 ONCE=0
@@ -407,6 +411,30 @@ ensure_hibiki_push() {
   if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: hibiki-daily-push.py --quiet"; return 0; fi
   python3 "$push" --quiet >> "$STORE/hibiki-push.log" 2>&1 \
     || log "hibiki-push: tick invocation failed (non-fatal, retries next window)"
+}
+
+# Hot-cache auto-refresh (card fedb4b5f Phase 2). Regenerates each channel agent's
+# .claude/hot-cache.md from the ledger + kanban in_progress so the SessionStart
+# snapshot can't freeze (the marveen-cache froze 06-22 -> the agent anchored to an
+# 8-day-old task). The script self-throttles per agent (mtime) and is idempotent,
+# so calling it on a bounded tick can never over-write or corrupt; this throttle
+# only bounds how often we spawn python. WSL has no cron, the supervisor is the
+# always-on home for it (mirrors ensure_hibiki_push).
+hot_cache_refresh_due() {     # -> 0 if the throttle window has elapsed, 1 if not
+  local nextf="$STATE_DIR/hot-cache-refresh.next" now next
+  now=$(date +%s)
+  [ -f "$nextf" ] || return 0
+  next=$(cat "$nextf" 2>/dev/null || echo 0); case "$next" in (*[!0-9]*|'') next=0;; esac
+  [ "$now" -ge "$next" ]
+}
+ensure_hot_cache_refresh() {
+  local refresh="$INSTALL_DIR/scripts/hot-cache-refresh.py"
+  [ -f "$refresh" ] || return 0       # not installed -> nothing to do
+  hot_cache_refresh_due || return 0   # throttled this tick
+  echo $(( $(date +%s) + HOT_CACHE_REFRESH_THROTTLE_SECONDS )) > "$STATE_DIR/hot-cache-refresh.next"
+  if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: hot-cache-refresh.py"; return 0; fi
+  python3 "$refresh" >> "$STORE/hot-cache-refresh.log" 2>&1 \
+    || log "hot-cache-refresh: tick invocation failed (non-fatal, retries next window)"
 }
 
 # Delivery-abandonment sentinel consumer (card d37df625). PR #130 writes a
@@ -820,6 +848,8 @@ tick() {
   ensure_idle_nudge_watch
   # 14) CLI VERSION WATCH (pane-detector baseline alert on Claude Code upgrade -- card b1739f30)
   ensure_cli_version_watch
+  # 15) HOT-CACHE AUTO-REFRESH (regenerate per-agent hot-cache.md from ledger+kanban -- card fedb4b5f Phase 2)
+  ensure_hot_cache_refresh
 }
 
 # --- main ------------------------------------------------------------------
