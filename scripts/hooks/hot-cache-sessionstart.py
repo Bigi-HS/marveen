@@ -34,6 +34,7 @@ If the file does not exist or is unreadable, the hook silently no-ops.
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -50,12 +51,46 @@ CONTENT_CHAR_LIMIT = 2000
 # Mini inject limit (startup budget for context-sensitive agents, ~200 tokens).
 MINI_CONTENT_CHAR_LIMIT = 800
 
+# Staleness-guard (card fedb4b5f). A hot-cache.md older than this is NOT injected
+# as a fresh snapshot: a frozen cache (marveen's was 8 days stale on 06-22) made
+# agents anchor to old work and "forget" the current task. Past the threshold we
+# re-frame the content as a stale historical reference and point the agent at the
+# live ledger / kanban instead of letting it read as current.
+STALE_THRESHOLD_SECONDS = 24 * 3600
+
 HEADER = (
     "HOT CACHE (SessionStart). Az aktuális kontextusod: "
     "utolsó feladat, pending munkák, ha újra elindulsz — az azonnali "
     "situational awareness, hogy ne kelljen memória-keresést végezned az elején. "
     "Ez az agent curator által naprakészen tartott pillanatkép."
 )
+
+STALE_HEADER_TEMPLATE = (
+    "HOT CACHE (ELAVULT — {days} napja frissítve). FIGYELEM: ez a pillanatkép "
+    "NEM friss, NE tekintsd az aktuális feladatodnak. A valós aktuális állapotodat "
+    "a ledgerből és a kanban in_progress kártyáidból állapítsd meg. Az alábbi "
+    "tartalom CSAK történeti referencia, lehet hogy már nem érvényes."
+)
+
+
+def _mtime_age_seconds(path: Path, now: float) -> float | None:
+    """Age of the file in seconds (now - mtime), or None if it can't be stat'd.
+    None means 'don't penalize' -- fall back to the fresh framing rather than
+    breaking injection on a stat error."""
+    try:
+        return max(0.0, now - path.stat().st_mtime)
+    except Exception:
+        return None
+
+
+def _build_block(content: str, age_seconds: float | None) -> str:
+    """Pick the fresh vs stale header for the cache content based on its age."""
+    if age_seconds is not None and age_seconds > STALE_THRESHOLD_SECONDS:
+        days = max(1, int(age_seconds // 86400))
+        header = STALE_HEADER_TEMPLATE.format(days=days)
+    else:
+        header = HEADER
+    return f"{header}\n\n{content}"
 
 
 def _agent_id(cwd: str | None) -> str:
@@ -108,7 +143,8 @@ def main():
     if len(content) > char_limit:
         content = content[:char_limit].rstrip() + "\n[truncated]"
 
-    block = f"{HEADER}\n\n{content}"
+    age_seconds = _mtime_age_seconds(cache_path, time.time())
+    block = _build_block(content, age_seconds)
     out = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
