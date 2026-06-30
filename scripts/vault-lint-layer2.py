@@ -177,11 +177,60 @@ def compute_tier_migrations(
 # Module 2: Dedup detector
 # ---------------------------------------------------------------------------
 
+def _extract_identity_key(agent_id: str, content: str) -> str:
+    """Extract identity key from entry for dedup comparison (Card b83cac15).
+
+    Case 1: agent_id differs -> use agent_id (e.g., "marveen" vs "dave")
+    Case 2: agent_id identical but content starts with "NAME:" -> use NAME
+            (e.g., applegate stores executor memories; extract executor name:
+             "blackbeard: ...", "morgan: ...", "roberts: ...")
+
+    Returns: string identity key (e.g., "marveen", "blackbeard", "morgan").
+    """
+    # Case 2: executor-pattern in applegate memory (NAME: prefix)
+    if content and ':' in content:
+        first_word = content.split(':')[0].strip()
+        # Heuristic: if first word looks like an agent name (lowercase, no spaces),
+        # and it's one of known executors, use it.
+        known_executors = {"blackbeard", "morgan", "roberts", "kidd", "rackham", "bonny", "avery", "hibiki", "claudia", "dave", "thor", "forge", "bond", "scout", "devil-advocate"}
+        if first_word.lower() in known_executors:
+            return first_word.lower()
+
+    # Case 1: return agent_id as primary key
+    return agent_id
+
+
+def _identity_key_hard_veto(a_agent_id: str, b_agent_id: str, a_content: str, b_content: str) -> bool:
+    """HARD non-merge veto: if identity keys differ, never merge (Card b83cac15).
+
+    Prevents executor-pattern false positives where multiple agents share
+    identical template structure but represent distinct roles/responsibilities.
+
+    Uses both agent_id (for cross-agent pairs) and content-based identity
+    (for executor-pattern in shared memory like applegate).
+
+    Examples:
+    - agent_id differs: marveen vs dave -> veto
+    - applegate stores: "blackbeard: ..." vs "morgan: ..." -> extract names -> veto
+    - same applegate, same executor: "blackbeard: ..." vs "blackbeard: ..." -> allow
+    """
+    a_key = _extract_identity_key(a_agent_id, a_content)
+    b_key = _extract_identity_key(b_agent_id, b_content)
+    return a_key != b_key
+
+
 def compute_dedup_candidates(
     memories: list,
     jaccard_threshold: float = DEDUP_JACCARD_THRESHOLD,
 ) -> list:
-    """Return dedup candidate pairs within same agent_id+category. SUGGEST only."""
+    """Return dedup candidate pairs within same category. SUGGEST only.
+
+    HARD non-merge guard (Card b83cac15): if agent_ids differ, exclude from
+    candidates entirely (veto at threshold, regardless of Jaccard score).
+
+    Grouping by category allows detection of cross-agent template duplicates
+    (e.g., executor-pattern: blackbeard + morgan both with identical profile).
+    """
     from collections import defaultdict
 
     groups: dict = defaultdict(list)
@@ -190,7 +239,7 @@ def compute_dedup_candidates(
         # M2: skip entries with empty keyword set (avoid false-positive Jaccard=1.0).
         if not kw:
             continue
-        key = (m["agent_id"], m["category"])
+        key = m["category"]  # Group by category only; identity guard filters cross-agent pairs.
         groups[key].append(
             {
                 "id": m["id"],
@@ -198,6 +247,7 @@ def compute_dedup_candidates(
                 "keywords": kw,
                 "keywords_str": m.get("keywords", ""),
                 "content_preview": (m.get("content") or "")[:80],
+                "content_full": m.get("content") or "",  # Full content for identity-key extraction
             }
         )
 
@@ -207,6 +257,11 @@ def compute_dedup_candidates(
         for i in range(n):
             for j in range(i + 1, n):
                 a, b = entries[i], entries[j]
+
+                # Card b83cac15: HARD non-merge veto if identity keys differ.
+                if _identity_key_hard_veto(a["agent_id"], b["agent_id"], a["content_full"], b["content_full"]):
+                    continue
+
                 score = jaccard(a["keywords"], b["keywords"])
                 if score >= jaccard_threshold:
                     candidates.append(
