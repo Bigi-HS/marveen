@@ -119,7 +119,9 @@ interface RawAnalyticsResponse {
 }
 
 function colIndex(headers: Array<{ name: string }>, name: string): number {
-  return headers.findIndex(h => h.name === name)
+  const i = headers.findIndex(h => h.name === name)
+  if (i === -1) throw new Error(`Analytics API response missing expected column "${name}"`)
+  return i
 }
 
 export function parseCtrResponse(raw: unknown): YtCtrRow[] {

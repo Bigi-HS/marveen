@@ -13,7 +13,11 @@ export const TWITCH_SCOPES: readonly string[] = [
   'moderator:read:followers',
 ] as const
 
-/** Optional Twitch scopes, gated behind a separate sub-flag. NOT included in the default consent. */
+/**
+ * Optional Twitch scopes -- gated behind TWITCH_ANALYTICS_GAMES_ENABLED (default OFF, separate from
+ * the main ANALYTICS_OAUTH_ENABLED flag). NOT included in the default Boss consent screen.
+ * Only add to the consent flow if Boss explicitly requests game-level analytics CSV reports.
+ */
 export const TWITCH_OPTIONAL_SCOPES: readonly string[] = [
   'analytics:read:games',
 ] as const

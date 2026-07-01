@@ -12,30 +12,17 @@ vi.mock('../analytics/tokens.js', () => ({
 import { loadGoogleTokenPath, loadTwitchTokenPath } from '../analytics/tokens.js'
 import { pull, type AnalyticsResult } from '../analytics/index.js'
 
-function withEnv(vars: Record<string, string | undefined>, fn: () => Promise<void> | void): Promise<void> | void {
+function withEnv(vars: Record<string, string | undefined>, fn: () => void): void {
   const saved: Record<string, string | undefined> = {}
   for (const [k, v] of Object.entries(vars)) {
     saved[k] = process.env[k]
     if (v === undefined) delete process.env[k]
     else process.env[k] = v
   }
-  try {
-    const r = fn()
-    if (r instanceof Promise) {
-      return r.finally(() => {
-        for (const [k, v] of Object.entries(saved)) {
-          if (v === undefined) delete process.env[k]
-          else process.env[k] = v
-        }
-      })
-    }
-    return r
-  } finally {
-    if (!(fn() instanceof Promise)) {
-      for (const [k, v] of Object.entries(saved)) {
-        if (v === undefined) delete process.env[k]
-        else process.env[k] = v
-      }
+  try { fn() } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
     }
   }
 }

@@ -1,6 +1,7 @@
 // Analytics OAuth orchestrator (card 6498275e).
 // Feature flag ANALYTICS_OAUTH_ENABLED -- default OFF.
 // Flag off OR token null -> returns {status:'disabled'|'not-consented', data:null}, NEVER throws.
+// status:'ok' with live data is wired in the follow-up card after Boss OAuth consent (out of this scaffold).
 
 import { loadGoogleTokenPath, loadTwitchTokenPath } from './tokens.js'
 
