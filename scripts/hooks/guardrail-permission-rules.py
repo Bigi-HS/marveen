@@ -42,7 +42,7 @@ import shlex
 
 # ── helpers (shared with destructive-bash) ───────────────────────────────────
 
-_CMD_SUBST_RE = re.compile(r'\$\(|\)|`')
+_CMD_SUBST_RE = re.compile(r'\$\(|[<>]\(|\)|`')
 
 def _split_subcommands(command):
     """Split on shell sequencing operators + command substitution boundaries."""
@@ -66,7 +66,10 @@ def _command_word(tokens):
             continue
         if '=' in tok and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', tok):
             continue
-        return os.path.basename(tok)
+        # Strip leading ( from subshell context: (curl ...) tokenizes as '(curl'
+        cmd = tok.lstrip('(')
+        if cmd:
+            return os.path.basename(cmd)
     return ''
 
 # Verbs that read their positional argument AS A FILE (not as a string to print).
@@ -197,7 +200,7 @@ def match_interpreter_env_read(command: str) -> bool:
         return False
     if _command_word(tokens) not in _INTERPRETER_CMDS:
         return False
-    # Walk tokens looking for -c or -e flag followed by the code string.
+    # Walk tokens looking for -c/-e flags or <<< (here-string) followed by code.
     i = 1
     while i < len(tokens):
         tok = tokens[i]
@@ -208,6 +211,10 @@ def match_interpreter_env_read(command: str) -> bool:
         elif tok.startswith(('-c', '-e')) and len(tok) > 2:
             code = tok[2:]
             i += 1
+        elif tok == '<<<' and i + 1 < len(tokens):
+            # here-string: `python3 <<< "code"` -- the next token IS the code
+            code = tokens[i + 1]
+            i += 2
         else:
             i += 1
             continue
