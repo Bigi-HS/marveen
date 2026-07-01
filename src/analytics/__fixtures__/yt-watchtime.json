@@ -1,0 +1,16 @@
+{
+  "kind": "youtubeAnalytics#resultTable",
+  "columnHeaders": [
+    {"name": "day", "dataType": "STRING"},
+    {"name": "estimatedMinutesWatched", "dataType": "INTEGER"},
+    {"name": "averageViewDuration", "dataType": "INTEGER"},
+    {"name": "views", "dataType": "INTEGER"}
+  ],
+  "rows": [
+    ["2026-06-24", 3200, 482, 398],
+    ["2026-06-25", 4100, 511, 482],
+    ["2026-06-26", 3850, 497, 465],
+    ["2026-06-27", 2900, 445, 391],
+    ["2026-06-28", 5200, 543, 576]
+  ]
+}

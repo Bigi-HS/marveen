@@ -1,0 +1,13 @@
+{
+  "kind": "youtubeAnalytics#resultTable",
+  "columnHeaders": [
+    {"name": "video", "dataType": "STRING"},
+    {"name": "impressions", "dataType": "INTEGER"},
+    {"name": "impressionsClickThroughRate", "dataType": "FLOAT"}
+  ],
+  "rows": [
+    ["abc123", 12000, 0.0542],
+    ["def456", 8500, 0.0381],
+    ["ghi789", 21000, 0.0671]
+  ]
+}
