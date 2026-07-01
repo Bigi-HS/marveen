@@ -337,11 +337,15 @@ class Card9e465135Tests(unittest.TestCase):
     ALLOWLIST_ALLOW = [
         # Open PR: POST /pulls
         'curl -X POST https://api.github.com/repos/Bigi-HS/marveen/pulls',
-        # Merge PR: PUT /pulls/{n}/merge
-        'curl -X PUT https://api.github.com/repos/Bigi-HS/marveen/pulls/123/merge',
         # Query string after /pulls
         'curl -X POST https://api.github.com/repos/Bigi-HS/marveen/pulls?draft=true',
+        # Edit PR metadata (title/base/state): PUT /pulls/{n} -- NOT a merge, allowed.
+        'curl -X PUT https://api.github.com/repos/Bigi-HS/marveen/pulls/123',
     ]
+    # NOTE: PUT /pulls/{n}/merge USED to be in ALLOWLIST_ALLOW. Card ec7754d7 flips
+    # it to DENY -- the direct GitHub merge endpoint bypasses the server-side gate
+    # (runGateCheck), so merges MUST go through the localhost gate-enforcing proxy
+    # POST /api/github/merge. See CardEc7754d7MergeBypassTests below.
 
     def test_line_continuation_deny(self):
         for c in self.LINE_CONT_DENY:
@@ -587,6 +591,74 @@ class QuoteAwareSplitterTests(unittest.TestCase):
         r = subprocess.run([sys.executable, _HOOK], input=payload,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, f'expected exit 0, got stderr: {r.stderr}')
+
+
+# ── card ec7754d7: block the direct GitHub merge endpoint (gate-bypass close) ──
+class CardEc7754d7MergeBypassTests(unittest.TestCase):
+    """The /api/github/merge server route enforces the approval gate (403 when a
+    required reviewer is missing/blocked on the live head). The curl-guard used to
+    allow the direct GitHub merge call PUT /pulls/{n}/merge as well (it fell under
+    the /pulls allowlist), so an agent could merge straight through GitHub with the
+    PAT and bypass runGateCheck entirely (marveen did exactly this on PR#336).
+
+    Fix: PR-open (POST /pulls) and PR-edit (PUT /pulls/{n}) stay allowed, but the
+    merge endpoint PUT /pulls/{n}/merge is blocked -- merges must go through the
+    localhost gate-enforcing proxy POST /api/github/merge.
+    """
+
+    # The direct merge endpoint -- every reachable form must BLOCK.
+    MERGE_DENY = [
+        'curl -X PUT https://api.github.com/repos/Bigi-HS/marveen/pulls/123/merge',
+        # with a merge_method body/query
+        'curl -X PUT https://api.github.com/repos/Bigi-HS/marveen/pulls/1/merge?merge_method=squash',
+        'curl -X PUT https://api.github.com/repos/Bigi-HS/marveen/pulls/42/merge -d @body.json',
+        # multi-digit / large PR number
+        'curl -X PUT https://api.github.com/repos/Bigi-HS/marveen/pulls/999999/merge',
+        # POST to the merge path (not a real GitHub verb, but block defensively)
+        'curl -X POST https://api.github.com/repos/Bigi-HS/marveen/pulls/7/merge',
+        # line-continuation obfuscation
+        'curl -X PUT \\\n https://api.github.com/repos/Bigi-HS/marveen/pulls/5/merge',
+        # subshell wrap
+        '(curl -X PUT https://api.github.com/repos/Bigi-HS/marveen/pulls/5/merge)',
+        # implicit body, no -X (curl defaults to POST) -> still blocked
+        'curl https://api.github.com/repos/Bigi-HS/marveen/pulls/5/merge -d @m.json',
+    ]
+
+    # Everything that must STAY allowed -- PR-open, PR-edit, update-branch, and the
+    # legitimate localhost merge proxy.
+    MERGE_ALLOW = [
+        'curl -X POST https://api.github.com/repos/Bigi-HS/marveen/pulls',
+        'curl -X POST https://api.github.com/repos/Bigi-HS/marveen/pulls?draft=true',
+        # Edit PR metadata (not a merge).
+        'curl -X PUT https://api.github.com/repos/Bigi-HS/marveen/pulls/123',
+        # update-branch is a rebase of the PR branch, not a merge -> allowed.
+        'curl -X PUT https://api.github.com/repos/Bigi-HS/marveen/pulls/123/update-branch',
+        # Read-only merge-status check (GET) is harmless.
+        'curl https://api.github.com/repos/Bigi-HS/marveen/pulls/123/merge',
+        # The LEGITIMATE path: merge via the localhost gate-enforcing proxy.
+        'curl -X POST http://localhost:3420/api/github/merge -d @merge.json',
+    ]
+
+    def test_merge_endpoint_denied(self):
+        for c in self.MERGE_DENY:
+            with self.subTest(cmd=c):
+                self.assertTrue(guard.match_external_curl(c), f'should DENY: {c!r}')
+
+    def test_non_merge_pulls_ops_allowed(self):
+        for c in self.MERGE_ALLOW:
+            with self.subTest(cmd=c):
+                self.assertFalse(guard.match_external_curl(c), f'should ALLOW: {c!r}')
+
+    def test_classify_end_to_end_blocks_merge(self):
+        payload = {
+            'tool_name': 'Bash',
+            'tool_input': {
+                'command': 'curl -X PUT https://api.github.com/repos/Bigi-HS/marveen/pulls/9/merge',
+            },
+        }
+        denied, name, _ = guard.classify(payload)
+        self.assertTrue(denied)
+        self.assertEqual(name, 'external-curl')
 
 
 if __name__ == '__main__':
