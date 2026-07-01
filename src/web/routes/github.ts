@@ -14,10 +14,29 @@ import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import { openPullRequest, PrRequestError, fetchPrInfo } from '../github-pr.js'
 import { mergePullRequest, MergeRequestError, validateMergeParams } from '../github-merge.js'
-import { runGateCheck } from '../gate-check.js'
+import { runGateCheck, type GithubPrInfo } from '../gate-check.js'
 import { readApprovals, hasActiveOverride, insertPrAuthor } from '../gate-db.js'
 import { getDb } from '../../db.js'
 import type { RouteContext } from './types.js'
+
+// The two network dependencies of the gate-enforced merge -- the live-head PR
+// fetcher and the GitHub merge call -- are injectable so the /api/github/merge
+// gate branch (403 missing/blocked, 409 head-moved) is testable in-process
+// without hitting GitHub. Mirrors gate.ts's __setGatePrFetcher seam. Defaults
+// are the real functions; production behaviour is unchanged.
+let mergePrFetcher: (pr: number) => Promise<GithubPrInfo> = fetchPrInfo
+let mergeRunner: typeof mergePullRequest = mergePullRequest
+export function __setGithubMergeDeps(deps: {
+  fetchPr?: (pr: number) => Promise<GithubPrInfo>
+  merge?: typeof mergePullRequest
+}): void {
+  if (deps.fetchPr) mergePrFetcher = deps.fetchPr
+  if (deps.merge) mergeRunner = deps.merge
+}
+export function __resetGithubMergeDeps(): void {
+  mergePrFetcher = fetchPrInfo
+  mergeRunner = mergePullRequest
+}
 
 export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method, identity } = ctx
@@ -53,7 +72,7 @@ export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
     try {
       const db = getDb()
       gateResult = await runGateCheck(v.pr, {
-        fetchPr: fetchPrInfo,
+        fetchPr: mergePrFetcher,
         readApprovals: (pr, sha) => readApprovals(db, pr, sha),
         hasActiveOverride: (pr, sha) => hasActiveOverride(db, pr, sha),
       })
@@ -86,7 +105,7 @@ export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
     }
 
     try {
-      const result = await mergePullRequest({ pr: v.pr, headSha: v.headSha, mergeMethod: v.mergeMethod })
+      const result = await mergeRunner({ pr: v.pr, headSha: v.headSha, mergeMethod: v.mergeMethod })
       logger.info(
         { caller: identity.agentId, pr: v.pr, sha: result.sha, mergeMethod: v.mergeMethod },
         'merged GitHub PR server-side',
