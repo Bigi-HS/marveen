@@ -54,6 +54,29 @@ export function migrateGateTables(db: Database.Database): void {
       recorded_at  INTEGER NOT NULL
     )
   `)
+
+  // Card 0c166e48: independent pre-gate CI runs (Buster-CI). Append-only and
+  // (pr, head_sha)-scoped, exactly like gate_approvals. The summary columns
+  // (tsc/tests/diff-stat) are advisory audit data; `status` is the load-bearing
+  // gate input. Additive CREATE IF NOT EXISTS, no FK, idempotent on every boot.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gate_ci_runs (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      pr_number   INTEGER NOT NULL,
+      head_sha    TEXT NOT NULL,
+      status      TEXT NOT NULL,
+      tsc_ok      INTEGER,
+      tests_pass  INTEGER,
+      tests_fail  INTEGER,
+      diff_files  INTEGER,
+      insertions  INTEGER,
+      deletions   INTEGER,
+      recorded_by TEXT NOT NULL,
+      recorded_at INTEGER NOT NULL,
+      note        TEXT
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_gate_ci_pr_sha ON gate_ci_runs(pr_number, head_sha)`)
 }
 
 // Record the opening agent for a PR (card ec818352, MG-SEC5). INSERT OR IGNORE
@@ -161,4 +184,93 @@ export function consumeOverride(db: Database.Database, pr: number, sha: string, 
   if (!unconsumed) return 'idempotent'
   db.prepare(`UPDATE gate_overrides SET consumed = 1, consumed_at = ? WHERE id = ?`).run(now, unconsumed.id)
   return 'consumed'
+}
+
+// -- Independent pre-gate CI runs (card 0c166e48) --------------------------
+
+export interface CiRunInput {
+  pr_number: number
+  head_sha: string
+  status: string
+  tsc_ok?: number | null
+  tests_pass?: number | null
+  tests_fail?: number | null
+  diff_files?: number | null
+  insertions?: number | null
+  deletions?: number | null
+  recorded_by: string
+  note?: string | null
+}
+
+export interface GateCiRunRow {
+  id: number
+  pr_number: number
+  head_sha: string
+  status: string
+  tsc_ok: number | null
+  tests_pass: number | null
+  tests_fail: number | null
+  diff_files: number | null
+  insertions: number | null
+  deletions: number | null
+  recorded_by: string
+  recorded_at: number
+  note: string | null
+}
+
+// Append-only INSERT of a CI run. `recorded_at` is always server-stamped by the
+// caller (epoch seconds), never caller-supplied. Summary columns default to null.
+export function insertCiRun(db: Database.Database, input: CiRunInput, now: number): GateCiRunRow {
+  const row: GateCiRunRow = {
+    id: 0,
+    pr_number: input.pr_number,
+    head_sha: input.head_sha,
+    status: input.status,
+    tsc_ok: input.tsc_ok ?? null,
+    tests_pass: input.tests_pass ?? null,
+    tests_fail: input.tests_fail ?? null,
+    diff_files: input.diff_files ?? null,
+    insertions: input.insertions ?? null,
+    deletions: input.deletions ?? null,
+    recorded_by: input.recorded_by,
+    recorded_at: now,
+    note: input.note ?? null,
+  }
+  const info = db
+    .prepare(
+      `INSERT INTO gate_ci_runs
+         (pr_number, head_sha, status, tsc_ok, tests_pass, tests_fail, diff_files, insertions, deletions, recorded_by, recorded_at, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      row.pr_number,
+      row.head_sha,
+      row.status,
+      row.tsc_ok,
+      row.tests_pass,
+      row.tests_fail,
+      row.diff_files,
+      row.insertions,
+      row.deletions,
+      row.recorded_by,
+      row.recorded_at,
+      row.note,
+    )
+  row.id = Number(info.lastInsertRowid)
+  return row
+}
+
+// Return the LATEST CI run for a (pr, head_sha), or null. Latest = newest
+// recorded_at, tie-broken by newest id -- so resolveCiStatus sees latest-wins.
+export function readLatestCiRun(db: Database.Database, pr: number, sha: string): GateCiRunRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, pr_number, head_sha, status, tsc_ok, tests_pass, tests_fail, diff_files, insertions, deletions, recorded_by, recorded_at, note
+         FROM gate_ci_runs
+        WHERE pr_number = ? AND head_sha = ?
+        ORDER BY recorded_at DESC, id DESC
+        LIMIT 1`,
+    )
+    .get(pr, sha) as GateCiRunRow | undefined
+  return row ?? null
 }

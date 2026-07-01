@@ -20,7 +20,10 @@ import {
   isValidSha,
   isValidReviewer,
   isValidVerdict,
+  isValidCiStatus,
   isPositiveInt,
+  isGateCiRequired,
+  resolveCiStatus,
   runGateCheck,
   type GithubPrInfo,
 } from '../gate-check.js'
@@ -31,6 +34,8 @@ import {
   hasActiveOverride,
   consumeOverride,
   readPrAuthor,
+  insertCiRun,
+  readLatestCiRun,
 } from '../gate-db.js'
 import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
 import { fetchPrInfo } from '../github-pr.js'
@@ -41,6 +46,10 @@ let prFetcher: (pr: number) => Promise<GithubPrInfo> = fetchPrInfo
 export function __setGatePrFetcher(fn: (pr: number) => Promise<GithubPrInfo>): void {
   prFetcher = fn
 }
+
+// The independent CI runner identity (card 0c166e48). Only this agent's token
+// (or an admin/operator relay) may post a CI run, so the author cannot self-post.
+const CI_RUNNER = 'buster'
 
 function nowEpoch(): number {
   return Math.floor(Date.now() / 1000)
@@ -143,6 +152,67 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  // Card 0c166e48 -- independent pre-gate CI post (Buster-CI). IDENTITY-BOUND:
+  // only Buster's own token may post a CI run (admin/operator tokens may relay).
+  // This is the load-bearing property: a PR author cannot forge their own CI
+  // PASS, so the CI signal is genuinely independent of the author.
+  if (path === '/api/gate/ci' && method === 'POST') {
+    const body = await parseJsonBody(req)
+    if (!body) {
+      json(res, { error: 'invalid JSON body' }, 400)
+      return true
+    }
+    const { pr_number, head_sha, status } = body
+    if (!isPositiveInt(pr_number)) {
+      json(res, { error: 'pr_number must be a positive integer' }, 400)
+      return true
+    }
+    if (!isValidSha(head_sha)) {
+      json(res, { error: 'head_sha must be exactly 40 hex characters' }, 400)
+      return true
+    }
+    if (!isValidCiStatus(status)) {
+      json(res, { error: "status must be one of 'pass', 'fail'" }, 400)
+      return true
+    }
+    // Identity binding: a per-agent token may only post as the CI runner
+    // (buster). Admin/operator tokens may relay. Absent identity (unit tests
+    // without auth middleware) is treated as admin.
+    const { identity } = ctx
+    if (identity && identity.source !== 'operator' && !hasScope(identity.scopes, ADMIN_SCOPE)) {
+      if (identity.agentId !== CI_RUNNER) {
+        logger.warn(
+          { tokenAgent: identity.agentId },
+          'Gate CI post binding: only the CI runner (buster) may post (rejected)',
+        )
+        json(res, { error: `token identity (${identity.agentId}) may not post a CI run; only ${CI_RUNNER} may` }, 403)
+        return true
+      }
+    }
+    const num = (v: unknown): number | null => (typeof v === 'number' && Number.isInteger(v) ? v : null)
+    const recordedBy = typeof body['recorded_by'] === 'string' ? (body['recorded_by'] as string) : (identity?.agentId ?? CI_RUNNER)
+    const note = typeof body['note'] === 'string' ? (body['note'] as string) : null
+    const row = insertCiRun(
+      getDb(),
+      {
+        pr_number,
+        head_sha,
+        status,
+        tsc_ok: num(body['tsc_ok']),
+        tests_pass: num(body['tests_pass']),
+        tests_fail: num(body['tests_fail']),
+        diff_files: num(body['diff_files']),
+        insertions: num(body['insertions']),
+        deletions: num(body['deletions']),
+        recorded_by: recordedBy,
+        note,
+      },
+      nowEpoch(),
+    )
+    json(res, row, 201)
+    return true
+  }
+
   // MG-AC3 / MG-AC6 -- preflight gate check against the live head.sha.
   if (path === '/api/gate/check' && method === 'GET') {
     const prRaw = url.searchParams.get('pr')
@@ -157,6 +227,10 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
         fetchPr: prFetcher,
         readApprovals: (p, sha) => readApprovals(db, p, sha),
         hasActiveOverride: (p, sha) => hasActiveOverride(db, p, sha),
+        // Card 0c166e48: independent CI status for the live head, gated by the
+        // GATE_CI_REQUIRED rollout flag (default off = observability only).
+        ciStatus: (p, sha) => resolveCiStatus(readLatestCiRun(db, p, sha)),
+        ciRequired: isGateCiRequired(),
       })
       json(res, result)
     } catch (err) {
