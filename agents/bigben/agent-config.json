@@ -1,6 +1,6 @@
 {
   "model": "claude-sonnet-4-6",
-  "securityProfile": "developer-junior",
+  "securityProfile": "default",
   "displayName": "Big Ben",
   "team": {
     "role": "member",
