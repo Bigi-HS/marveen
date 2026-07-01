@@ -40,6 +40,12 @@ function runHook(source: string): string | null {
   const out = execFileSync('python3', [HOOK], {
     input: JSON.stringify({ source, cwd: TEST_AGENT_DIR }),
     encoding: 'utf-8',
+    // Phase 1 tests the staleness-guard on a controlled backdated file. Phase 2b
+    // (card 6485f301) would regenerate that file fresh and defeat the guard by
+    // design, so disable the SessionStart refresh here to test the guard in
+    // isolation. The refresh path has its own coverage in
+    // hot-cache-sessionstart-refresh.test.ts.
+    env: { ...process.env, HOT_CACHE_SESSIONSTART_REFRESH: '0' },
   })
   const trimmed = out.trim()
   if (!trimmed) return null
@@ -119,7 +125,14 @@ describe('hot-cache-sessionstart.py staleness-guard (card fedb4b5f)', () => {
 describe('hot-cache-sessionstart.py robustness (never breaks SessionStart)', () => {
   function exitCode(stdin: string): number {
     try {
-      execFileSync('python3', [HOOK], { input: stdin, encoding: 'utf-8' })
+      // Disable the Phase 2b refresh: an empty/`{}` payload resolves to the main
+      // agent on the startup path, which would otherwise trigger a real cache
+      // write. These tests only assert the hook never crashes on bad input.
+      execFileSync('python3', [HOOK], {
+        input: stdin,
+        encoding: 'utf-8',
+        env: { ...process.env, HOT_CACHE_SESSIONSTART_REFRESH: '0' },
+      })
       return 0
     } catch (err: any) {
       return err.status ?? 1

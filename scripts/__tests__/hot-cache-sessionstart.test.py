@@ -8,6 +8,7 @@ Policy:
   - no hot-cache file: no-op always
 """
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -32,7 +33,14 @@ def run_hook(source: str, agent_id: str, hot_cache_content: str | None = "Test h
         cache_path.unlink()
 
     payload = json.dumps({"cwd": cwd, "source": source})
-    result = subprocess.run([sys.executable, str(HOOK)], input=payload, capture_output=True, text=True)
+    # Test the inject-policy in isolation: disable the Phase 2b SessionStart
+    # refresh (card 6485f301) so the hook reads the fixture verbatim instead of
+    # regenerating it from the live DBs (which would also clobber real caches).
+    # Refresh has its own coverage in hot-cache-sessionstart-refresh.test.ts.
+    env = {**os.environ, "HOT_CACHE_SESSIONSTART_REFRESH": "0"}
+    result = subprocess.run(
+        [sys.executable, str(HOOK)], input=payload, capture_output=True, text=True, env=env
+    )
 
     # Cleanup
     if hot_cache_content is not None and cache_path.exists():
