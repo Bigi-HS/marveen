@@ -22,7 +22,7 @@ import { Readable } from 'node:stream'
 import { rmSync } from 'node:fs'
 import { initDatabase, getDb } from '../db.js'
 import { tryHandleGithub, __setGithubMergeDeps, __resetGithubMergeDeps } from '../web/routes/github.js'
-import { insertApproval, insertOverride } from '../web/gate-db.js'
+import { insertApproval, insertOverride, insertCiRun } from '../web/gate-db.js'
 import type { GithubPrInfo } from '../web/gate-check.js'
 import type { AgentIdentity } from '../web/agent-token-registry.js'
 
@@ -194,6 +194,81 @@ describe('POST /api/github/merge -- same-final-head gate enforcement (card 194f4
 
     expect(r.status).toBe(403)
     expect(r.body.gate.override_active).toBe(false)
+    expect(merge.calls).toHaveLength(0)
+  })
+})
+
+// Card 0c166e48: the merge route inherits the independent-CI requirement via
+// runGateCheck. With GATE_CI_REQUIRED on, an all-seats-approved PR still cannot
+// merge until a fresh Buster-CI PASS exists on the live head -- the strongest
+// point of enforcement (merge time, not just the advisory check endpoint).
+describe('POST /api/github/merge -- independent CI enforcement (card 0c166e48)', () => {
+  let savedFlag: string | undefined
+  beforeEach(() => {
+    savedFlag = process.env.GATE_CI_REQUIRED
+    process.env.GATE_CI_REQUIRED = '1'
+  })
+  afterEach(() => {
+    if (savedFlag === undefined) delete process.env.GATE_CI_REQUIRED
+    else process.env.GATE_CI_REQUIRED = savedFlag
+  })
+
+  const postCi = (sha: string, status: string) =>
+    insertCiRun(getDb(), { pr_number: PR, head_sha: sha, status, recorded_by: 'buster' }, 1500)
+
+  it('flag ON: all seats approved but NO CI bundle -> 403, merge NOT called', async () => {
+    seed('thor', 'approved', SHA_A)
+    seed('dave', 'approved', SHA_A)
+    const merge = mergeSpy()
+    wire({ liveHead: SHA_A, merge })
+
+    const r = await callMerge({ pr_number: PR, head_sha: SHA_A, merge_method: 'merge' })
+
+    expect(r.status).toBe(403)
+    expect(r.body.gate.ci_required).toBe(true)
+    expect(r.body.gate.ci_status).toBe('none')
+    expect(merge.calls).toHaveLength(0)
+  })
+
+  it('flag ON: seats approved + Buster CI PASS on the live head -> merges once', async () => {
+    seed('thor', 'approved', SHA_A)
+    seed('dave', 'approved', SHA_A)
+    postCi(SHA_A, 'pass')
+    const merge = mergeSpy()
+    wire({ liveHead: SHA_A, merge })
+
+    const r = await callMerge({ pr_number: PR, head_sha: SHA_A, merge_method: 'merge' })
+
+    expect(r.status).toBe(200)
+    expect(merge.calls).toHaveLength(1)
+  })
+
+  it('flag ON: CI PASS bound to the OLD head does NOT clear the moved head -> 403', async () => {
+    // Approvals + CI on SHA_A, but the branch moved to SHA_B (nothing re-run).
+    seed('thor', 'approved', SHA_B)
+    seed('dave', 'approved', SHA_B)
+    postCi(SHA_A, 'pass') // stale CI, bound to the old sha
+    const merge = mergeSpy()
+    wire({ liveHead: SHA_B, merge })
+
+    const r = await callMerge({ pr_number: PR, head_sha: SHA_B, merge_method: 'merge' })
+
+    expect(r.status).toBe(403)
+    expect(r.body.gate.ci_status).toBe('none') // stale bundle not counted on the live head
+    expect(merge.calls).toHaveLength(0)
+  })
+
+  it('flag ON: a Buster CI FAIL on the live head blocks the merge -> 403', async () => {
+    seed('thor', 'approved', SHA_A)
+    seed('dave', 'approved', SHA_A)
+    postCi(SHA_A, 'fail')
+    const merge = mergeSpy()
+    wire({ liveHead: SHA_A, merge })
+
+    const r = await callMerge({ pr_number: PR, head_sha: SHA_A, merge_method: 'merge' })
+
+    expect(r.status).toBe(403)
+    expect(r.body.gate.ci_status).toBe('fail')
     expect(merge.calls).toHaveLength(0)
   })
 })

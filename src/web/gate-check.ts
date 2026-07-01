@@ -35,6 +35,47 @@ export function isPositiveInt(n: unknown): n is number {
   return typeof n === 'number' && Number.isInteger(n) && n > 0
 }
 
+// ---------------------------------------------------------------------------
+// Pre-gate independent CI (Buster-CI) -- card 0c166e48 (D-2/T-2 convergence).
+//
+// The gate trusts the author's own tsc+vitest output; a lying author or a
+// falsely-green fixture slips through and Thor cannot re-run the suite. The fix
+// is an INDEPENDENT run: Buster checks the PR head out clean, runs tsc+tests,
+// and posts a (pr, head_sha)-scoped PASS/FAIL bundle. The gate, when enforcement
+// is enabled, requires a fresh CI PASS in addition to the reviewer seats. The
+// bundle is bound to the head.sha, so a rebased head loses its CI PASS exactly
+// like it loses its approvals (same-head invariant, reused).
+// ---------------------------------------------------------------------------
+
+// The two statuses a CI runner may POST. `none` is DERIVED (no run for this sha)
+// and is never a valid posted value.
+export const CI_STATUSES = ['pass', 'fail'] as const
+export type PostableCiStatus = (typeof CI_STATUSES)[number]
+export type CiStatus = PostableCiStatus | 'none'
+
+export function isValidCiStatus(s: unknown): s is PostableCiStatus {
+  return typeof s === 'string' && (CI_STATUSES as readonly string[]).includes(s)
+}
+
+// Resolve the gate-relevant CI status from the LATEST run for a (pr, sha).
+// latest-run-wins: a re-run (e.g. flaky infra) can flip a sha's status, but the
+// same sha is the same code so a genuine failure re-runs to fail. Any status
+// that is not an explicit `pass` is treated as fail (fail-safe); a missing run
+// is `none`.
+export function resolveCiStatus(latest: { status: string } | null | undefined): CiStatus {
+  if (!latest) return 'none'
+  return latest.status === 'pass' ? 'pass' : 'fail'
+}
+
+// Safe-rollout flag. Enforcement is OFF by default so shipping this code (and
+// the PR that adds it) cannot self-lock before a Buster runner exists: with the
+// flag off the CI status is reported for observability but does not affect pass.
+// Flip to enforce = separate Boss-GO.
+export function isGateCiRequired(env: Record<string, string | undefined> = process.env): boolean {
+  const v = env.GATE_CI_REQUIRED
+  return v === '1' || v === 'true'
+}
+
 // MG-AC4 -- security-PR detection. A PR requires Chad's approval if its diff
 // touches any security-sensitive path. The patterns are matched against the
 // GitHub `filename` field (a repo-relative POSIX path). Conservative by design:
@@ -161,6 +202,12 @@ export interface GateCheckDeps {
   fetchPr: (pr: number) => Promise<GithubPrInfo>
   readApprovals: (pr: number, sha: string) => ApprovalRow[]
   hasActiveOverride: (pr: number, sha: string) => boolean
+  // Independent Buster-CI status for the CURRENT (pr, sha). Optional so existing
+  // callers keep their exact behaviour: omitted -> `none`, never enforced.
+  ciStatus?: (pr: number, sha: string) => CiStatus
+  // Whether a CI PASS is required for the gate to pass (env GATE_CI_REQUIRED).
+  // Default false -> observability only.
+  ciRequired?: boolean
 }
 
 export interface GateCheckResult {
@@ -172,6 +219,11 @@ export interface GateCheckResult {
   missing: string[]
   pass: boolean
   override_active: boolean
+  // Independent-CI surface (card 0c166e48). ci_status is always reported;
+  // ci_required reflects the rollout flag; ci_pass is the derived gate input.
+  ci_status: CiStatus
+  ci_required: boolean
+  ci_pass: boolean
 }
 
 // MG-AC3 / MG-AC6 -- the gate check. Always evaluates against the CURRENT
@@ -185,6 +237,17 @@ export async function runGateCheck(pr: number, deps: GateCheckDeps): Promise<Gat
   const required = requiredReviewers(securityTouched)
   const evaluation = evaluateApprovals(deps.readApprovals(pr, headSha), required)
   const overrideActive = deps.hasActiveOverride(pr, headSha)
+
+  // Independent Buster-CI (card 0c166e48). ci_status is bound to the live head
+  // (same-head invariant): a stale bundle for an old sha is simply not found.
+  // When enforcement is on, a fresh CI PASS is required IN ADDITION to the
+  // reviewer seats; CI can never substitute for a missing seat. A Boss override
+  // forces pass regardless (emergency path), same as for the reviewer gate.
+  const ciStatus = deps.ciStatus ? deps.ciStatus(pr, headSha) : 'none'
+  const ciPass = ciStatus === 'pass'
+  const ciRequired = deps.ciRequired ?? false
+  const ciSatisfied = !ciRequired || ciPass
+
   return {
     pr_number: pr,
     head_sha: headSha,
@@ -192,7 +255,10 @@ export async function runGateCheck(pr: number, deps: GateCheckDeps): Promise<Gat
     approved: evaluation.approved,
     blocked: evaluation.blocked,
     missing: evaluation.missing,
-    pass: overrideActive ? true : evaluation.pass,
+    pass: overrideActive ? true : evaluation.pass && ciSatisfied,
     override_active: overrideActive,
+    ci_status: ciStatus,
+    ci_required: ciRequired,
+    ci_pass: ciPass,
   }
 }

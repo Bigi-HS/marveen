@@ -14,8 +14,8 @@ import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import { openPullRequest, PrRequestError, fetchPrInfo } from '../github-pr.js'
 import { mergePullRequest, MergeRequestError, validateMergeParams } from '../github-merge.js'
-import { runGateCheck, type GithubPrInfo } from '../gate-check.js'
-import { readApprovals, hasActiveOverride, insertPrAuthor } from '../gate-db.js'
+import { runGateCheck, resolveCiStatus, isGateCiRequired, type GithubPrInfo } from '../gate-check.js'
+import { readApprovals, hasActiveOverride, insertPrAuthor, readLatestCiRun } from '../gate-db.js'
 import { getDb } from '../../db.js'
 import type { RouteContext } from './types.js'
 
@@ -75,6 +75,11 @@ export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
         fetchPr: mergePrFetcher,
         readApprovals: (pr, sha) => readApprovals(db, pr, sha),
         hasActiveOverride: (pr, sha) => hasActiveOverride(db, pr, sha),
+        // Card 0c166e48: merge-time inherits the independent-CI requirement, so a
+        // required-and-missing CI PASS blocks the merge exactly as it blocks
+        // /api/gate/check. Gated by GATE_CI_REQUIRED (default off).
+        ciStatus: (pr, sha) => resolveCiStatus(readLatestCiRun(db, pr, sha)),
+        ciRequired: isGateCiRequired(),
       })
     } catch (err) {
       logger.warn({ caller: identity.agentId, pr: v.pr, err }, 'GitHub merge: gate check fetch failed')
