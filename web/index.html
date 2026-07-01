@@ -553,66 +553,6 @@
         </div>
       </div>
 
-      <!-- connectors.hu cross-promo banner -->
-      <div class="cxhu-banner" id="cxhuBanner">
-        <div class="cxhu-banner-inner">
-          <div class="cxhu-banner-logo">
-            <svg width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
-              <rect width="28" height="28" rx="7" fill="#00977c"/>
-              <path d="M8 14c0-3.314 2.686-6 6-6s6 2.686 6 6" stroke="#fff" stroke-width="2" stroke-linecap="round" fill="none"/>
-              <circle cx="14" cy="19" r="2.5" fill="#59e9ce"/>
-              <circle cx="8" cy="14" r="1.5" fill="#fff" opacity=".7"/>
-              <circle cx="20" cy="14" r="1.5" fill="#fff" opacity=".7"/>
-            </svg>
-          </div>
-          <div class="cxhu-banner-text">
-            <span class="cxhu-banner-headline">connectors.hu, egy MCP mind fölött</span>
-            <span class="cxhu-banner-sub">NAV, Billingo, Wise, fal.ai: egyetlen MCP-ből, vagy token-hatékony CLI-vel. Magyar fókusz, nemzetközi lefedettség.</span>
-          </div>
-          <!-- install flow: states swapped by JS -->
-          <div class="cxhu-banner-action" id="cxhuAction">
-            <div class="cxhu-state" id="cxhuStateLoading">
-              <span class="cxhu-spinner" aria-label="Betöltés..."></span>
-            </div>
-            <div class="cxhu-state" id="cxhuStateDone" hidden>
-              <span class="cxhu-done-badge">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                connectors.hu CLI telepítve
-              </span>
-            </div>
-            <div class="cxhu-state" id="cxhuStateInstall" hidden>
-              <button class="cxhu-banner-cta" id="cxhuInstallBtn">Telepítés</button>
-              <a class="cxhu-link-sm" href="https://connectors.hu" target="_blank" rel="noopener noreferrer">Mi ez?</a>
-            </div>
-            <div class="cxhu-state" id="cxhuStateInstalling" hidden>
-              <span class="cxhu-spinner"></span>
-              <span class="cxhu-state-label">Telepítés folyamatban...</span>
-            </div>
-            <div class="cxhu-state cxhu-state--token" id="cxhuStateToken" hidden>
-              <span class="cxhu-done-badge">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                CLI telepítve
-              </span>
-              <input class="cxhu-token-input" id="cxhuTokenInput" type="password" placeholder="connectors.hu token (dashboardról)" autocomplete="off" spellcheck="false">
-              <button class="cxhu-banner-cta" id="cxhuConfigureBtn">Mentés és szinkron</button>
-            </div>
-            <div class="cxhu-state" id="cxhuStateConfiguring" hidden>
-              <span class="cxhu-spinner"></span>
-              <span class="cxhu-state-label">Szinkronizálás...</span>
-            </div>
-            <div class="cxhu-state" id="cxhuStateError" hidden>
-              <span class="cxhu-error-msg" id="cxhuErrorMsg"></span>
-              <button class="cxhu-banner-cta cxhu-retry-btn" id="cxhuRetryBtn">Újra</button>
-            </div>
-          </div>
-          <button class="cxhu-banner-close" id="cxhuBannerClose" aria-label="Bezárás" title="Bezárás">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-              <line x1="2" y1="2" x2="12" y2="12"/><line x1="12" y1="2" x2="2" y2="12"/>
-            </svg>
-          </button>
-        </div>
-      </div>
-
       <!-- Connector tabs -->
       <div class="connector-tabs">
         <button class="connector-tab active" data-ctab="installed">Telepített</button>
