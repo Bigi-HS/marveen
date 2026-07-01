@@ -10,7 +10,8 @@ On a match:
   - Returns additionalContext warning so the agent is aware the output is suspect
   - Never blocks (exit 0): the tool already ran; we can't un-run it, only warn
 
-Fail-open: any parse error or exception -> exit 0 silently.
+Fail-open: any parse error or exception -> exit 0; exceptions are audited to
+aidefence.log so a silently-crashed scanner is distinguishable from "no hits".
 Matcher in settings.json PostToolUse: mcp__
 """
 import sys
@@ -100,6 +101,7 @@ def main() -> None:
     try:
         payload = json.load(sys.stdin)
     except Exception:
+        _audit("<parse-fail>", ["exception:json-decode"])
         sys.exit(0)
 
     tool_name = payload.get("tool_name") or ""
@@ -111,8 +113,12 @@ def main() -> None:
     if tool_response is None:
         sys.exit(0)
 
-    text = _flatten(tool_response)
-    hits = _scan(text)
+    try:
+        text = _flatten(tool_response)
+        hits = _scan(text)
+    except Exception as exc:
+        _audit(tool_name, [f"exception:scan-error:{type(exc).__name__}"])
+        sys.exit(0)
 
     if not hits:
         sys.exit(0)

@@ -136,6 +136,23 @@ class PayloadTests(unittest.TestCase):
         r = self._run(raw="{ broken json")
         self.assertEqual(r.returncode, 0)
 
+    def test_malformed_stdin_audited(self):
+        # Fail-open path must be auditable: a crashed scanner != "no hits"
+        log = os.path.join(
+            os.path.dirname(os.path.dirname(_HERE)), "store", "aidefence.log"
+        )
+        before = 0
+        if os.path.exists(log):
+            with open(log) as f:
+                before = sum(1 for _ in f)
+        self._run(raw="{ broken json")
+        if not os.path.exists(log):
+            return  # store/ not writable in this env -- skip
+        with open(log) as f:
+            lines = f.readlines()
+        self.assertGreater(len(lines), before, "aidefence.log should have grown")
+        self.assertTrue(any("<parse-fail>" in ln for ln in lines[before:]))
+
     def test_empty_stdin_exit_0(self):
         r = self._run(raw="")
         self.assertEqual(r.returncode, 0)
