@@ -45,20 +45,65 @@ import shlex
 _CMD_SUBST_RE = re.compile(r'\$\(|[<>]\(|\)|`')
 
 def _split_subcommands(command):
-    """Split on shell sequencing operators + command substitution boundaries."""
-    # bash treats \<newline> as a no-op whitespace joiner (line continuation).
-    # Without this, a trailing \ before \n leaves a dangling escape that makes
-    # shlex raise ValueError -> the piece is silently skipped, bypassing URL
-    # and filename detection in R2/R3 (card 9e465135).
+    """Split on shell sequencing operators + command substitution boundaries.
+
+    Quote-aware: | ; && || \\n are only treated as separators OUTSIDE single-
+    or double-quoted strings.  A bare regex split on | would cut inside quoted
+    args (e.g. grep "foo|bar") and produce unclosed-quote fragments that make
+    shlex raise ValueError -- now that ValueError is fail-closed (card 295ebfcc),
+    those fragments would cause spurious blocks.  Quote-aware split avoids that.
+
+    bash treats \\<newline> as a no-op whitespace joiner (line continuation).
+    Without this, a trailing \\ before \\n leaves a dangling escape that makes
+    shlex raise ValueError -> the piece is silently skipped, bypassing URL
+    and filename detection in R2/R3 (card 9e465135).
+    """
     command = re.sub(r'\\\n[ \t]*', ' ', command)
     normalized = _CMD_SUBST_RE.sub(';', command)
-    return re.split(r'(?:&&|\|\||[;|\n])', normalized)
+    parts: list[str] = []
+    buf: list[str] = []
+    in_sq = False  # inside '...'
+    in_dq = False  # inside "..."
+    i = 0
+    n = len(normalized)
+    while i < n:
+        ch = normalized[i]
+        if ch == "'" and not in_dq:
+            in_sq = not in_sq
+            buf.append(ch)
+        elif ch == '"' and not in_sq:
+            in_dq = not in_dq
+            buf.append(ch)
+        elif not in_sq and not in_dq:
+            if ch in (';', '\n'):
+                parts.append(''.join(buf)); buf = []
+            elif ch == '|':
+                # || (logical-OR) -> skip second |, split once
+                if i + 1 < n and normalized[i + 1] == '|':
+                    i += 1
+                parts.append(''.join(buf)); buf = []
+            elif ch == '&' and i + 1 < n and normalized[i + 1] == '&':
+                # && (logical-AND) -> skip second &, split once
+                i += 1
+                parts.append(''.join(buf)); buf = []
+            else:
+                buf.append(ch)
+        else:
+            buf.append(ch)
+        i += 1
+    parts.append(''.join(buf))
+    return parts
+
+# Sentinel returned by _tokenize on shlex ValueError (malformed/obfuscated shell
+# syntax).  Callers MUST treat this as DENY (fail-closed): if we cannot parse a
+# piece we cannot prove it is safe (card 295ebfcc).
+_PARSE_FAIL = object()
 
 def _tokenize(piece):
     try:
         return shlex.split(piece, comments=False, posix=True)
     except ValueError:
-        return None
+        return _PARSE_FAIL  # fail-closed: unparseable piece -> callers block
 
 def _command_word(tokens):
     for tok in tokens:
@@ -152,6 +197,14 @@ def match_env_file_print(command: str) -> bool:
     """
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
+        if tokens is _PARSE_FAIL:
+            # Targeted fail-closed: _CMD_SUBST_RE + heredocs can produce
+            # malformed fragments in legitimate commands; only block when the
+            # unparseable piece ALSO contains the specific threat pattern
+            # (a .env filename), so we don't false-positive on git commits etc.
+            if _ENV_FILE_RE.search(piece):
+                return True
+            continue
         if not tokens:
             continue
         if _command_word(tokens) not in _FILE_READ_VERBS:
@@ -196,6 +249,8 @@ def match_interpreter_env_read(command: str) -> bool:
     Script-file invocations (python3 script.py) are not inspected because
     we cannot read the file contents statically."""
     tokens = _tokenize(command)
+    if tokens is _PARSE_FAIL:
+        return True  # fail-closed: unparseable interpreter command -> block
     if not tokens:
         return False
     if _command_word(tokens) not in _INTERPRETER_CMDS:
@@ -265,6 +320,13 @@ def match_external_curl(command: str) -> bool:
     """
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
+        if tokens is _PARSE_FAIL:
+            # Targeted fail-closed: only block when the unparseable piece also
+            # contains 'curl' as a substring, so we don't false-positive on
+            # heredoc-bearing git commits or other complex legitimate commands.
+            if re.search(r'\bcurl\b', piece):
+                return True
+            continue
         if not tokens:
             continue
         if _command_word(tokens) != 'curl':
