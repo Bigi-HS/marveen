@@ -6,10 +6,12 @@
     {"name": "estimatedMinutesWatched", "dataType": "INTEGER"}
   ],
   "rows": [
-    ["BROWSE_FEATURES", 4200, 18900],
-    ["YT_SEARCH", 3100, 14000],
-    ["SUGGESTED_VIDEOS", 2800, 12600],
-    ["EXT_URL", 1200, 5400],
-    ["NO_LINK_OTHER", 700, 3150]
+    ["SUBSCRIBER",    4200, 18900],
+    ["YT_SEARCH",     3100, 14000],
+    ["RELATED_VIDEO", 2800, 12600],
+    ["EXT_URL",       1200,  5400],
+    ["YT_CHANNEL",     900,  4050],
+    ["END_SCREEN",     650,  2925],
+    ["NO_LINK_OTHER",  700,  3150]
   ]
 }

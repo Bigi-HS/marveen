@@ -43,14 +43,15 @@ export interface YtWatchtimeRow {
 // ── Traffic source bucket map ─────────────────────────────────────────────────
 // Maps the insightTrafficSourceType enum values the Analytics API returns to the
 // 4 buckets the youtube-full audit method uses (browse/suggested/search/external).
+// Source: developers.google.com/youtube/analytics/dimensions (official API enum).
+// NOTE: BROWSE_FEATURES and SUGGESTED_VIDEOS are YouTube Studio UI labels only --
+// the API never returns them; removed to avoid false-green fixture tests.
 const TRAFFIC_BUCKET_MAP: Record<string, TrafficBucket> = {
-  BROWSE_FEATURES:   'browse',
-  YT_CHANNEL:        'browse',
-  SUGGESTED_VIDEOS:  'suggested',
-  RELATED_VIDEO:     'suggested',
-  END_SCREEN:        'suggested',
+  SUBSCRIBER:        'browse',    // homepage/subscriptions feed
+  YT_CHANNEL:        'browse',    // channel page (intentional: browse family)
+  RELATED_VIDEO:     'suggested', // suggested videos panel
+  END_SCREEN:        'suggested', // end screen cards (intentional: suggested family)
   YT_SEARCH:         'search',
-  SUBSCRIBER:        'browse',
   EXT_URL:           'external',
   SHORTS:            'other',
   PLAYLIST:          'other',

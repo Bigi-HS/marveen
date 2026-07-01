@@ -129,36 +129,52 @@ describe('parseTrafficResponse', () => {
     }
   })
 
-  it('maps BROWSE_FEATURES to browse bucket', () => {
+  it('maps SUBSCRIBER to browse bucket (real API enum for homepage/subscriptions feed)', () => {
     const raw = loadFixture('yt-traffic.json')
     const rows = parseTrafficResponse(raw) as YtTrafficBucket[]
-    const browse = rows.find(r => r.bucket === 'browse')
+    const browse = rows.find(r => r.sourceType === 'SUBSCRIBER')
     expect(browse).toBeDefined()
-    expect(browse!.sourceType).toBe('BROWSE_FEATURES')
+    expect(browse!.bucket).toBe('browse')
+  })
+
+  it('maps YT_CHANNEL to browse bucket', () => {
+    const raw = loadFixture('yt-traffic.json')
+    const rows = parseTrafficResponse(raw) as YtTrafficBucket[]
+    const ch = rows.find(r => r.sourceType === 'YT_CHANNEL')
+    expect(ch).toBeDefined()
+    expect(ch!.bucket).toBe('browse')
   })
 
   it('maps YT_SEARCH to search bucket', () => {
     const raw = loadFixture('yt-traffic.json')
     const rows = parseTrafficResponse(raw) as YtTrafficBucket[]
-    const search = rows.find(r => r.bucket === 'search')
+    const search = rows.find(r => r.sourceType === 'YT_SEARCH')
     expect(search).toBeDefined()
-    expect(search!.sourceType).toBe('YT_SEARCH')
+    expect(search!.bucket).toBe('search')
   })
 
-  it('maps SUGGESTED_VIDEOS to suggested bucket', () => {
+  it('maps RELATED_VIDEO to suggested bucket (real API enum, not SUGGESTED_VIDEOS UI label)', () => {
     const raw = loadFixture('yt-traffic.json')
     const rows = parseTrafficResponse(raw) as YtTrafficBucket[]
-    const suggested = rows.find(r => r.bucket === 'suggested')
+    const suggested = rows.find(r => r.sourceType === 'RELATED_VIDEO')
     expect(suggested).toBeDefined()
-    expect(suggested!.sourceType).toBe('SUGGESTED_VIDEOS')
+    expect(suggested!.bucket).toBe('suggested')
+  })
+
+  it('maps END_SCREEN to suggested bucket', () => {
+    const raw = loadFixture('yt-traffic.json')
+    const rows = parseTrafficResponse(raw) as YtTrafficBucket[]
+    const es = rows.find(r => r.sourceType === 'END_SCREEN')
+    expect(es).toBeDefined()
+    expect(es!.bucket).toBe('suggested')
   })
 
   it('maps EXT_URL to external bucket', () => {
     const raw = loadFixture('yt-traffic.json')
     const rows = parseTrafficResponse(raw) as YtTrafficBucket[]
-    const ext = rows.find(r => r.bucket === 'external')
+    const ext = rows.find(r => r.sourceType === 'EXT_URL')
     expect(ext).toBeDefined()
-    expect(ext!.sourceType).toBe('EXT_URL')
+    expect(ext!.bucket).toBe('external')
   })
 
   it('maps unmapped sources to other bucket', () => {
@@ -167,6 +183,13 @@ describe('parseTrafficResponse', () => {
     const others = rows.filter(r => r.bucket === 'other')
     expect(others.length).toBeGreaterThanOrEqual(1)
     expect(others.some(r => r.sourceType === 'NO_LINK_OTHER')).toBe(true)
+  })
+
+  it('does NOT contain phantom UI labels BROWSE_FEATURES or SUGGESTED_VIDEOS in fixture', () => {
+    const raw = loadFixture('yt-traffic.json')
+    const rows = parseTrafficResponse(raw) as YtTrafficBucket[]
+    expect(rows.every(r => r.sourceType !== 'BROWSE_FEATURES')).toBe(true)
+    expect(rows.every(r => r.sourceType !== 'SUGGESTED_VIDEOS')).toBe(true)
   })
 })
 
