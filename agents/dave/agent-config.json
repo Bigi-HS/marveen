@@ -1,5 +1,5 @@
 {
-  "model": "claude-opus-4-8[1m]",
+  "model": "claude-opus-4-8",
   "securityProfile": "developer-senior",
   "displayName": "Dave",
   "claudeConfigDir": "/home/domin/marveen/agents/dave/.claude-config",
