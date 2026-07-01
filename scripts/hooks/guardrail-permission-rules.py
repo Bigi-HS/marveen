@@ -86,11 +86,18 @@ _LOCALHOST_RE = re.compile(
 )
 
 # Own-repo GitHub API allowlist (card 9e465135): fleet-pr-merge-gate opens PRs
-# and merges via authenticated POST/PUT to api.github.com/repos/Bigi-HS/marveen/.
-# DELETE stays blocked (branch deletion is irreversible and must go via operator
-# or the localhost server proxy).
+# (POST /pulls) and merges (PUT /pulls/{n}/merge). Scoped to /pulls ONLY --
+# the broader /repos/Bigi-HS/marveen/ prefix would also allow:
+#   POST /hooks  -> webhook = exfil channel (repo events to attacker URL)
+#   POST /keys   -> deploy key = persistent clone access
+#   PUT  /actions/secrets/{n} -> CI-secret overwrite = supply-chain tamper
+#   PUT  /contents/PATH       -> direct file write, bypasses PR/merge-gate
+#   PUT  /git/refs/heads/BRANCH -> ref-move, force-push equivalent
+# None of these are reachable via git push, so the original comment "exfil
+# does not expand beyond git push" was wrong (Dave CHANGES, PR#332).
+# DELETE stays blocked on all paths (irreversible; use operator or server proxy).
 _OWN_REPO_GITHUB_RE = re.compile(
-    r'^https://api\.github\.com/repos/Bigi-HS/marveen/',
+    r'^https://api\.github\.com/repos/Bigi-HS/marveen/pulls(?:/|\?|$)',
     re.IGNORECASE,
 )
 _GITHUB_PR_ALLOWED_METHODS = frozenset({'POST', 'PUT'})
