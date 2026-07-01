@@ -150,6 +150,19 @@ _OWN_REPO_GITHUB_RE = re.compile(
 )
 _GITHUB_PR_ALLOWED_METHODS = frozenset({'POST', 'PUT'})
 
+# The direct GitHub merge endpoint: PUT /repos/Bigi-HS/marveen/pulls/{n}/merge
+# (card ec7754d7). Even though it sits under the /pulls allowlist above, a direct
+# curl to it merges the PR with the PAT and BYPASSES the server-side approval gate
+# (runGateCheck in /api/github/merge, which returns 403 when a required reviewer is
+# missing/blocked on the live head). marveen merged PR#336 this way. So merges must
+# go through the localhost gate-enforcing proxy POST /api/github/merge, and this
+# endpoint is blocked here regardless of method. PR-open (POST /pulls) and PR-edit
+# (PUT /pulls/{n}) remain allowed -- only the /{n}/merge suffix is denied.
+_GITHUB_MERGE_RE = re.compile(
+    r'^https://api\.github\.com/repos/Bigi-HS/marveen/pulls/\d+/merge(?:\?|$)',
+    re.IGNORECASE,
+)
+
 # Mutating HTTP methods that trigger external-curl R3.
 _MUTATING_METHODS = frozenset({'POST', 'PUT', 'DELETE', 'PATCH'})
 
@@ -364,9 +377,14 @@ def match_external_curl(command: str) -> bool:
         for url in urls:
             if _LOCALHOST_RE.match(url):
                 continue
-            # Own-repo GitHub PR/merge ops (card 9e465135): POST=open-PR,
-            # PUT=merge-PR. DELETE stays blocked (branch deletion irreversible).
+            # Own-repo GitHub PR ops (card 9e465135): POST=open-PR, PUT=edit-PR.
+            # DELETE stays blocked (branch deletion irreversible).
             if _OWN_REPO_GITHUB_RE.match(url) and method in _GITHUB_PR_ALLOWED_METHODS:
+                # ...but the direct merge endpoint (PUT /pulls/{n}/merge) bypasses
+                # the server-side approval gate, so block it even inside the /pulls
+                # allowlist (card ec7754d7). Merges go through the localhost proxy.
+                if _GITHUB_MERGE_RE.match(url):
+                    return True
                 continue
             return True
     return False
