@@ -31,6 +31,7 @@ File format (markdown, ~300-500 words max):
 
 If the file does not exist or is unreadable, the hook silently no-ops.
 """
+import importlib.util
 import json
 import os
 import sys
@@ -42,6 +43,13 @@ import ledger_lib  # noqa: E402
 
 # resume + clear: full inject for all agents.
 FULL_INJECT_SOURCES = {"resume", "clear"}
+
+# Continuity Phase 2b (card 6485f301): regenerate this agent's snapshot from live
+# sources (in_progress kanban + last ledger turn) at SessionStart, so a fresh
+# session / resume reflects the immediate-last state instead of a supervisor-tick
+# snapshot up to REFRESH_INTERVAL_SECONDS (4h) old. Set to "0" to disable and fall
+# back to reading whatever the periodic refresher last wrote (legacy path).
+REFRESH_ENV_FLAG = "HOT_CACHE_SESSIONSTART_REFRESH"
 
 # startup: only context-sensitive agents get a mini inject.
 MINI_HOT_CACHE_AGENTS = {"dave", "quill", "marveen"}
@@ -97,12 +105,52 @@ def _agent_id(cwd: str | None) -> str:
     return ledger_lib.agent_id_from_cwd(cwd)
 
 
+def _install_dir() -> str:
+    # Honour HOT_CACHE_INSTALL_DIR so the read path resolves the same root the
+    # refresher writes to (they must agree). Production leaves it unset -> both
+    # fall back to ledger_lib._install_dir() (the repo root). Test override only.
+    return os.environ.get("HOT_CACHE_INSTALL_DIR") or ledger_lib._install_dir()
+
+
 def _hot_cache_path(cwd: str | None) -> Path:
     agent_id = _agent_id(cwd)
-    install_dir = ledger_lib._install_dir()
+    install_dir = _install_dir()
     if agent_id == "marveen":
         return Path(install_dir) / ".claude" / "hot-cache.md"
     return Path(install_dir) / "agents" / agent_id / ".claude" / "hot-cache.md"
+
+
+def _load_refresh_module():
+    """Load the sibling scripts/hot-cache-refresh.py by path. The hyphenated
+    filename is not importable as a module name, so use importlib. Importing has
+    no side effects (its main() is guarded by __name__ == '__main__')."""
+    here = os.path.dirname(os.path.abspath(__file__))  # <install>/scripts/hooks
+    refresh_path = os.path.join(os.path.dirname(here), "hot-cache-refresh.py")
+    spec = importlib.util.spec_from_file_location("hot_cache_refresh", refresh_path)
+    if spec is None or spec.loader is None:
+        raise ImportError("cannot load hot-cache-refresh.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _refresh_own_snapshot(agent_id: str) -> None:
+    """Regenerate THIS agent's hot-cache.md from live sources before injecting
+    (card 6485f301). Reuses refresh_agent from the periodic refresher, with the 4h
+    throttle bypassed (force=True) for this ONE agent only -- no cross-agent work.
+    Cheap: two read-only DB reads (~50-100ms). Fail-open: any error leaves the
+    existing cache in place and injection continues (the staleness-guard remains
+    the backstop), so a refresh problem can never break SessionStart."""
+    if os.environ.get(REFRESH_ENV_FLAG, "1") == "0":
+        return
+    try:
+        mod = _load_refresh_module()
+        install_dir = mod._install_dir()
+        noa_db = mod._noa_db_path(install_dir)
+        # interval is irrelevant under force=True; pass 0 to signal "no throttle".
+        mod.refresh_agent(agent_id, install_dir, noa_db, time.time(), 0, True)
+    except Exception:
+        pass
 
 
 def _read_hot_cache(path: Path) -> str | None:
@@ -131,8 +179,14 @@ def main():
     elif source == "startup" and _agent_id(cwd) in MINI_HOT_CACHE_AGENTS:
         char_limit = MINI_CONTENT_CHAR_LIMIT
     else:
-        # startup + stateless agent: skip.
+        # startup + stateless agent: skip (also skips the refresh below -- no
+        # regeneration work for an agent that would not inject anyway).
         sys.exit(0)
+
+    # Regenerate this agent's snapshot from live sources before reading it, so the
+    # injected block is the SessionStart-moment state, not a periodic-tick result
+    # up to 4h old (card 6485f301). Scoped to the injecting agent; fail-open.
+    _refresh_own_snapshot(_agent_id(cwd))
 
     cache_path = _hot_cache_path(cwd)
     content = _read_hot_cache(cache_path)
