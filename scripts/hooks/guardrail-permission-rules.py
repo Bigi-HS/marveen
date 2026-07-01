@@ -46,6 +46,11 @@ _CMD_SUBST_RE = re.compile(r'\$\(|\)|`')
 
 def _split_subcommands(command):
     """Split on shell sequencing operators + command substitution boundaries."""
+    # bash treats \<newline> as a no-op whitespace joiner (line continuation).
+    # Without this, a trailing \ before \n leaves a dangling escape that makes
+    # shlex raise ValueError -> the piece is silently skipped, bypassing URL
+    # and filename detection in R2/R3 (card 9e465135).
+    command = re.sub(r'\\\n[ \t]*', ' ', command)
     normalized = _CMD_SUBST_RE.sub(';', command)
     return re.split(r'(?:&&|\|\||[;|\n])', normalized)
 
@@ -79,6 +84,16 @@ _LOCALHOST_RE = re.compile(
     r'^https?://(?:localhost|127\.0\.0\.1|::1)(?::\d+)?(?:/|$)',
     re.IGNORECASE,
 )
+
+# Own-repo GitHub API allowlist (card 9e465135): fleet-pr-merge-gate opens PRs
+# and merges via authenticated POST/PUT to api.github.com/repos/Bigi-HS/marveen/.
+# DELETE stays blocked (branch deletion is irreversible and must go via operator
+# or the localhost server proxy).
+_OWN_REPO_GITHUB_RE = re.compile(
+    r'^https://api\.github\.com/repos/Bigi-HS/marveen/',
+    re.IGNORECASE,
+)
+_GITHUB_PR_ALLOWED_METHODS = frozenset({'POST', 'PUT'})
 
 # Mutating HTTP methods that trigger external-curl R3.
 _MUTATING_METHODS = frozenset({'POST', 'PUT', 'DELETE', 'PATCH'})
@@ -271,8 +286,13 @@ def match_external_curl(command: str) -> bool:
         if method not in _MUTATING_METHODS and not has_body:
             continue
         for url in urls:
-            if not _LOCALHOST_RE.match(url):
-                return True
+            if _LOCALHOST_RE.match(url):
+                continue
+            # Own-repo GitHub PR/merge ops (card 9e465135): POST=open-PR,
+            # PUT=merge-PR. DELETE stays blocked (branch deletion irreversible).
+            if _OWN_REPO_GITHUB_RE.match(url) and method in _GITHUB_PR_ALLOWED_METHODS:
+                continue
+            return True
     return False
 
 
