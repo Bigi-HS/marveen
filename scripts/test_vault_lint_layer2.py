@@ -21,13 +21,20 @@ vl2 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(vl2)
 
 
-def make_memory(id_val, agent_id, category, keywords):
-    """Convenience factory for test memory objects."""
+def make_memory(id_val, agent_id, category, keywords, content=None):
+    """Convenience factory for test memory objects.
+
+    Args:
+        content: optional custom content (for Case 2 executor-name prefix tests).
+                 Default: f"Test entry for {agent_id}"
+    """
+    if content is None:
+        content = f"Test entry for {agent_id}"
     return {
         "id": id_val,
         "agent_id": agent_id,
         "category": category,
-        "content": f"Test entry for {agent_id}",
+        "content": content,
         "keywords": keywords,
         "created_at": 1700000000,
         "accessed_at": 1700000000,
@@ -255,6 +262,72 @@ def test_empty_keywords_skipped():
     print("✓ test_empty_keywords_skipped PASS")
 
 
+def test_applicate_executor_cross_identity_no_merge():
+    """Case 2: applicate vault executor-name prefix (blackbeard: vs morgan:).
+
+    Applicate stores executor profiles with "NAME: description" format.
+    Both entries have agent_id=applicate but different executor names -> veto.
+
+    Expected: 0 dedup-candidates (identity-key vetoes cross-executor pair).
+    This is the real production case that motivated the guard.
+    """
+    memories = [
+        make_memory(
+            50, "applicate", "warm",
+            "executor, dev, sonnet, noa-rewrite",
+            content="blackbeard: új flotta-tag, programozó munkaágens (dev executor)"
+        ),
+        make_memory(
+            51, "applicate", "warm",
+            "executor, dev, sonnet, noa-rewrite",
+            content="morgan: új flotta-tag, programozó munkaágens (dev executor)"
+        ),
+    ]
+
+    candidates = vl2.compute_dedup_candidates(memories, jaccard_threshold=0.4)
+
+    # Both agent_id=applicate, but content prefix names differ (blackbeard vs morgan)
+    # Identity-key guard extracts names and vetoes. Expected: 0.
+    assert len(candidates) == 0, (
+        f"Expected 0 dedup-candidates for applicate cross-executor (blackbeard vs morgan), "
+        f"but got {len(candidates)}: {candidates}"
+    )
+    print("✓ test_applicate_executor_cross_identity_no_merge PASS")
+
+
+def test_applicate_executor_same_identity_merge():
+    """Case 2: applicate vault, same executor name (blackbeard: vs blackbeard:).
+
+    Both entries agent_id=applicate and same executor name (extracted from content prefix).
+    Keywords are same -> should be merge-candidate (no veto).
+
+    Expected: 1 dedup-candidate (no veto; same identity).
+    """
+    memories = [
+        make_memory(
+            52, "applicate", "warm",
+            "executor, dev, sonnet",
+            content="blackbeard: új flotta-tag, programozó munkaágens"
+        ),
+        make_memory(
+            53, "applicate", "warm",
+            "executor, dev, sonnet",
+            content="blackbeard: Updated profile, koordinátor eszköz"
+        ),
+    ]
+
+    candidates = vl2.compute_dedup_candidates(memories, jaccard_threshold=0.4)
+
+    # Both agent_id=applicate and extracted name is "blackbeard" in both
+    # Identity matches, Jaccard is high -> should be candidate.
+    # Jaccard({executor,dev,sonnet}) = 1.0 >= 0.4
+    assert len(candidates) == 1, (
+        f"Expected 1 dedup-candidate for applicate same-executor (blackbeard vs blackbeard), "
+        f"but got {len(candidates)}"
+    )
+    print("✓ test_applicate_executor_same_identity_merge PASS")
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -271,6 +344,8 @@ def run_all_tests(verbose=False):
         test_low_jaccard_threshold,
         test_near_threshold_same_agent,
         test_empty_keywords_skipped,
+        test_applicate_executor_cross_identity_no_merge,  # Case 2: applicate vault
+        test_applicate_executor_same_identity_merge,      # Case 2: applicate same executor
     ]
 
     passed = 0
