@@ -12,7 +12,8 @@
     "backfill-embeddings": "tsx scripts/backfill-embeddings.ts",
     "schedule": "tsx src/schedule-cli.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "design:lint": "node scripts/design-wcag-lint.mjs"
   },
   "engines": {
     "node": ">=20 <24"
@@ -29,6 +30,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@google/design.md": "0.3.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.0",
