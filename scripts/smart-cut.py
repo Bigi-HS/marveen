@@ -21,7 +21,8 @@ import sys
 import os
 from pathlib import Path
 
-FFMPEG = "/home/domin/marveen/store/whisper-env/env/bin/ffmpeg"
+FFMPEG  = "/home/domin/marveen/store/whisper-env/env/bin/ffmpeg"
+FFPROBE = "/home/domin/marveen/store/whisper-env/env/bin/ffprobe"
 
 # Magyar + angol fillerszavak
 FILLERS = {
@@ -207,7 +208,7 @@ def main():
     ap.add_argument("--audio",    help="Audio fájl (WAV/MP4) silencedetect-hez")
     ap.add_argument("--mode",     choices=["srt","silence","both"], default="srt")
     ap.add_argument("--min-gap",  type=float, default=0.5,  help="Min. SRT rés (mp) ami vágandó (default 0.5)")
-    ap.add_argument("--noise",    type=int,   default=-35,  help="silencedetect zaj küszöb dB (default -35)")
+    ap.add_argument("--noise",    type=int,   default=-40,  help="silencedetect zaj küszöb dB (default -40; talking-head: -40dB ~10%% cut; agresszivabb: -35dB ~13%%; levagas-heavy: -30dB ~16%%)")
     ap.add_argument("--duration", type=float, default=0.5,  help="Min. csend hossz sec (default 0.5)")
     ap.add_argument("--out-dir",  default=".", help="Kimenet mappa")
     args = ap.parse_args()
@@ -241,7 +242,7 @@ def main():
     if args.mode == "silence" and args.audio:
         # Audio hosszát ffprobe-bal
         r = subprocess.run(
-            ["ffprobe","-v","error","-show_entries","format=duration",
+            [FFPROBE,"-v","error","-show_entries","format=duration",
              "-of","default=noprint_wrappers=1:nokey=1", args.audio],
             capture_output=True, text=True
         )
