@@ -1,0 +1,10 @@
+{
+  "total": 342,
+  "points": 1025,
+  "data": [
+    {"broadcaster_id": "9998887", "broadcaster_login": "dominik", "broadcaster_name": "Dominik",
+     "user_id": "111111", "user_login": "sub_a", "user_name": "Sub_A",
+     "tier": "1000", "is_gift": false}
+  ],
+  "pagination": {"cursor": "xyz"}
+}
