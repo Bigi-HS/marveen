@@ -20,10 +20,12 @@ spec.loader.exec_module(_mod)  # type: ignore
 
 extract_video_id = _mod.extract_video_id
 check_prerequisites = _mod.check_prerequisites
+find_ffmpeg = _mod.find_ffmpeg
 parse_vtt = _mod.parse_vtt
 frame_budget_for_duration = _mod.frame_budget_for_duration
 build_prompt_context = _mod.build_prompt_context
 MODES = _mod.MODES
+WHISPER_VENV_FFMPEG = _mod.WHISPER_VENV_FFMPEG
 
 
 # ── extract_video_id ──────────────────────────────────────────────────────────
@@ -156,6 +158,33 @@ class TestFrameBudget(unittest.TestCase):
         # 5s video in hook mode: 5s * 2fps = 10 frames
         budget = frame_budget_for_duration(5.0, 'hook')
         self.assertEqual(budget, 10)
+
+
+# ── find_ffmpeg ───────────────────────────────────────────────────────────────
+
+class TestFindFfmpeg(unittest.TestCase):
+
+    def test_returns_none_when_both_missing(self):
+        with patch('shutil.which', return_value=None), \
+             patch('os.path.isfile', return_value=False):
+            self.assertIsNone(find_ffmpeg())
+
+    def test_prefers_path_ffmpeg(self):
+        with patch('shutil.which', return_value='/usr/bin/ffmpeg'):
+            result = find_ffmpeg()
+            self.assertEqual(result, '/usr/bin/ffmpeg')
+
+    def test_falls_back_to_whisper_venv(self):
+        with patch('shutil.which', return_value=None), \
+             patch('os.path.isfile', return_value=True), \
+             patch('os.access', return_value=True):
+            result = find_ffmpeg()
+            self.assertEqual(result, WHISPER_VENV_FFMPEG)
+
+    def test_whisper_venv_ffmpeg_path_contains_store(self):
+        self.assertIn('store', WHISPER_VENV_FFMPEG)
+        self.assertIn('whisper-env', WHISPER_VENV_FFMPEG)
+        self.assertTrue(WHISPER_VENV_FFMPEG.endswith('ffmpeg'))
 
 
 # ── MODES constants ───────────────────────────────────────────────────────────

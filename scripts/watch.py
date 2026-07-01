@@ -16,6 +16,7 @@ The SKILL.md orchestration layer reads these files and sends the multimodal prom
 """
 
 import argparse
+import glob
 import os
 import re
 import shutil
@@ -27,6 +28,21 @@ from typing import Optional
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 YTDLP = os.path.expanduser('~/.local/bin/yt-dlp')
+
+# whisper-env ships ffmpeg + faster-whisper for the fleet (no system-wide install needed)
+WHISPER_VENV = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'store', 'whisper-env', 'env')
+WHISPER_VENV_FFMPEG = os.path.join(WHISPER_VENV, 'bin', 'ffmpeg')
+
+# Extend sys.path with venv site-packages so faster-whisper is importable even when the
+# active interpreter is the system python (not the venv python).
+def _add_whisper_venv_to_path() -> None:
+    sp = glob.glob(os.path.join(WHISPER_VENV, 'lib', 'python*', 'site-packages'))
+    for p in sp:
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+_add_whisper_venv_to_path()
 
 # frame_rate, max_seconds (None = full), scale
 MODES = {
@@ -57,14 +73,24 @@ def extract_video_id(url_or_id: str) -> str:
 
 # ── Prerequisite check ────────────────────────────────────────────────────────
 
+def find_ffmpeg() -> Optional[str]:
+    """Return path to ffmpeg binary: PATH first, then whisper-env fallback."""
+    path_ffmpeg = shutil.which('ffmpeg')
+    if path_ffmpeg:
+        return path_ffmpeg
+    if os.path.isfile(WHISPER_VENV_FFMPEG) and os.access(WHISPER_VENV_FFMPEG, os.X_OK):
+        return WHISPER_VENV_FFMPEG
+    return None
+
 def check_prerequisites() -> dict:
     """Return dict of dependency availability."""
     results = {}
     # yt-dlp
     results['yt_dlp'] = os.path.isfile(YTDLP) and os.access(YTDLP, os.X_OK)
-    # ffmpeg
-    results['ffmpeg'] = shutil.which('ffmpeg') is not None
-    # faster-whisper
+    # ffmpeg: PATH or whisper-env
+    results['ffmpeg'] = find_ffmpeg() is not None
+    results['ffmpeg_bin'] = find_ffmpeg()
+    # faster-whisper: current env or whisper-env (already added to sys.path above)
     try:
         import importlib
         importlib.import_module('faster_whisper')
@@ -123,13 +149,13 @@ def download_video(video_id: str, workdir: Path) -> Path:
 
 # ── Frame extraction ──────────────────────────────────────────────────────────
 
-def extract_frames(video_path: Path, workdir: Path, mode: str) -> list[Path]:
+def extract_frames(video_path: Path, workdir: Path, mode: str, ffmpeg_bin: str = 'ffmpeg') -> list[Path]:
     """Extract frames with HH-MM-SS.jpg naming. Returns sorted list of frame paths."""
     rate_str, max_s, scale = MODES[mode]
     prefix = 'hook-' if mode == 'hook' else ''
     out_pattern = str(workdir / f'{prefix}%H-%M-%S.jpg')
 
-    cmd = ['ffmpeg', '-i', str(video_path)]
+    cmd = [ffmpeg_bin, '-i', str(video_path)]
     if max_s is not None:
         cmd += ['-t', str(max_s)]
     cmd += [
@@ -138,7 +164,7 @@ def extract_frames(video_path: Path, workdir: Path, mode: str) -> list[Path]:
         out_pattern,
         '-y',
     ]
-    print(f'[watch] Extracting frames (mode={mode}, rate={rate_str}) ...', flush=True)
+    print(f'[watch] Extracting frames (mode={mode}, rate={rate_str}, ffmpeg={ffmpeg_bin}) ...', flush=True)
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f'ffmpeg failed:\n{result.stderr}')
@@ -295,9 +321,9 @@ def main() -> None:
         # 2. Frame extraction (skip if --no-frames or ffmpeg missing)
         if not args.no_frames:
             if not prereqs['ffmpeg']:
-                print('[watch] WARNING: ffmpeg missing -- skipping frame extraction. Install ffmpeg to enable visual analysis.', file=sys.stderr)
+                print('[watch] WARNING: ffmpeg not found (PATH or whisper-env) -- skipping frame extraction.', file=sys.stderr)
             else:
-                frames = extract_frames(video_path, workdir, args.mode)
+                frames = extract_frames(video_path, workdir, args.mode, ffmpeg_bin=prereqs['ffmpeg_bin'])
 
         # 3. Transcript (captions-first: yt-dlp auto-captions is primary,
         # faster-whisper only if --whisper flag is passed AND it is installed)
