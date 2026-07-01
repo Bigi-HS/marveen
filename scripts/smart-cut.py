@@ -211,6 +211,7 @@ def main():
     ap.add_argument("--duration", type=float, default=0.5,  help="Min. csend hossz sec (default 0.5)")
     ap.add_argument("--out-dir",  default=".", help="Kimenet mappa")
     args = ap.parse_args()
+    os.makedirs(args.out_dir, exist_ok=True)
 
     cuts = []
 
