@@ -70,6 +70,8 @@ import { tryHandleAck } from './web/routes/ack.js'
 import { tryHandleAgentCategories } from './web/routes/agent-categories.js'
 import { tryHandleAdmin } from './web/routes/admin.js'
 import { tryHandlePublicDigest } from './web/routes/public-digest.js'
+import { tryHandleAnalytics } from './web/routes/analytics.js'
+import { applyAnalyticsMigrations } from './analytics/storage.js'
 import { tryHandleStatic } from './web/routes/static.js'
 import type { RouteContext } from './web/routes/types.js'
 
@@ -301,6 +303,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleGate(routeCtx)) return
       if (await tryHandleGithub(routeCtx)) return
       if (await tryHandlePublicDigest(routeCtx)) return
+      if (await tryHandleAnalytics(routeCtx)) return
       if (await tryHandleStatic(routeCtx, WEB_DIR)) return
 
       res.writeHead(404)
@@ -405,6 +408,12 @@ export function startWebServer(port = 3420): http.Server {
   // someday->icebox parked-lane reconcile + bucket-centre backfill. Idempotent.
   applyKanbanMigrations()
   logger.info('Kanban migrations applied (priority_score + icebox lane)')
+
+  // Analytics snapshot storage (card 54df4c8f, A-layer): additive analytics_snapshots
+  // table + index. Idempotent CREATE IF NOT EXISTS so a live noa.db gains the table
+  // on the next boot without a destructive rebuild.
+  applyAnalyticsMigrations()
+  logger.info('Analytics migrations applied (analytics_snapshots)')
 
   const scheduleInterval = startScheduleRunner()
   logger.info('Schedule runner started (60s poll)')

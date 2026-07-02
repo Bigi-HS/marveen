@@ -40,6 +40,13 @@ export interface YtWatchtimeRow {
   views: number
 }
 
+export interface YtSubscribersRow {
+  day: string
+  gained: number
+  lost: number
+  net: number // gained - lost (net daily subscriber delta)
+}
+
 // ── Traffic source bucket map ─────────────────────────────────────────────────
 // Maps the insightTrafficSourceType enum values the Analytics API returns to the
 // 4 buckets the youtube-full audit method uses (browse/suggested/search/external).
@@ -107,6 +114,20 @@ export function buildWatchtimeRequest(opts: {
     startDate: opts.startDate,
     endDate: opts.endDate,
     metrics: 'estimatedMinutesWatched,averageViewDuration,views',
+    dimensions: 'day',
+  }
+}
+
+// Daily subscriber deltas (spec 2: subscribersGained/subscribersLost/net).
+// Official metrics: developers.google.com/youtube/analytics/metrics.
+export function buildSubscribersRequest(opts: {
+  channelId: string; startDate: string; endDate: string
+}): YtAnalyticsRequest {
+  return {
+    ids: `channel==${opts.channelId}`,
+    startDate: opts.startDate,
+    endDate: opts.endDate,
+    metrics: 'subscribersGained,subscribersLost',
     dimensions: 'day',
   }
 }
@@ -184,4 +205,18 @@ export function parseWatchtimeResponse(raw: unknown): YtWatchtimeRow[] {
     avgViewDuration: row[iAvg] as number,
     views: row[iViews] as number,
   }))
+}
+
+export function parseSubscribersResponse(raw: unknown): YtSubscribersRow[] {
+  const r = raw as RawAnalyticsResponse
+  if (!r.rows?.length || !r.columnHeaders) return []
+  const h = r.columnHeaders
+  const iDay = colIndex(h, 'day')
+  const iGained = colIndex(h, 'subscribersGained')
+  const iLost = colIndex(h, 'subscribersLost')
+  return (r.rows as unknown[][]).map(row => {
+    const gained = row[iGained] as number
+    const lost = row[iLost] as number
+    return { day: row[iDay] as string, gained, lost, net: gained - lost }
+  })
 }
