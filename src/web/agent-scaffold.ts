@@ -36,6 +36,15 @@ const DESTRUCTIVE_BASH_HOOK_MARKER = 'guardrail-destructive-bash.py'
 // directory deny, .env file read deny, external curl mutating-method deny.
 const PERMISSION_RULES_HOOK_MARKER = 'guardrail-permission-rules.py'
 
+// And the SessionStart per-agent enforcement reminder (card 03a4f57d): the hook is
+// agent-generic (it no-ops for agents without a configured check) so it is safe to
+// backfill fleet-wide -- hibiki gets the inbox-check, claudia the email ask-first.
+const SESSION_ENFORCE_HOOK_MARKER = 'session-start-enforce.py'
+
+// And the UserPromptSubmit long-session anti-bloat freshness nudge (card 705381e3):
+// threshold-gated + rate-limited, fleet-wide, no-ops on normal turns.
+const FRESHNESS_NUDGE_HOOK_MARKER = 'prompt-freshness-nudge.py'
+
 type HookCommand = { type?: string; command?: string; prompt?: string }
 type HookEntry = { matcher?: string; hooks?: HookCommand[] }
 type HooksBlock = Record<string, HookEntry[]>
@@ -111,6 +120,31 @@ export function ensurePermissionRulesHook(target: HooksBlock, template: HooksBlo
   return true
 }
 
+// Targeted idempotent merge of the SessionStart per-agent enforcement reminder
+// (card 03a4f57d), mirroring ensureMemoryHook. ADD-only, drift-proof: backfilled
+// into every existing agent's SessionStart at the next boot; the hook itself
+// no-ops for agents without a configured reminder.
+export function ensureSessionEnforceHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.SessionStart ?? []).filter(e => entryReferences(e, SESSION_ENFORCE_HOOK_MARKER))
+  if (entries.length === 0) return false
+  const existing = target.SessionStart ?? []
+  if (existing.some(e => entryReferences(e, SESSION_ENFORCE_HOOK_MARKER))) return false
+  target.SessionStart = [...existing, ...entries]
+  return true
+}
+
+// Targeted idempotent merge of the UserPromptSubmit long-session freshness nudge
+// (card 705381e3). ADD-only; creates the UserPromptSubmit block if the agent has
+// none (older agents were scaffolded without one), never rewrites existing entries.
+export function ensureFreshnessNudgeHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.UserPromptSubmit ?? []).filter(e => entryReferences(e, FRESHNESS_NUDGE_HOOK_MARKER))
+  if (entries.length === 0) return false
+  const existing = target.UserPromptSubmit ?? []
+  if (existing.some(e => entryReferences(e, FRESHNESS_NUDGE_HOOK_MARKER))) return false
+  target.UserPromptSubmit = [...existing, ...entries]
+  return true
+}
+
 // Idempotent migration: every agent's settings.json should carry the shared
 // hooks (PreCompact memory-save/skill-reflection + the SessionStart taskstate
 // and memory auto-inject replays). Two cases:
@@ -148,7 +182,10 @@ export function ensureAgentHooks(name: string): boolean {
     const askFirstChanged = ensureAskFirstHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const destructiveBashChanged = ensureDestructiveBashHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const permRulesChanged = ensurePermissionRulesHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    const sessionEnforceChanged = ensureSessionEnforceHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    const freshnessNudgeChanged = ensureFreshnessNudgeHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     changed = memChanged || guardChanged || askFirstChanged || destructiveBashChanged || permRulesChanged
+      || sessionEnforceChanged || freshnessNudgeChanged
   }
   if (!changed) return false
   mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
