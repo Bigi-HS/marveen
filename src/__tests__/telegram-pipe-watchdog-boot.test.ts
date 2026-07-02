@@ -125,8 +125,20 @@ describe('recoverOrchestratorPipeOnce', () => {
     expect(r.recovered).toBe(false)
   })
 
-  it('inconclusive probe (network error, child present): no recovery', async () => {
+  // card 2f0298cf: present child + unreachable probe (status 0) is now healthy,
+  // not inconclusive -- but still NO recovery drive (only 'dead' recovers).
+  it('network-error probe with child present -> healthy, no recovery', async () => {
     mockPresence.mockReturnValue(true)
+    mockConflict.mockResolvedValue({ conflicted: false, status: 0 })
+    const p = recoverOrchestratorPipeOnce(NOW)
+    await vi.runAllTimersAsync()
+    const r = await p
+    expect(r.verdict).toBe('healthy')
+    expect(mockReconnect).not.toHaveBeenCalled()
+  })
+
+  it('network-error probe with presence UNKNOWN -> inconclusive, no recovery', async () => {
+    mockPresence.mockReturnValue(null)
     mockConflict.mockResolvedValue({ conflicted: false, status: 0 })
     const p = recoverOrchestratorPipeOnce(NOW)
     await vi.runAllTimersAsync()

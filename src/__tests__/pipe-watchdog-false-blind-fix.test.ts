@@ -29,6 +29,7 @@ import {
   INITIAL_STATE,
   type WatchdogState,
 } from '../web/telegram-pipe-watchdog.js'
+import { PROBE_TIMEOUT_MS } from '../web/channel-conflict-probe.js'
 
 // ---------------------------------------------------------------------------
 // Real-dead cases -- these must pass BOTH before and after the fix.
@@ -82,41 +83,37 @@ describe('confirmed-healthy [MUST pass before AND after 2f0298cf fix]', () => {
 //   if (facts.present === true && facts.probeStatus === 0) return 'healthy'
 // ---------------------------------------------------------------------------
 
-describe('false-blind fix [TODO: convert to it() after fix lands]', () => {
-  it.todo(
-    'present=true, status=0 (probe aborted) → should be healthy (process running = pipe alive)',
-    // Uncomment after fix:
-    // () => {
-    //   expect(assessPipeLiveness({ present: true, conflicted: false, probeStatus: 0 })).toBe('healthy')
-    // }
-  )
+describe('false-blind fix [2f0298cf -- present + abort must not freeze the watchdog]', () => {
+  it('present=true, status=0 (probe aborted) -> healthy (process running = pipe alive)', () => {
+    expect(assessPipeLiveness({ present: true, conflicted: false, probeStatus: 0 })).toBe('healthy')
+  })
 
-  it.todo(
-    'frozen state (consecutiveDead=3, alerted=true) resets when present=true, status=0',
-    // Uncomment after fix:
-    // () => {
-    //   const frozen: WatchdogState = { consecutiveDead: 3, alerted: true, lastHealthyTs: 1000 }
-    //   // With fix: assessPipeLiveness({present:true, status:0}) = healthy
-    //   const reset = nextState(frozen, 'healthy', 99999)  // simulate what the cycle now gets
-    //   expect(reset.consecutiveDead).toBe(0)
-    //   expect(reset.alerted).toBe(false)
-    //   expect(reset.lastHealthyTs).toBe(99999)
-    // }
-  )
+  it('frozen state (consecutiveDead=3, alerted=true) resets on present=true, status=0', () => {
+    const frozen: WatchdogState = { consecutiveDead: 3, alerted: true, lastHealthyTs: 1000 }
+    // The verdict the cycle now derives for a present-but-unreachable probe...
+    const verdict = assessPipeLiveness({ present: true, conflicted: false, probeStatus: 0 })
+    expect(verdict).toBe('healthy')
+    // ...and nextState on that verdict clears the frozen counters + stamps healthy.
+    const reset = nextState(frozen, verdict, 99999)
+    expect(reset.consecutiveDead).toBe(0)
+    expect(reset.alerted).toBe(false)
+    expect(reset.lastHealthyTs).toBe(99999)
+  })
 
-  it.todo(
-    'present=null (presence unknown), status=0 → inconclusive STILL (unknown process state is not a safe healthy signal)',
-    // This case stays inconclusive even after the fix:
-    // assessPipeLiveness({ present: null, conflicted: false, probeStatus: 0 }) === 'inconclusive'
-    // Only present===true is safe to treat as healthy on abort.
-  )
+  it('present=null (presence unknown), status=0 -> inconclusive STILL (unknown process state is not a safe healthy signal)', () => {
+    expect(assessPipeLiveness({ present: null, conflicted: false, probeStatus: 0 })).toBe('inconclusive')
+  })
 
-  it.todo(
-    'PROBE_TIMEOUT_MS should be raised to allow 409 to arrive before abort',
-    // After fix: PROBE_TIMEOUT_MS >= 12000 in channel-conflict-probe.ts:30.
-    // import { PROBE_TIMEOUT_MS } from '../web/channel-conflict-probe.js' -- if exported
-    // expect(PROBE_TIMEOUT_MS).toBeGreaterThanOrEqual(12000)
-  )
+  it('inconclusive verdict on present=null, status=0 remains a no-op on frozen state (still safe)', () => {
+    const frozen: WatchdogState = { consecutiveDead: 3, alerted: true, lastHealthyTs: 1000 }
+    const verdict = assessPipeLiveness({ present: null, conflicted: false, probeStatus: 0 })
+    expect(verdict).toBe('inconclusive')
+    expect(nextState(frozen, verdict, 99999)).toBe(frozen) // same ref -- untouched
+  })
+
+  it('PROBE_TIMEOUT_MS raised so the 409/200 can arrive before abort', () => {
+    expect(PROBE_TIMEOUT_MS).toBeGreaterThanOrEqual(12000)
+  })
 })
 
 // ---------------------------------------------------------------------------
