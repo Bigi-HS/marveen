@@ -41,8 +41,15 @@ cd "${REPO_ROOT}"
 
 # Checkpoint WAL into the main DB file so the snapshot is self-contained.
 # Tolerate a missing sqlite3 CLI -- just fall back to copying the files as-is.
-if [[ -f store/claudeclaw.db ]] && command -v sqlite3 >/dev/null 2>&1; then
-  sqlite3 store/claudeclaw.db 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null || true
+# Both DBs matter after the noa.db cutover: noa.db holds the live server tables
+# (memories / kanban / messages) and claudeclaw.db still holds the live ledger
+# (conversation_log) until the ledger migration lands. Checkpoint whichever exist.
+if command -v sqlite3 >/dev/null 2>&1; then
+  for _db in store/noa.db store/claudeclaw.db; do
+    if [[ -f "${_db}" ]]; then
+      sqlite3 "${_db}" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null || true
+    fi
+  done
 fi
 
 # --- Build the two path lists (each relative to its own base). -------------
@@ -61,6 +68,9 @@ add_if() {
 }
 
 # repo/ group (relative to REPO_ROOT)
+add_if "${REPOLIST}" "${REPO_ROOT}" store/noa.db
+add_if "${REPOLIST}" "${REPO_ROOT}" store/noa.db-shm
+add_if "${REPOLIST}" "${REPO_ROOT}" store/noa.db-wal
 add_if "${REPOLIST}" "${REPO_ROOT}" store/claudeclaw.db
 add_if "${REPOLIST}" "${REPO_ROOT}" store/claudeclaw.db-shm
 add_if "${REPOLIST}" "${REPO_ROOT}" store/claudeclaw.db-wal

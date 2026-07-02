@@ -36,16 +36,66 @@ INDEX = "CREATE INDEX IF NOT EXISTS idx_convlog_agent ON conversation_log(agent_
 RECENT_LIMIT = 20
 
 
+def _dotenv_value(install, key):
+    """Read `key` from <install>/.env, or None if absent/unreadable. Hooks run
+    without the server's dotenv-preload, so a var only present in the .env file
+    (like NOA_DB_PATH) has to be read from disk. Mirrors the inline .env read in
+    main_agent_id()."""
+    try:
+        with open(os.path.join(install, ".env")) as f:
+            for line in f:
+                if line.startswith(key + "="):
+                    return line.split("=", 1)[1].strip()
+    except Exception:
+        pass
+    return None
+
+
+def _noa_db_setting(install):
+    """The configured NOA_DB_PATH: the process env wins (explicit / tests), else
+    the <install>/.env file. A blank env value falls through to the file."""
+    v = os.environ.get("NOA_DB_PATH")
+    if v is not None and v.strip():
+        return v
+    return _dotenv_value(install, "NOA_DB_PATH")
+
+
+def _resolve_live_db(ledger_override, noa_setting, install):
+    """Resolve which DB the ledger / memory hooks read+write.
+
+    Precedence, mirroring the server's resolveNoaDbPath (src/db-path.ts) so the
+    hooks open the SAME live DB the dashboard does after the noa.db cutover:
+      1. LEDGER_DB_PATH  -- explicit test seam, highest priority.
+      2. NOA_DB_PATH     -- the cutover switch; resolved against `install`, must
+         end in `.db` and stay strictly under the install root.
+      3. default         -- <install>/store/claudeclaw.db (legacy), used when
+         unset/blank OR when a bad value is rejected. Fail-open (never raise): a
+         hook must not break session start over a misconfigured path.
+    """
+    if ledger_override:
+        return ledger_override
+    default = os.path.join(install, "store", "claudeclaw.db")
+    raw = (noa_setting or "").strip()
+    if not raw:
+        return default
+    resolved = os.path.normpath(os.path.join(install, raw))
+    if not resolved.lower().endswith(".db"):
+        return default
+    root = install.rstrip(os.sep) + os.sep
+    if not resolved.startswith(root):
+        return default
+    return resolved
+
+
 def db_path():
     # Hooks live in <install>/scripts/hooks/; the ledger is <install>/store/.
     # Resolve from THIS file's location so it is correct regardless of the
-    # session's cwd. Test override: LEDGER_DB_PATH.
-    override = os.environ.get("LEDGER_DB_PATH")
-    if override:
-        return override
-    here = os.path.dirname(os.path.abspath(__file__))
-    install = os.path.dirname(os.path.dirname(here))
-    return os.path.join(install, "store", "claudeclaw.db")
+    # session's cwd. Test seam: LEDGER_DB_PATH. Live DB: NOA_DB_PATH (env/.env),
+    # so hooks track the noa.db cutover instead of the frozen legacy default.
+    install = _install_dir()
+    return _resolve_live_db(
+        os.environ.get("LEDGER_DB_PATH"), _noa_db_setting(install), install
+    )
 
 
 def _install_dir():

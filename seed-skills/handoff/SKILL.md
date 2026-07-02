@@ -35,7 +35,7 @@ Collect data from these sources (skip any that return empty):
 ```bash
 # Active kanban cards (assigned to current agent or recently touched)
 AGENT_ID="$(echo $BOT_NAME | tr '[:upper:]' '[:lower:]')"
-sqlite3 store/claudeclaw.db "SELECT id, title, status, priority, assignee, description FROM kanban_cards WHERE archived_at IS NULL AND (assignee = '$AGENT_ID' OR status = 'in_progress') ORDER BY priority DESC, updated_at DESC LIMIT 10"
+sqlite3 store/noa.db "SELECT id, title, status, priority, assignee, description FROM kanban_cards WHERE archived_at IS NULL AND (assignee = '$AGENT_ID' OR status = 'in_progress') ORDER BY priority DESC, updated_at DESC LIMIT 10"
 
 # Hot memories from last 24h
 curl -s -H "Authorization: Bearer $(cat store/.dashboard-token)" \
