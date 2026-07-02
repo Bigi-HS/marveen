@@ -16,7 +16,7 @@ import { ensureAgentConfigDir } from './agent-config-dir.js'
 import { parseTelegramToken } from './telegram.js'
 import { getProvider, getProviderType, channelStateDir, readChannelToken, channelIntentFromEnabledPlugins, type ChannelProviderType } from '../channel-provider.js'
 import { CHANNEL_PROVIDER } from '../config.js'
-import { loadProfileTemplate } from './profiles.js'
+import { computeSkipFlag, loadProfileTemplate } from './profiles.js'
 import { writeAgentSettingsFromProfile } from './agent-scaffold.js'
 import { getSecret } from './vault.js'
 import { backupChannelEnv, restoreChannelEnv } from './channel-token-durability.js'
@@ -281,9 +281,10 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
         apiKeyEnv = `export ANTHROPIC_API_KEY="${agentApiKey}" && `
       }
     }
-    // Apply security profile: write allow/deny list into settings.json, and
-    // skip the dangerously-skip-permissions flag for strict profiles so
-    // Claude Code enforces the list rather than bypassing it.
+    // Apply security profile: write allow/deny list into settings.json. For a
+    // strict, channel-less profile we also drop --dangerously-skip-permissions
+    // so Claude Code enforces the list rather than bypassing it (see the
+    // skipFlag computation below for the channel-agent exception).
     const profile = loadProfileTemplate(readAgentSecurityProfile(name))
     writeAgentSettingsFromProfile(name, profile)
     // Channel-less agents must not load the global channel plugins from
@@ -305,7 +306,11 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
         logger.warn({ err, name }, 'Could not disable channel plugins for channel-less agent')
       }
     }
-    const skipFlag = profile.permissionMode === 'strict' ? '' : '--dangerously-skip-permissions '
+    // A strict profile drops the bypass so Claude Code enforces the allow/deny
+    // list -- EXCEPT for a channel agent, which must keep it: a permission prompt
+    // has no answerable surface on Telegram/Slack and leaks into the chat on
+    // restart while the callback stalls (card b407711f). See computeSkipFlag.
+    const skipFlag = computeSkipFlag(profile.permissionMode, hasChannel)
     // Per-agent CLAUDE_CONFIG_DIR. Every sub-agent gets an ISOLATED config dir
     // so it reads/writes its OWN .claude.json instead of contending on the
     // single shared ~/.claude.json file lock -- the WSL launch bug where the
