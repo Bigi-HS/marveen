@@ -10,9 +10,27 @@
   }
   body {
     margin: 0;
+    /* Deep-ocean depth: two faint cyan/orange light-wells over the deep surface
+     * so the page reads like water lit from above rather than a flat panel. All
+     * colour comes from palette vars -- no literal hex leaves tokens.css. */
     background-color: var(--bg-deep);
+    background-image:
+      radial-gradient(80rem 40rem at 15% -10%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 60%),
+      radial-gradient(70rem 40rem at 100% 0%, color-mix(in srgb, var(--primary) 9%, transparent), transparent 55%);
+    background-attachment: fixed;
     color: var(--text);
     font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     -webkit-font-smoothing: antialiased;
+  }
+}
+
+@layer components {
+  /* Frosted surface used by cards + panels: subtle top-lit gradient + hairline. */
+  .surface-card {
+    background-image: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--bg-elevated) 55%, transparent),
+      color-mix(in srgb, var(--bg-surface) 92%, transparent)
+    );
   }
 }

@@ -23,6 +23,34 @@ export const AGENT_STATUS_LABEL: Record<AgentLiveStatus, string> = {
 }
 
 /**
+ * Status pill styling for the fleet card. Every status gets a readable TEXT label
+ * (not colour alone -- a11y) plus a tinted background + inset ring so the grid is
+ * scannable at a glance. Palette tokens only (INV-3): the attention state (stalled)
+ * borrows the hottest palette colour, orange, but its "Stalled" label keeps it
+ * distinct from the (also-orange, pulsing) busy state.
+ */
+export const AGENT_STATUS_CHIP: Record<AgentLiveStatus, string> = {
+  idle: 'text-accent bg-accent/10 ring-1 ring-inset ring-accent/25',
+  busy: 'text-primary bg-primary/10 ring-1 ring-inset ring-primary/25',
+  offline: 'text-neutral bg-neutral/10 ring-1 ring-inset ring-border',
+  error: 'text-primary bg-primary/15 ring-1 ring-inset ring-primary/40',
+  unknown: 'text-text-muted bg-border/30 ring-1 ring-inset ring-border',
+}
+
+/**
+ * Left-edge accent rail on a fleet card (rendered via a `before:` pseudo-element).
+ * Attention states get a visible orange/neutral rail so a fleet needing a look
+ * pops out of the grid; healthy-and-quiet (idle) stays transparent.
+ */
+export const AGENT_STATUS_ACCENT: Record<AgentLiveStatus, string> = {
+  idle: 'before:bg-transparent',
+  busy: 'before:bg-accent/50',
+  offline: 'before:bg-neutral/40',
+  error: 'before:bg-primary',
+  unknown: 'before:bg-border',
+}
+
+/**
  * Normalise the health board's derived status to the AC-F0-4 vocabulary.
  * active -> busy, idle -> idle, stopped -> offline, stalled -> error.
  */
