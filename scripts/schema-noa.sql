@@ -300,6 +300,28 @@ CREATE TABLE token_usage_cursors (
 );
 
 -- ============================================================================
+-- Analytics snapshots (card 54df4c8f, A-layer)
+-- ============================================================================
+-- Per-source daily YT/Twitch pull result. UNIQUE(source, period_date) powers the
+-- idempotent UPSERT (a repeated pull for the same day overwrites, never duplicates).
+-- Also created at runtime by applyAnalyticsMigrations() (CREATE IF NOT EXISTS) so a
+-- live noa.db predating this feature gains the table on the next boot.
+CREATE TABLE analytics_snapshots (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  source       TEXT    NOT NULL,          -- youtube | twitch
+  period_date  TEXT    NOT NULL,          -- YYYY-MM-DD (period.to); upsert key
+  status       TEXT    NOT NULL,          -- ok | error
+  pulled_at    INTEGER NOT NULL,          -- epoch seconds
+  period_from  TEXT,                      -- YYYY-MM-DD (ok only)
+  period_to    TEXT,                      -- YYYY-MM-DD (ok only)
+  metrics_json TEXT,                      -- JSON parsed metrics (ok only)
+  reason       TEXT,                      -- error category auth|quota|network|... (error only)
+  detail       TEXT,                      -- safe message; NEVER a token (error only)
+  UNIQUE(source, period_date)
+);
+CREATE INDEX idx_analytics_source_date ON analytics_snapshots(source, period_date);
+
+-- ============================================================================
 -- FTS5: trigram tokenizer over memories (substring search) -- AC-6
 -- ============================================================================
 
