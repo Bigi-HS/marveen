@@ -294,7 +294,15 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
   // GET /api/gate/verify -- mechanical 4-point deploy-verify (F1-F4).
   // Returns { pass: boolean, score: number, total: 4, checks: { F1..F4 } }.
   // Forge calls this after every deploy instead of interpreting pane output by hand.
+  // MG-SEC6 (card 747d60bd): ADMIN_SCOPE required -- the response exposes full
+  // fleet topology (session names, watchdog patterns, channel agents, vault ids).
+  // Per-agent tokens (non-admin) must not read this snapshot.
   if (path === '/api/gate/verify' && method === 'GET') {
+    const { identity } = ctx
+    if (identity && identity.source !== 'operator' && !hasScope(identity.scopes, ADMIN_SCOPE)) {
+      json(res, { error: 'admin scope required for /api/gate/verify' }, 403)
+      return true
+    }
     const result = runDeployVerify()
     json(res, result, result.pass ? 200 : 503)
     return true
