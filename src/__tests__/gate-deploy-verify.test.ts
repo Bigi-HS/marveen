@@ -118,6 +118,21 @@ describe('runDeployVerify', () => {
     expect(r.checks.F4.pass).toBe(true)
   })
 
+  it('F2 ignores *-local agents (dev-only clones, never run as prod sessions)', () => {
+    // Simulate listAgents returning local dev clones alongside real agents.
+    // The real deps filter removes *-local before session check -- replicate via dep injection.
+    __setDeployVerifyDeps({
+      ...healthy,
+      listAgents: () => ['dave', 'claudia-local', 'marveen-local'],
+      // sessions only alive for real agent, not -local clones
+      isSessionAlive: (name) => !['agent-claudia-local', 'agent-marveen-local'].includes(name),
+    })
+    // Without the filter these would fail F2; with it they are excluded at realDeps level.
+    // Here we test the verify logic when caller already provides the filtered list:
+    const r = runDeployVerify()
+    expect(r.checks.F2.pass).toBe(true)
+  })
+
   it('returns pass:false and score:0 when everything fails', () => {
     __setDeployVerifyDeps({
       isSessionAlive: () => false,
