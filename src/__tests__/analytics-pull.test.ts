@@ -41,6 +41,7 @@ function fixtureClient(): AnalyticsClient {
       query: async (req) => {
         if (req.metrics.includes('impressionsClickThroughRate')) return fixture('yt-ctr.json')
         if (req.metrics.includes('audienceWatchRatio')) return fixture('yt-retention.json')
+        if (req.metrics.includes('subscribersGained')) return fixture('yt-subscribers.json')
         if (req.dimensions === 'insightTrafficSourceType') return fixture('yt-traffic.json')
         return fixture('yt-watchtime.json')
       },
@@ -84,8 +85,11 @@ describe('runPull -- ok shape (fixtures)', () => {
       expect(Array.isArray(m.ctr)).toBe(true)
       expect(Array.isArray(m.retention)).toBe(true)
       expect(Array.isArray(m.traffic)).toBe(true)
+      expect(Array.isArray(m.subscribers)).toBe(true)
       expect(typeof m.ctr[0].impressions).toBe('number')
       expect(typeof m.ctr[0].ctr).toBe('number')
+      // subscribers net = gained - lost (spec 2)
+      expect(m.subscribers[0].net).toBe(m.subscribers[0].gained - m.subscribers[0].lost)
     }
     if (res.twitch.status === 'ok') {
       const m = res.twitch.metrics

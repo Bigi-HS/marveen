@@ -24,13 +24,15 @@ import type { RouteContext } from './types.js'
 
 // Marketing annotations (spec 3: "what it means / target band" per KPI). Static
 // copy -- the interpretation guide the dashboard shows next to each number.
+// Target bands are Radar's small-channel-calibrated, devil-advocate-cleared values
+// (data-gate PR#354, store/datagate-pr354-54df4c8f.md), NOT platform averages.
 const KPI_ANNOTATIONS: Record<string, { meaning: string; target: string }> = {
-  subs_net: { meaning: 'Net subscriber change (gained minus lost).', target: 'Positive and trending up week over week.' },
+  subs_net: { meaning: 'Net subscriber change (gained minus lost).', target: 'Trend-based, not absolute: net-positive weekly; a breakout video should accelerate it.' },
   views: { meaning: 'Total video views in the window.', target: 'Steady growth; spikes map to uploads.' },
-  avg_retention_pct: { meaning: 'Average % of the video watched.', target: 'Above 40% is healthy for long-form.' },
-  avg_ctr: { meaning: 'Impressions click-through rate.', target: '4-10% is a strong thumbnail/title.' },
-  twitch_followers: { meaning: 'Total Twitch followers.', target: 'Monotonic growth; watch for stream-day jumps.' },
-  twitch_avg_concurrents: { meaning: 'Average concurrent viewers while live.', target: 'Grows with cadence + raid/network effects.' },
+  avg_retention_pct: { meaning: 'Average % of the video watched. First-60s retention is the key hook-health signal (correlative, not causal).', target: '>=45% acceptable, >=50% good, >=60% strong. Flag: high 60s + falling full-video retention = clickbait (session penalty).' },
+  avg_ctr: { meaning: 'Long-form impressions CTR (exclude Shorts; <1000 impressions/video = insufficient data).', target: 'Dubler-hybrid 5-7%; entertainment/gaming 6-9%; edu/tutorial 4-6%. Read together with retention.' },
+  twitch_followers: { meaning: 'Total Twitch followers.', target: 'Net-positive weekly; Affiliate gate at 50 followers.' },
+  twitch_avg_concurrents: { meaning: 'Average concurrent viewers while live -- a lagging health signal, not the leading metric (post-Affiliate leaders: Tier-1 sub-count + Discord activity).', target: 'Staged: 3 pre-Affiliate; 5 post-Affiliate with peak/avg<2.5 (organic); 10 at community-scale (~6-12 months). Twitch-only; recalibrate on first multi-platform stream.' },
 }
 
 function parseOkMetrics<M>(rows: AnalyticsSnapshotRow[]): Array<{ date: string; metrics: M }> {
@@ -67,6 +69,11 @@ export function buildAnalyticsDashboard(db?: Database.Database): unknown {
 
   const views7d = sum(ytDailyViews.slice(-7).map(d => d.views))
   const views30d = sum(ytDailyViews.map(d => d.views))
+
+  // Net subscriber delta per snapshot (sum of daily gained-lost), windowed.
+  const ytDailySubsNet = ytAsc.map(s => sum((s.metrics.subscribers ?? []).map(r => r.net)))
+  const subsNet7d = sum(ytDailySubsNet.slice(-7))
+  const subsNet30d = sum(ytDailySubsNet)
 
   // Retention: average of per-snapshot mean audienceWatchRatio (as a %).
   const retentionPerSnap = ytAsc.map(s => avg((s.metrics.retention ?? []).map(r => r.watchRatio)) * 100)
@@ -126,8 +133,8 @@ export function buildAnalyticsDashboard(db?: Database.Database): unknown {
       twitch: twLatest ? { status: twLatest.status, period_date: twLatest.period_date, pulled_at: twLatest.pulled_at, reason: twLatest.reason } : null,
     },
     kpi: {
-      subs_net_7d: 0, // net subs deltas require subscribersGained/Lost daily rows (B-layer wires the daily YT report); 0 until then.
-      subs_net_30d: 0,
+      subs_net_7d: subsNet7d,
+      subs_net_30d: subsNet30d,
       views_7d: views7d,
       views_30d: views30d,
       avg_retention_pct: Number(avgRetentionPct.toFixed(2)),

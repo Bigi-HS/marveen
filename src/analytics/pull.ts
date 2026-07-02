@@ -25,14 +25,17 @@ import {
   parseRetentionResponse,
   parseTrafficResponse,
   parseWatchtimeResponse,
+  parseSubscribersResponse,
   buildCtrRequest,
   buildRetentionRequest,
   buildTrafficRequest,
   buildWatchtimeRequest,
+  buildSubscribersRequest,
   type YtCtrRow,
   type YtRetentionRow,
   type YtTrafficBucket,
   type YtWatchtimeRow,
+  type YtSubscribersRow,
   type YtAnalyticsRequest,
 } from './youtube.js'
 import {
@@ -70,6 +73,7 @@ export interface YoutubeMetrics {
   ctr: YtCtrRow[]
   retention: YtRetentionRow[]
   traffic: YtTrafficBucket[]
+  subscribers: YtSubscribersRow[] // daily subscribersGained/Lost/net (spec 2)
 }
 
 export interface TwitchMetrics {
@@ -198,17 +202,19 @@ async function pullYoutube(
     return { status: 'error', source: 'youtube', pulled_at: nowS, reason: 'auth', detail: 'No analytics client configured (OAuth consent pending)' }
   }
   try {
-    const [watchRaw, ctrRaw, retentionRaw, trafficRaw] = await Promise.all([
+    const [watchRaw, ctrRaw, retentionRaw, trafficRaw, subsRaw] = await Promise.all([
       client.youtube.query(buildWatchtimeRequest({ channelId: ctx.channelId, startDate: ctx.period.from, endDate: ctx.period.to })),
       client.youtube.query(buildCtrRequest({ channelId: ctx.channelId, startDate: ctx.period.from, endDate: ctx.period.to })),
       client.youtube.query(buildRetentionRequest({ channelId: ctx.channelId, videoId: '', startDate: ctx.period.from, endDate: ctx.period.to })),
       client.youtube.query(buildTrafficRequest({ channelId: ctx.channelId, startDate: ctx.period.from, endDate: ctx.period.to })),
+      client.youtube.query(buildSubscribersRequest({ channelId: ctx.channelId, startDate: ctx.period.from, endDate: ctx.period.to })),
     ])
     const metrics: YoutubeMetrics = {
       watchtime: parseWatchtimeResponse(watchRaw),
       ctr: parseCtrResponse(ctrRaw),
       retention: parseRetentionResponse(retentionRaw),
       traffic: parseTrafficResponse(trafficRaw),
+      subscribers: parseSubscribersResponse(subsRaw),
     }
     return { status: 'ok', source: 'youtube', pulled_at: nowS, period: ctx.period, metrics }
   } catch (err) {

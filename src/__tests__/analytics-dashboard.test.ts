@@ -28,6 +28,7 @@ function okYt(date: string, views: number, ctr: number, imp: number, watchRatio:
       ctr: [{ videoId: 'v1', impressions: imp, ctr }],
       retention: [{ elapsedRatio: 0, watchRatio, relativePerformance: 1 }],
       traffic: [],
+      subscribers: [{ day: date, gained: 20, lost: 5, net: 15 }],
     }),
     reason: null,
     detail: null,
@@ -69,6 +70,7 @@ describe('buildAnalyticsDashboard', () => {
 
     // KPI row
     expect(payload.kpi.views_7d).toBe(900)
+    expect(payload.kpi.subs_net_7d).toBe(30) // two snapshots x net 15 (spec 2, B1 fix)
     expect(payload.kpi.twitch_followers).toBe(14823) // latest snapshot
     expect(payload.kpi.avg_ctr).toBeCloseTo(0.06, 4) // latest snapshot's impression-weighted CTR
     expect(payload.kpi.twitch_avg_concurrents).toBeCloseTo(223.5, 1)
