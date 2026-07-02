@@ -41,8 +41,14 @@ describe('assessPipeLiveness', () => {
     expect(assessPipeLiveness({ present: true, conflicted: false, probeStatus: 200 })).toBe('dead')
   })
 
-  it('network error (status 0) with present/unknown -> inconclusive (fail-safe)', () => {
-    expect(assessPipeLiveness({ present: true, conflicted: false, probeStatus: 0 })).toBe('inconclusive')
+  // card 2f0298cf false-blind: a present child whose probe could not reach
+  // Telegram (status 0) is healthy, not inconclusive -- leaving it inconclusive
+  // froze the watchdog on a live pipe. Unknown presence (null) stays fail-safe.
+  it('network error (status 0) with child present -> healthy (process running = pipe alive)', () => {
+    expect(assessPipeLiveness({ present: true, conflicted: false, probeStatus: 0 })).toBe('healthy')
+  })
+
+  it('network error (status 0) with presence UNKNOWN -> inconclusive (fail-safe)', () => {
     expect(assessPipeLiveness({ present: null, conflicted: false, probeStatus: 0 })).toBe('inconclusive')
   })
 

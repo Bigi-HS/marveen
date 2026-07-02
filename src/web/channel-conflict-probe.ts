@@ -25,9 +25,15 @@ export interface TelegramConflictResult {
   description: string | null
 }
 
-// Short timeout: this runs on the dashboard monitor's poll path. A network-
-// hung Telegram API must NOT delay the next iteration of the check loop.
-const PROBE_TIMEOUT_MS = 4_000
+// Probe timeout. The former 4s was too tight for a residential/WSL round-trip
+// to api.telegram.org: the getUpdates call regularly aborted before Telegram
+// answered, so the pipe-watchdog saw status=0 every cycle and froze in
+// 'inconclusive' (card 2f0298cf false-blind). 15s lets the 409/200 actually
+// arrive. The callers tolerate it: channel-monitor fires the probe as
+// fire-and-forget (it never blocks the sync check-loop), and both pipe
+// watchdogs run on their own out-of-band cadence where the extra wall-time
+// only materialises under a genuine network hang (where slowness is expected).
+export const PROBE_TIMEOUT_MS = 15_000
 
 /**
  * Issues a single bounded getUpdates call against Telegram and reports

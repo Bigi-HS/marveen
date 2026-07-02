@@ -64,13 +64,23 @@ export interface PipeLivenessFacts {
  *   - a clean 200 from the probe means the getUpdates slot was free while we
  *     expected a poller -> the pipe is dead (the child may linger but is not
  *     polling) -- the DIRECT slot-free death signal, not a 409 inference.
- *   - anything else (network error, inconclusive presence) is 'inconclusive'
- *     and must never trigger recovery on the live orchestrator.
+ *   - a present child whose probe could NOT reach Telegram (status 0: network
+ *     error / abort) is treated as healthy (card 2f0298cf false-blind): we have
+ *     positive evidence the process exists and NO death evidence -- a free slot
+ *     answers 200 fast, only an unreachable API yields 0. Leaving this
+ *     'inconclusive' froze the watchdog: nextState is a no-op on inconclusive,
+ *     so consecutiveDead / lastHealthyTs never advanced and auto-recovery was
+ *     silently disabled while the pipe was in fact alive. Both hard death
+ *     signals (present===false, status===200) are evaluated BEFORE this line,
+ *     so a genuinely dead pipe is never masked by it.
+ *   - anything else (network error with UNKNOWN presence, present===null) stays
+ *     'inconclusive' and must never trigger recovery on the live orchestrator.
  */
 export function assessPipeLiveness(facts: PipeLivenessFacts): PipeLiveness {
   if (facts.present === false) return 'dead'
   if (facts.conflicted) return 'healthy'
   if (facts.probeStatus === 200) return 'dead'
+  if (facts.present === true && facts.probeStatus === 0) return 'healthy'
   return 'inconclusive'
 }
 
