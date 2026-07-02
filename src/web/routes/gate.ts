@@ -39,6 +39,7 @@ import {
 } from '../gate-db.js'
 import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
 import { fetchPrInfo } from '../github-pr.js'
+import { runDeployVerify } from '../deploy-verify.js'
 
 // The GitHub PR reader is the only network dependency; injectable so route
 // tests run without hitting the API (mirrors codetree's rebuild-runner seam).
@@ -287,6 +288,15 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
       return true
     }
     json(res, { consumed: true }, 200)
+    return true
+  }
+
+  // GET /api/gate/verify -- mechanical 4-point deploy-verify (F1-F4).
+  // Returns { pass: boolean, score: number, total: 4, checks: { F1..F4 } }.
+  // Forge calls this after every deploy instead of interpreting pane output by hand.
+  if (path === '/api/gate/verify' && method === 'GET') {
+    const result = runDeployVerify()
+    json(res, result, result.pass ? 200 : 503)
     return true
   }
 
