@@ -27,13 +27,21 @@ export function NavShell({
 }) {
   return (
     <div className="mx-auto flex min-h-full max-w-6xl flex-col px-3 py-3 sm:px-5">
-      <header className="mb-4 flex items-center gap-3">
-        <span className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full shadow-glow ring-1 ring-accent">
+      <header className="surface-card relative mb-5 flex items-center gap-4 overflow-hidden rounded-2xl border border-border px-5 py-4">
+        {/* faint depth glow anchored to the avatar side */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -left-10 -top-10 h-40 w-40 rounded-full bg-accent/10 blur-3xl"
+        />
+        <span className="relative flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-full shadow-glow ring-2 ring-accent">
           <img src="/api/marveen/avatar" alt="NoA" className="h-full w-full object-cover" />
         </span>
-        <h1 className="text-base font-semibold text-text">
-          NoA <span className="text-text-muted">Mission Control</span>
-        </h1>
+        <div className="relative min-w-0">
+          <h1 className="text-lg font-semibold leading-tight text-text">
+            NoA <span className="font-normal text-text-muted">Mission Control</span>
+          </h1>
+          <p className="truncate text-xs text-text-muted">Nyugodt vizet, tiszta irányt.</p>
+        </div>
       </header>
 
       <nav className="mb-4 flex gap-1 border-b border-border">

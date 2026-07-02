@@ -3,6 +3,7 @@ import { useEventStream } from '@/hooks/useEventStream'
 import { mergeAgentStatus } from '@/lib/agent-grid'
 import { isAuthError } from '@/lib/auth-error'
 import { AgentGrid } from '@/components/AgentGrid'
+import { StatBar } from '@/components/StatBar'
 import { NeedsAttentionBlock } from '@/components/NeedsAttentionBlock'
 import { ActivityFeed } from '@/components/ActivityFeed'
 import { AuthRequired } from '@/components/AuthRequired'
@@ -36,6 +37,16 @@ export function Home() {
 
   return (
     <div className="space-y-6">
+      {loadingGrid ? (
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-[68px]" />
+          ))}
+        </div>
+      ) : (
+        <StatBar agents={grid} cards={cards} />
+      )}
+
       <section>
         <SectionTitle>Needs attention</SectionTitle>
         <NeedsAttentionBlock agents={grid} cards={cards} />
