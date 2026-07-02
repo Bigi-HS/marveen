@@ -177,11 +177,17 @@ function checkF4(deps: DeployVerifyDeps): VerifyCheck {
 }
 
 export function runDeployVerify(deps: DeployVerifyDeps = _deps): DeployVerifyResult {
+  // *-local agents are dev-only clones that never run as production tmux sessions.
+  // Strip them before any check so their absence does not false-fail F2/F3/F4.
+  const prodDeps: DeployVerifyDeps = {
+    ...deps,
+    listAgents: () => deps.listAgents().filter(n => !n.endsWith('-local')),
+  }
   const checks = {
-    F1: checkF1(deps),
-    F2: checkF2(deps),
-    F3: checkF3(deps),
-    F4: checkF4(deps),
+    F1: checkF1(prodDeps),
+    F2: checkF2(prodDeps),
+    F3: checkF3(prodDeps),
+    F4: checkF4(prodDeps),
   }
   const score = Object.values(checks).filter(c => c.pass).length
   return { pass: score === 4, score, total: 4, checks }
