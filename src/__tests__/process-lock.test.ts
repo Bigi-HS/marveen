@@ -497,6 +497,18 @@ describe('parseLsofListeningPorts', () => {
     expect(parseLsofListeningPorts(output)).toEqual([3420])
   })
 
+  it('extracts LISTEN port from the hostname:port NAME form (not just IP:port / *:port)', () => {
+    // lsof renders the NAME column as `<host>:<port> (LISTEN)` when the bind
+    // address resolves to a hostname (e.g. loopback bound to 127.0.0.1 shown as
+    // `localhost`). The regex must anchor on `:PORT (LISTEN)` regardless of what
+    // precedes the colon. Locks the hostname:port variant against regex drift.
+    const output = [
+      'node    12345   user   23u  IPv4 0x1234  0t0  TCP localhost:3420 (LISTEN)',
+      'node    12345   user   24u  IPv4 0x1234  0t0  TCP dave.local:8080 (LISTEN)',
+    ].join('\n')
+    expect(parseLsofListeningPorts(output)).toEqual([3420, 8080])
+  })
+
   it('returns [] for empty / header-only output (no LISTEN lines)', () => {
     const output = 'COMMAND   PID   USER   FD   TYPE  DEVICE SIZE/OFF NODE NAME\n'
     expect(parseLsofListeningPorts(output)).toEqual([])
