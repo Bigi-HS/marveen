@@ -22,21 +22,30 @@ const env = readEnvFile()
 export type EnvSource = 'process' | 'file' | 'default'
 
 /** Resolve an integer knob: process.env > file env > fallback.
- *  Invalid process.env values (NaN, <=0) fall through to file/default. */
+ *  Invalid process.env values (NaN, <=0) fall through to file/default.
+ *  When `opts.max` is set, a value above the cap is treated as invalid and
+ *  falls through too -- e.g. WEB_PORT=99999 (> 65535) drops to the .env/default
+ *  instead of surfacing only later at server.listen(). The cap applies to both
+ *  the process.env and file sources so an out-of-range value is rejected wherever
+ *  it comes from. The existing lower-bound behaviour is unchanged (process.env
+ *  requires n>0; the file source keeps accepting any finite integer <= max). */
 export function resolveIntEnv(
   key: string,
   fileEnv: Record<string, string | undefined>,
   fallback: number,
+  opts?: { max?: number },
 ): { value: number; source: EnvSource } {
+  const max = opts?.max
+  const withinMax = (n: number): boolean => max === undefined || n <= max
   const processVal = process.env[key]
   if (processVal !== undefined) {
     const n = parseInt(processVal, 10)
-    if (Number.isFinite(n) && n > 0) return { value: n, source: 'process' }
+    if (Number.isFinite(n) && n > 0 && withinMax(n)) return { value: n, source: 'process' }
   }
   const fileVal = fileEnv[key]
   if (fileVal !== undefined) {
     const n = parseInt(fileVal, 10)
-    if (Number.isFinite(n)) return { value: n, source: 'file' }
+    if (Number.isFinite(n) && withinMax(n)) return { value: n, source: 'file' }
   }
   return { value: fallback, source: 'default' }
 }
@@ -72,7 +81,9 @@ export const BOT_NAME = env['BOT_NAME'] ?? 'Marveen'
 export const MAIN_AGENT_ID = env['MAIN_AGENT_ID'] ?? 'marveen'
 
 // ── Boot-network knobs: process.env > .env-file > default (AC-1) ─────────────
-const webPortResult = resolveIntEnv('WEB_PORT', env, 3420)
+// max=65535: an out-of-range WEB_PORT (e.g. 99999) is rejected here and falls
+// through to the .env/default instead of failing later at server.listen().
+const webPortResult = resolveIntEnv('WEB_PORT', env, 3420, { max: 65535 })
 export const WEB_PORT = webPortResult.value
 // AC-1b tripwire: warn when process.env wins so a stray `tmux set-environment -g
 // WEB_PORT` or supervisor edit is visible in dashboard.log immediately on boot.

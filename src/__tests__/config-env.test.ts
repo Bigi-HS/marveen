@@ -96,6 +96,47 @@ describe('resolveIntEnv', () => {
       expect(r.source).toBe<EnvSource>('file')
     })
   })
+
+  // ── upper-bound cap (d60b0caa): out-of-range port falls through like <=0/NaN ─
+  it('process.env above max cap falls through to file value', () => {
+    withEnv({ WEB_PORT: '99999' }, () => {
+      const r = resolveIntEnv('WEB_PORT', { WEB_PORT: '9000' }, 3420, { max: 65535 })
+      expect(r.value).toBe(9000)
+      expect(r.source).toBe<EnvSource>('file')
+    })
+  })
+
+  it('process.env above max cap falls through to default when no file value', () => {
+    withEnv({ WEB_PORT: '70000' }, () => {
+      const r = resolveIntEnv('WEB_PORT', {}, 3420, { max: 65535 })
+      expect(r.value).toBe(3420)
+      expect(r.source).toBe<EnvSource>('default')
+    })
+  })
+
+  it('file value above max cap falls through to default', () => {
+    withEnv({ WEB_PORT: undefined }, () => {
+      const r = resolveIntEnv('WEB_PORT', { WEB_PORT: '99999' }, 3420, { max: 65535 })
+      expect(r.value).toBe(3420)
+      expect(r.source).toBe<EnvSource>('default')
+    })
+  })
+
+  it('exactly max (65535) is accepted (boundary)', () => {
+    withEnv({ WEB_PORT: '65535' }, () => {
+      const r = resolveIntEnv('WEB_PORT', {}, 3420, { max: 65535 })
+      expect(r.value).toBe(65535)
+      expect(r.source).toBe<EnvSource>('process')
+    })
+  })
+
+  it('no max option: large values still accepted (back-compat, cap opt-in)', () => {
+    withEnv({ WEB_PORT: '99999' }, () => {
+      const r = resolveIntEnv('WEB_PORT', {}, 3420)
+      expect(r.value).toBe(99999)
+      expect(r.source).toBe<EnvSource>('process')
+    })
+  })
 })
 
 // ── resolveStrEnv (AC-1, WEB_HOST) ──────────────────────────────────────────
