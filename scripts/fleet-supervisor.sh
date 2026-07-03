@@ -156,9 +156,49 @@ backoff_register_failure() {   # comp -- escalate next-retry delay
   [ "$delay" -gt "$RETRY_MAX_SECONDS" ] && delay=$RETRY_MAX_SECONDS
   echo $(( $(date +%s) + delay )) > "$STATE_DIR/$comp.next"
   log "$comp: launch failed/rapid-exit (#$fails) -- next retry in ${delay}s"
+  crash_alert_if_warranted "$comp"
 }
 backoff_reset() {              # comp -- healthy: clear failure state
   rm -f "$STATE_DIR/$1.fails" "$STATE_DIR/$1.next" 2>/dev/null || true
+}
+# Crash alert (card aa45edc9): Telegram Bot API alert when dashboard rapid-exits
+# CRASH_ALERT_THRESHOLD times consecutively. Throttled to one alert per 3h.
+# Token cascade: forge bot -> chad bot -> root .env (same as cli-version-watch).
+CRASH_ALERT_THRESHOLD="${CRASH_ALERT_THRESHOLD:-3}"
+CRASH_ALERT_THROTTLE_SECONDS="${CRASH_ALERT_THROTTLE_SECONDS:-10800}"
+crash_alert_if_warranted() {   # comp
+  local comp="$1"
+  local failf="$STATE_DIR/$comp.fails" fails
+  fails=$(cat "$failf" 2>/dev/null || echo 0); case "$fails" in (*[!0-9]*|'') fails=0;; esac
+  [ "$fails" -lt "$CRASH_ALERT_THRESHOLD" ] && return 0
+  local alertf="$STATE_DIR/$comp.crash-alert.next" now next
+  now=$(date +%s)
+  next=0; [ -f "$alertf" ] && { next=$(cat "$alertf" 2>/dev/null || echo 0); case "$next" in (*[!0-9]*|'') next=0;; esac; }
+  [ "$next" -gt "$now" ] && return 0
+  echo $(( now + CRASH_ALERT_THROTTLE_SECONDS )) > "$alertf"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "DRY-RUN would: send crash-alert Telegram for $comp (#$fails rapid exits)"
+    return 0
+  fi
+  local env_file token
+  for env_file in \
+    "$INSTALL_DIR/agents/forge/.claude/channels/telegram/.env" \
+    "$INSTALL_DIR/agents/chad/.claude/channels/telegram/.env" \
+    "$INSTALL_DIR/.env"; do
+    token=$(grep 'TELEGRAM_BOT_TOKEN=' "$env_file" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]') || true
+    [ -n "$token" ] && break
+  done
+  if [ -n "$token" ] && [ -n "$CURL" ]; then
+    "$CURL" -sf --max-time 10 \
+      "https://api.telegram.org/bot${token}/sendMessage" \
+      -d "chat_id=8643929442" \
+      --data-urlencode "text=[Armorer] Dashboard rapid-exit alert: $comp #$fails gyors kilepes. Supervisor auto-recovery fut -- vizsgald meg (store/fleet-supervisor.log). RCA gyanusitott: platform-sleep TCP-socket death (ce09030e)." \
+      >/dev/null 2>&1 \
+      && log "crash-alert: Telegram sent ($comp #$fails)" \
+      || log "crash-alert: Telegram send failed (non-fatal, $comp #$fails)"
+  else
+    log "crash-alert: no token found -- alert suppressed ($comp #$fails)"
+  fi
 }
 # After a launch, if the thing died inside the settle window, treat as failure.
 settle_check() {               # comp predicate_cmd... -> registers failure if dead
@@ -435,6 +475,33 @@ ensure_hot_cache_refresh() {
   if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: hot-cache-refresh.py"; return 0; fi
   python3 "$refresh" >> "$STORE/hot-cache-refresh.log" 2>&1 \
     || log "hot-cache-refresh: tick invocation failed (non-fatal, retries next window)"
+}
+
+# n8n -> WSL2 dashboard bridge (card e4d64187). Windows-side n8n cannot reach
+# 127.0.0.1:3420 (WSL2 loopback, PR#325 boot-hardening). Forwarder binds 0.0.0.0:3422
+# inside WSL2. Pure Python3 stdlib, no socat needed. URL written to store/n8n-kanban-url.txt.
+ensure_n8n_kanban_bridge() {
+  local pid_file="$STATE_DIR/n8n-kanban-bridge.pid"
+  local bridge="$INSTALL_DIR/scripts/n8n-kanban-bridge.py"
+  local url_file="$STORE/n8n-kanban-url.txt"
+  [ -f "$bridge" ] || return 0
+  local wsl_ip
+  wsl_ip=$(ip addr show eth0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+  if [ -f "$pid_file" ]; then
+    local pid; pid=$(cat "$pid_file" 2>/dev/null || echo "")
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
+        && grep -q "n8n-kanban-bridge" /proc/"$pid"/cmdline 2>/dev/null; then
+      [ -n "$wsl_ip" ] && printf 'http://%s:3422\n' "$wsl_ip" > "$url_file"
+      return 0
+    fi
+    rm -f "$pid_file"
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start n8n-kanban-bridge.py on 0.0.0.0:3422"; return 0; fi
+  nohup python3 "$bridge" >> "$STORE/n8n-kanban-bridge.log" 2>&1 &
+  local new_pid=$!
+  echo "$new_pid" > "$pid_file"
+  [ -n "$wsl_ip" ] && printf 'http://%s:3422\n' "$wsl_ip" > "$url_file"
+  log "n8n-kanban-bridge: started (pid=$new_pid, url=http://${wsl_ip:-?}:3422)"
 }
 
 # Delivery-abandonment sentinel consumer (card d37df625). PR #130 writes a
@@ -850,6 +917,8 @@ tick() {
   ensure_cli_version_watch
   # 15) HOT-CACHE AUTO-REFRESH (regenerate per-agent hot-cache.md from ledger+kanban -- card fedb4b5f Phase 2)
   ensure_hot_cache_refresh
+  # 16) N8N KANBAN BRIDGE (Windows-side n8n -> WSL2 dashboard API forwarder -- card e4d64187)
+  ensure_n8n_kanban_bridge
 }
 
 # --- main ------------------------------------------------------------------
