@@ -31,12 +31,13 @@ HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_video_transcribe.py"
 MODEL_CACHE="$REPO_ROOT/store/whisper-env/models"
 
 # --- args ------------------------------------------------------------------
-URL=""; LANG="auto"; MODEL="medium"; OUT_DIR="$REPO_ROOT/store/transcripts"
+URL=""; LANG="auto"; MODEL="medium"; OUT_DIR="$REPO_ROOT/store/transcripts"; WORD_TIMESTAMPS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --lang)   LANG="$2"; shift 2 ;;
     --model)  MODEL="$2"; shift 2 ;;
     --out-dir) OUT_DIR="$2"; shift 2 ;;
+    --word-timestamps) WORD_TIMESTAMPS="--word-timestamps"; shift ;;
     -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     -*) echo "ERROR: unknown flag: $1" >&2; exit 2 ;;
     *) if [ -z "$URL" ]; then URL="$1"; else echo "ERROR: extra arg: $1" >&2; exit 2; fi; shift ;;
@@ -120,10 +121,11 @@ fi
 echo "[3/3] faster-whisper: transcribing (model=$MODEL lang=$LANG)"
 START=$(date +%s)
 if ! "$PYTHON" "$HELPER" --audio "$WAV" --out-base "$OUT_DIR/$SLUG" \
-      --model "$MODEL" --lang "$LANG" --download-root "$MODEL_CACHE"; then
+      --model "$MODEL" --lang "$LANG" --download-root "$MODEL_CACHE" $WORD_TIMESTAMPS; then
   echo "ERROR: transcription failed" >&2; exit 12
 fi
 END=$(date +%s)
 echo "Done in $((END-START))s. Output:"
 echo "  $OUT_DIR/$SLUG.txt"
 echo "  $OUT_DIR/$SLUG.srt"
+[ -n "$WORD_TIMESTAMPS" ] && echo "  $OUT_DIR/$SLUG.words.srt"
