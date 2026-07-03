@@ -49,8 +49,9 @@ vi.mock('../web/token-usage.js', () => ({
   ]),
 }))
 
-const { tryHandlePublicDigest } = await import('../web/routes/public-digest.js')
+const { tryHandlePublicDigest, __resetStatusCache, STATUS_TTL_MS } = await import('../web/routes/public-digest.js')
 const { getTokenSummary } = await import('../web/token-usage.js')
+const { isAgentRunning, capturePane, isTmuxSessionAlive } = await import('../web/agent-process.js')
 
 // ── Test DB setup ────────────────────────────────────────────────────────────
 
@@ -106,6 +107,9 @@ function makeCtx(overrides: { remoteAddress?: string } = {}): RouteContext {
 // reset env and mocks between tests
 afterEach(() => {
   delete process.env.PUBLIC_DIGEST_ENABLED
+  // Status cache persists across resolves by design; clear it between tests so a
+  // test's isAgentRunning/capturePane mock state is never masked by a prior cache.
+  __resetStatusCache()
 })
 
 // ── (a) Happy path ───────────────────────────────────────────────────────────
@@ -464,5 +468,69 @@ describe('(g) determinism -- seeded rows produce exact counts', () => {
     const nowS = Math.floor(Date.now() / 1000)
     expect(fromArg).toBeGreaterThan(nowS - 7 * 24 * 3600 - 10)
     expect(fromArg).toBeLessThanOrEqual(nowS - 7 * 24 * 3600 + 10)
+  })
+})
+
+// ── (h) Status-cache TTL -- collapse per-agent tmux spawns (card beb1d807) ─────
+
+describe('(h) status-cache -- limits per-agent tmux capturePane spawns', () => {
+  // 3 resolvable agents: marveen (main -> isTmuxSessionAlive path) + dave + thor.
+  beforeEach(() => {
+    wipe()
+    __resetStatusCache()
+    vi.mocked(isAgentRunning).mockReturnValue(true)
+    vi.mocked(isTmuxSessionAlive).mockReturnValue(true)
+    vi.mocked(capturePane).mockReturnValue('idle pane text')
+  })
+
+  afterEach(() => {
+    // Restore the default (offline) mock state for the rest of the suite.
+    vi.mocked(isAgentRunning).mockReturnValue(false)
+    vi.mocked(isTmuxSessionAlive).mockReturnValue(false)
+    vi.mocked(capturePane).mockReturnValue(null)
+    vi.useRealTimers()
+    __resetStatusCache()
+  })
+
+  it('captures each agent exactly once, then a second rapid request adds ZERO spawns (cache hit within TTL)', async () => {
+    vi.mocked(capturePane).mockClear()
+    const ip = '10.9.1.1'
+
+    await tryHandlePublicDigest(makeCtx({ remoteAddress: ip }))
+    const afterFirst = vi.mocked(capturePane).mock.calls.length
+    // marveen + dave + thor -> exactly 3 tmux capture-pane spawns
+    expect(afterFirst).toBe(3)
+
+    // Second request well within the TTL window: fully served from cache.
+    await tryHandlePublicDigest(makeCtx({ remoteAddress: ip }))
+    expect(vi.mocked(capturePane).mock.calls.length).toBe(afterFirst)
+  })
+
+  it('recomputes (re-spawns) after the TTL window expires', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    __resetStatusCache()
+    vi.mocked(capturePane).mockClear()
+
+    await tryHandlePublicDigest(makeCtx({ remoteAddress: '10.9.2.1' }))
+    expect(vi.mocked(capturePane).mock.calls.length).toBe(3)
+
+    // Jump just past the TTL -> cache entries stale -> all 3 agents recompute.
+    vi.setSystemTime(STATUS_TTL_MS + 1)
+    await tryHandlePublicDigest(makeCtx({ remoteAddress: '10.9.2.2' }))
+    expect(vi.mocked(capturePane).mock.calls.length).toBe(6)
+  })
+
+  it('still returns a valid busy/idle status while serving from cache', async () => {
+    const ip = '10.9.3.1'
+    await tryHandlePublicDigest(makeCtx({ remoteAddress: ip }))
+    await tryHandlePublicDigest(makeCtx({ remoteAddress: ip }))
+    const body = JSON.parse(mockBody)
+    const entries = Object.entries(body.agents).filter(([k]) => k !== 'count_by_status')
+    for (const [, v] of entries) {
+      expect(['idle', 'busy', 'offline']).toContain((v as { status: string }).status)
+    }
+    // 'idle pane text' -> detectPaneState -> our seeded panes resolve to a real status.
+    expect(body.agents.count_by_status.offline).toBe(0)
   })
 })
