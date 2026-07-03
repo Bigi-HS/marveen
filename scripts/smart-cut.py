@@ -236,6 +236,12 @@ def main():
         cuts += run_silencedetect(args.audio, noise_db=args.noise, min_dur=args.duration)
 
     if not cuts:
+        if args.mode in ("silence", "both"):
+            print(
+                f"WARN: 0 vágási pont silence módban -- a --noise küszöb ({args.noise}dB) "
+                "lehet túl szigorú. Próbáld -35dB-vel (--noise -35).",
+                file=sys.stderr,
+            )
         print("Nincs vágandó szegmens a megadott küszöbökkel.")
         sys.exit(0)
 
@@ -254,6 +260,17 @@ def main():
 
     keep, merged = cuts_to_keep_segments(segments[-1]["end"], cuts)
     report(segments, merged, keep, args.mode)
+
+    # Quality gate: warn on over-aggressive cut rate (silence modes only)
+    if args.mode in ("silence", "both") and merged:
+        total_s = segments[-1]["end"] if segments else 0
+        cut_s = sum(c["dur"] for c in merged)
+        if total_s > 0 and cut_s / total_s > 0.25:
+            print(
+                f"WARN: {cut_s / total_s * 100:.0f}% kivágva -- threshold lehet túl agresszív. "
+                "Ellenőrizd manuálisan (próbáld --noise -45).",
+                file=sys.stderr,
+            )
 
     # FFmpeg script kiírása
     srt_name = Path(args.srt).stem if args.srt else Path(args.audio).stem

@@ -5,6 +5,10 @@ faster-whisper transcription helper (called by video-transcribe.sh).
 Reads a 16 kHz mono WAV, transcribes with faster-whisper (CTranslate2, CPU int8),
 and writes a timestamped plain-text transcript and an SRT subtitle file.
 
+With --word-timestamps: also writes a word-level SRT (.words.srt) for caption
+sync precision. Word-level SRT keeps each word as a separate cue so downstream
+tools (HyperFrames, dubscript-tc-import) can achieve <±0.1s alignment.
+
 Run via the dedicated env's python (absolute path), e.g.:
   store/whisper-env/env/bin/python scripts/_video_transcribe.py \
       --audio /tmp/x.wav --out-base /tmp/x --model medium --lang hu
@@ -36,6 +40,8 @@ def main() -> int:
     ap.add_argument("--model", default="medium")
     ap.add_argument("--lang", default="auto", help="hu | en | auto (source speech language)")
     ap.add_argument("--download-root", default=None, help="model cache dir")
+    ap.add_argument("--word-timestamps", action="store_true", default=False,
+                    help="Also write word-level SRT (.words.srt) for caption sync precision")
     args = ap.parse_args()
 
     if not os.path.isfile(args.audio):
@@ -66,23 +72,47 @@ def main() -> int:
         language=language,
         vad_filter=True,  # drop long silences -> faster + cleaner timestamps
         beam_size=5,
+        word_timestamps=args.word_timestamps,
     )
 
     txt_path = args.out_base + ".txt"
     srt_path = args.out_base + ".srt"
+    words_srt_path = args.out_base + ".words.srt" if args.word_timestamps else None
+
     n = 0
-    with open(txt_path, "w", encoding="utf-8") as ftxt, open(srt_path, "w", encoding="utf-8") as fsrt:
-        for i, seg in enumerate(segments, start=1):
-            text = seg.text.strip()
-            ftxt.write(f"[{fmt_ts(seg.start, '.')} -> {fmt_ts(seg.end, '.')}] {text}\n")
-            fsrt.write(f"{i}\n{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}\n{text}\n\n")
-            n += 1
+    word_cue = 0
+    fsrt_words = open(words_srt_path, "w", encoding="utf-8") if words_srt_path else None
+
+    try:
+        with open(txt_path, "w", encoding="utf-8") as ftxt, \
+             open(srt_path, "w", encoding="utf-8") as fsrt:
+            for i, seg in enumerate(segments, start=1):
+                text = seg.text.strip()
+                ftxt.write(f"[{fmt_ts(seg.start, '.')} -> {fmt_ts(seg.end, '.')}] {text}\n")
+                fsrt.write(f"{i}\n{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}\n{text}\n\n")
+                n += 1
+
+                # Word-level SRT: one cue per word
+                if fsrt_words and seg.words:
+                    for w in seg.words:
+                        word_cue += 1
+                        word_text = w.word.strip()
+                        fsrt_words.write(
+                            f"{word_cue}\n"
+                            f"{fmt_ts(w.start)} --> {fmt_ts(w.end)}\n"
+                            f"{word_text}\n\n"
+                        )
+    finally:
+        if fsrt_words:
+            fsrt_words.close()
 
     # Machine-readable summary on stdout for the shell wrapper.
     print(f"DETECTED_LANG={info.language} LANG_PROB={info.language_probability:.2f} "
           f"DURATION={info.duration:.1f} SEGMENTS={n}")
     print(f"TXT={txt_path}")
     print(f"SRT={srt_path}")
+    if words_srt_path:
+        print(f"WORDS_SRT={words_srt_path}")
     if n == 0:
         print("WARN: no speech segments produced", file=sys.stderr)
         return 6
