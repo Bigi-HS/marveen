@@ -24,7 +24,25 @@ type AgentStatus = 'idle' | 'busy' | 'offline'
 // 60 req/min per IP: burst=60 tokens, refill=1/s.
 const digestLimiter = createRateLimiter({ capacity: 60, refillPerSec: 1 })
 
-function resolveAgentStatus(name: string): AgentStatus {
+// ── Status cache (card beb1d807 pre-golive; Dave finding C on PR#313) ──────────
+// resolveAgentStatus shells out to tmux (has-session + capture-pane) ONCE PER
+// AGENT. With ~27 agents and up to 60 digest req/min (Live Artifact polling), an
+// uncached path spawns ~agents×requests tmux processes/min (~1600/min worst case)
+// and loads the host. A short TTL cache collapses repeat resolves within the
+// window to a single tmux pass per agent, keeping status fresh enough for a VIEW.
+// Tunable via PUBLIC_DIGEST_STATUS_TTL_MS (default 5s); read once at module load.
+export const STATUS_TTL_MS = (() => {
+  const raw = Number(process.env.PUBLIC_DIGEST_STATUS_TTL_MS)
+  return Number.isFinite(raw) && raw > 0 ? raw : 5000
+})()
+const statusCache = new Map<string, { status: AgentStatus; expiresAt: number }>()
+
+/** Test-only: clear the status cache so the next resolve recomputes from tmux. */
+export function __resetStatusCache(): void {
+  statusCache.clear()
+}
+
+function computeAgentStatus(name: string): AgentStatus {
   const running = name === MAIN_AGENT_ID
     ? isTmuxSessionAlive(MAIN_CHANNELS_SESSION)
     : isAgentRunning(name)
@@ -35,6 +53,14 @@ function resolveAgentStatus(name: string): AgentStatus {
   const state = detectPaneState(pane)
   // idle -> "idle"; everything else (busy/typing/unknown/error) -> "busy"
   return state === 'idle' ? 'idle' : 'busy'
+}
+
+function resolveAgentStatus(name: string, nowMs: number): AgentStatus {
+  const cached = statusCache.get(name)
+  if (cached && nowMs < cached.expiresAt) return cached.status
+  const status = computeAgentStatus(name)
+  statusCache.set(name, { status, expiresAt: nowMs + STATUS_TTL_MS })
+  return status
 }
 
 export async function tryHandlePublicDigest(ctx: RouteContext): Promise<boolean> {
@@ -59,7 +85,8 @@ export async function tryHandlePublicDigest(ctx: RouteContext): Promise<boolean>
   }
 
   const db = getNoaDb()
-  const nowS = Math.floor(Date.now() / 1000)
+  const nowMs = Date.now()
+  const nowS = Math.floor(nowMs / 1000)
 
   // ── Agents (spec 3.2: {name}.status, {name}.last_active_ts, count_by_status)
   const agentNames = [MAIN_AGENT_ID, ...listAgentNames()]
@@ -67,7 +94,7 @@ export async function tryHandlePublicDigest(ctx: RouteContext): Promise<boolean>
   const countByStatus: Record<string, number> = { idle: 0, busy: 0, offline: 0 }
 
   for (const name of agentNames) {
-    const status = resolveAgentStatus(name)
+    const status = resolveAgentStatus(name, nowMs)
     const row = db.prepare(
       'SELECT MAX(created_at) as ts FROM agent_messages WHERE from_agent = ?'
     ).get(name) as { ts: number | null }
