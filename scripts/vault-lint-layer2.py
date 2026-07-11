@@ -30,7 +30,13 @@ DEDUP_JACCARD_THRESHOLD = float(os.environ.get("VAULT_L2_DEDUP_JACCARD", "0.4"))
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.normpath(os.path.join(HERE, ".."))
-DB_PATH = os.path.join(PROJECT_ROOT, "store", "claudeclaw.db")
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+from db_resolve import resolve_default_db  # noqa: E402
+
+# Live DB (card 57480c07): honor NOA_DB_PATH, fail open to the live store/noa.db
+# rather than the frozen legacy claudeclaw.db (this lint reads the memories table).
+DB_PATH = resolve_default_db(project_root=PROJECT_ROOT)
 PROPOSALS_PATH = os.path.join(PROJECT_ROOT, "store", "vault-lint-l2-proposals.json")
 BADGE_PATH = os.path.join(PROJECT_ROOT, "store", "vault-lint-l2-badge.json")
 
