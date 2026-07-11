@@ -16,6 +16,14 @@ export default defineConfig({
       // Exclude deploy-time dist backups (store/dist-backup-YYYYMMDD-HHMMSS/):
       // the backup dir contains __tests__ which vitest would otherwise glob.
       'store/dist-backup-*/**',
+      // Per-agent working dirs vendor skill-pack stub test files under
+      // agents/<name>/.claude-config/skills/.../*.test.mjs. They are untracked
+      // stubs, not this repo's suite, and only appear after certain scaffolds,
+      // so `vitest run` globs them into ~125 "No test suite found" file-collection
+      // failures that hide the real signal (3634/0) and confuse reviewers. No real
+      // src suite lives under agents/ (it's src/__tests__), so exclude the whole
+      // subtree. (card 06b0e188; memory vitest-agents-glob-noise)
+      'agents/**',
       // dashboard-new is a separate Vite project with its OWN vitest config
       // (jsdom + React Testing Library setup). This root runner is node-env, so
       // globbing its tests here runs them under the wrong environment (no jsdom
