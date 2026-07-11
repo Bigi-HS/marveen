@@ -363,7 +363,8 @@ def due_actions(now: datetime, plan: dict | None, supplements: list[dict], confi
                             "build": build_plan_error_message})
         else:
             nutrition = plan.get("nutrition_targets", {})
-            overview = today_supplement_overview(supplements, d, session)
+            supp_enabled = config.get("supplement_push_enabled", True)
+            overview = today_supplement_overview(supplements, d, session) if supp_enabled else []
             if session is None:
                 # No session entry for today -> treat as rest.
                 actions.append({"key": "session", "kind": "rest",
@@ -378,10 +379,12 @@ def due_actions(now: datetime, plan: dict | None, supplements: list[dict], confi
     # 2. Timed intake reminders: bucket every intake due today by its RESOLVED time, so
     # a single reminder per time lists all supplements due then (collision decision,
     # card 4db2faed). Names within a bucket are sorted for deterministic text.
+    # Skipped entirely when supplement_push_enabled=false in push-config.json.
     tol = int(config.get("reminder_tolerance_min", DEFAULT_REMINDER_TOLERANCE_MIN))
     buckets: dict[str, list[str]] = {}
-    for name, t in resolved_supplement_intakes(supplements, d, session):
-        buckets.setdefault(t, []).append(name)
+    if config.get("supplement_push_enabled", True):
+        for name, t in resolved_supplement_intakes(supplements, d, session):
+            buckets.setdefault(t, []).append(name)
     for t in sorted(buckets):
         key = f"supp:{t}"
         if key in sent:
