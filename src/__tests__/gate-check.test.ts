@@ -129,6 +129,31 @@ describe('isSecuritySensitivePath (MG-AC4)', () => {
     expect(isSecuritySensitivePath('src/web/agent-token-registry.ts')).toBe(true)
     expect(isSecuritySensitivePath('src/web/routes/admin.ts')).toBe(true)
   })
+
+  // Analytics OAuth/egress surface (card 8de7e55a, PR#335 gap): src/analytics/
+  // holds the OAuth token store (tokens.ts) + scopes (scopes.ts) + the external
+  // egress clients (youtube.ts, twitch.ts) that call third-party APIs with those
+  // credentials. The keyword patterns MISS them: 'analytics' has no auth/secret/
+  // store substring, so tokens.ts fails the token-qualifier and scopes.ts has no
+  // matching keyword at all -- so PR#335 (analytics/tokens.ts, scopes.ts) merged
+  // without an auto-required Chad. Directory-rooted trigger (like scripts/hooks/,
+  // src/mcp/) is the conservative umbrella: the whole module is credential+egress.
+  it('matches the src/analytics/** OAuth token/scope + egress clients (card 8de7e55a)', () => {
+    expect(isSecuritySensitivePath('src/analytics/tokens.ts')).toBe(true)
+    expect(isSecuritySensitivePath('src/analytics/scopes.ts')).toBe(true)
+    expect(isSecuritySensitivePath('src/analytics/youtube.ts')).toBe(true)
+    expect(isSecuritySensitivePath('src/analytics/twitch.ts')).toBe(true)
+    expect(isSecuritySensitivePath('src/analytics/pull.ts')).toBe(true)
+  })
+
+  // False-positive guard: the auth-gated analytics READ route serves aggregated
+  // data and carries no credential handling -- it merged 2-way (thor+dave) as
+  // PR#371. It lives under src/web/routes/, NOT src/analytics/, so the dir-root
+  // trigger must NOT catch it (over-broadening would dilute the gate).
+  it('does NOT match the auth-gated analytics read route (routes/analytics.ts stays 2-way)', () => {
+    expect(isSecuritySensitivePath('src/web/routes/analytics.ts')).toBe(false)
+    expect(isSecuritySensitivePath('src/__tests__/analytics-labels.test.ts')).toBe(false)
+  })
 })
 
 describe('runGateCheck requires chad for a gate-code PR (card 88eb6120)', () => {
@@ -146,6 +171,17 @@ describe('runGateCheck requires chad for a gate-code PR (card 88eb6120)', () => 
   it('a PR touching routes/codetree.ts pulls chad into the required set (card b8e014a4)', async () => {
     const result = await runGateCheck(602, {
       fetchPr: async () => ({ headSha: 'b'.repeat(40), files: ['src/web/routes/codetree.ts'] }),
+      readApprovals: () => [],
+      hasActiveOverride: () => false,
+    })
+    expect(result.required).toEqual(['thor', 'dave', 'chad'])
+    expect(result.missing).toContain('chad')
+    expect(result.pass).toBe(false)
+  })
+
+  it('a PR touching src/analytics/ OAuth code pulls chad into the required set (card 8de7e55a)', async () => {
+    const result = await runGateCheck(603, {
+      fetchPr: async () => ({ headSha: 'c'.repeat(40), files: ['src/analytics/tokens.ts', 'src/analytics/scopes.ts'] }),
       readApprovals: () => [],
       hasActiveOverride: () => false,
     })
