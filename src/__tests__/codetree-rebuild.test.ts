@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { initCodetreeDatabase, querySymbolsByName, queryImporters, queryExportsForFile, getIndexMeta } from '../web/codetree-db.js'
+import { initCodetreeDatabase, querySymbolsByName, queryImporters, queryExportsForFile, queryCallers, queryCallees, getIndexMeta } from '../web/codetree-db.js'
 import { enumerateSourceFiles, rebuildIndex } from '../web/codetree-rebuild.js'
 
 const TEST_DB = '/tmp/test-codetree-rebuild.db'
@@ -100,6 +100,19 @@ describe('rebuildIndex', () => {
     expect(meta.files_count).toBe(summary.files_indexed)
     expect(meta.symbols_count).toBe(summary.symbols_indexed)
     expect(meta.imports_count).toBe(summary.imports_indexed)
+    expect(meta.calls_count).toBe(summary.calls_indexed)
+  })
+
+  it('records call edges resolvable by the callers/callees queries (Phase-2)', () => {
+    const summary = rebuildIndex({ rootDir: root, scanDirs: ['src', 'scripts'] })
+    expect(summary.calls_indexed).toBeGreaterThanOrEqual(1)
+    // src/server.ts: startServer() { saveAgentMemory() }
+    expect(queryCallers('saveAgentMemory')).toContainEqual({
+      caller_file: 'src/server.ts',
+      caller_symbol: 'startServer',
+      line: 2,
+    })
+    expect(queryCallees('startServer')).toEqual([{ callee_name: 'saveAgentMemory' }])
   })
 
   it('is idempotent across two runs (CT-AC5)', () => {

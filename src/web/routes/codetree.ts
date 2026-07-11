@@ -8,6 +8,8 @@ import {
   fileIndexed,
   queryExportsForFile,
   queryImporters,
+  queryCallers,
+  queryCallees,
 } from '../codetree-db.js'
 import type { RebuildSummary } from '../codetree-rebuild.js'
 import { spawnRebuildWorker } from '../codetree-rebuild-spawn.js'
@@ -102,6 +104,23 @@ export async function tryHandleCodetree(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  if (path === '/api/codetree/callers' && method === 'GET') {
+    const name = url.searchParams.get('name')
+    if (!name) { json(res, { error: 'name parameter is required' }, 400); return true }
+    if (notBuilt(res)) return true
+    json(res, { indexed_at: indexedAtIso(), name, callers: queryCallers(name) })
+    return true
+  }
+
+  if (path === '/api/codetree/callees' && method === 'GET') {
+    const symbol = url.searchParams.get('symbol')
+    if (!symbol) { json(res, { error: 'symbol parameter is required' }, 400); return true }
+    if (notBuilt(res)) return true
+    const file = url.searchParams.get('file') ?? undefined
+    json(res, { indexed_at: indexedAtIso(), symbol, callees: queryCallees(symbol, file) })
+    return true
+  }
+
   if (path === '/api/codetree/impact' && method === 'GET') {
     const diff = url.searchParams.get('diff')
     const card = url.searchParams.get('card')
@@ -133,6 +152,7 @@ export async function tryHandleCodetree(ctx: RouteContext): Promise<boolean> {
       files_count: meta.files_count,
       symbols_count: meta.symbols_count,
       imports_count: meta.imports_count,
+      calls_count: meta.calls_count,
       schema_version: meta.schema_version,
       stale: isStale(),
     })

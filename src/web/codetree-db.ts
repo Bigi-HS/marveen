@@ -5,7 +5,8 @@ import { logger } from '../logger.js'
 import { importMatchesQuery } from './codetree-extract.js'
 
 export const CODETREE_DB_FILENAME = 'codetree.db'
-export const CODETREE_SCHEMA_VERSION = '1'
+// v2 adds the code_calls table (Phase-2 call-path tracing, card 52815f7c).
+export const CODETREE_SCHEMA_VERSION = '2'
 
 export interface SymbolRow {
   name: string
@@ -26,11 +27,28 @@ export interface ImporterRow {
   imported_names: string[] | null
 }
 
+// A call/new edge: `caller_symbol` in `caller_file` invokes `callee_name`.
+// caller_symbol is null for module-scope calls. callee_name is name-based
+// (resolved at query time), matching the import-edge model.
+export interface CallRow {
+  caller_file: string
+  caller_symbol: string | null
+  callee_name: string
+  line: number
+}
+
+export interface CallerRow {
+  caller_file: string
+  caller_symbol: string | null
+  line: number
+}
+
 export interface IndexMeta {
   indexed_at: number // epoch seconds
   files_count: number
   symbols_count: number
   imports_count: number
+  calls_count: number
   schema_version: string
 }
 
@@ -72,6 +90,16 @@ export function initCodetreeDatabase(dbPathOverride?: string): void {
     CREATE INDEX IF NOT EXISTS idx_imports_from ON code_imports(from_file);
     CREATE INDEX IF NOT EXISTS idx_imports_to   ON code_imports(to_module);
 
+    CREATE TABLE IF NOT EXISTS code_calls (
+      id            INTEGER PRIMARY KEY,
+      caller_file   TEXT NOT NULL,
+      caller_symbol TEXT,
+      callee_name   TEXT NOT NULL,
+      line          INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_calls_callee ON code_calls(callee_name);
+    CREATE INDEX IF NOT EXISTS idx_calls_caller ON code_calls(caller_symbol);
+
     CREATE TABLE IF NOT EXISTS code_index_meta (
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -111,6 +139,7 @@ export function getIndexMeta(): IndexMeta | null {
     files_count: Number(readMetaValue('files_count') ?? 0),
     symbols_count: Number(readMetaValue('symbols_count') ?? 0),
     imports_count: Number(readMetaValue('imports_count') ?? 0),
+    calls_count: Number(readMetaValue('calls_count') ?? 0),
     schema_version: readMetaValue('schema_version') ?? CODETREE_SCHEMA_VERSION,
   }
 }
@@ -165,11 +194,37 @@ export function queryImporters(moduleQuery: string): ImporterRow[] {
   return out
 }
 
+// "Who calls X": every call site whose callee_name matches, ordered by file then
+// line. Name-based (a callee_name is the rightmost identifier of the call target),
+// so cross-file callers resolve without module resolution -- the consumer
+// disambiguates same-named callees by caller_file, as with import edges. Indexed
+// on callee_name.
+export function queryCallers(name: string): CallerRow[] {
+  return getCodetreeDb()
+    .prepare(
+      'SELECT caller_file, caller_symbol, line FROM code_calls WHERE callee_name = ? ORDER BY caller_file, line',
+    )
+    .all(name) as CallerRow[]
+}
+
+// "What does X call": the distinct callee names invoked by symbol X, ordered by
+// name. Optional `file` scopes to a single caller file when the same symbol name
+// is defined in more than one file. Indexed on caller_symbol.
+export function queryCallees(symbol: string, file?: string): Array<{ callee_name: string }> {
+  const sql =
+    'SELECT DISTINCT callee_name FROM code_calls WHERE caller_symbol = ?' +
+    (file != null ? ' AND caller_file = ?' : '') +
+    ' ORDER BY callee_name'
+  const stmt = getCodetreeDb().prepare(sql)
+  const rows = file != null ? stmt.all(symbol, file) : stmt.all(symbol)
+  return rows as Array<{ callee_name: string }>
+}
+
 // Full replace of the index data in a single transaction (idempotent rebuild).
 // CREATE-IF-NOT-EXISTS keeps the schema stable for concurrent readers; we
 // truncate-then-insert rather than DROP so the server's read connection never
 // sees a missing table mid-rebuild.
-export function replaceIndexData(symbols: SymbolRow[], imports: ImportRow[]): void {
+export function replaceIndexData(symbols: SymbolRow[], imports: ImportRow[], calls: CallRow[] = []): void {
   const db = getCodetreeDb()
   const insSymbol = db.prepare(
     'INSERT INTO code_symbols (name, kind, file, line, exported) VALUES (?, ?, ?, ?, ?)',
@@ -177,17 +232,23 @@ export function replaceIndexData(symbols: SymbolRow[], imports: ImportRow[]): vo
   const insImport = db.prepare(
     'INSERT INTO code_imports (from_file, to_module, imported_names) VALUES (?, ?, ?)',
   )
+  const insCall = db.prepare(
+    'INSERT INTO code_calls (caller_file, caller_symbol, callee_name, line) VALUES (?, ?, ?, ?)',
+  )
   const tx = db.transaction(() => {
-    db.exec('DELETE FROM code_symbols; DELETE FROM code_imports;')
+    db.exec('DELETE FROM code_symbols; DELETE FROM code_imports; DELETE FROM code_calls;')
     for (const s of symbols) insSymbol.run(s.name, s.kind, s.file, s.line, s.exported ? 1 : 0)
     for (const i of imports) {
       insImport.run(i.from_file, i.to_module, i.imported_names != null ? JSON.stringify(i.imported_names) : null)
     }
+    for (const c of calls) insCall.run(c.caller_file, c.caller_symbol, c.callee_name, c.line)
   })
   tx()
 }
 
-export function setIndexMeta(meta: Omit<IndexMeta, 'schema_version'> & { schema_version?: string }): void {
+export function setIndexMeta(
+  meta: Omit<IndexMeta, 'schema_version' | 'calls_count'> & { calls_count?: number; schema_version?: string },
+): void {
   const db = getCodetreeDb()
   const upsert = db.prepare(
     'INSERT INTO code_index_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
@@ -197,6 +258,7 @@ export function setIndexMeta(meta: Omit<IndexMeta, 'schema_version'> & { schema_
     upsert.run('files_count', String(meta.files_count))
     upsert.run('symbols_count', String(meta.symbols_count))
     upsert.run('imports_count', String(meta.imports_count))
+    upsert.run('calls_count', String(meta.calls_count ?? 0))
     upsert.run('schema_version', meta.schema_version ?? CODETREE_SCHEMA_VERSION)
   })
   tx()

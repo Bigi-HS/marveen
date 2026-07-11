@@ -16,9 +16,16 @@ export interface ExtractedImport {
   imported_names: string[] | null // named imports; null for namespace/default/side-effect/star
 }
 
+export interface ExtractedCall {
+  caller_symbol: string | null // enclosing top-level symbol; null = module scope
+  callee_name: string // rightmost identifier of the call/new target
+  line: number // 1-based
+}
+
 export interface FileExtraction {
   symbols: ExtractedSymbol[]
   imports: ExtractedImport[]
+  calls: ExtractedCall[]
 }
 
 const MODULE_EXT_RE = /\.(ts|tsx|js|jsx|mjs|cjs)$/
@@ -76,17 +83,62 @@ function namedImportNames(clause: ts.ImportClause | undefined): string[] | null 
   return null
 }
 
-// Parse one already-parsed SourceFile into top-level symbols + import edges.
-// Pure: no IO, no DB. The rebuild passes program.getSourceFile() outputs here;
-// tests pass ts.createSourceFile() fixtures. Same AST either way.
+// The static name of a call/new target: `foo()` -> 'foo', `a.b.c()` -> 'c'
+// (rightmost property name). Computed (`obj[x]()`) and other non-identifier
+// targets have no static name and are skipped -- the graph is name-based and
+// resolved at query time, matching the import-edge model (noResolve rebuild).
+function calleeName(expr: ts.Expression): string | null {
+  if (ts.isIdentifier(expr)) return expr.text
+  if (ts.isPropertyAccessExpression(expr)) return expr.name.text
+  return null
+}
+
+// The top-level symbol a statement defines, used to attribute the calls in its
+// body. A multi-declarator variable statement has no single owner -> null (its
+// calls are treated as module scope), matching the single-owner attribution the
+// caller graph needs.
+function topLevelSymbolName(stmt: ts.Statement): string | null {
+  if (ts.isFunctionDeclaration(stmt) && stmt.name) return stmt.name.text
+  if (ts.isClassDeclaration(stmt) && stmt.name) return stmt.name.text
+  if (ts.isVariableStatement(stmt)) {
+    const decls = stmt.declarationList.declarations
+    if (decls.length === 1 && ts.isIdentifier(decls[0].name)) return decls[0].name.text
+  }
+  return null
+}
+
+// Collect every call/new expression under `node`, each attributed to
+// `callerSymbol`. forEachChild recursion also descends into arguments and the
+// callee expression, so nested/argument calls are captured too.
+function collectCalls(node: ts.Node, callerSymbol: string | null, sf: ts.SourceFile, out: ExtractedCall[]): void {
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) || ts.isNewExpression(n)) {
+      const name = calleeName(n.expression)
+      if (name) out.push({ caller_symbol: callerSymbol, callee_name: name, line: lineOf(sf, n) })
+    }
+    ts.forEachChild(n, visit)
+  }
+  visit(node)
+}
+
+// Parse one already-parsed SourceFile into top-level symbols + import edges +
+// call edges. Pure: no IO, no DB. The rebuild passes program.getSourceFile()
+// outputs here; tests pass ts.createSourceFile() fixtures. Same AST either way.
 export function extractFromSourceFile(sf: ts.SourceFile): FileExtraction {
   const symbols: ExtractedSymbol[] = []
   const imports: ExtractedImport[] = []
+  const calls: ExtractedCall[] = []
   // Local names re-exported via a bare `export { a, b as c }` clause; used to
   // promote the matching internal symbol to exported (CT-AC8 recall).
   const exportedLocalNames = new Set<string>()
 
   for (const stmt of sf.statements) {
+    // Call edges: attribute every call in this statement's subtree to the
+    // top-level symbol it defines (or null for module-scope statements).
+    if (!ts.isImportDeclaration(stmt) && !ts.isExportDeclaration(stmt)) {
+      collectCalls(stmt, topLevelSymbolName(stmt), sf, calls)
+    }
+
     if (ts.isFunctionDeclaration(stmt) && stmt.name) {
       symbols.push({ name: stmt.name.text, kind: 'function', line: lineOf(sf, stmt), exported: hasExportModifier(stmt) })
     } else if (ts.isClassDeclaration(stmt) && stmt.name) {
@@ -132,5 +184,5 @@ export function extractFromSourceFile(sf: ts.SourceFile): FileExtraction {
     }
   }
 
-  return { symbols, imports }
+  return { symbols, imports, calls }
 }

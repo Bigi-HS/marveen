@@ -9,6 +9,8 @@ import {
   fileIndexed,
   queryExportsForFile,
   queryImporters,
+  queryCallers,
+  queryCallees,
   replaceIndexData,
   setIndexMeta,
   CODETREE_SCHEMA_VERSION,
@@ -29,8 +31,15 @@ function seed() {
       { from_file: 'src/memory.ts', to_module: '../db.js', imported_names: null },
       { from_file: 'src/db.ts', to_module: 'better-sqlite3', imported_names: null },
     ],
+    [
+      { caller_file: 'src/server.ts', caller_symbol: 'startWebServer', callee_name: 'saveAgentMemory', line: 90 },
+      { caller_file: 'src/server.ts', caller_symbol: 'startWebServer', callee_name: 'saveAgentMemory', line: 95 },
+      { caller_file: 'src/memory.ts', caller_symbol: 'flush', callee_name: 'saveAgentMemory', line: 12 },
+      { caller_file: 'src/db.ts', caller_symbol: 'saveAgentMemory', callee_name: 'internalHelper', line: 830 },
+      { caller_file: 'src/db.ts', caller_symbol: null, callee_name: 'startWebServer', line: 900 },
+    ],
   )
-  setIndexMeta({ indexed_at: 1_700_000_000, files_count: 3, symbols_count: 4, imports_count: 3 })
+  setIndexMeta({ indexed_at: 1_700_000_000, files_count: 3, symbols_count: 4, imports_count: 3, calls_count: 5 })
 }
 
 describe('codetree-db', () => {
@@ -64,6 +73,7 @@ describe('codetree-db', () => {
     expect(meta.files_count).toBe(3)
     expect(meta.symbols_count).toBe(4)
     expect(meta.imports_count).toBe(3)
+    expect(meta.calls_count).toBe(5)
     expect(meta.schema_version).toBe(CODETREE_SCHEMA_VERSION)
   })
 
@@ -124,5 +134,44 @@ describe('codetree-db', () => {
     seed()
     expect(querySymbolsByName('saveAgentMemory')).toHaveLength(1)
     expect(getIndexMeta()!.symbols_count).toBe(4)
+    expect(queryCallers('saveAgentMemory')).toHaveLength(3)
+  })
+
+  it('queryCallers returns every call site of a callee, ordered by file then line', () => {
+    seed()
+    const rows = queryCallers('saveAgentMemory')
+    expect(rows).toEqual([
+      { caller_file: 'src/memory.ts', caller_symbol: 'flush', line: 12 },
+      { caller_file: 'src/server.ts', caller_symbol: 'startWebServer', line: 90 },
+      { caller_file: 'src/server.ts', caller_symbol: 'startWebServer', line: 95 },
+    ])
+  })
+
+  it('queryCallers exposes a module-scope caller as a null caller_symbol', () => {
+    seed()
+    expect(queryCallers('startWebServer')).toEqual([
+      { caller_file: 'src/db.ts', caller_symbol: null, line: 900 },
+    ])
+  })
+
+  it('queryCallers returns empty for an uncalled name', () => {
+    seed()
+    expect(queryCallers('neverCalled')).toEqual([])
+  })
+
+  it('queryCallees returns the distinct names a symbol calls, ordered by name', () => {
+    seed()
+    expect(queryCallees('startWebServer')).toEqual([{ callee_name: 'saveAgentMemory' }])
+  })
+
+  it('queryCallees can scope to a specific caller file', () => {
+    seed()
+    expect(queryCallees('saveAgentMemory', 'src/db.ts')).toEqual([{ callee_name: 'internalHelper' }])
+    expect(queryCallees('saveAgentMemory', 'src/other.ts')).toEqual([])
+  })
+
+  it('queryCallees returns empty for a symbol that calls nothing', () => {
+    seed()
+    expect(queryCallees('internalHelper')).toEqual([])
   })
 })

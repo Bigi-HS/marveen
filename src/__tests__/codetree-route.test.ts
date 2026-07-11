@@ -36,8 +36,12 @@ function seedFresh() {
       { name: 'internalHelper', kind: 'function', file: 'src/db.ts', line: 5, exported: false },
     ],
     [{ from_file: 'src/server.ts', to_module: './db.js', imported_names: ['saveAgentMemory'] }],
+    [
+      { caller_file: 'src/server.ts', caller_symbol: 'startServer', callee_name: 'saveAgentMemory', line: 90 },
+      { caller_file: 'src/db.ts', caller_symbol: 'saveAgentMemory', callee_name: 'internalHelper', line: 830 },
+    ],
   )
-  setIndexMeta({ indexed_at: Math.floor(Date.now() / 1000), files_count: 2, symbols_count: 2, imports_count: 1 })
+  setIndexMeta({ indexed_at: Math.floor(Date.now() / 1000), files_count: 2, symbols_count: 2, imports_count: 1, calls_count: 2 })
 }
 
 beforeEach(() => {
@@ -108,6 +112,58 @@ describe('GET /api/codetree/importers (CT-AC3)', () => {
   })
 })
 
+describe('GET /api/codetree/callers (Phase-2 call-path)', () => {
+  it('400 when name param missing or empty', async () => {
+    seedFresh()
+    expect((await call('GET', '/api/codetree/callers')).status).toBe(400)
+    expect((await call('GET', '/api/codetree/callers?name=')).status).toBe(400)
+  })
+  it('503 before any rebuild', async () => {
+    expect((await call('GET', '/api/codetree/callers?name=saveAgentMemory')).status).toBe(503)
+  })
+  it('returns the call sites of a callee with an indexed_at envelope', async () => {
+    seedFresh()
+    const r = await call('GET', '/api/codetree/callers?name=saveAgentMemory')
+    expect(r.status).toBe(200)
+    expect(r.body.indexed_at).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    expect(r.body.name).toBe('saveAgentMemory')
+    expect(r.body.callers).toEqual([
+      { caller_file: 'src/server.ts', caller_symbol: 'startServer', line: 90 },
+    ])
+  })
+  it('200 with empty callers on no match', async () => {
+    seedFresh()
+    const r = await call('GET', '/api/codetree/callers?name=nope')
+    expect(r.status).toBe(200)
+    expect(r.body.callers).toEqual([])
+  })
+})
+
+describe('GET /api/codetree/callees (Phase-2 call-path)', () => {
+  it('400 when symbol param missing or empty', async () => {
+    seedFresh()
+    expect((await call('GET', '/api/codetree/callees')).status).toBe(400)
+    expect((await call('GET', '/api/codetree/callees?symbol=')).status).toBe(400)
+  })
+  it('503 before any rebuild', async () => {
+    expect((await call('GET', '/api/codetree/callees?symbol=startServer')).status).toBe(503)
+  })
+  it('returns the distinct names a symbol calls', async () => {
+    seedFresh()
+    const r = await call('GET', '/api/codetree/callees?symbol=startServer')
+    expect(r.status).toBe(200)
+    expect(r.body.symbol).toBe('startServer')
+    expect(r.body.callees).toEqual([{ callee_name: 'saveAgentMemory' }])
+  })
+  it('scopes callees to an optional file param', async () => {
+    seedFresh()
+    const r = await call('GET', '/api/codetree/callees?symbol=saveAgentMemory&file=src/db.ts')
+    expect(r.body.callees).toEqual([{ callee_name: 'internalHelper' }])
+    const miss = await call('GET', '/api/codetree/callees?symbol=saveAgentMemory&file=src/other.ts')
+    expect(miss.body.callees).toEqual([])
+  })
+})
+
 describe('GET /api/codetree/meta (CT-AC4)', () => {
   it('503 before any rebuild', async () => {
     expect((await call('GET', '/api/codetree/meta')).status).toBe(503)
@@ -116,7 +172,7 @@ describe('GET /api/codetree/meta (CT-AC4)', () => {
     seedFresh()
     const r = await call('GET', '/api/codetree/meta')
     expect(r.status).toBe(200)
-    expect(r.body).toMatchObject({ files_count: 2, symbols_count: 2, imports_count: 1, stale: false })
+    expect(r.body).toMatchObject({ files_count: 2, symbols_count: 2, imports_count: 1, calls_count: 2, stale: false })
   })
   it('stale=true when indexed_at is older than 24h (CT-SEC1)', async () => {
     replaceIndexData([], [])
@@ -128,7 +184,7 @@ describe('GET /api/codetree/meta (CT-AC4)', () => {
 
 describe('POST /api/codetree/rebuild (CT-AC5, CT-AC6)', () => {
   const fakeSummary: RebuildSummary = {
-    files_indexed: 160, symbols_indexed: 1842, imports_indexed: 634,
+    files_indexed: 160, symbols_indexed: 1842, imports_indexed: 634, calls_indexed: 2951,
     duration_ms: 4200, indexed_at: '2026-06-17T10:00:00.000Z', files_skipped: [],
   }
 
