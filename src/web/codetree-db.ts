@@ -229,6 +229,38 @@ export function queryCallees(symbol: string, file?: string): Array<{ callee_name
   return rows as Array<{ callee_name: string }>
 }
 
+// All exported symbols -- the candidate universe for dead-code detection.
+// ~hundreds to ~2k rows; a full ordered scan is negligible.
+export function queryExportedSymbols(): SymbolRow[] {
+  const rows = getCodetreeDb()
+    .prepare('SELECT name, kind, file, line, exported FROM code_symbols WHERE exported = 1 ORDER BY file, line')
+    .all() as Array<{ name: string; kind: string; file: string; line: number; exported: number }>
+  return rows.map((r) => ({ ...r, exported: r.exported === 1 }))
+}
+
+// The distinct set of call-target names across every call edge. Used as an O(1)
+// "is this name called anywhere" reachability probe for dead-code detection.
+export function queryDistinctCalleeNames(): Set<string> {
+  const rows = getCodetreeDb()
+    .prepare('SELECT DISTINCT callee_name FROM code_calls')
+    .all() as Array<{ callee_name: string }>
+  return new Set(rows.map((r) => r.callee_name))
+}
+
+// Every import edge (raw, unresolved), with imported_names parsed. Dead-code
+// detection resolves these against each symbol's file at query time (same
+// name-based model as queryImporters).
+export function queryAllImportEdges(): ImportRow[] {
+  const rows = getCodetreeDb()
+    .prepare('SELECT from_file, to_module, imported_names FROM code_imports ORDER BY from_file')
+    .all() as Array<{ from_file: string; to_module: string; imported_names: string | null }>
+  return rows.map((r) => ({
+    from_file: r.from_file,
+    to_module: r.to_module,
+    imported_names: r.imported_names != null ? (JSON.parse(r.imported_names) as string[]) : null,
+  }))
+}
+
 // Full replace of the index data in a single transaction (idempotent rebuild).
 // CREATE-IF-NOT-EXISTS keeps the schema stable for concurrent readers; we
 // truncate-then-insert rather than DROP so the server's read connection never

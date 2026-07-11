@@ -11,12 +11,16 @@ import {
   queryImporters,
   queryCallers,
   queryCallees,
+  queryExportedSymbols,
+  queryDistinctCalleeNames,
+  queryAllImportEdges,
   CODETREE_SCHEMA_VERSION,
 } from '../codetree-db.js'
 import type { RebuildSummary } from '../codetree-rebuild.js'
 import { spawnRebuildWorker } from '../codetree-rebuild-spawn.js'
 import { buildImpactReport, type ImpactDeps } from '../codetree-impact.js'
 import { realImpactDeps } from '../codetree-impact-io.js'
+import { selectDeadCodeCandidates, DEADCODE_CAVEATS } from '../codetree-deadcode.js'
 
 const STALE_AFTER_SECONDS = 24 * 3600
 
@@ -124,6 +128,24 @@ export async function tryHandleCodetree(ctx: RouteContext): Promise<boolean> {
     if (notBuilt(res)) return true
     const file = url.searchParams.get('file') ?? undefined
     json(res, { indexed_at: indexedAtIso(), symbol, callees: queryCallees(symbol, file) })
+    return true
+  }
+
+  if (path === '/api/codetree/dead-code' && method === 'GET') {
+    if (notBuilt(res)) return true
+    // Optional `prefix` narrows the report to a path subtree. It only feeds an
+    // in-memory Array.filter startsWith on already-loaded file strings -- no
+    // shell/fs/DB sink -- so it needs no ref guard.
+    const prefix = url.searchParams.get('prefix') ?? undefined
+    let candidates = selectDeadCodeCandidates({
+      exportedSymbols: queryExportedSymbols(),
+      calleeNames: queryDistinctCalleeNames(),
+      importEdges: queryAllImportEdges(),
+    })
+    if (prefix) candidates = candidates.filter((c) => c.file.startsWith(prefix))
+    // Named "candidates" + inline caveats so the consumer never derives an
+    // automated deletion: this is a review aid with documented blind spots.
+    json(res, { indexed_at: indexedAtIso(), dead_code_candidates: candidates, caveats: DEADCODE_CAVEATS })
     return true
   }
 
