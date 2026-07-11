@@ -59,6 +59,35 @@ LOG="$STORE/fleet-supervisor.log"
 LOCK="$STORE/.fleet-supervisor.lock"
 STATE_DIR="$STORE/.fleet-supervisor"
 
+# Resolve the live fleet DB the supervisor reads (agent_messages, ...). Mirrors
+# resolveNoaDbPath (src/db-path.ts) and the python hooks (ledger_lib._resolve_live_db):
+# an explicit NOA_DB_PATH override wins when it names a `.db` under the install
+# root; otherwise the STORE-relative live default `noa.db`. Post-cutover the
+# frozen legacy claudeclaw.db is NEVER the default -- reading it here would query
+# a stale agent_messages table and blind the idle-nudge watchdog to live
+# obligations (split-brain, card 57480c07). STORE-relative default keeps test
+# isolation (FLEET_SUPERVISOR_STORE) intact; a bad override fails open to the
+# live default, never to the frozen db.
+resolve_live_db() {
+  local raw="${NOA_DB_PATH:-}"
+  # Trim leading/trailing whitespace (mirrors the python .strip()).
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  if [ -n "$raw" ]; then
+    local candidate
+    case "$raw" in
+      /*) candidate="$raw" ;;
+      *)  candidate="$INSTALL_DIR/$raw" ;;
+    esac
+    case "$candidate" in
+      *..*) : ;;                                    # parent-dir traversal -> reject
+      "$INSTALL_DIR"/*.db) printf '%s' "$candidate"; return 0 ;;
+    esac
+    # invalid override (bad suffix / outside root) -> fall through to safe default
+  fi
+  printf '%s' "$STORE/noa.db"
+}
+
 TICK_SECONDS=60
 SETTLE_SECONDS=8            # how long a freshly launched component must survive
 RETRY_BASE_SECONDS=30       # first backoff after a rapid failure
@@ -629,7 +658,7 @@ pane_has_overloaded_error() {
 # IDLE_NUDGE_LOOKBACK_SECONDS window.
 agent_has_open_obligation() {
   local agent="$1" db count
-  db="$STORE/claudeclaw.db"
+  db="$(resolve_live_db)"
   [ -f "$db" ] || return 1
   count=$(python3 -c "
 import sqlite3, sys, time
