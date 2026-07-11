@@ -164,6 +164,56 @@ describe('GET /api/codetree/callees (Phase-2 call-path)', () => {
   })
 })
 
+describe('GET /api/codetree/dead-code (Phase-2 B)', () => {
+  // src/a.ts exports three symbols:
+  //  - imported  : pulled in by name from src/b.ts    -> reachable
+  //  - calledOnly : never imported, but called by name -> reachable
+  //  - orphan     : neither imported nor called        -> DEAD candidate
+  // src/c.ts exports `masked`, and src/b.ts namespace-imports src/c.ts (null
+  // names) -> conservatively suppressed even though nothing names `masked`.
+  function seedDead() {
+    replaceIndexData(
+      [
+        { name: 'imported', kind: 'function', file: 'src/a.ts', line: 10, exported: true },
+        { name: 'calledOnly', kind: 'function', file: 'src/a.ts', line: 20, exported: true },
+        { name: 'orphan', kind: 'function', file: 'src/a.ts', line: 30, exported: true },
+        { name: 'internalOnly', kind: 'function', file: 'src/a.ts', line: 40, exported: false },
+        { name: 'masked', kind: 'const', file: 'src/c.ts', line: 5, exported: true },
+      ],
+      [
+        { from_file: 'src/b.ts', to_module: './a.js', imported_names: ['imported'] },
+        { from_file: 'src/b.ts', to_module: './c.js', imported_names: null },
+      ],
+      [{ caller_file: 'src/b.ts', caller_symbol: 'run', callee_name: 'calledOnly', line: 3 }],
+    )
+    setIndexMeta({ indexed_at: Math.floor(Date.now() / 1000), files_count: 3, symbols_count: 5, imports_count: 2, calls_count: 1 })
+  }
+
+  it('503 before any rebuild', async () => {
+    expect((await call('GET', '/api/codetree/dead-code')).status).toBe(503)
+  })
+
+  it('flags only the truly unreferenced export, with an indexed_at envelope + caveats', async () => {
+    seedDead()
+    const r = await call('GET', '/api/codetree/dead-code')
+    expect(r.status).toBe(200)
+    expect(r.body.indexed_at).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    expect(r.body.dead_code_candidates).toEqual([
+      { name: 'orphan', kind: 'function', file: 'src/a.ts', line: 30 },
+    ])
+    expect(Array.isArray(r.body.caveats)).toBe(true)
+    expect(r.body.caveats.length).toBeGreaterThan(0)
+  })
+
+  it('optional prefix narrows the report to a path subtree', async () => {
+    seedDead()
+    const inA = await call('GET', '/api/codetree/dead-code?prefix=src/a')
+    expect(inA.body.dead_code_candidates.map((c: any) => c.name)).toEqual(['orphan'])
+    const inScripts = await call('GET', '/api/codetree/dead-code?prefix=scripts/')
+    expect(inScripts.body.dead_code_candidates).toEqual([])
+  })
+})
+
 describe('GET /api/codetree/meta (CT-AC4)', () => {
   it('503 before any rebuild', async () => {
     expect((await call('GET', '/api/codetree/meta')).status).toBe(503)

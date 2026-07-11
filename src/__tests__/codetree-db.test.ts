@@ -11,6 +11,9 @@ import {
   queryImporters,
   queryCallers,
   queryCallees,
+  queryExportedSymbols,
+  queryDistinctCalleeNames,
+  queryAllImportEdges,
   replaceIndexData,
   setIndexMeta,
   CODETREE_SCHEMA_VERSION,
@@ -173,5 +176,30 @@ describe('codetree-db', () => {
   it('queryCallees returns empty for a symbol that calls nothing', () => {
     seed()
     expect(queryCallees('internalHelper')).toEqual([])
+  })
+
+  it('queryExportedSymbols returns only exported symbols, ordered by file then line', () => {
+    seed()
+    const rows = queryExportedSymbols()
+    expect(rows.map((r) => r.name)).toEqual(['getAgentMemories', 'saveAgentMemory', 'startWebServer'])
+    expect(rows.every((r) => r.exported === true)).toBe(true)
+    expect(rows.map((r) => r.name)).not.toContain('internalHelper')
+  })
+
+  it('queryDistinctCalleeNames returns the deduped set of call targets', () => {
+    seed()
+    const names = queryDistinctCalleeNames()
+    expect(names).toBeInstanceOf(Set)
+    expect([...names].sort()).toEqual(['internalHelper', 'saveAgentMemory', 'startWebServer'])
+  })
+
+  it('queryAllImportEdges returns every edge with imported_names parsed', () => {
+    seed()
+    const edges = queryAllImportEdges()
+    expect(edges).toHaveLength(3)
+    const server = edges.find((e) => e.from_file === 'src/server.ts')!
+    expect(server.imported_names).toEqual(['saveAgentMemory', 'getAgentMemories'])
+    const memory = edges.find((e) => e.from_file === 'src/memory.ts')!
+    expect(memory.imported_names).toBeNull()
   })
 })
