@@ -657,33 +657,33 @@ class TestDirectSendReuse(unittest.TestCase):
 
 
 class ResolveDefaultDbTest(unittest.TestCase):
-    """Pre-retire hardcode migration (card b793b2d8): the standalone default DB
-    honors NOA_DB_PATH so layer2_call_log / budget / insert_kanban_card land on
-    the live noa.db, not the frozen claudeclaw.db."""
+    """Post-retire default (card 57480c07): the standalone default DB honors
+    NOA_DB_PATH so layer2_call_log / budget / insert_kanban_card land on the live
+    noa.db, and fails open to the LIVE noa.db, never the frozen claudeclaw.db."""
 
     ROOT = "/proj/root"
 
-    def _legacy(self):
-        return os.path.join(self.ROOT, "store", "claudeclaw.db")
+    def _default(self):
+        return os.path.join(self.ROOT, "store", "noa.db")
 
     def test_honors_noa_db_path(self):
         got = fl.resolve_default_db({"NOA_DB_PATH": "store/noa.db"}, self.ROOT)
         self.assertEqual(got, os.path.join(self.ROOT, "store", "noa.db"))
 
-    def test_unset_falls_back_to_legacy(self):
-        self.assertEqual(fl.resolve_default_db({}, self.ROOT), self._legacy())
+    def test_unset_falls_back_to_noa(self):
+        self.assertEqual(fl.resolve_default_db({}, self.ROOT), self._default())
 
-    def test_blank_falls_back_to_legacy(self):
-        self.assertEqual(fl.resolve_default_db({"NOA_DB_PATH": "   "}, self.ROOT), self._legacy())
+    def test_blank_falls_back_to_noa(self):
+        self.assertEqual(fl.resolve_default_db({"NOA_DB_PATH": "   "}, self.ROOT), self._default())
 
     def test_non_db_target_rejected(self):
         self.assertEqual(
-            fl.resolve_default_db({"NOA_DB_PATH": "store/evil.txt"}, self.ROOT), self._legacy()
+            fl.resolve_default_db({"NOA_DB_PATH": "store/evil.txt"}, self.ROOT), self._default()
         )
 
     def test_root_escape_rejected(self):
         self.assertEqual(
-            fl.resolve_default_db({"NOA_DB_PATH": "../outside.db"}, self.ROOT), self._legacy()
+            fl.resolve_default_db({"NOA_DB_PATH": "../outside.db"}, self.ROOT), self._default()
         )
 
     def test_never_frozen_db_when_cutover_active(self):

@@ -52,7 +52,10 @@ const PYTHON = resolveFromPath('python3')
 // is read from the single authoritative source maintained by the
 // token-outage-bridge (spec 4.3); no pane-capture fallback.
 const TOKEN_OUTAGE_STATE_PATH = join(PROJECT_ROOT, 'store', 'token-outage-state.json')
-const CLAUDECLAW_LEGACY_DB = join(PROJECT_ROOT, 'store', 'claudeclaw.db')
+// Post-retire default (card 57480c07): the fallback is the LIVE noa.db, so a
+// scheduled send with NOA_DB_PATH unset can no longer write into the frozen
+// legacy claudeclaw.db.
+const DEFAULT_LIVE_DB = join(PROJECT_ROOT, 'store', 'noa.db')
 const DIRECT_SEND_SCRIPT = join(PROJECT_ROOT, 'scripts', 'direct-send.py')
 const FALLBACK_LLM_SCRIPT = join(PROJECT_ROOT, 'scripts', 'fallback_llm_client.py')
 const FALLBACK_LLM_PROVIDERS = join(PROJECT_ROOT, 'store', 'fallback-llm-providers.yaml')
@@ -77,9 +80,9 @@ export function readTokenOutageState(path: string = TOKEN_OUTAGE_STATE_PATH): { 
 // direct_send_log / layer2_call_log rows AND its kanban card updates/inserts into
 // the FROZEN legacy DB, invisible to the live board (card b793b2d8, latent
 // split-brain bug). Reuse the canonical resolver (same guard as the app's own DB
-// handle); fall back to the legacy path only when NOA_DB_PATH is unset (pre-cutover).
+// handle); fall back to the live noa.db when NOA_DB_PATH is unset (card 57480c07).
 export function scheduledDbPath(env: NodeJS.ProcessEnv = process.env): string {
-  return resolveNoaDbPath(env.NOA_DB_PATH, PROJECT_ROOT, CLAUDECLAW_LEGACY_DB)
+  return resolveNoaDbPath(env.NOA_DB_PATH, PROJECT_ROOT, DEFAULT_LIVE_DB)
 }
 
 // Pure trigger predicate (AC-1): direct-send fires iff the task opts in AND the

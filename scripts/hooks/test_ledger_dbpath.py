@@ -24,7 +24,10 @@ class ResolveLiveDbTest(unittest.TestCase):
     """Pure precedence + guard logic (no filesystem / no real .env)."""
 
     INSTALL = "/opt/noa"
-    DEFAULT = os.path.join("/opt/noa", "store", "claudeclaw.db")
+    # Post-retire (card 57480c07): the fail-open default is the LIVE noa.db, not
+    # the frozen claudeclaw.db -- a misconfigured NOA_DB_PATH must never route the
+    # ledger back to the frozen legacy DB.
+    DEFAULT = os.path.join("/opt/noa", "store", "noa.db")
 
     def r(self, ledger_override, noa_setting):
         return ledger_lib._resolve_live_db(ledger_override, noa_setting, self.INSTALL)
@@ -35,7 +38,7 @@ class ResolveLiveDbTest(unittest.TestCase):
     def test_noa_relative_resolves_under_install(self):
         self.assertEqual(self.r(None, "store/noa.db"), os.path.join(self.INSTALL, "store", "noa.db"))
 
-    def test_unset_falls_back_to_legacy_default(self):
+    def test_unset_falls_back_to_noa_default(self):
         self.assertEqual(self.r(None, None), self.DEFAULT)
 
     def test_blank_falls_back_to_default(self):
