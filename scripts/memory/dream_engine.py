@@ -5,6 +5,7 @@ Runs at 22:00 CET, processes daily-log -> ReasoningBank entries
 Safeguards: snapshot, dedup-FLAG, never-delete, curator-review on destructive ops
 """
 
+import os
 import sqlite3
 import json
 import subprocess
@@ -14,7 +15,34 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-VAULT_PATH = "store/claudeclaw.db"
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def resolve_default_db(env=None, project_root=None):
+    """Vault DB target for the dream-engine consolidation. Honors NOA_DB_PATH
+    (the noa.db cutover live DB) and fails open to the LIVE store/noa.db, never
+    the frozen store/claudeclaw.db (card 57480c07). The dream-engine reads the
+    memories table (dedup / hot-warm-gap / cold-refresh scans) and copy2-snapshots
+    the vault; defaulting to the frozen legacy DB would consolidate against a
+    stale vault and snapshot the dead DB -> latent capability-loss. NOA_DB_PATH
+    is honored only if it names a .db under the project root; anything else fails
+    open to the live noa.db.
+    """
+    env = os.environ if env is None else env
+    if project_root is None:
+        project_root = PROJECT_ROOT
+    default = os.path.join(project_root, "store", "noa.db")
+    raw = (env.get("NOA_DB_PATH") or "").strip()
+    if not raw:
+        return default
+    resolved = os.path.abspath(os.path.join(project_root, raw))
+    root_with_sep = project_root.rstrip(os.sep) + os.sep
+    if resolved.endswith(".db") and resolved.startswith(root_with_sep):
+        return resolved
+    return default
+
+
+VAULT_PATH = resolve_default_db(project_root=PROJECT_ROOT)
 TOKEN_PATH = "store/.dashboard-token"
 API_BASE = "http://localhost:3420"
 AGENT_ID = "applegate"

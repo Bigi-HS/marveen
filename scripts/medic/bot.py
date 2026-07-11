@@ -43,7 +43,32 @@ from medic import patterns  # noqa: E402
 
 INSTALL_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ENV_PATH = os.path.join(INSTALL_DIR, "store", "medic-bot.env")
-DB_PATH = os.path.join(INSTALL_DIR, "store", "claudeclaw.db")
+
+
+def resolve_default_db(env=None, project_root=None):
+    """DB target for Medic's read-only probes (probe_stuck reads the LIVE
+    agent_messages table). Honors NOA_DB_PATH (the noa.db cutover live DB) and
+    fails open to the LIVE store/noa.db, never the frozen store/claudeclaw.db
+    (card 57480c07). Defaulting to the frozen legacy DB would make the stuck-
+    message diagnosis read a stale/empty table -> split-brain health signal.
+    NOA_DB_PATH is honored only if it names a .db under the project root;
+    anything else fails open to the live noa.db.
+    """
+    env = os.environ if env is None else env
+    if project_root is None:
+        project_root = INSTALL_DIR
+    default = os.path.join(project_root, "store", "noa.db")
+    raw = (env.get("NOA_DB_PATH") or "").strip()
+    if not raw:
+        return default
+    resolved = os.path.abspath(os.path.join(project_root, raw))
+    root_with_sep = project_root.rstrip(os.sep) + os.sep
+    if resolved.endswith(".db") and resolved.startswith(root_with_sep):
+        return resolved
+    return default
+
+
+DB_PATH = resolve_default_db(project_root=INSTALL_DIR)
 
 _BOT_TOKEN: Optional[str] = None  # cached; never logged
 
