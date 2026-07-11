@@ -9,7 +9,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 
 export const PROJECT_ROOT = join(__dirname, '..')
 export const STORE_DIR = join(PROJECT_ROOT, 'store')
-export const DB_FILENAME = 'claudeclaw.db'
+// Post-cutover default (card 57480c07): the live fleet DB is store/noa.db. Code
+// that resolves via NOA_DB_PATH (db.ts) uses this only as the fallback; the few
+// direct join(STORE_DIR, DB_FILENAME) consumers (heartbeat size stat,
+// channel-coordinator ingest) now point at the live DB instead of the frozen
+// legacy claudeclaw.db. PID_FILENAME keeps its historical name (pidfile, not a DB).
+export const DB_FILENAME = 'noa.db'
 export const PID_FILENAME = 'claudeclaw.pid'
 
 const env = readEnvFile()

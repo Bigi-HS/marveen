@@ -8,7 +8,8 @@
 // latent split-brain bug (the log tables never appeared in either DB, proving
 // the path had never run). scheduledDbPath resolves the LIVE DB from NOA_DB_PATH
 // via the canonical resolveNoaDbPath (same guard as the app's own DB handle),
-// falling back to claudeclaw.db only when NOA_DB_PATH is unset.
+// falling back to the live noa.db when NOA_DB_PATH is unset (post-retire: the
+// frozen claudeclaw.db is no longer a default target, card 57480c07).
 
 import { describe, it, expect } from 'vitest'
 import { resolve } from 'node:path'
@@ -22,13 +23,13 @@ describe('scheduledDbPath (b793b2d8 pre-retire hardcode migration)', () => {
     )
   })
 
-  it('falls back to claudeclaw.db when NOA_DB_PATH is unset', () => {
-    expect(scheduledDbPath({})).toBe(resolve(PROJECT_ROOT, 'store/claudeclaw.db'))
+  it('falls back to the live noa.db when NOA_DB_PATH is unset (post-retire)', () => {
+    expect(scheduledDbPath({})).toBe(resolve(PROJECT_ROOT, 'store/noa.db'))
   })
 
-  it('falls back to claudeclaw.db when NOA_DB_PATH is blank', () => {
+  it('falls back to the live noa.db when NOA_DB_PATH is blank (post-retire)', () => {
     expect(scheduledDbPath({ NOA_DB_PATH: '   ' })).toBe(
-      resolve(PROJECT_ROOT, 'store/claudeclaw.db'),
+      resolve(PROJECT_ROOT, 'store/noa.db'),
     )
   })
 

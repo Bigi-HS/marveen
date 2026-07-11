@@ -1,6 +1,6 @@
 """Shared helpers for the deterministic conversation-continuity ledger.
 
-The ledger (store/claudeclaw.db -> conversation_log) is a rolling TRANSCRIPT of
+The ledger (store/noa.db -> conversation_log, post-cutover) is a rolling TRANSCRIPT of
 every channel turn -- inbound user messages AND outbound replies -- per
 agent_id + chat_id. On a respawn (a fresh --channels session with no memory of
 the live conversation) the SessionStart hook injects the last ~20 turns of
@@ -68,13 +68,14 @@ def _resolve_live_db(ledger_override, noa_setting, install):
       1. LEDGER_DB_PATH  -- explicit test seam, highest priority.
       2. NOA_DB_PATH     -- the cutover switch; resolved against `install`, must
          end in `.db` and stay strictly under the install root.
-      3. default         -- <install>/store/claudeclaw.db (legacy), used when
-         unset/blank OR when a bad value is rejected. Fail-open (never raise): a
-         hook must not break session start over a misconfigured path.
+      3. default         -- <install>/store/noa.db (the live DB post-retire, card
+         57480c07), used when unset/blank OR when a bad value is rejected. Fail-open
+         (never raise): a hook must not break session start over a misconfigured
+         path, and the fail-open target is the LIVE DB, never the frozen legacy one.
     """
     if ledger_override:
         return ledger_override
-    default = os.path.join(install, "store", "claudeclaw.db")
+    default = os.path.join(install, "store", "noa.db")
     raw = (noa_setting or "").strip()
     if not raw:
         return default
