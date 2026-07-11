@@ -89,6 +89,18 @@ export function isSecuritySensitivePath(filename: string): boolean {
   if (f.startsWith('scripts/hooks/')) return true
   if (f.startsWith('src/mcp/')) return true
 
+  // src/analytics/** (card 8de7e55a, PR#335 gap): the analytics module holds the
+  // OAuth token store (tokens.ts) + scopes (scopes.ts) + the external egress
+  // clients (youtube.ts / twitch.ts) that call third-party APIs with those
+  // credentials. The keyword patterns below MISS them -- 'analytics' carries no
+  // auth/secret/store substring, so tokens.ts fails the token-qualifier and
+  // scopes.ts matches no keyword -- so PR#335 merged its OAuth code without an
+  // auto-required Chad. The whole module is credential+egress territory, so a
+  // conservative directory-rooted trigger is the right umbrella. NOTE: the
+  // auth-gated read route src/web/routes/analytics.ts is deliberately NOT here
+  // (pure aggregation, no credential handling -- it stays thor+dave).
+  if (f.startsWith('src/analytics/')) return true
+
   // Exact-file patterns.
   if (f === 'src/aidefence-guard.ts') return true
   if (f === 'src/prompt-safety.ts') return true
