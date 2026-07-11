@@ -23,13 +23,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import time
 import urllib.request
 from pathlib import Path
 
-DEFAULT_DB = "store/claudeclaw.db"
+DEFAULT_DB = os.environ.get("NOA_DB_PATH", "store/noa.db")
 DEFAULT_STATE = "store/.todo-freshness-state.json"
 DEFAULT_TOKEN = "store/.dashboard-token"
 # Sender identity for the inter-agent alert. This is an automated ops heartbeat,
