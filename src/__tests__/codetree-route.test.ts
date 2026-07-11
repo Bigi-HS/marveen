@@ -180,6 +180,16 @@ describe('GET /api/codetree/meta (CT-AC4)', () => {
     const r = await call('GET', '/api/codetree/meta')
     expect(r.body.stale).toBe(true)
   })
+  it('stale=true when the stored schema_version predates the current one, even if freshly indexed (Phase-2 schema bump)', async () => {
+    // A pre-Phase-2 (v1) index has no code_calls data; after deploy it must
+    // signal stale so the callers/callees graph is not silently dark until a
+    // manual rebuild runs.
+    replaceIndexData([], [])
+    setIndexMeta({ indexed_at: Math.floor(Date.now() / 1000), files_count: 1, symbols_count: 0, imports_count: 0, schema_version: '1' })
+    const r = await call('GET', '/api/codetree/meta')
+    expect(r.body.stale).toBe(true)
+    expect(r.body.schema_version).toBe('1')
+  })
 })
 
 describe('POST /api/codetree/rebuild (CT-AC5, CT-AC6)', () => {

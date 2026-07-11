@@ -4,12 +4,14 @@ import {
   isCodetreeBuilt,
   getIndexedAtEpoch,
   getIndexMeta,
+  getStoredSchemaVersion,
   querySymbolsByName,
   fileIndexed,
   queryExportsForFile,
   queryImporters,
   queryCallers,
   queryCallees,
+  CODETREE_SCHEMA_VERSION,
 } from '../codetree-db.js'
 import type { RebuildSummary } from '../codetree-rebuild.js'
 import { spawnRebuildWorker } from '../codetree-rebuild-spawn.js'
@@ -63,6 +65,10 @@ function indexedAtIso(): string {
 function isStale(): boolean {
   const epoch = getIndexedAtEpoch()
   if (epoch == null) return true
+  // A schema older than the current one is stale regardless of age: the on-disk
+  // index predates the current shape (e.g. no code_calls data), so consumers
+  // must rebuild rather than trust a silently-empty graph (card 52815f7c).
+  if (getStoredSchemaVersion() !== CODETREE_SCHEMA_VERSION) return true
   return Math.floor(Date.now() / 1000) - epoch > STALE_AFTER_SECONDS
 }
 

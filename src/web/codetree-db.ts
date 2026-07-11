@@ -124,6 +124,15 @@ export function getIndexedAtEpoch(): number | null {
   return v != null ? Number(v) : null
 }
 
+// The schema_version stored in the index, or undefined if never written. A
+// stored value that differs from CODETREE_SCHEMA_VERSION means the on-disk index
+// predates the current shape (e.g. a v1 index has no code_calls data) and must
+// be treated as stale so consumers rebuild rather than read a silently-empty
+// graph (card 52815f7c).
+export function getStoredSchemaVersion(): string | undefined {
+  return readMetaValue('schema_version')
+}
+
 // "Built" = a rebuild has run at least once (indexed_at present). The GET
 // endpoints use this to return 503 before any rebuild rather than a misleading
 // empty result (CT-AC4 / CT-SEC1 staleness theme).
