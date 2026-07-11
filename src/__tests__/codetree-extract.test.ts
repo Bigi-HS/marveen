@@ -118,6 +118,65 @@ describe('extractFromSourceFile — imports', () => {
   })
 })
 
+describe('extractFromSourceFile — calls (Phase-2 call-path tracing)', () => {
+  it('attributes a call to its enclosing top-level function', () => {
+    const { calls } = extractFromSourceFile(sf('function outer() {\n  helper()\n}'))
+    expect(calls).toContainEqual({ caller_symbol: 'outer', callee_name: 'helper', line: 2 })
+  })
+
+  it('uses the rightmost name of a property-access call (obj.method())', () => {
+    const { calls } = extractFromSourceFile(sf('function f() {\n  db.saveRow()\n}'))
+    expect(calls).toContainEqual({ caller_symbol: 'f', callee_name: 'saveRow', line: 2 })
+  })
+
+  it('uses the rightmost name of a deep property-access call (a.b.c())', () => {
+    const { calls } = extractFromSourceFile(sf('function f() {\n  a.b.c()\n}'))
+    expect(calls).toContainEqual({ caller_symbol: 'f', callee_name: 'c', line: 2 })
+  })
+
+  it('records a constructor call (new Foo()) as an edge to Foo', () => {
+    const { calls } = extractFromSourceFile(sf('function make() {\n  return new Widget()\n}'))
+    expect(calls).toContainEqual({ caller_symbol: 'make', callee_name: 'Widget', line: 2 })
+  })
+
+  it('attributes calls inside an arrow-function const to that const', () => {
+    const { calls } = extractFromSourceFile(sf('const handler = () => {\n  process()\n}'))
+    expect(calls).toContainEqual({ caller_symbol: 'handler', callee_name: 'process', line: 2 })
+  })
+
+  it('attributes calls inside a class method to the class name', () => {
+    const { calls } = extractFromSourceFile(sf('class Svc {\n  run() {\n    doWork()\n  }\n}'))
+    expect(calls).toContainEqual({ caller_symbol: 'Svc', callee_name: 'doWork', line: 3 })
+  })
+
+  it('records nested and argument calls, each attributed to the enclosing symbol', () => {
+    const { calls } = extractFromSourceFile(sf('function f() {\n  outerCall(innerCall())\n}'))
+    expect(calls).toContainEqual({ caller_symbol: 'f', callee_name: 'outerCall', line: 2 })
+    expect(calls).toContainEqual({ caller_symbol: 'f', callee_name: 'innerCall', line: 2 })
+  })
+
+  it('attributes a module-scope call to a null caller', () => {
+    const { calls } = extractFromSourceFile(sf('bootstrap()'))
+    expect(calls).toContainEqual({ caller_symbol: null, callee_name: 'bootstrap', line: 1 })
+  })
+
+  it('attributes a call in a single-declarator const initializer to that const', () => {
+    const { calls } = extractFromSourceFile(sf('const app = createApp()'))
+    expect(calls).toContainEqual({ caller_symbol: 'app', callee_name: 'createApp', line: 1 })
+  })
+
+  it('ignores a computed call with no static name (obj[x]())', () => {
+    const { calls } = extractFromSourceFile(sf('function f() {\n  reg[key]()\n}'))
+    expect(calls).toEqual([])
+  })
+
+  it('attributes calls in a multi-declarator statement to a null caller', () => {
+    const { calls } = extractFromSourceFile(sf('const a = one(), b = two()'))
+    expect(calls).toContainEqual({ caller_symbol: null, callee_name: 'one', line: 1 })
+    expect(calls).toContainEqual({ caller_symbol: null, callee_name: 'two', line: 1 })
+  })
+})
+
 describe('module path resolution helpers', () => {
   it('stripModuleExt removes ts/js extensions', () => {
     expect(stripModuleExt('src/db.ts')).toBe('src/db')

@@ -4,7 +4,7 @@ import { join, relative, sep } from 'node:path'
 import { PROJECT_ROOT } from '../config.js'
 import { logger } from '../logger.js'
 import { extractFromSourceFile } from './codetree-extract.js'
-import { replaceIndexData, setIndexMeta, type SymbolRow, type ImportRow } from './codetree-db.js'
+import { replaceIndexData, setIndexMeta, type SymbolRow, type ImportRow, type CallRow } from './codetree-db.js'
 
 export interface RebuildOptions {
   rootDir?: string
@@ -15,6 +15,7 @@ export interface RebuildSummary {
   files_indexed: number
   symbols_indexed: number
   imports_indexed: number
+  calls_indexed: number
   duration_ms: number
   indexed_at: string // ISO 8601 UTC
   files_skipped: Array<{ path: string; error: string }>
@@ -80,6 +81,7 @@ export function rebuildIndex(opts: RebuildOptions = {}): RebuildSummary {
 
   const symbols: SymbolRow[] = []
   const imports: ImportRow[] = []
+  const calls: CallRow[] = []
   const filesSkipped: Array<{ path: string; error: string }> = []
   let filesIndexed = 0
 
@@ -91,34 +93,37 @@ export function rebuildIndex(opts: RebuildOptions = {}): RebuildSummary {
       continue
     }
     try {
-      const { symbols: fileSymbols, imports: fileImports } = extractFromSourceFile(sf)
+      const { symbols: fileSymbols, imports: fileImports, calls: fileCalls } = extractFromSourceFile(sf)
       for (const s of fileSymbols) symbols.push({ ...s, file: rel })
       for (const i of fileImports) imports.push({ from_file: rel, to_module: i.to_module, imported_names: i.imported_names })
+      for (const c of fileCalls) calls.push({ caller_file: rel, caller_symbol: c.caller_symbol, callee_name: c.callee_name, line: c.line })
       filesIndexed++
     } catch (err) {
       filesSkipped.push({ path: rel, error: err instanceof Error ? err.message : String(err) })
     }
   }
 
-  replaceIndexData(symbols, imports)
+  replaceIndexData(symbols, imports, calls)
   const indexedAtEpoch = Math.floor(startedAt / 1000)
   setIndexMeta({
     indexed_at: indexedAtEpoch,
     files_count: filesIndexed,
     symbols_count: symbols.length,
     imports_count: imports.length,
+    calls_count: calls.length,
   })
 
   const summary: RebuildSummary = {
     files_indexed: filesIndexed,
     symbols_indexed: symbols.length,
     imports_indexed: imports.length,
+    calls_indexed: calls.length,
     duration_ms: Date.now() - startedAt,
     indexed_at: new Date(indexedAtEpoch * 1000).toISOString(),
     files_skipped: filesSkipped,
   }
   logger.info(
-    { files: summary.files_indexed, symbols: summary.symbols_indexed, imports: summary.imports_indexed, skipped: filesSkipped.length, ms: summary.duration_ms },
+    { files: summary.files_indexed, symbols: summary.symbols_indexed, imports: summary.imports_indexed, calls: summary.calls_indexed, skipped: filesSkipped.length, ms: summary.duration_ms },
     'codetree index rebuilt',
   )
   return summary

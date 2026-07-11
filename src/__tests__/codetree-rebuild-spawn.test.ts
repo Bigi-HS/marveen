@@ -14,6 +14,7 @@ const SUMMARY: RebuildSummary = {
   files_indexed: 204,
   symbols_indexed: 2415,
   imports_indexed: 1066,
+  calls_indexed: 3820,
   duration_ms: 1234,
   indexed_at: '2026-06-23T03:00:00.000Z',
   files_skipped: [],
