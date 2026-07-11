@@ -376,6 +376,30 @@ def resolve_api_key(provider):
 # --------------------------------------------------------------------------- #
 # DB: layer2_call_log + budget (AC-9)
 # --------------------------------------------------------------------------- #
+def resolve_default_db(env=None, project_root=None):
+    """Default DB target for standalone runs: the live noa.db via NOA_DB_PATH,
+    else the legacy store/claudeclaw.db. Hardcoding claudeclaw.db here would
+    (post-cutover) write layer2_call_log rows, the outage budget count, AND
+    insert_kanban_card rows into the FROZEN legacy DB, invisible to the live board
+    (card b793b2d8). The schedule-runner passes --db-path explicitly (which
+    overrides this); this only governs standalone invocations. NOA_DB_PATH is
+    honored only if it names a .db under the project root; else falls back to the
+    legacy path (never crash the fallback path).
+    """
+    env = os.environ if env is None else env
+    if project_root is None:
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    legacy = os.path.join(project_root, "store", "claudeclaw.db")
+    raw = (env.get("NOA_DB_PATH") or "").strip()
+    if not raw:
+        return legacy
+    resolved = os.path.abspath(os.path.join(project_root, raw))
+    root_with_sep = project_root.rstrip(os.sep) + os.sep
+    if resolved.endswith(".db") and resolved.startswith(root_with_sep):
+        return resolved
+    return legacy
+
+
 def _connect(db_path):
     return sqlite3.connect(db_path, timeout=5)
 
@@ -569,7 +593,7 @@ def main(argv=None, completion=_http_completion, sender=None, token_loader=None,
     parser = argparse.ArgumentParser(description="Degraded-reasoning fallback LLM client (token-outage Layer 2)")
     parser.add_argument("--task-dir", required=True)
     parser.add_argument("--providers-yaml", default="/home/domin/marveen/store/fallback-llm-providers.yaml")
-    parser.add_argument("--db-path", default="/home/domin/marveen/store/claudeclaw.db")
+    parser.add_argument("--db-path", default=resolve_default_db())
     parser.add_argument("--state-file", default="/home/domin/marveen/store/token-outage-state.json")
     parser.add_argument("--env-file", default="/home/domin/marveen/.env")
     parser.add_argument("--chat-id", default=None)

@@ -96,6 +96,30 @@ def telegram_send(token, chat_id, text, opener=urllib.request.urlopen):
         return -1
 
 
+def resolve_default_db(env=None, project_root=None):
+    """Default DB target for standalone runs: the live noa.db via NOA_DB_PATH,
+    else the legacy store/claudeclaw.db. The noa.db cutover points NOA_DB_PATH at
+    the migrated database; hardcoding claudeclaw.db here would (post-cutover) write
+    direct_send_log rows + kanban card updates into the FROZEN legacy DB, invisible
+    to the live board (card b793b2d8). The schedule-runner passes --db-path
+    explicitly (which overrides this default); this only governs standalone
+    invocations. NOA_DB_PATH is honored only if it names a .db under the project
+    root; anything else falls back to the legacy path (never crash the send path).
+    """
+    env = os.environ if env is None else env
+    if project_root is None:
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    legacy = os.path.join(project_root, "store", "claudeclaw.db")
+    raw = (env.get("NOA_DB_PATH") or "").strip()
+    if not raw:
+        return legacy
+    resolved = os.path.abspath(os.path.join(project_root, raw))
+    root_with_sep = project_root.rstrip(os.sep) + os.sep
+    if resolved.endswith(".db") and resolved.startswith(root_with_sep):
+        return resolved
+    return legacy
+
+
 def _connect(db_path):
     # Short busy timeout so a momentarily-locked DB does not hang the send path.
     return sqlite3.connect(db_path, timeout=5)
@@ -156,7 +180,7 @@ def main(argv=None, sender=telegram_send, now=None):
     parser = argparse.ArgumentParser(description="Model-free direct-send (token-outage Layer 1)")
     parser.add_argument("--task-dir", required=True)
     parser.add_argument("--env-file", default="/home/domin/marveen/.env")
-    parser.add_argument("--db-path", default="/home/domin/marveen/store/claudeclaw.db")
+    parser.add_argument("--db-path", default=resolve_default_db())
     parser.add_argument("--chat-id", default=None)
     args = parser.parse_args(argv)
 
