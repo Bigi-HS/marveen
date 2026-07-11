@@ -333,5 +333,73 @@ class TestDreamEngineSafeguards(unittest.TestCase):
 
         dream_engine.VAULT_PATH = old_path
 
+
+class TestVaultPathResolution(unittest.TestCase):
+    """Card 57480c07 retire: the dream-engine vault must resolve to the LIVE DB.
+
+    dream_engine reads the memories table (dedup / hot-warm-gap / cold-refresh
+    scans) and copy2-snapshots the vault. Before the retire, VAULT_PATH was the
+    relative, FROZEN 'store/claudeclaw.db' -> consolidation scanned a stale vault
+    and snapshotted the dead DB (latent capability-loss). resolve_default_db
+    honors NOA_DB_PATH and fails open to the LIVE store/noa.db under the project
+    root, never the frozen legacy DB."""
+
+    ROOT = "/proj/root"
+
+    def _default(self):
+        return os.path.join(self.ROOT, "store", "noa.db")
+
+    def test_honors_noa_db_path(self):
+        import dream_engine
+        got = dream_engine.resolve_default_db({"NOA_DB_PATH": "store/noa.db"}, self.ROOT)
+        self.assertEqual(got, os.path.join(self.ROOT, "store", "noa.db"))
+
+    def test_unset_falls_back_to_noa(self):
+        import dream_engine
+        self.assertEqual(dream_engine.resolve_default_db({}, self.ROOT), self._default())
+
+    def test_blank_falls_back_to_noa(self):
+        import dream_engine
+        self.assertEqual(
+            dream_engine.resolve_default_db({"NOA_DB_PATH": "   "}, self.ROOT), self._default()
+        )
+
+    def test_non_db_target_rejected(self):
+        import dream_engine
+        self.assertEqual(
+            dream_engine.resolve_default_db({"NOA_DB_PATH": "store/evil.txt"}, self.ROOT),
+            self._default(),
+        )
+
+    def test_root_escape_rejected(self):
+        import dream_engine
+        self.assertEqual(
+            dream_engine.resolve_default_db({"NOA_DB_PATH": "../outside.db"}, self.ROOT),
+            self._default(),
+        )
+
+    def test_absolute_in_root_honored(self):
+        import dream_engine
+        got = dream_engine.resolve_default_db({"NOA_DB_PATH": "/proj/root/store/noa.db"}, self.ROOT)
+        self.assertEqual(got, "/proj/root/store/noa.db")
+
+    def test_never_frozen_db_when_cutover_active(self):
+        import dream_engine
+        got = dream_engine.resolve_default_db({"NOA_DB_PATH": "store/noa.db"}, self.ROOT)
+        self.assertFalse(got.endswith("claudeclaw.db"))
+        self.assertTrue(got.endswith("noa.db"))
+
+    def test_module_vault_path_is_not_frozen_legacy(self):
+        import dream_engine
+        self.assertFalse(dream_engine.VAULT_PATH.endswith("claudeclaw.db"))
+        self.assertTrue(dream_engine.VAULT_PATH.endswith(".db"))
+
+    def test_module_vault_path_is_absolute_under_root(self):
+        # The relative 'store/claudeclaw.db' was CWD-dependent; the resolved path
+        # must be an absolute path anchored at the project root.
+        import dream_engine
+        self.assertTrue(os.path.isabs(dream_engine.VAULT_PATH))
+
+
 if __name__ == '__main__':
     unittest.main()
