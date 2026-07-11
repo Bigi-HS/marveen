@@ -177,6 +177,36 @@ class DueActionsTests(unittest.TestCase):
         session_act = next(a for a in acts if a["key"] == "session")
         self.assertEqual(session_act["kind"], "rest")
 
+    def test_supplement_push_disabled_suppresses_agenda_and_reminders(self):
+        # Boss-requested toggle (TG1231): supplement_push_enabled=false must drop BOTH
+        # supplement surfaces -- the session/rest intake agenda AND the timed intake
+        # reminders -- while leaving the session/rest push itself untouched.
+        config = {**self.config, "supplement_push_enabled": False}
+        plan = _plan([_strength_session("monday")])
+        # (a) the session still fires, but its message carries no intake agenda.
+        now = datetime(2026, 6, 8, 6, 35)  # monday, after push time
+        acts = push.due_actions(now, plan, self.supps, config, set())
+        session_act = next(a for a in acts if a["key"] == "session")
+        self.assertEqual(session_act["kind"], "session")
+        self.assertNotIn("Mai bevitel-terv:", session_act["build"](SIG))
+        # (b) no timed intake reminder is queued even at a resolved intake time.
+        now2 = datetime(2026, 6, 8, 8, 3)  # within tolerance of the 08:00 intake
+        acts2 = push.due_actions(now2, plan, self.supps, config, {"session"})
+        self.assertFalse([a for a in acts2 if a["key"].startswith("supp:")])
+
+    def test_supplement_push_defaults_enabled_when_key_absent(self):
+        # Regression guard: with the flag absent the pre-toggle behavior stands --
+        # the agenda is present and the timed reminder fires (default True both reads).
+        self.assertNotIn("supplement_push_enabled", self.config)
+        plan = _plan([_strength_session("monday")])
+        now = datetime(2026, 6, 8, 6, 35)
+        acts = push.due_actions(now, plan, self.supps, self.config, set())
+        session_act = next(a for a in acts if a["key"] == "session")
+        self.assertIn("Mai bevitel-terv:", session_act["build"](SIG))
+        now2 = datetime(2026, 6, 8, 8, 3)
+        acts2 = push.due_actions(now2, plan, self.supps, self.config, {"session"})
+        self.assertIn("supp:08:00", {a["key"] for a in acts2})
+
 
 class UnparseableTimeGuardTests(unittest.TestCase):
     """Card 9bf34f76: real hibiki-supplements.json uses SYMBOLIC intake phases
