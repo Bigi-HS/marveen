@@ -22,6 +22,7 @@ import {
   UNTRUSTED_PREAMBLE,
   wrapUntrusted,
 } from '../prompt-safety.js'
+import { resolveNoaDbPath } from '../db-path.js'
 import { cronMatchesNow } from './cron.js'
 import { shouldHoldProactiveWork } from './fleet-pause-enforcer.js'
 import {
@@ -51,6 +52,7 @@ const PYTHON = resolveFromPath('python3')
 // is read from the single authoritative source maintained by the
 // token-outage-bridge (spec 4.3); no pane-capture fallback.
 const TOKEN_OUTAGE_STATE_PATH = join(PROJECT_ROOT, 'store', 'token-outage-state.json')
+const CLAUDECLAW_LEGACY_DB = join(PROJECT_ROOT, 'store', 'claudeclaw.db')
 const DIRECT_SEND_SCRIPT = join(PROJECT_ROOT, 'scripts', 'direct-send.py')
 const FALLBACK_LLM_SCRIPT = join(PROJECT_ROOT, 'scripts', 'fallback_llm_client.py')
 const FALLBACK_LLM_PROVIDERS = join(PROJECT_ROOT, 'store', 'fallback-llm-providers.yaml')
@@ -67,6 +69,17 @@ export function readTokenOutageState(path: string = TOKEN_OUTAGE_STATE_PATH): { 
   } catch {
     return null
   }
+}
+
+// Resolve the LIVE fleet DB for the model-free child scripts (direct-send.py /
+// fallback_llm_client.py). The noa.db cutover points NOA_DB_PATH at the migrated
+// database; hardcoding claudeclaw.db made a scheduled token-outage send write its
+// direct_send_log / layer2_call_log rows AND its kanban card updates/inserts into
+// the FROZEN legacy DB, invisible to the live board (card b793b2d8, latent
+// split-brain bug). Reuse the canonical resolver (same guard as the app's own DB
+// handle); fall back to the legacy path only when NOA_DB_PATH is unset (pre-cutover).
+export function scheduledDbPath(env: NodeJS.ProcessEnv = process.env): string {
+  return resolveNoaDbPath(env.NOA_DB_PATH, PROJECT_ROOT, CLAUDECLAW_LEGACY_DB)
 }
 
 // Pure trigger predicate (AC-1): direct-send fires iff the task opts in AND the
@@ -87,7 +100,7 @@ function runDirectSend(task: ScheduledTask): number {
     DIRECT_SEND_SCRIPT,
     '--task-dir', taskDir,
     '--env-file', join(PROJECT_ROOT, '.env'),
-    '--db-path', join(PROJECT_ROOT, 'store', 'claudeclaw.db'),
+    '--db-path', scheduledDbPath(),
   ]
   try {
     execFileSync(PYTHON, args, { timeout: 20000, stdio: 'pipe' })
@@ -185,7 +198,7 @@ function runFallbackLLM(task: ScheduledTask, agentName: string): number {
     FALLBACK_LLM_SCRIPT,
     '--task-dir', taskDir,
     '--providers-yaml', FALLBACK_LLM_PROVIDERS,
-    '--db-path', join(PROJECT_ROOT, 'store', 'claudeclaw.db'),
+    '--db-path', scheduledDbPath(),
     '--state-file', TOKEN_OUTAGE_STATE_PATH,
     '--env-file', join(PROJECT_ROOT, '.env'),
   ]
