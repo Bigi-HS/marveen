@@ -66,9 +66,19 @@ def generate_concept_index(db_path, output_path=None):
     db.close()
     return len(index), output_path
 
+def default_db_path():
+    """Live DB default (card 57480c07): honor NOA_DB_PATH, fail open to the live
+    store/noa.db rather than the frozen legacy claudeclaw.db (this reads the
+    memories table)."""
+    here = Path(__file__).resolve().parent
+    if str(here) not in sys.path:
+        sys.path.insert(0, str(here))
+    from db_resolve import resolve_default_db
+    return resolve_default_db(project_root=str(here.parent))
+
 if __name__ == "__main__":
-    db_path = Path(__file__).parent.parent / "store" / "claudeclaw.db"
-    output_path = Path(__file__).parent.parent / "store" / "concept-index.json"
-    
+    db_path = default_db_path()
+    output_path = Path(db_path).parent / "concept-index.json"
+
     count, path = generate_concept_index(str(db_path), str(output_path))
     print(f"✓ Generated {count} concept-index entries → {path}")

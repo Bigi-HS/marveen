@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { platform } from 'node:os'
+import { resolveNoaDbPath } from '../src/db-path.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = join(__dirname, '..')
@@ -78,8 +79,13 @@ if (existsSync(envPath)) {
   fail('.env fajl', 'nem talalhato — futtasd: npm run setup')
 }
 
-// Adatbázis
-const dbPath = join(PROJECT_ROOT, 'store', 'claudeclaw.db')
+// Adatbázis (card 57480c07): honor NOA_DB_PATH, fail open to the live
+// store/noa.db rather than the frozen legacy claudeclaw.db.
+const dbPath = resolveNoaDbPath(
+  process.env.NOA_DB_PATH,
+  PROJECT_ROOT,
+  join(PROJECT_ROOT, 'store', 'noa.db'),
+)
 if (existsSync(dbPath)) {
   ok('Adatbazis', 'letezik')
   try {
