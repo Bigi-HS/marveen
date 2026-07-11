@@ -15,6 +15,11 @@
 
 import { json } from '../http-helpers.js'
 import { listRecentSnapshots, type AnalyticsSnapshotRow } from '../../analytics/storage.js'
+import {
+  aggregateCtrByFormat,
+  DEFAULT_IMPRESSION_FLOOR,
+  type FormatTaggedCtrRow,
+} from '../../analytics/labels.js'
 import type {
   YoutubeMetrics,
   TwitchMetrics,
@@ -31,6 +36,11 @@ const KPI_ANNOTATIONS: Record<string, { meaning: string; target: string }> = {
   views: { meaning: 'Total video views in the window.', target: 'Steady growth; spikes map to uploads.' },
   avg_retention_pct: { meaning: 'Average % of the video watched. First-60s retention is the key hook-health signal (correlative, not causal).', target: '>=45% acceptable, >=50% good, >=60% strong. Flag: high 60s + falling full-video retention = clickbait (session penalty).' },
   avg_ctr: { meaning: 'Long-form impressions CTR (exclude Shorts; <1000 impressions/video = insufficient data).', target: 'Dubler-hybrid 5-7%; entertainment/gaming 6-9%; edu/tutorial 4-6%. Read together with retention.' },
+  // D3 (spec 4c81a561 Rész 2): the two formats use DIFFERENT signals and are NEVER
+  // mixed. Long-form = thumbnail-CTR; Shorts = in-feed swipe-through ("how many chose
+  // to view"), which has no thumbnail-CTR benchmark.
+  avg_ctr_long: { meaning: 'Long-form thumbnail impressions CTR, impression-weighted over videos clearing the insufficient-data floor. Shorts are excluded (they carry no thumbnail-CTR in-feed). null = insufficient data.', target: 'Dubler-hybrid 5-7%; entertainment/gaming 6-9%; edu/tutorial 4-6%. Read together with retention.' },
+  shorts_swipe_through: { meaning: 'Shorts feed swipe-through ("how many chose to view" from the feed swipe) -- the first-frame hook signal. NOT a thumbnail-CTR; the long-form CTR band never applies. null = swipe-through data absent (insufficient data), never folded into long-form.', target: 'First-frame hook driven; calibrate the swipe-through band per run via date-filtered WebSearch, not a permanent constant.' },
   twitch_followers: { meaning: 'Total Twitch followers.', target: 'Net-positive weekly; Affiliate gate at 50 followers.' },
   twitch_avg_concurrents: { meaning: 'Average concurrent viewers while live -- a lagging health signal, not the leading metric (post-Affiliate leaders: Tier-1 sub-count + Discord activity).', target: 'Staged: 3 pre-Affiliate; 5 post-Affiliate with peak/avg<2.5 (organic); 10 at community-scale (~6-12 months). Twitch-only; recalibrate on first multi-platform stream.' },
 }
@@ -84,6 +94,15 @@ export function buildAnalyticsDashboard(db?: Database.Database): unknown {
   const ctrRows = latestYt?.metrics.ctr ?? []
   const totalImp = sum(ctrRows.map(c => c.impressions))
   const avgCtr = totalImp > 0 ? sum(ctrRows.map(c => c.ctr * c.impressions)) / totalImp : 0
+
+  // D3 (spec 4c81a561): keep long-form and Shorts CTR in SEPARATE buckets and expose
+  // them as two distinct KPIs (avg_ctr_long vs shorts_swipe_through), never mixed.
+  // Untagged rows are long-form (backward-compatible with pre-D3 snapshots); a Shorts
+  // row without swipe-through data => insufficient_data, never in the long-form bucket.
+  const ctrByFormat = aggregateCtrByFormat(
+    ctrRows as FormatTaggedCtrRow[],
+    DEFAULT_IMPRESSION_FLOOR, // injectable floor; calibrate per run, not a baked constant.
+  )
 
   // Twitch KPIs.
   const twFollowers = twAsc.map(s => s.metrics.followers?.total ?? 0)
@@ -139,6 +158,9 @@ export function buildAnalyticsDashboard(db?: Database.Database): unknown {
       views_30d: views30d,
       avg_retention_pct: Number(avgRetentionPct.toFixed(2)),
       avg_ctr: Number(avgCtr.toFixed(4)),
+      // D3: two distinct, never-mixed KPIs. null surfaces as insufficient_data.
+      avg_ctr_long: ctrByFormat.avgCtrLong === null ? null : Number(ctrByFormat.avgCtrLong.toFixed(4)),
+      shorts_swipe_through: ctrByFormat.shortsSwipeThrough === null ? null : Number(ctrByFormat.shortsSwipeThrough.toFixed(4)),
       twitch_followers: twitchFollowers,
       twitch_avg_concurrents: Number(twitchAvgConcurrents.toFixed(1)),
     },
