@@ -23,7 +23,7 @@ BUF = 16384
 
 
 def _build_allowlist() -> frozenset:
-    allowed = {"127.0.0.1", "::1"}
+    allowed = {"127.0.0.1"}
     env_override = os.environ.get("N8N_BRIDGE_ALLOWED_IPS", "").strip()
     if env_override:
         for ip in env_override.split(","):
@@ -36,8 +36,9 @@ def _build_allowlist() -> frozenset:
         with open("/etc/resolv.conf") as f:
             for line in f:
                 if line.startswith("nameserver"):
-                    win_ip = line.split()[1].strip()
-                    allowed.add(win_ip)
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        allowed.add(parts[1].strip())
                     break
     except OSError:
         pass
