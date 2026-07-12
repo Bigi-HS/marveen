@@ -72,6 +72,7 @@ import { tryHandleAdmin } from './web/routes/admin.js'
 import { tryHandlePublicDigest } from './web/routes/public-digest.js'
 import { tryHandleAnalytics } from './web/routes/analytics.js'
 import { applyAnalyticsMigrations } from './analytics/storage.js'
+import { tryHandleNotify } from './web/routes/notify.js'
 import { tryHandleStatic } from './web/routes/static.js'
 import type { RouteContext } from './web/routes/types.js'
 
@@ -304,6 +305,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleGithub(routeCtx)) return
       if (await tryHandlePublicDigest(routeCtx)) return
       if (await tryHandleAnalytics(routeCtx)) return
+      if (await tryHandleNotify(routeCtx)) return
       if (await tryHandleStatic(routeCtx, WEB_DIR)) return
 
       res.writeHead(404)
