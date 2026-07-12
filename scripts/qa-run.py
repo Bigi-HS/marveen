@@ -30,6 +30,8 @@ import urllib.request
 REPO = "Bigi-HS/marveen"
 MAIN_CHECKOUT = "/home/domin/marveen"
 WORKTREE_BASE = "/tmp"
+DASHBOARD_URL = "http://localhost:3420"
+CI_RUNNER = "buster"  # identity recorded for the independent CI signal (card 0c166e48)
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +93,55 @@ def _remove_worktree(wt_path: str) -> None:
     )
 
 
+def _diff_numstat(base_ref: str, head_sha: str, cwd: str) -> dict:
+    """git diff --numstat <base>...<head> (merge-base, matches the GitHub PR diff)."""
+    r = subprocess.run(
+        ["git", "diff", "--numstat", f"origin/{base_ref}...{head_sha}"],
+        cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    return parse_numstat(r.stdout if r.returncode == 0 else "")
+
+
+# ---------------------------------------------------------------------------
+# Dashboard I/O (--post-ci)
+# ---------------------------------------------------------------------------
+
+def _dashboard_token() -> str:
+    """Operator token from store/.dashboard-token (localhost API bearer)."""
+    with open(os.path.join(MAIN_CHECKOUT, "store", ".dashboard-token")) as f:
+        return f.read().strip()
+
+
+def _api_post(path: str, body: dict, token: str, base_url: str = DASHBOARD_URL) -> tuple:
+    req = urllib.request.Request(
+        base_url + path,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, r.read().decode()[:400]
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()[:400]
+
+
+def post_ci(payload: dict, token: str, base_url: str = DASHBOARD_URL) -> tuple:
+    """POST the mechanical CI result to the gate CI surface (card 0c166e48)."""
+    return _api_post("/api/gate/ci", payload, token, base_url)
+
+
+def alert_forge(pr_number: int, head_sha: str, note: str, token: str,
+                base_url: str = DASHBOARD_URL) -> tuple:
+    """Relay a RED CI result to forge as an inter-agent message."""
+    content = (
+        f"gate-ci-runner: PR#{pr_number} @{head_sha[:8]} mechanical CI = FAIL. "
+        f"{note} Nem tolt gate-szeket, csak jelez -- nezd meg a mechanikus bukast."
+    )
+    return _api_post("/api/messages", {"from": CI_RUNNER, "to": "forge", "content": content},
+                     token, base_url)
+
+
 # ---------------------------------------------------------------------------
 # Output parsing
 # ---------------------------------------------------------------------------
@@ -129,6 +180,61 @@ def _tail_failures(output: str, n: int = 40) -> list:
     return (fail_lines or lines)[-n:]
 
 
+def parse_numstat(output: str) -> dict:
+    """Parse `git diff --numstat base...head` into file/line counts.
+
+    Each line is "<ins>\\t<del>\\t<path>"; binary files render as "-\\t-\\t<path>"
+    (counted as a changed file, no line contribution). Blank lines are ignored.
+    """
+    files = insertions = deletions = 0
+    for line in output.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3 or not parts[2].strip():
+            continue
+        files += 1
+        ins, dele = parts[0], parts[1]
+        if ins.isdigit():
+            insertions += int(ins)
+        if dele.isdigit():
+            deletions += int(dele)
+    return {"diff_files": files, "insertions": insertions, "deletions": deletions}
+
+
+def build_ci_payload(
+    pr_number: int,
+    head_sha: str,
+    tsc_ok: bool,
+    vt: dict,
+    diff_stats: dict,
+    note: str = None,
+    recorded_by: str = "buster",
+) -> dict:
+    """Map a mechanical verdict to the POST /api/gate/ci payload.
+
+    status is "pass" only when tsc is clean AND vitest has zero failures --
+    anything else is "fail" (green CI is necessary-not-sufficient for the gate).
+
+    tsc_ok is serialized as 1/0, not a JSON boolean: the endpoint's num() coerces
+    only integers, so a boolean would be dropped to null.
+    """
+    status = "pass" if (tsc_ok and vt.get("failed", 0) == 0) else "fail"
+    payload = {
+        "pr_number": pr_number,
+        "head_sha": head_sha,
+        "status": status,
+        "tsc_ok": 1 if tsc_ok else 0,
+        "tests_pass": int(vt.get("passed", 0)),
+        "tests_fail": int(vt.get("failed", 0)),
+        "diff_files": int(diff_stats.get("diff_files", 0)),
+        "insertions": int(diff_stats.get("insertions", 0)),
+        "deletions": int(diff_stats.get("deletions", 0)),
+        "recorded_by": recorded_by,
+    }
+    if note is not None:
+        payload["note"] = note
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -140,6 +246,11 @@ def main() -> int:
         "--no-cleanup", action="store_true",
         help="Keep the worktree after the run (useful for manual inspection)",
     )
+    ap.add_argument(
+        "--post-ci", action="store_true",
+        help="POST the mechanical verdict to /api/gate/ci (independent CI signal, "
+             "card 0c166e48); relays a RED result to forge. Fills no gate seat.",
+    )
     args = ap.parse_args()
 
     pr_n = args.pr_number
@@ -150,6 +261,7 @@ def main() -> int:
     print(f"\n[qa-run] PR #{pr_n}", flush=True)
     pr = _gh(token, f"/pulls/{pr_n}")
     head_sha = pr["head"]["sha"]
+    base_ref = pr.get("base", {}).get("ref", "develop")
     print(f"  title : {pr.get('title', '?')[:72]}")
     print(f"  state : {pr.get('state', '?')}")
     print(f"  head  : {head_sha}")
@@ -233,6 +345,26 @@ def main() -> int:
             print("\n-- vitest failure excerpt --")
             for line in _tail_failures(vt_output):
                 print(f"  {line}")
+
+        # --post-ci: record the mechanical verdict on the independent CI surface.
+        # SENSE + REPORT only: this posts an advisory ci_status, it never fills a
+        # reviewer seat, merges, or deploys (green CI is necessary-not-sufficient).
+        if args.post_ci:
+            diff_stats = _diff_numstat(base_ref, head_sha, wt_path)
+            note = (
+                f"tsc {'ok' if tsc_ok else 'FAIL'}; "
+                f"vitest {vt['passed']}p/{vt['failed']}f/{vt['skipped']}s"
+            )
+            payload = build_ci_payload(pr_n, head_sha, tsc_ok, vt, diff_stats, note=note)
+            try:
+                token_op = _dashboard_token()
+                code, resp = post_ci(payload, token_op)
+                print(f"\n  >> post-ci: /api/gate/ci -> {code} ({payload['status']})")
+                if payload["status"] == "fail":
+                    ac, _ = alert_forge(pr_n, head_sha, note, token_op)
+                    print(f"  >> post-ci: forge alert -> {ac}")
+            except OSError as e:
+                print(f"  >> post-ci: SKIPPED (dashboard token/API unreachable: {e})")
 
         return 0 if overall == "PASS" else 1
 
