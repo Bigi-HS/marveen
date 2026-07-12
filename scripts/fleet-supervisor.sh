@@ -136,7 +136,7 @@ mkdir -p "$STORE" "$STATE_DIR"
 
 # Full PATH so bun/node/claude/tmux resolve identically to channels.sh, whether
 # we were launched from a login shell or the bare /etc/wsl.conf [boot] context.
-export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+export PATH="$HOME/.npm-global/bin:/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
 # Scrub tmux's own socket env var. If the supervisor is launched from inside a
 # tmux pane (e.g. a manual run, or relaunched by channels.sh), an inherited
@@ -514,6 +514,34 @@ ensure_hot_cache_refresh() {
   if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: hot-cache-refresh.py"; return 0; fi
   python3 "$refresh" >> "$STORE/hot-cache-refresh.log" 2>&1 \
     || log "hot-cache-refresh: tick invocation failed (non-fatal, retries next window)"
+}
+
+# n8n instance manager (card 36a4bd06). WSL-local n8n for Tier 1 token-offload.
+# Gated by store/n8n.enabled (touch to activate; absent = fully inert, merge safe).
+# Binds 127.0.0.1:5678 ONLY (loopback -- never 0.0.0.0). Data in ~/.n8n.
+# PATH must include ~/.npm-global/bin (set above). n8n is installed there via
+# `npm install -g n8n --prefix ~/.npm-global`.
+N8N_SESSION="noafleet-n8n"
+N8N_PORT="${N8N_PORT:-5678}"
+n8n_alive() {
+  local code
+  code=$("$CURL" -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$N8N_PORT/healthz" 2>/dev/null)
+  [ "$code" = "200" ] || [ "$code" = "202" ]
+}
+ensure_n8n() {
+  [ -f "$STORE/n8n.enabled" ] || return 0   # inert until operator-enabled
+  settle_check n8n n8n_alive
+  if n8n_alive; then
+    backoff_reset n8n
+    return 0
+  fi
+  backoff_blocked n8n || return 0
+  if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start n8n session $N8N_SESSION on 127.0.0.1:$N8N_PORT"; return 0; fi
+  "$TMUX_BIN" kill-session -t "$N8N_SESSION" 2>/dev/null || true
+  run "$TMUX_BIN" new-session -d -s "$N8N_SESSION" -c "$HOME" \
+    "export N8N_HOST=127.0.0.1 N8N_LISTEN_ADDRESS=127.0.0.1 N8N_PORT=$N8N_PORT N8N_USER_FOLDER=$HOME/.n8n N8N_LOG_LEVEL=warn && exec n8n start" 9>&-
+  backoff_note_launch n8n
+  log "n8n: launched (tmux $N8N_SESSION -> n8n start, 127.0.0.1:$N8N_PORT)"
 }
 
 # n8n -> WSL2 dashboard bridge (card e4d64187). Windows-side n8n cannot reach
@@ -957,7 +985,9 @@ tick() {
   ensure_cli_version_watch
   # 15) HOT-CACHE AUTO-REFRESH (regenerate per-agent hot-cache.md from ledger+kanban -- card fedb4b5f Phase 2)
   ensure_hot_cache_refresh
-  # 16) N8N KANBAN BRIDGE (Windows-side n8n -> WSL2 dashboard API forwarder -- card e4d64187)
+  # 16) N8N INSTANCE (Tier 1 token-offload -- gated by store/n8n.enabled, card 36a4bd06)
+  ensure_n8n
+  # 17) N8N KANBAN BRIDGE (Windows-side n8n -> WSL2 dashboard API forwarder -- card e4d64187)
   ensure_n8n_kanban_bridge
 }
 
