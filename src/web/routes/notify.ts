@@ -26,6 +26,14 @@ function readBotToken(): string | null {
   }
 }
 
+// Test seam (mirrors gate.ts __setGatePrFetcher): lets a test override the .env
+// bot-token read so the token-missing branch is deterministic without touching
+// the real .env. Production always resolves via readBotToken.
+let botTokenReader: () => string | null = readBotToken
+export function __setBotTokenReader(fn: (() => string | null) | null): void {
+  botTokenReader = fn ?? readBotToken
+}
+
 export async function tryHandleNotify(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method } = ctx
 
@@ -46,7 +54,7 @@ export async function tryHandleNotify(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
-  const token = readBotToken()
+  const token = botTokenReader()
   if (!token) {
     logger.error('notify/telegram: TELEGRAM_BOT_TOKEN missing from .env')
     json(res, { error: 'bot token not configured' }, 500)
