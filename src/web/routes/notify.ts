@@ -19,7 +19,7 @@ function readBotToken(): string | null {
   if (!existsSync(envPath)) return null
   try {
     const content = readFileSync(envPath, 'utf8')
-    const m = content.match(/TELEGRAM_BOT_TOKEN=(.+)/)
+    const m = content.match(/TELEGRAM_BOT_TOKEN=([^#\s]+)/)
     return m ? m[1].trim() : null
   } catch {
     return null
