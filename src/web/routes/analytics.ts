@@ -41,7 +41,7 @@ const KPI_ANNOTATIONS: Record<string, { meaning: string; target: string }> = {
   // to view"), which has no thumbnail-CTR benchmark.
   avg_ctr_long: { meaning: 'Long-form thumbnail impressions CTR, impression-weighted over videos clearing the insufficient-data floor. Shorts are excluded (they carry no thumbnail-CTR in-feed). null = insufficient data.', target: 'Dubler-hybrid 5-7%; entertainment/gaming 6-9%; edu/tutorial 4-6%. Read together with retention.' },
   shorts_swipe_through: { meaning: 'Shorts feed swipe-through ("how many chose to view" from the feed swipe) -- the first-frame hook signal. NOT a thumbnail-CTR; the long-form CTR band never applies. null = swipe-through data absent (insufficient data), never folded into long-form.', target: 'First-frame hook driven; calibrate the swipe-through band per run via date-filtered WebSearch, not a permanent constant.' },
-  twitch_followers: { meaning: 'Total Twitch followers.', target: 'Net-positive weekly; Affiliate gate at 50 followers.' },
+  twitch_followers: { meaning: 'Total Twitch followers.', target: 'Net-positive weekly; Affiliate gate at 25 followers (Twitch lowered the bar 2026-06: 25 followers + 4h streamed + 4 unique broadcast days + 3 avg concurrent, down from 50/8h/7). Verify the live numbers per campaign via a date-filtered Tier-1 search, not a permanent constant.' },
   twitch_avg_concurrents: { meaning: 'Average concurrent viewers while live -- a lagging health signal, not the leading metric (post-Affiliate leaders: Tier-1 sub-count + Discord activity).', target: 'Staged: 3 pre-Affiliate; 5 post-Affiliate with peak/avg<2.5 (organic); 10 at community-scale (~6-12 months). Twitch-only; recalibrate on first multi-platform stream.' },
 }
 
