@@ -78,7 +78,9 @@ def default_db_path():
 
 if __name__ == "__main__":
     db_path = default_db_path()
-    output_path = Path(db_path).parent / "concept-index.json"
+    # Anchor the concept-index to the project store/ dir (card c9a543b5 NIT), so a
+    # non-store/ NOA_DB_PATH override does not relocate the output alongside the DB.
+    output_path = Path(__file__).resolve().parent.parent / "store" / "concept-index.json"
 
     count, path = generate_concept_index(str(db_path), str(output_path))
     print(f"✓ Generated {count} concept-index entries → {path}")

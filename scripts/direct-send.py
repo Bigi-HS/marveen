@@ -96,29 +96,12 @@ def telegram_send(token, chat_id, text, opener=urllib.request.urlopen):
         return -1
 
 
-def resolve_default_db(env=None, project_root=None):
-    """Default DB target for standalone runs: the live noa.db via NOA_DB_PATH,
-    else store/noa.db directly (post-retire, card 57480c07). The noa.db cutover
-    points NOA_DB_PATH at the migrated database; defaulting to the frozen
-    claudeclaw.db would (post-cutover) write direct_send_log rows + kanban card
-    updates into the FROZEN legacy DB, invisible to the live board (card b793b2d8).
-    The schedule-runner passes --db-path explicitly (which overrides this default);
-    this only governs standalone invocations. NOA_DB_PATH is honored only if it
-    names a .db under the project root; anything else fails open to the LIVE noa.db
-    (never crash the send path, never route to the frozen legacy DB).
-    """
-    env = os.environ if env is None else env
-    if project_root is None:
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    default = os.path.join(project_root, "store", "noa.db")
-    raw = (env.get("NOA_DB_PATH") or "").strip()
-    if not raw:
-        return default
-    resolved = os.path.abspath(os.path.join(project_root, raw))
-    root_with_sep = project_root.rstrip(os.sep) + os.sep
-    if resolved.endswith(".db") and resolved.startswith(root_with_sep):
-        return resolved
-    return default
+# resolve_default_db lives in the shared scripts/db_resolve.py (card c9a543b5, DRY).
+# See that module for the noa.db-cutover / frozen-legacy rationale: defaulting to
+# the frozen claudeclaw.db would (post-cutover) write direct_send_log rows + kanban
+# updates into the dead legacy DB, invisible to the live board (card b793b2d8).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from db_resolve import resolve_default_db  # noqa: E402
 
 
 def _connect(db_path):

@@ -376,29 +376,12 @@ def resolve_api_key(provider):
 # --------------------------------------------------------------------------- #
 # DB: layer2_call_log + budget (AC-9)
 # --------------------------------------------------------------------------- #
-def resolve_default_db(env=None, project_root=None):
-    """Default DB target for standalone runs: the live noa.db via NOA_DB_PATH,
-    else store/noa.db directly (post-retire, card 57480c07). Defaulting to the
-    frozen claudeclaw.db would (post-cutover) write layer2_call_log rows, the
-    outage budget count, AND insert_kanban_card rows into the FROZEN legacy DB,
-    invisible to the live board (card b793b2d8). The schedule-runner passes
-    --db-path explicitly (which overrides this); this only governs standalone
-    invocations. NOA_DB_PATH is honored only if it names a .db under the project
-    root; else fails open to the LIVE noa.db (never crash the fallback path, never
-    route to the frozen legacy DB).
-    """
-    env = os.environ if env is None else env
-    if project_root is None:
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    default = os.path.join(project_root, "store", "noa.db")
-    raw = (env.get("NOA_DB_PATH") or "").strip()
-    if not raw:
-        return default
-    resolved = os.path.abspath(os.path.join(project_root, raw))
-    root_with_sep = project_root.rstrip(os.sep) + os.sep
-    if resolved.endswith(".db") and resolved.startswith(root_with_sep):
-        return resolved
-    return default
+# resolve_default_db lives in the shared scripts/db_resolve.py (card c9a543b5, DRY).
+# See that module for the noa.db-cutover / frozen-legacy rationale: defaulting to the
+# frozen claudeclaw.db would (post-cutover) write layer2_call_log rows, the outage
+# budget count, AND insert_kanban_card rows into the dead legacy DB (card b793b2d8).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from db_resolve import resolve_default_db  # noqa: E402
 
 
 def _connect(db_path):
