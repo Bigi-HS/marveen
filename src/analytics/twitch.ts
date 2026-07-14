@@ -47,6 +47,11 @@ export interface TwitchVodSummary {
   viewCount: number
   createdAt: string
   duration: string
+  // Helix video `type`: 'archive' (a past broadcast/stream), 'highlight' (a clipped
+  // segment) or 'upload' (a manually uploaded file). Only 'archive' represents
+  // streamed time -- B4 sumStreamMinutes counts archive ONLY, so a highlight/upload
+  // can never inflate the Affiliate stream-hours gate.
+  videoType: string
 }
 
 // ── Request builders ──────────────────────────────────────────────────────────
@@ -75,7 +80,10 @@ export function buildStreamRequest(opts: { userLogin: string }): HelixRequest {
 export function buildVideosRequest(opts: { userId: string; first?: number }): HelixRequest {
   return {
     endpoint: '/helix/videos',
-    params: { user_id: opts.userId, first: opts.first ?? 20 },
+    // type=archive narrows the request to past broadcasts only (Helix default is
+    // type=all, which mixes in highlights/uploads). The parse+sum layer filters on
+    // videoType too (defense-in-depth), so a mixed payload can never leak either.
+    params: { user_id: opts.userId, first: opts.first ?? 20, type: 'archive' },
   }
 }
 
@@ -129,13 +137,16 @@ export function parseStreamResponse(raw: unknown): TwitchStreamSummary {
 }
 
 export function parseVideosResponse(raw: unknown): TwitchVodSummary[] {
-  const r = raw as { data?: Array<{ id?: string; title?: string; view_count?: number; created_at?: string; duration?: string }> }
+  const r = raw as { data?: Array<{ id?: string; title?: string; view_count?: number; created_at?: string; duration?: string; type?: string }> }
   return (r.data ?? []).map(v => ({
     id: v.id ?? '',
     title: v.title ?? '',
     viewCount: v.view_count ?? 0,
     createdAt: v.created_at ?? '',
     duration: v.duration ?? '',
+    // Carry the Helix `type` so the B4 sum can filter to archive-only. Absent =>
+    // '' (unknown), which is NOT 'archive' and therefore never counted as stream time.
+    videoType: v.type ?? '',
   }))
 }
 
@@ -160,8 +171,14 @@ export function parseTwitchDurationMinutes(duration: string): number {
  * Affiliate-gate input (spec: gate = 240 min / 4h over a rolling 30-day window;
  * FRISSITVE 2026-06 -- old bar was 500 min / 8.33h). VOD duration is the best
  * proxy the Helix API gives for streamed time; the B-layer may swap in a
- * stream-session log if one is kept. `type === 'archive'` filters out clips/uploads.
+ * stream-session log if one is kept.
+ *
+ * Counts ONLY archive VODs (videoType === 'archive'). Highlights and uploads are
+ * excluded so a clipped segment or a manually uploaded file can never inflate the
+ * stream-hours input and false-green the Affiliate gate (never-false-green discipline).
  */
 export function sumStreamMinutes(vods: TwitchVodSummary[]): number {
-  return vods.reduce((a, v) => a + parseTwitchDurationMinutes(v.duration), 0)
+  return vods
+    .filter(v => v.videoType === 'archive')
+    .reduce((a, v) => a + parseTwitchDurationMinutes(v.duration), 0)
 }

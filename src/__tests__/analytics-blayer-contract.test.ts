@@ -97,12 +97,25 @@ describe('B4 -- stream-hours parse + Affiliate gate', () => {
     expect(parseTwitchDurationMinutes('')).toBe(0)
   })
 
-  it('sums VOD durations into a window minute total', () => {
+  it('sums archive VOD durations into a window minute total', () => {
     const vods: TwitchVodSummary[] = [
-      { id: 'a', title: '', viewCount: 0, createdAt: '', duration: '3h00m00s' },
-      { id: 'b', title: '', viewCount: 0, createdAt: '', duration: '3h00m00s' },
+      { id: 'a', title: '', viewCount: 0, createdAt: '', duration: '3h00m00s', videoType: 'archive' },
+      { id: 'b', title: '', viewCount: 0, createdAt: '', duration: '3h00m00s', videoType: 'archive' },
     ]
     expect(sumStreamMinutes(vods)).toBeCloseTo(360, 2)
+  })
+
+  it('EXCLUDES highlights/uploads from stream-hours (no Affiliate false-green)', () => {
+    const vods: TwitchVodSummary[] = [
+      { id: 'a', title: '', viewCount: 0, createdAt: '', duration: '2h00m00s', videoType: 'archive' },
+      { id: 'hl', title: '', viewCount: 0, createdAt: '', duration: '5h00m00s', videoType: 'highlight' },
+      { id: 'up', title: '', viewCount: 0, createdAt: '', duration: '9h00m00s', videoType: 'upload' },
+      { id: 'unk', title: '', viewCount: 0, createdAt: '', duration: '9h00m00s', videoType: '' },
+    ]
+    // Only the 2h archive counts; the 5h highlight + 9h upload + unknown-type do NOT.
+    // Without the filter the sum would be 25h and false-green the 4h Affiliate gate.
+    expect(sumStreamMinutes(vods)).toBeCloseTo(120, 2)
+    expect(affiliateHoursLabel(sumStreamMinutes(vods))).toBe('flag')
   })
 
   it('gate default is 240 minutes (FRISSITVE 2026-06, not the old 500)', () => {

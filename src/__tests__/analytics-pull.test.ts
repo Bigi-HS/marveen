@@ -103,7 +103,9 @@ describe('runPull -- ok shape (fixtures)', () => {
       expect(m.subscriptions.tier3).toBe(0)
       // B3: single /streams sample carries no peak.
       expect(m.stream.peakConcurrent).toBeNull()
-      // B4: stream-minutes window is the summed VOD duration (2h30m15s + 1h15m00s).
+      // B4: stream-minutes window sums ARCHIVE VODs only (2h30m15s + 1h15m00s). The
+      // fixture also carries a 45m highlight (hl001) which must NOT count -- if it
+      // leaked in, the total would be 270.25 and could false-green the Affiliate gate.
       expect(m.streamMinutesWindow).toBeCloseTo(150.25 + 75, 2)
     }
     // B5: per-video views + retention proxy parsed from the extended CTR columns.
