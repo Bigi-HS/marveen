@@ -47,8 +47,26 @@ OLLAMA = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(SCRIPT_DIR)
-TOK = open(os.path.join(ROOT, "store", ".dashboard-token")).read().strip()
+_TOKEN_PATH = os.path.join(ROOT, "store", ".dashboard-token")
 DB = os.path.join(ROOT, "store", "noa.db")
+# SSRF/exfil guard host allowlist (mirrors memory-retrieval-eval / local_worker).
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _token():
+    """Read the dashboard bearer token at USE time (not import time), so the pure
+    --questions path (templates + print) stays runnable without a live store/
+    present -- it needs neither the token nor the DB."""
+    return open(_TOKEN_PATH).read().strip()
+
+
+def _assert_loopback(url):
+    """SSRF/exfil guard (mirrors local_worker.assert_local_urls): the embed
+    request carries grill candidate content, so the endpoint MUST be loopback --
+    a tampered OLLAMA_URL must not ship candidate text to a remote host."""
+    host = urllib.parse.urlparse(url).hostname
+    if host not in LOCAL_HOSTS:
+        raise RuntimeError(f"non-loopback OLLAMA_URL {url!r} (host={host!r}) -- abort (SSRF guard)")
 
 
 def _resolve_templates():
@@ -111,6 +129,9 @@ def cmd_questions(agent):
 
 def embed(text):
     """Embed via the same localhost ollama model the server uses. None on failure."""
+    # Assert loopback BEFORE the request fires: the candidate text carries vault
+    # content, so a tampered OLLAMA_URL must abort loudly, never connect out.
+    _assert_loopback(OLLAMA)
     body = json.dumps({"model": EMBED_MODEL, "prompt": text}).encode()
     req = urllib.request.Request(f"{OLLAMA}/api/embeddings", data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
@@ -158,7 +179,7 @@ def best_cosine(vec, vault):
 def search(q, agent, limit=8):
     qs = urllib.parse.urlencode({"q": q, "mode": "hybrid", "agent": agent, "limit": limit})
     req = urllib.request.Request(f"{BASE}/api/memories?{qs}",
-                                 headers={"Authorization": f"Bearer {TOK}"})
+                                 headers={"Authorization": f"Bearer {_token()}"})
     return json.load(urllib.request.urlopen(req, timeout=20))
 
 
@@ -187,7 +208,7 @@ def write_memory(agent, content, category, keywords):
     body = json.dumps({"agent_id": agent, "content": content,
                        "category": category, "keywords": keywords or None}).encode()
     req = urllib.request.Request(f"{BASE}/api/memories", data=body, method="POST",
-                                 headers={"Authorization": f"Bearer {TOK}",
+                                 headers={"Authorization": f"Bearer {_token()}",
                                           "Content-Type": "application/json"})
     return json.load(urllib.request.urlopen(req, timeout=20))
 
