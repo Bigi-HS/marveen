@@ -43,6 +43,7 @@ import {
   parseSubscriptionsResponse,
   parseStreamResponse,
   parseVideosResponse,
+  sumStreamMinutes,
   buildFollowersRequest,
   buildSubscriptionsRequest,
   buildStreamRequest,
@@ -81,6 +82,9 @@ export interface TwitchMetrics {
   subscriptions: TwitchSubsSummary
   stream: TwitchStreamSummary
   videos: TwitchVodSummary[]
+  // B4 (spec 4c81a561): total live minutes in the window (summed VOD durations).
+  // The Affiliate-gate input -- gate = 240 min / 4h over 30 days (FRISSITVE 2026-06).
+  streamMinutesWindow: number
 }
 
 export interface PullOk<M> {
@@ -243,11 +247,13 @@ async function pullTwitch(
       client.twitch.query(buildStreamRequest({ userLogin: ctx.userLogin })),
       client.twitch.query(buildVideosRequest({ userId: ctx.broadcasterId })),
     ])
+    const videos = parseVideosResponse(videosRaw)
     const metrics: TwitchMetrics = {
       followers: parseFollowersResponse(followersRaw),
       subscriptions: parseSubscriptionsResponse(subsRaw),
       stream: parseStreamResponse(streamRaw),
-      videos: parseVideosResponse(videosRaw),
+      videos,
+      streamMinutesWindow: sumStreamMinutes(videos),
     }
     return { status: 'ok', source: 'twitch', pulled_at: nowS, period: ctx.period, metrics }
   } catch (err) {

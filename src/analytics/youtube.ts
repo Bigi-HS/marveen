@@ -16,6 +16,13 @@ export interface YtCtrRow {
   videoId: string
   impressions: number
   ctr: number
+  // B5 (spec 4c81a561): per-video views + retention proxy, so top_videos can rank
+  // by retained-views (views x avgViewPercentage) instead of the impression proxy.
+  // OPTIONAL for backward compat: pre-B5 snapshots (and any response that does not
+  // include the columns) leave these undefined and the ranking falls back to
+  // impressions. `averageViewPercentage` is the % of the video watched (0-100).
+  views?: number
+  avgViewPercentage?: number
 }
 
 export interface YtRetentionRow {
@@ -76,7 +83,10 @@ export function buildCtrRequest(opts: {
     ids: `channel==${opts.channelId}`,
     startDate: opts.startDate,
     endDate: opts.endDate,
-    metrics: 'impressions,impressionsClickThroughRate',
+    // B5: also pull per-video views + averageViewPercentage so top_videos can rank
+    // by retained-views. All four are valid metrics with dimension=video (source:
+    // developers.google.com/youtube/analytics/metrics).
+    metrics: 'impressions,impressionsClickThroughRate,views,averageViewPercentage',
     dimensions: 'video',
   }
 }
@@ -145,6 +155,13 @@ function colIndex(headers: Array<{ name: string }>, name: string): number {
   return i
 }
 
+// Non-throwing column lookup for OPTIONAL columns (B5): returns -1 when absent so
+// the parser can degrade gracefully instead of throwing on a response that lacks
+// the newer per-video metrics.
+function colIndexOpt(headers: Array<{ name: string }>, name: string): number {
+  return headers.findIndex(h => h.name === name)
+}
+
 export function parseCtrResponse(raw: unknown): YtCtrRow[] {
   const r = raw as RawAnalyticsResponse
   if (!r.rows?.length || !r.columnHeaders) return []
@@ -152,11 +169,19 @@ export function parseCtrResponse(raw: unknown): YtCtrRow[] {
   const iVideo = colIndex(h, 'video')
   const iImp = colIndex(h, 'impressions')
   const iCtr = colIndex(h, 'impressionsClickThroughRate')
-  return (r.rows as unknown[][]).map(row => ({
-    videoId: row[iVideo] as string,
-    impressions: row[iImp] as number,
-    ctr: row[iCtr] as number,
-  }))
+  // B5 optional per-video metrics -- only mapped when the columns are present.
+  const iViews = colIndexOpt(h, 'views')
+  const iAvgPct = colIndexOpt(h, 'averageViewPercentage')
+  return (r.rows as unknown[][]).map(row => {
+    const out: YtCtrRow = {
+      videoId: row[iVideo] as string,
+      impressions: row[iImp] as number,
+      ctr: row[iCtr] as number,
+    }
+    if (iViews !== -1) out.views = row[iViews] as number
+    if (iAvgPct !== -1) out.avgViewPercentage = row[iAvgPct] as number
+    return out
+  })
 }
 
 export function parseRetentionResponse(raw: unknown): YtRetentionRow[] {

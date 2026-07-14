@@ -88,11 +88,15 @@ describe('parseFollowersResponse', () => {
 })
 
 describe('parseSubscriptionsResponse', () => {
-  it('parses subscriptions fixture into total and points', () => {
+  it('parses subscriptions fixture into total, points and tier split (B2)', () => {
     const raw = loadFixture('twitch-subscriptions.json')
     const summary = parseSubscriptionsResponse(raw) as TwitchSubsSummary
-    expect(summary.total).toBe(342)
-    expect(summary.points).toBe(1025)
+    expect(summary.total).toBe(9)
+    expect(summary.points).toBe(10)
+    // B2 (card 4c81a561): Tier-split from data[].tier (8x'1000' + 1x'2000').
+    expect(summary.tier1).toBe(8)
+    expect(summary.tier2).toBe(1)
+    expect(summary.tier3).toBe(0)
   })
 
   it('exposes ONLY real subscription fields -- no invented retention/CTR', () => {
@@ -132,12 +136,23 @@ describe('parseVideosResponse', () => {
   it('parses videos fixture into array with view_count per VOD', () => {
     const raw = loadFixture('twitch-videos.json')
     const vods = parseVideosResponse(raw) as TwitchVodSummary[]
-    expect(vods).toHaveLength(2)
+    expect(vods).toHaveLength(3)
     expect(vods[0].id).toBe('vod001')
     expect(vods[0].viewCount).toBe(1834)
     expect(vods[0].title).toBe('VOD: Building stuff')
     expect(vods[1].id).toBe('vod002')
     expect(vods[1].viewCount).toBe(932)
+  })
+
+  it('carries the Helix video type (archive vs highlight) so B4 can filter it', () => {
+    const raw = loadFixture('twitch-videos.json')
+    const vods = parseVideosResponse(raw) as TwitchVodSummary[]
+    expect(vods[0].videoType).toBe('archive')
+    expect(vods[1].videoType).toBe('archive')
+    // The highlight is parsed but tagged non-archive -> B4 sumStreamMinutes drops it.
+    const hl = vods.find(v => v.id === 'hl001')
+    expect(hl).toBeDefined()
+    expect(hl!.videoType).toBe('highlight')
   })
 
   it('exposes ONLY real VOD fields -- no invented CTR/retention', () => {

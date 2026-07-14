@@ -1,10 +1,16 @@
 {
-  "total": 342,
-  "points": 1025,
+  "total": 9,
+  "points": 10,
   "data": [
-    {"broadcaster_id": "9998887", "broadcaster_login": "dominik", "broadcaster_name": "Dominik",
-     "user_id": "111111", "user_login": "sub_a", "user_name": "Sub_A",
-     "tier": "1000", "is_gift": false}
+    {"broadcaster_id": "9998887", "user_id": "111111", "user_login": "sub_a", "tier": "1000", "is_gift": false},
+    {"broadcaster_id": "9998887", "user_id": "111112", "user_login": "sub_b", "tier": "1000", "is_gift": false},
+    {"broadcaster_id": "9998887", "user_id": "111113", "user_login": "sub_c", "tier": "1000", "is_gift": false},
+    {"broadcaster_id": "9998887", "user_id": "111114", "user_login": "sub_d", "tier": "1000", "is_gift": false},
+    {"broadcaster_id": "9998887", "user_id": "111115", "user_login": "sub_e", "tier": "1000", "is_gift": false},
+    {"broadcaster_id": "9998887", "user_id": "111116", "user_login": "sub_f", "tier": "1000", "is_gift": false},
+    {"broadcaster_id": "9998887", "user_id": "111117", "user_login": "sub_g", "tier": "1000", "is_gift": false},
+    {"broadcaster_id": "9998887", "user_id": "111118", "user_login": "sub_h", "tier": "1000", "is_gift": false},
+    {"broadcaster_id": "9998887", "user_id": "111119", "user_login": "sub_i", "tier": "2000", "is_gift": false}
   ],
   "pagination": {"cursor": "xyz"}
 }

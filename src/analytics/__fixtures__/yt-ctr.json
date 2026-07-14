@@ -3,11 +3,13 @@
   "columnHeaders": [
     {"name": "video", "dataType": "STRING"},
     {"name": "impressions", "dataType": "INTEGER"},
-    {"name": "impressionsClickThroughRate", "dataType": "FLOAT"}
+    {"name": "impressionsClickThroughRate", "dataType": "FLOAT"},
+    {"name": "views", "dataType": "INTEGER"},
+    {"name": "averageViewPercentage", "dataType": "FLOAT"}
   ],
   "rows": [
-    ["abc123", 12000, 0.0542],
-    ["def456", 8500, 0.0381],
-    ["ghi789", 21000, 0.0671]
+    ["abc123", 12000, 0.0542, 9000, 60.0],
+    ["def456", 8500, 0.0381, 7000, 80.0],
+    ["ghi789", 21000, 0.0671, 12000, 35.0]
   ]
 }

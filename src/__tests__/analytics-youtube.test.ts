@@ -34,7 +34,9 @@ function loadFixture(name: string): unknown {
 describe('buildCtrRequest', () => {
   it('uses correct metrics and dimensions', () => {
     const r = buildCtrRequest({ channelId: 'UCxxx', startDate: '2026-06-01', endDate: '2026-06-28' })
-    expect(r.metrics).toBe('impressions,impressionsClickThroughRate')
+    // B5 (card 4c81a561): also pulls per-video views + averageViewPercentage so
+    // top_videos can rank by retained-views.
+    expect(r.metrics).toBe('impressions,impressionsClickThroughRate,views,averageViewPercentage')
     expect(r.dimensions).toBe('video')
     expect(r.ids).toBe('channel==UCxxx')
     expect(r.startDate).toBe('2026-06-01')
