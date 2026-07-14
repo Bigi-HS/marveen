@@ -14,12 +14,14 @@ token is read lazily at use-time, exercised by test_import_is_side_effect_free.
 Run: python3 scripts/__tests__/memory-retrieval-eval.test.py
 
 Covers:
-  - parse_cli: positional sample_N + --paraphrase/-p opt-in (default unchanged)
+  - parse_cli: positional sample_N + --paraphrase/-p opt-in + --json/--threshold
   - _clean_paraphrase: <think>-strip, quote/punct trim, meta-echo + over-long drop
+  - _META_RE (PR#389 nit): whole-word meta filtering ('terminal' kept, 'term' dropped)
   - _assert_loopback: SSRF guard rejects non-loopback OLLAMA_URL
   - ollama_available: graceful False on daemon down / model absent (injected opener)
   - paraphrase_query: graceful '' on transport failure (never crashes the run)
   - make_query: baseline lexical-anchor is untouched (regression signal intact)
+  - build_summary: regression-gate shape + hybrid recall@1 pass-criteria + exit gate
 """
 import importlib.util
 import io
@@ -44,20 +46,36 @@ class ImportTests(unittest.TestCase):
 
 
 class ParseCliTests(unittest.TestCase):
+    # parse_cli now returns (sample, paraphrase, as_json, threshold).
     def test_default_is_lexical_anchor(self):
-        self.assertEqual(mre.parse_cli([]), (40, False))
+        self.assertEqual(mre.parse_cli([]), (40, False, False, mre.DEFAULT_THRESHOLD))
 
     def test_positional_sample_preserved(self):
-        self.assertEqual(mre.parse_cli(["12"]), (12, False))
+        self.assertEqual(mre.parse_cli(["12"]), (12, False, False, mre.DEFAULT_THRESHOLD))
 
     def test_paraphrase_long_flag(self):
-        self.assertEqual(mre.parse_cli(["5", "--paraphrase"]), (5, True))
+        self.assertEqual(mre.parse_cli(["5", "--paraphrase"]),
+                         (5, True, False, mre.DEFAULT_THRESHOLD))
 
     def test_paraphrase_short_flag(self):
-        self.assertEqual(mre.parse_cli(["-p", "8"]), (8, True))
+        self.assertEqual(mre.parse_cli(["-p", "8"]),
+                         (8, True, False, mre.DEFAULT_THRESHOLD))
 
     def test_explicit_lexical_overrides(self):
-        self.assertEqual(mre.parse_cli(["--paraphrase", "--lexical", "3"]), (3, False))
+        self.assertEqual(mre.parse_cli(["--paraphrase", "--lexical", "3"]),
+                         (3, False, False, mre.DEFAULT_THRESHOLD))
+
+    def test_json_flag(self):
+        self.assertEqual(mre.parse_cli(["12", "--json"]),
+                         (12, False, True, mre.DEFAULT_THRESHOLD))
+
+    def test_threshold_space_form(self):
+        self.assertEqual(mre.parse_cli(["--threshold", "0.5"]),
+                         (40, False, False, 0.5))
+
+    def test_threshold_equals_form(self):
+        self.assertEqual(mre.parse_cli(["--threshold=1.01", "12", "--json"]),
+                         (12, False, True, 1.01))
 
 
 class CleanParaphraseTests(unittest.TestCase):
@@ -87,6 +105,27 @@ class CleanParaphraseTests(unittest.TestCase):
     def test_empty_input(self):
         self.assertEqual(mre._clean_paraphrase(""), "")
         self.assertEqual(mre._clean_paraphrase(None), "")
+
+    # --- PR#389 nit 1: whole-word meta-token matching (no substring over-drop) ---
+    def test_query_word_containing_metatoken_is_kept(self):
+        # 'terminal' CONTAINS 'term' -- a substring test wrongly dropped it. A
+        # legitimate query must survive whole-word filtering.
+        self.assertEqual(mre._clean_paraphrase("terminal pane detector crash"),
+                         "terminal pane detector crash")
+
+    def test_determine_containing_term_is_kept(self):
+        self.assertEqual(mre._clean_paraphrase("how to determine backup status"),
+                         "how to determine backup status")
+
+    def test_standalone_metatoken_still_dropped(self):
+        # the actual meta-token 'term' as a whole word IS filtered.
+        self.assertEqual(mre._clean_paraphrase("use a different term for this"), "")
+
+    def test_multiword_metatoken_still_dropped(self):
+        self.assertEqual(mre._clean_paraphrase("write the search query here"), "")
+
+    def test_paraphrase_metatoken_wholeword_dropped(self):
+        self.assertEqual(mre._clean_paraphrase("paraphrase the topic somehow"), "")
 
 
 class LoopbackGuardTests(unittest.TestCase):
@@ -163,6 +202,50 @@ class MakeQueryBaselineTests(unittest.TestCase):
     def test_content_fallback(self):
         row = {"content": "Buster kameleon canary sandbox agent", "keywords": ""}
         self.assertTrue(mre.make_query(row))
+
+
+def _raw(hybrid_r1_hits, evaluated=10, fts_r1_hits=3):
+    """Build a run_eval()-shaped tally with `hybrid_r1_hits`/`evaluated` at r@1."""
+    def stat(hits):
+        return {"r@1": hits, "r@5": hits, "r@10": hits,
+                "mrr": float(hits), "found": hits}
+    return {
+        "sample_size": evaluated, "evaluated": evaluated, "skipped": 0,
+        "retrievable_total": evaluated,
+        "stats": {"hybrid": stat(hybrid_r1_hits), "fts": stat(fts_r1_hits)},
+        "misses": {"hybrid": [], "fts": []}, "errors": [],
+    }
+
+
+class BuildSummaryTests(unittest.TestCase):
+    def test_shape_has_regression_fields(self):
+        s = mre.build_summary(_raw(10), "lexical-anchor", 0.90)
+        self.assertEqual(s["mode"], "lexical-anchor")
+        self.assertEqual(s["experiment_id"], "memory-retrieval-eval")
+        for key in ("sample_size", "evaluated", "skipped", "metrics", "pass_criteria"):
+            self.assertIn(key, s)
+        self.assertIn("hybrid", s["metrics"])
+        self.assertIn("fts", s["metrics"])
+        for m in ("hybrid", "fts"):
+            for k in ("recall@1", "recall@5", "recall@10", "mrr", "found"):
+                self.assertIn(k, s["metrics"][m])
+
+    def test_pass_criteria_met_on_high_recall(self):
+        s = mre.build_summary(_raw(10, evaluated=10), "lexical-anchor", 0.90)
+        self.assertEqual(s["metrics"]["hybrid"]["recall@1"], 1.0)
+        self.assertTrue(s["pass_criteria"]["met"])
+        self.assertEqual(s["pass_criteria"]["metric"], "hybrid recall@1")
+
+    def test_pass_criteria_not_met_on_low_recall(self):
+        s = mre.build_summary(_raw(5, evaluated=10), "lexical-anchor", 0.90)
+        self.assertEqual(s["metrics"]["hybrid"]["recall@1"], 0.5)
+        self.assertFalse(s["pass_criteria"]["met"])
+
+    def test_impossible_threshold_never_met(self):
+        # exit-code-1 path: --threshold 1.01 is unreachable even at perfect recall.
+        s = mre.build_summary(_raw(10, evaluated=10), "lexical-anchor", 1.01)
+        self.assertEqual(s["metrics"]["hybrid"]["recall@1"], 1.0)
+        self.assertFalse(s["pass_criteria"]["met"])
 
 
 if __name__ == "__main__":

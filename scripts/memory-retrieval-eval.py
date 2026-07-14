@@ -23,7 +23,17 @@ is unreachable the paraphrase mode degrades gracefully with a clear message
 rather than crashing. The default lexical-anchor mode is unchanged and remains
 the credential-free regression baseline.
 
+REGRESSION MODE (card 570030c9, J1-final): the eval also speaks the fleet's
+regression-gate interface (same shape as scripts/eval-notification-format.py) so
+a deploy/CI check can consume it uniformly:
+  --json        emit a machine-readable summary object to stdout (no human table)
+  --threshold X pass-criteria is `hybrid recall@1 >= X` (hybrid is the PRODUCTION
+                retrieval path). Exit code 0 when met, 1 when not.
+The regression check runs the DEFAULT lexical-anchor mode (zero-dependency,
+deterministic); paraphrase stays opt-in and is NOT the gate (LLM = slow/variable).
+
 Usage: python3 scripts/memory-retrieval-eval.py [sample_N] [--paraphrase]
+                                                 [--json] [--threshold X]
 """
 import sqlite3, urllib.request, urllib.parse, json, sys, re, os
 
@@ -47,6 +57,12 @@ def _token():
 # rather than the frozen legacy claudeclaw.db (this eval reads the memories table).
 DB_PATH = resolve_default_db(project_root=PROJECT_ROOT)
 KS = (1, 5, 10)
+
+# Regression-gate default: the known baseline for the DEFAULT lexical-anchor mode
+# has measured hybrid recall@1 = 0.97-1.00 on samples. 0.90 catches a real
+# retrieval regression (embedding/schema/rerank break) while leaving headroom so
+# a single unlucky sample row does not flake the gate. Overridable via --threshold.
+DEFAULT_THRESHOLD = 0.90
 STOP = set("a an the and or of to in on for with is are was the ez az es hogy nem "
            "egy mint van vagy mar meg csak ami amit ha de -- 07 06 2026".split())
 
@@ -55,6 +71,10 @@ STOP = set("a an the and or of to in on for with is are was the ez az es hogy ne
 # contract, same think=false / format-JSON invariants, same loopback SSRF guard.
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 PARAPHRASE_MODEL = os.environ.get("EVAL_PARAPHRASE_MODEL", "qwen3:4b")
+# Per-call paraphrase timeout (seconds). 120s was a heavy default for a small
+# local model; 45s is enough for qwen3:4b on a warm daemon and fails faster on a
+# stuck one. Override with EVAL_PARAPHRASE_TIMEOUT for slow hosts / larger models.
+PARAPHRASE_TIMEOUT = float(os.environ.get("EVAL_PARAPHRASE_TIMEOUT", "45"))
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
@@ -74,17 +94,32 @@ PARAPHRASE_SYSTEM = (
 
 
 def parse_cli(argv):
-    """Split argv into (sample_N, paraphrase_flag). Keeps the original positional
-    sample arg; --paraphrase / -p is an opt-in flag. Default sample stays 40."""
-    sample, paraphrase = 40, False
-    for a in argv:
+    """Split argv into (sample_N, paraphrase, as_json, threshold). Keeps the
+    original positional sample arg and --paraphrase/-p opt-in; adds the fleet
+    regression interface: --json (machine summary) and --threshold X (hybrid
+    recall@1 pass-criteria). Default sample stays 40, threshold DEFAULT_THRESHOLD.
+    Only recognised flags are honoured -- an unknown token is ignored, as before."""
+    sample, paraphrase, as_json = 40, False, False
+    threshold = DEFAULT_THRESHOLD
+    i = 0
+    while i < len(argv):
+        a = argv[i]
         if a in ("--paraphrase", "-p"):
             paraphrase = True
         elif a in ("--lexical", "--anchor"):
             paraphrase = False
+        elif a == "--json":
+            as_json = True
+        elif a == "--threshold":
+            i += 1
+            if i < len(argv):
+                threshold = float(argv[i])
+        elif a.startswith("--threshold="):
+            threshold = float(a.split("=", 1)[1])
         elif a.lstrip("-").isdigit():
             sample = int(a.lstrip("-"))
-    return sample, paraphrase
+        i += 1
+    return sample, paraphrase, as_json, threshold
 
 
 def search(q, mode, agent, limit=10):
@@ -143,6 +178,19 @@ def ollama_available(base_url=OLLAMA_URL, model=PARAPHRASE_MODEL,
 _META_TOKENS = ("verbatim", "szakmai kifejezés", "search query", "keresési kifejezés",
                 "the note", "a jegyzet", "3-8", "3–8", "paraphrase", "term")
 
+# WHOLE-WORD matching (PR#389 nit): a bare substring test wrongly dropped a
+# legitimate query word that merely CONTAINS a meta-token (e.g. 'terminal' -> the
+# 'term' token, 'determine' -> 'term'). Anchor each token on word boundaries so
+# only a standalone meta-token filters. Word chars include the accented Hungarian
+# letters used in the multi-word Hungarian tokens; the digit-range tokens ("3-8",
+# "3–8") keep their internal punctuation via re.escape.
+_META_WORD = "[0-9A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű]"
+_META_RE = re.compile(
+    "|".join(rf"(?<!{_META_WORD})(?:{re.escape(tok)})(?!{_META_WORD})"
+             for tok in _META_TOKENS),
+    re.IGNORECASE,
+)
+
 
 def _clean_paraphrase(raw, max_words=12):
     """Strip qwen3 <think> blocks, quotes and trailing punctuation; return a
@@ -155,8 +203,7 @@ def _clean_paraphrase(raw, max_words=12):
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     text = lines[-1] if lines else ""
     text = text.strip("\"'` ").rstrip(".!?,;:").strip()
-    low = text.lower()
-    if any(tok in low for tok in _META_TOKENS):
+    if _META_RE.search(text):  # standalone meta-token echo (whole-word) -> unusable
         return ""
     if len(text.split()) > max_words:  # not a short query -> unusable
         return ""
@@ -188,7 +235,7 @@ def paraphrase_query(row, base_url=OLLAMA_URL, model=PARAPHRASE_MODEL,
         headers={"Content-Type": "application/json"},
     )
     try:
-        with opener(req, timeout=120) as r:
+        with opener(req, timeout=PARAPHRASE_TIMEOUT) as r:
             resp = json.load(r)
     except Exception:
         return ""
@@ -203,27 +250,12 @@ def rank_of(mem_id, results):
     return None
 
 
-def main(argv=None):
-    sample_n, paraphrase = parse_cli(sys.argv[1:] if argv is None else argv)
+def run_eval(gen_query, sample_n):
+    """Run the eval against the live server and return the raw tallies. Pure of
+    any printing / exit; the caller shapes them for human or --json output.
 
-    # Only the query generator is swappable -- metrics/reporting are shared.
-    if paraphrase:
-        # Graceful degrade: no local LLM -> clear message + skip, never crash.
-        if not ollama_available():
-            print("# Memory retrieval eval (paraphrase mode) -- SKIPPED: the local "
-                  "LLM is unreachable\n"
-                  f"#   Ollama at {OLLAMA_URL} did not serve model {PARAPHRASE_MODEL!r}.\n"
-                  "#   Paraphrase mode needs the fleet-local daemon (no cloud "
-                  "credentials); start it and retry,\n"
-                  "#   or run the default lexical-anchor baseline: "
-                  "python3 scripts/memory-retrieval-eval.py")
-            return
-        gen_query = paraphrase_query
-        mode_label = f"paraphrase (LLM: {PARAPHRASE_MODEL} via local Ollama)"
-    else:
-        gen_query = make_query
-        mode_label = "lexical-anchor (baseline, zero-dependency)"
-
+    Returns a dict: {sample_size, evaluated, skipped, retrievable_total,
+    stats{mode->{r@k,mrr_sum,found}}, misses{mode->[(id,q)]}, errors[str]}."""
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     # deterministic sample: every Nth by id, non-scoped (retrievable)
@@ -237,6 +269,7 @@ def main(argv=None):
     stats = {m: {f"r@{k}": 0 for k in KS} | {"mrr": 0.0, "found": 0}
              for m in ("hybrid", "fts")}
     misses = {"hybrid": [], "fts": []}
+    errors = []
 
     evaluated = 0  # rows with a non-empty derived query -- the true recall denominator
     for row in sample:
@@ -248,7 +281,7 @@ def main(argv=None):
             try:
                 res = search(q, mode, row["agent_id"], limit=10)
             except Exception as e:
-                print(f"  ERR {mode} q={q!r}: {e}")
+                errors.append(f"{mode} q={q!r}: {e}")
                 continue
             rank = rank_of(row["id"], res)
             if rank:
@@ -260,27 +293,132 @@ def main(argv=None):
             else:
                 misses[mode].append((row["id"], q))
 
-    skipped = len(sample) - evaluated
-    if evaluated == 0:
-        print(f"# Memory retrieval eval [{mode_label}] -- no evaluable memories "
-              f"(sample={len(sample)}, all had empty derived queries or table empty)")
-        return
-    n = evaluated  # denominator = rows actually queried, NOT len(sample) (empty-query skips excluded)
-    empty_note = "empty paraphrase" if paraphrase else "empty query"
-    note = f", {skipped} skipped ({empty_note})" if skipped else ""
-    print(f"# Memory retrieval eval [{mode_label}]\n"
-          f"# evaluated={n} (of {len(rows)} retrievable{note})\n")
+    return {
+        "sample_size": len(sample),
+        "evaluated": evaluated,
+        "skipped": len(sample) - evaluated,
+        "retrievable_total": len(rows),
+        "stats": stats,
+        "misses": misses,
+        "errors": errors,
+    }
+
+
+def build_summary(raw, mode_key, threshold):
+    """Shape run_eval() tallies into the fleet regression-summary object (mirrors
+    scripts/eval-notification-format.py: a `metrics` map + a `pass_criteria`
+    {threshold, metric, value, met} block, gated on hybrid recall@1)."""
+    n = raw["evaluated"]
+    metrics = {}
     for mode in ("hybrid", "fts"):
-        s = stats[mode]
+        s = raw["stats"][mode]
+        metrics[mode] = {
+            **{f"recall@{k}": round(s[f"r@{k}"] / n, 4) if n else None for k in KS},
+            "mrr": round(s["mrr"] / n, 4) if n else None,
+            "found": s["found"],
+        }
+    hybrid_r1 = metrics["hybrid"]["recall@1"]
+    met = hybrid_r1 is not None and hybrid_r1 >= threshold
+    return {
+        "experiment_id": "memory-retrieval-eval",
+        "mode": mode_key,
+        "sample_size": raw["sample_size"],
+        "evaluated": n,
+        "skipped": raw["skipped"],
+        "retrievable_total": raw["retrievable_total"],
+        "metrics": metrics,
+        "pass_criteria": {
+            "metric": "hybrid recall@1",
+            "threshold": threshold,
+            "value": hybrid_r1,
+            "met": met,
+        },
+        "errors": raw["errors"],
+    }
+
+
+def main(argv=None):
+    sample_n, paraphrase, as_json, threshold = parse_cli(
+        sys.argv[1:] if argv is None else argv)
+
+    # Only the query generator is swappable -- metrics/reporting are shared.
+    if paraphrase:
+        # Graceful degrade: no local LLM -> clear message + skip, never crash.
+        # NOTE: paraphrase is opt-in and NEVER the regression gate (LLM =
+        # slow/variable); the deploy/CI check runs the default lexical-anchor mode.
+        if not ollama_available():
+            msg = ("the local LLM is unreachable: Ollama at "
+                   f"{OLLAMA_URL} did not serve model {PARAPHRASE_MODEL!r}")
+            if as_json:
+                print(json.dumps({"experiment_id": "memory-retrieval-eval",
+                                  "mode": "paraphrase", "skipped_run": True,
+                                  "reason": msg}, ensure_ascii=False))
+            else:
+                print("# Memory retrieval eval (paraphrase mode) -- SKIPPED: "
+                      f"{msg}.\n"
+                      "#   Paraphrase mode needs the fleet-local daemon (no cloud "
+                      "credentials); start it and retry,\n"
+                      "#   or run the default lexical-anchor baseline: "
+                      "python3 scripts/memory-retrieval-eval.py")
+            # Not a regression FAIL -- the gate never runs paraphrase. Exit 0.
+            return 0
+        gen_query = paraphrase_query
+        mode_key = "paraphrase"
+        mode_label = f"paraphrase (LLM: {PARAPHRASE_MODEL} via local Ollama)"
+    else:
+        gen_query = make_query
+        mode_key = "lexical-anchor"
+        mode_label = "lexical-anchor (baseline, zero-dependency)"
+
+    raw = run_eval(gen_query, sample_n)
+
+    if raw["evaluated"] == 0:
+        summary = build_summary(raw, mode_key, threshold)
+        if as_json:
+            print(json.dumps(summary, indent=2, ensure_ascii=False))
+        else:
+            print(f"# Memory retrieval eval [{mode_label}] -- no evaluable memories "
+                  f"(sample={raw['sample_size']}, all had empty derived queries or "
+                  "table empty)")
+        # No data => cannot assert the pass-criteria => regression FAIL (exit 1).
+        return 1
+
+    summary = build_summary(raw, mode_key, threshold)
+    met = summary["pass_criteria"]["met"]
+
+    if as_json:
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        return 0 if met else 1
+
+    # --- human table (unchanged baseline signal + appended verdict line) ---
+    n = raw["evaluated"]
+    empty_note = "empty paraphrase" if paraphrase else "empty query"
+    note = f", {raw['skipped']} skipped ({empty_note})" if raw["skipped"] else ""
+    print(f"# Memory retrieval eval [{mode_label}]\n"
+          f"# evaluated={n} (of {raw['retrievable_total']} retrievable{note})\n")
+    for mode in ("hybrid", "fts"):
+        s = raw["stats"][mode]
         line = "  ".join(f"recall@{k}={s[f'r@{k}']/n:.2f}" for k in KS)
         print(f"[{mode:6}] {line}  MRR={s['mrr']/n:.3f}  found={s['found']}/{n}")
     print()
+    if raw["errors"]:
+        print(f"errors ({len(raw['errors'])}), first 5:")
+        for e in raw["errors"][:5]:
+            print(f"  ERR {e}")
+        print()
     # show a few hybrid misses for inspection
-    if misses["hybrid"]:
-        print(f"hybrid misses ({len(misses['hybrid'])}), first 5:")
-        for mid, q in misses["hybrid"][:5]:
+    if raw["misses"]["hybrid"]:
+        print(f"hybrid misses ({len(raw['misses']['hybrid'])}), first 5:")
+        for mid, q in raw["misses"]["hybrid"][:5]:
             print(f"  id={mid} q={q!r}")
+        print()
+    # regression verdict (the gate-consumable line)
+    pc = summary["pass_criteria"]
+    verdict = "PASS" if met else "FAIL"
+    print(f"regression: {verdict}  ({pc['metric']}={pc['value']:.2f} "
+          f">= threshold {pc['threshold']:.2f} => {'MET' if met else 'NOT MET'})")
+    return 0 if met else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
