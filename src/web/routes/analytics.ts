@@ -17,9 +17,13 @@ import { json } from '../http-helpers.js'
 import { listRecentSnapshots, type AnalyticsSnapshotRow } from '../../analytics/storage.js'
 import {
   aggregateCtrByFormat,
+  peakAvgConcurrentLabel,
+  affiliateHoursLabel,
+  retainedViewsScore,
   DEFAULT_IMPRESSION_FLOOR,
   type FormatTaggedCtrRow,
 } from '../../analytics/labels.js'
+import type { YtTrafficBucket } from '../../analytics/youtube.js'
 import type {
   YoutubeMetrics,
   TwitchMetrics,
@@ -43,6 +47,14 @@ const KPI_ANNOTATIONS: Record<string, { meaning: string; target: string }> = {
   shorts_swipe_through: { meaning: 'Shorts feed swipe-through ("how many chose to view" from the feed swipe) -- the first-frame hook signal. NOT a thumbnail-CTR; the long-form CTR band never applies. null = swipe-through data absent (insufficient data), never folded into long-form.', target: 'First-frame hook driven; calibrate the swipe-through band per run via date-filtered WebSearch, not a permanent constant.' },
   twitch_followers: { meaning: 'Total Twitch followers.', target: 'Net-positive weekly; Affiliate gate at 25 followers (Twitch lowered the bar 2026-06: 25 followers + 4h streamed + 4 unique broadcast days + 3 avg concurrent, down from 50/8h/7). Verify the live numbers per campaign via a date-filtered Tier-1 search, not a permanent constant.' },
   twitch_avg_concurrents: { meaning: 'Average concurrent viewers while live -- a lagging health signal, not the leading metric (post-Affiliate leaders: Tier-1 sub-count + Discord activity).', target: 'Staged: 3 pre-Affiliate; 5 post-Affiliate with peak/avg<2.5 (organic); 10 at community-scale (~6-12 months). Twitch-only; recalibrate on first multi-platform stream.' },
+  // B2: Tier-split sub-count. Post-Affiliate, tier1 is the DA-H4 leading metric.
+  twitch_subs_tier1: { meaning: 'Tier-1 subscriber count (Helix data[].tier "1000"). Post-Affiliate this is the leading revenue-health metric, NOT total subs or concurrents.', target: 'Trend-based: net-positive; a Discord sub-perk funnel should accelerate it.' },
+  twitch_subs_tier2: { meaning: 'Tier-2 subscriber count (tier "2000").', target: 'Secondary to tier1; watch the mix, not the absolute.' },
+  twitch_subs_tier3: { meaning: 'Tier-3 subscriber count (tier "3000").', target: 'Rare on a small channel; each one is a superfan signal.' },
+  // B3: peak/avg organic-shape gate.
+  twitch_peak_concurrent: { meaning: 'Peak concurrent viewers within the stream. null = a single /streams sample cannot observe a peak (B-layer intraday poll fills it); the organic-check stays insufficient_data while null.', target: 'peak/avg < 2.5 reads as organic sustained viewership; >= 2.5 as a spiky raid/host/bot burst.' },
+  // B4: Affiliate stream-hours gate (FRISSITVE 2026-06).
+  twitch_stream_hours: { meaning: 'Total live hours in the window (summed archive-VOD durations) -- the Affiliate hours-requirement input.', target: 'Affiliate gate = 4h (240 min) / 30-day rolling (FRISSITVE 2026-06, old 500 min/8.33h). One of four Affiliate axes: 25 followers + 4h + 4 unique broadcast days + 3 avg concurrent.' },
 }
 
 function parseOkMetrics<M>(rows: AnalyticsSnapshotRow[]): Array<{ date: string; metrics: M }> {
@@ -112,6 +124,19 @@ export function buildAnalyticsDashboard(db?: Database.Database): unknown {
     .filter((v): v is number => typeof v === 'number')
   const twitchAvgConcurrents = avg(twConcurrents)
 
+  // Latest Twitch snapshot for the point-in-time B2/B3/B4 metrics.
+  const latestTwMetrics = twAsc[twAsc.length - 1]?.metrics
+  // B2: Tier-split sub-count (guarded -- pre-B2 snapshots lack the tier fields).
+  const twSubsTier1 = latestTwMetrics?.subscriptions?.tier1 ?? 0
+  const twSubsTier2 = latestTwMetrics?.subscriptions?.tier2 ?? 0
+  const twSubsTier3 = latestTwMetrics?.subscriptions?.tier3 ?? 0
+  // B3: peak concurrent + organic-shape gate (null while no intraday sample).
+  const twPeakConcurrent = latestTwMetrics?.stream?.peakConcurrent ?? null
+  const twPeakAvgLabel = peakAvgConcurrentLabel(twPeakConcurrent, twitchAvgConcurrents)
+  // B4: stream-hours window + Affiliate hours-gate (240 min / 4h, FRISSITVE 2026-06).
+  const twStreamMinutes = latestTwMetrics?.streamMinutesWindow ?? 0
+  const twAffiliateHoursLabel = affiliateHoursLabel(twStreamMinutes)
+
   // Trend sparklines (28 days) for the main 4 KPIs.
   const trend = {
     views: ytDailyViews.map(d => d.views),
@@ -125,11 +150,42 @@ export function buildAnalyticsDashboard(db?: Database.Database): unknown {
   }
 
   // Tables.
+  // B5: rank top_videos by retained-views (views x retention), NOT the impression
+  // proxy. Falls back to impressions when a snapshot has no per-video views/retention
+  // (pre-B5), so old data still orders sanely. Surface views + avgViewPercentage so
+  // the dashboard can show WHY a video ranks where it does.
   const topVideos = (latestYt?.metrics.ctr ?? [])
     .slice()
-    .sort((a, b) => b.impressions - a.impressions)
+    .sort((a, b) => retainedViewsScore(b) - retainedViewsScore(a))
     .slice(0, 5)
-    .map(v => ({ videoId: v.videoId, impressions: v.impressions, ctr: v.ctr }))
+    .map(v => ({
+      videoId: v.videoId,
+      impressions: v.impressions,
+      ctr: v.ctr,
+      views: v.views ?? null,
+      avgViewPercentage: v.avgViewPercentage ?? null,
+      retainedViewsScore: Number(retainedViewsScore(v).toFixed(2)),
+    }))
+
+  // B5: traffic-source surface. The CTR-floor assumption depends on WHERE the CTR
+  // comes from (suggested-heavy vs search-heavy read very differently), so expose the
+  // per-bucket views/minutes from the latest snapshot. Aggregated by the 4+other
+  // buckets the parser already maps (browse/suggested/search/external/other).
+  const trafficBuckets: Record<string, { views: number; minutesWatched: number }> = {}
+  for (const t of (latestYt?.metrics.traffic ?? []) as YtTrafficBucket[]) {
+    const b = (trafficBuckets[t.bucket] ??= { views: 0, minutesWatched: 0 })
+    b.views += t.views
+    b.minutesWatched += t.minutesWatched
+  }
+  const trafficViewsTotal = Object.values(trafficBuckets).reduce((a, b) => a + b.views, 0)
+  const trafficSources = Object.entries(trafficBuckets)
+    .map(([bucket, v]) => ({
+      bucket,
+      views: v.views,
+      minutesWatched: v.minutesWatched,
+      viewsShare: trafficViewsTotal > 0 ? Number((v.views / trafficViewsTotal).toFixed(4)) : 0,
+    }))
+    .sort((a, b) => b.views - a.views)
 
   const latestTw = twAsc[twAsc.length - 1]
   const lastStream = latestTw?.metrics.stream
@@ -163,11 +219,30 @@ export function buildAnalyticsDashboard(db?: Database.Database): unknown {
       shorts_swipe_through: ctrByFormat.shortsSwipeThrough === null ? null : Number(ctrByFormat.shortsSwipeThrough.toFixed(4)),
       twitch_followers: twitchFollowers,
       twitch_avg_concurrents: Number(twitchAvgConcurrents.toFixed(1)),
+      // B2: Tier-split sub-count (post-Affiliate leading metric = tier1).
+      twitch_subs_tier1: twSubsTier1,
+      twitch_subs_tier2: twSubsTier2,
+      twitch_subs_tier3: twSubsTier3,
+      // B3: peak concurrent (null => insufficient_data on the organic-shape gate).
+      twitch_peak_concurrent: twPeakConcurrent,
+      // B4: stream-hours window (Affiliate hours-gate input).
+      twitch_stream_hours: Number((twStreamMinutes / 60).toFixed(2)),
+    },
+    // B3/B4: data-gate verdicts (green/red/grey) for the metrics that carry a gate.
+    // insufficient_data (grey) means "not enough signal to colour", never a silent 0.
+    gates: {
+      // peak/avg organic-shape check -- insufficient_data while peakConcurrent is null.
+      twitch_peak_avg: twPeakAvgLabel,
+      // Affiliate stream-hours axis: ok at/above 240 min (4h) / 30 days, else flag.
+      twitch_affiliate_hours: twAffiliateHoursLabel,
     },
     annotations: KPI_ANNOTATIONS,
     trend,
     tables: {
       top_videos: topVideos,
+      // B5: traffic-source mix (browse/suggested/search/external/other) for the
+      // CTR-floor assumption-map.
+      traffic_sources: trafficSources,
       last_stream: lastStream,
       next_stream: null, // scheduled-stream API is a B-layer add; no A-layer source.
     },

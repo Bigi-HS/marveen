@@ -147,6 +147,99 @@ export function shortsLabel(
   return swipeThroughRate >= thresholds.swipeThroughOkFloor ? 'ok' : 'flag'
 }
 
+// ── B3: peak/avg concurrent organic-health label ────────────────────────────────
+
+export interface PeakAvgThresholds {
+  // At/above this peak/avg ratio the concurrency shape looks spiky (raid/host/bot
+  // burst) rather than organic sustained viewership -> 'flag'. Below => 'ok'
+  // (organic). Source note: spec 4c81a561 B3 "peak/avg<2.5 (organic)".
+  // calibrate per run via date-filtered WebSearch, not a permanent constant.
+  organicMaxRatio: number
+}
+
+// Default peak/avg organic ceiling. LOGIC is fixed; the number is a per-run input.
+export const DEFAULT_PEAK_AVG_THRESHOLDS: PeakAvgThresholds = {
+  organicMaxRatio: 2.5,
+}
+
+/**
+ * B3 -- peak/avg concurrent organic-health label.
+ *
+ * Returns 'insufficient_data' when peak is null (a single /streams sample cannot
+ * observe a peak -- never false-green an organic verdict from one data point) or
+ * when avg is <= 0 (no viewers to ratio against). Otherwise a peak/avg ratio below
+ * organicMaxRatio reads as organic sustained viewership ('ok'); at/above it reads
+ * as a spiky/raid/bot burst ('flag').
+ */
+export function peakAvgConcurrentLabel(
+  peakConcurrent: number | null,
+  avgConcurrent: number,
+  thresholds: PeakAvgThresholds = DEFAULT_PEAK_AVG_THRESHOLDS,
+): MetricLabel {
+  if (peakConcurrent === null || avgConcurrent <= 0) return 'insufficient_data'
+  return peakConcurrent / avgConcurrent < thresholds.organicMaxRatio ? 'ok' : 'flag'
+}
+
+// ── B4: Twitch Affiliate stream-hours gate label ─────────────────────────────────
+
+export interface AffiliateHoursThresholds {
+  // Minimum streamed minutes over the rolling window to clear the Affiliate hours
+  // requirement. FRISSITVE 2026-06: Twitch lowered the bar to 4h (240 min) / 30 days
+  // (old = 500 min / 8.33h). Source: blog.twitch.tv 2026-05-13 "Monetization for
+  // All" (verified via PR#385 @c41c9736). Unlike the CTR/retention bands this is a
+  // PLATFORM-DEFINED requirement, not a marketing calibration -- but keep it injected
+  // so a future platform change is a one-line update, not a code edit.
+  gateMinutes: number
+}
+
+// Default Affiliate stream-hours gate: 240 min (4h) over the rolling 30-day window.
+export const DEFAULT_AFFILIATE_HOURS_THRESHOLDS: AffiliateHoursThresholds = {
+  gateMinutes: 240,
+}
+
+/**
+ * B4 -- Twitch Affiliate stream-hours gate label.
+ *
+ * At/above the gate (240 min / 4h by default) the hours requirement is met ('ok');
+ * below it the channel has not yet cleared the streamed-time bar ('flag'). This is
+ * ONE of the four Affiliate requirements (also: 25 followers, 4 unique broadcast
+ * days, 3 avg concurrent) -- this label covers only the hours axis.
+ *
+ * Returns 'insufficient_data' for a negative/NaN input (no measurable stream time),
+ * so a missing VOD source is never falsely coloured.
+ */
+export function affiliateHoursLabel(
+  streamMinutes: number,
+  thresholds: AffiliateHoursThresholds = DEFAULT_AFFILIATE_HOURS_THRESHOLDS,
+): MetricLabel {
+  if (!Number.isFinite(streamMinutes) || streamMinutes < 0) return 'insufficient_data'
+  return streamMinutes >= thresholds.gateMinutes ? 'ok' : 'flag'
+}
+
+// ── B5: top-video ranking score (retained views) ─────────────────────────────────
+
+/**
+ * B5 -- retained-views ranking score for top_videos.
+ *
+ * Ranks a video by views weighted by how much of it was actually watched:
+ * `views x (averageViewPercentage / 100)`. A high-view video with poor retention
+ * ranks below a slightly-smaller-view video that held its audience -- the marketing
+ * signal we want to surface. No baked coefficient (a pure product), so it stays
+ * within the "no baked numbers" discipline.
+ *
+ * Falls back to `impressions` when the per-video views/retention fields are absent
+ * (pre-B5 snapshots or a response without those columns), so ordering never breaks.
+ */
+export function retainedViewsScore(row: {
+  impressions: number
+  views?: number
+  avgViewPercentage?: number
+}): number {
+  if (typeof row.views !== 'number') return row.impressions
+  const retentionFraction = typeof row.avgViewPercentage === 'number' ? row.avgViewPercentage / 100 : 1
+  return row.views * retentionFraction
+}
+
 // ── D3 aggregation: keep long-form and Shorts CTR strictly separate ──────────────
 
 // A CTR row may carry a format tag and (for Shorts) a swipe-through rate. Both are

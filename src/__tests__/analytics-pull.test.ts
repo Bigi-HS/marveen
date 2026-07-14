@@ -97,6 +97,20 @@ describe('runPull -- ok shape (fixtures)', () => {
       expect(typeof m.subscriptions.total).toBe('number')
       expect(typeof m.stream.isLive).toBe('boolean')
       expect(Array.isArray(m.videos)).toBe(true)
+      // B2: Tier-split sub-count parsed from the fixture data[] (8x'1000' + 1x'2000').
+      expect(m.subscriptions.tier1).toBe(8)
+      expect(m.subscriptions.tier2).toBe(1)
+      expect(m.subscriptions.tier3).toBe(0)
+      // B3: single /streams sample carries no peak.
+      expect(m.stream.peakConcurrent).toBeNull()
+      // B4: stream-minutes window is the summed VOD duration (2h30m15s + 1h15m00s).
+      expect(m.streamMinutesWindow).toBeCloseTo(150.25 + 75, 2)
+    }
+    // B5: per-video views + retention proxy parsed from the extended CTR columns.
+    if (res.youtube.status === 'ok') {
+      const first = res.youtube.metrics.ctr[0]
+      expect(typeof first.views).toBe('number')
+      expect(typeof first.avgViewPercentage).toBe('number')
     }
   })
 

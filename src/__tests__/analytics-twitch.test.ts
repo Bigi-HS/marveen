@@ -88,11 +88,15 @@ describe('parseFollowersResponse', () => {
 })
 
 describe('parseSubscriptionsResponse', () => {
-  it('parses subscriptions fixture into total and points', () => {
+  it('parses subscriptions fixture into total, points and tier split (B2)', () => {
     const raw = loadFixture('twitch-subscriptions.json')
     const summary = parseSubscriptionsResponse(raw) as TwitchSubsSummary
-    expect(summary.total).toBe(342)
-    expect(summary.points).toBe(1025)
+    expect(summary.total).toBe(9)
+    expect(summary.points).toBe(10)
+    // B2 (card 4c81a561): Tier-split from data[].tier (8x'1000' + 1x'2000').
+    expect(summary.tier1).toBe(8)
+    expect(summary.tier2).toBe(1)
+    expect(summary.tier3).toBe(0)
   })
 
   it('exposes ONLY real subscription fields -- no invented retention/CTR', () => {
