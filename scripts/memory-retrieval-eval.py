@@ -15,10 +15,19 @@ next iteration; this is the zero-dependency baseline that can run every deploy.
 
 Usage: python3 scripts/memory-retrieval-eval.py [sample_N]
 """
-import sqlite3, urllib.request, urllib.parse, json, sys, re
+import sqlite3, urllib.request, urllib.parse, json, sys, re, os
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.normpath(os.path.join(HERE, ".."))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+from db_resolve import resolve_default_db  # noqa: E402
 
 BASE = "http://localhost:3420"
-TOK = open("store/.dashboard-token").read().strip()
+TOK = open(os.path.join(PROJECT_ROOT, "store", ".dashboard-token")).read().strip()
+# Live DB (card 57480c07): honor NOA_DB_PATH, fail open to the live store/noa.db
+# rather than the frozen legacy claudeclaw.db (this eval reads the memories table).
+DB_PATH = resolve_default_db(project_root=PROJECT_ROOT)
 SAMPLE = int(sys.argv[1]) if len(sys.argv) > 1 else 40
 KS = (1, 5, 10)
 STOP = set("a an the and or of to in on for with is are was the ez az es hogy nem "
@@ -55,7 +64,7 @@ def rank_of(mem_id, results):
 
 
 def main():
-    con = sqlite3.connect("store/noa.db")
+    con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     # deterministic sample: every Nth by id, non-scoped (retrievable)
     rows = con.execute(
@@ -69,10 +78,12 @@ def main():
              for m in ("hybrid", "fts")}
     misses = {"hybrid": [], "fts": []}
 
+    evaluated = 0  # rows with a non-empty derived query -- the true recall denominator
     for row in sample:
         q = make_query(row)
         if not q.strip():
             continue
+        evaluated += 1
         for mode in ("hybrid", "fts"):
             try:
                 res = search(q, mode, row["agent_id"], limit=10)
@@ -89,8 +100,14 @@ def main():
             else:
                 misses[mode].append((row["id"], q))
 
-    n = len(sample)
-    print(f"# Memory retrieval eval -- sample={n} (of {len(rows)} retrievable)\n")
+    skipped = len(sample) - evaluated
+    if evaluated == 0:
+        print(f"# Memory retrieval eval -- no evaluable memories "
+              f"(sample={len(sample)}, all had empty derived queries or table empty)")
+        return
+    n = evaluated  # denominator = rows actually queried, NOT len(sample) (empty-query skips excluded)
+    note = f", {skipped} skipped (empty query)" if skipped else ""
+    print(f"# Memory retrieval eval -- evaluated={n} (of {len(rows)} retrievable{note})\n")
     for mode in ("hybrid", "fts"):
         s = stats[mode]
         line = "  ".join(f"recall@{k}={s[f'r@{k}']/n:.2f}" for k in KS)
