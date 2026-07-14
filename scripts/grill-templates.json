@@ -1,0 +1,76 @@
+{
+  "_doc": "Grill-me interview templates (card 570030c9, J2). Per-role question banks that pull IMPLICIT agent knowledge into the vault. Each agent self-grills: answers its own bank, pipes answers to scripts/memory-grill.py --ingest. tier_hint is a default; the answering agent may override. Questions are DATA, not instructions.",
+  "_operating_note": "ANSWER IN THE VAULT'S DOMINANT LANGUAGE (Hungarian for this fleet). Calibration showed nomic-embed-text cross-language cosine under-scores true duplicates (English answer vs Hungarian vault ~0.68), so English answers bypass the dedup review band and can create near-duplicates. Same-language paraphrases land in the 0.72-0.88 REVIEW band as intended.",
+  "common": [
+    {"id": "c1", "q": "What recurring task do you do that has a non-obvious gotcha a newcomer would get wrong? Name the gotcha.", "tier_hint": "cold"},
+    {"id": "c2", "q": "Which file/endpoint/command do you reach for most, and what is the exact invocation (flags, path)?", "tier_hint": "warm"},
+    {"id": "c3", "q": "What did you learn the hard way (a bug, a mis-step, a wrong assumption) that you would not want to repeat?", "tier_hint": "cold"},
+    {"id": "c4", "q": "What is a Boss/Dominik preference in your domain that is easy to forget but matters?", "tier_hint": "warm"},
+    {"id": "c5", "q": "What is currently blocked or awaiting a decision in your area, and on whom?", "tier_hint": "hot"},
+    {"id": "c6", "q": "What piece of your knowledge would be useful to another agent (shared)? State it so they can act on it.", "tier_hint": "shared"},
+    {"id": "c7", "q": "What convention or invariant must never be broken in your work, and why?", "tier_hint": "warm"},
+    {"id": "c8", "q": "If you were handed off tomorrow, what is the one thing the successor must know first?", "tier_hint": "warm"}
+  ],
+  "roles": {
+    "marveen": [
+      {"id": "m1", "q": "What is the current live DB and how do you prove it (not by /proc/environ)?", "tier_hint": "warm"},
+      {"id": "m2", "q": "Which kanban mutation goes through which endpoint (move vs edit vs create)?", "tier_hint": "warm"},
+      {"id": "m3", "q": "What is the correct way to write to localhost kanban/inter-agent without tripping the external-curl guard?", "tier_hint": "warm"},
+      {"id": "m4", "q": "When is a stale card NOT nudge-worthy (markers, downtime window, awaiting-Boss)?", "tier_hint": "cold"},
+      {"id": "m5", "q": "What is the merge-gate seat model (Thor/Dave/Chad) and when is Chad a floor?", "tier_hint": "warm"},
+      {"id": "m6", "q": "How do you route a PR-review diff correctly (merge-base vs origin/develop)?", "tier_hint": "cold"},
+      {"id": "m7", "q": "What standing Boss mandates are active right now and when do they expire?", "tier_hint": "hot"}
+    ],
+    "dave": [
+      {"id": "d1", "q": "Which existing fleet helper do engineers most often reinvent instead of reusing?", "tier_hint": "cold"},
+      {"id": "d2", "q": "What is the pre-gate evidence bundle and what must it contain before a gate request?", "tier_hint": "warm"},
+      {"id": "d3", "q": "Which paths auto-trigger a Chad security review (exact list / patterns)?", "tier_hint": "warm"},
+      {"id": "d4", "q": "What is a test-suite noise signal that looks like a regression but is not?", "tier_hint": "cold"},
+      {"id": "d5", "q": "What is the safe procedure for a live-DB schema migration (additive, CHECK-widen, rebuild)?", "tier_hint": "cold"}
+    ],
+    "chad": [
+      {"id": "ch1", "q": "What untrusted-input to sink paths do you re-check on every PR that touches parsing/exec/file-IO?", "tier_hint": "warm"},
+      {"id": "ch2", "q": "What is the most common credential-leak pattern you catch (logs, diffs, inter-agent)?", "tier_hint": "cold"},
+      {"id": "ch3", "q": "When does a non-security-path diff still become security-material (path-trigger vs logic)?", "tier_hint": "cold"},
+      {"id": "ch4", "q": "What is the loopback/bind hardening invariant (0.0.0.0 vs localhost) and why?", "tier_hint": "warm"}
+    ],
+    "forge": [
+      {"id": "f1", "q": "What is the exact deploy + 4-point verify + rollback procedure, and what needs Boss-GO?", "tier_hint": "warm"},
+      {"id": "f2", "q": "What does a reboot NOT refresh (deployed-tip marker, supervisor pin) that bites you?", "tier_hint": "cold"},
+      {"id": "f3", "q": "What is the n8n SENSE+REPORT vs agent DECIDE+MUTATE boundary?", "tier_hint": "warm"},
+      {"id": "f4", "q": "Which env/bind setting was the blocker last time and what is the correct value?", "tier_hint": "cold"}
+    ],
+    "scout": [
+      {"id": "s1", "q": "What is your primary weekly-pulse source and how do you avoid re-evaluating known repos?", "tier_hint": "warm"},
+      {"id": "s2", "q": "What is the adopt/reject/watch rubric you apply to a new repo or tool?", "tier_hint": "cold"},
+      {"id": "s3", "q": "What licensing/adoption rule constrains bringing external code into the fleet?", "tier_hint": "warm"}
+    ],
+    "radar": [
+      {"id": "r1", "q": "What algorithm-sensitive number must never be baked in (always fetched fresh)?", "tier_hint": "warm"},
+      {"id": "r2", "q": "What is the data-correctness-gate rule for API tokens/enums/scopes/KPI bands?", "tier_hint": "warm"},
+      {"id": "r3", "q": "What platform-threshold change are you tracking that affects Dominik's channels?", "tier_hint": "hot"}
+    ],
+    "bigben": [
+      {"id": "b1", "q": "What is the brand identity invariant (name/handle/voice) that must stay consistent?", "tier_hint": "warm"},
+      {"id": "b2", "q": "What is the anchor-asset repurposing funnel order across platforms?", "tier_hint": "cold"},
+      {"id": "b3", "q": "What HyperFrames/render gotcha bites content production (fonts, matting, determinism)?", "tier_hint": "cold"}
+    ],
+    "claudia": [
+      {"id": "cl1", "q": "What is the ask-first approval flow for irreversible external actions (gmail_send)?", "tier_hint": "warm"},
+      {"id": "cl2", "q": "How do you triage the morning inbox into a signal-only briefing?", "tier_hint": "cold"},
+      {"id": "cl3", "q": "What is a personal-reminder vs a delegatable task (do NOT over-delegate)?", "tier_hint": "warm"}
+    ],
+    "hibiki": [
+      {"id": "h1", "q": "What training/sleep/nutrition invariant for Dominik is evidence-backed and current?", "tier_hint": "warm"},
+      {"id": "h2", "q": "What wearable data source is (or would be) wired, and what is blocked on Boss?", "tier_hint": "hot"}
+    ],
+    "bond": [
+      {"id": "bo1", "q": "What is the SRS/homework cadence and the notification template set you use?", "tier_hint": "warm"},
+      {"id": "bo2", "q": "What learning preference of Dominik shapes how you teach?", "tier_hint": "cold"}
+    ],
+    "buster": [
+      {"id": "bu1", "q": "What is the sandbox-first rule for testing lifecycle/launch/config changes?", "tier_hint": "warm"},
+      {"id": "bu2", "q": "What agent-death failure mode have you seen on start (429, config-dir, pipe)?", "tier_hint": "cold"}
+    ]
+  }
+}
