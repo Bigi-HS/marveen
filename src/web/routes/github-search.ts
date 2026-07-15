@@ -8,23 +8,27 @@
 // Response: { items: [{ full_name, html_url, description, stargazers_count, pushed_at }] }
 //           | { error: string }
 
-import { join } from 'node:path'
-import { readFileSync, existsSync } from 'node:fs'
 import { logger } from '../../logger.js'
-import { PROJECT_ROOT } from '../../config.js'
+import { readEnvValue } from '../../env.js'
 import { json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
 
 function readGithubPat(): string | null {
-  const envPath = join(PROJECT_ROOT, '.env')
-  if (!existsSync(envPath)) return null
-  try {
-    const content = readFileSync(envPath, 'utf8')
-    const m = content.match(/GITHUB_PAT=([^#\s]+)/)
-    return m ? m[1] : null
-  } catch {
-    return null
-  }
+  return readEnvValue('GITHUB_PAT')
+}
+
+// Test seam (mirrors notify.ts __setBotTokenReader): lets a test override the
+// .env PAT read so the pat-missing branch is deterministic without touching the
+// real .env. Production always resolves via readGithubPat.
+let patReader: () => string | null = readGithubPat
+export function __setPatReader(fn: (() => string | null) | null): void {
+  patReader = fn ?? readGithubPat
+}
+
+// Clamps the requested result count to the GitHub-allowed 1-30 window, defaulting
+// a non-numeric request to 10. Pure so the clamp is directly testable.
+export function clampGithubMax(raw: number): number {
+  return Math.min(Math.max(isNaN(raw) ? 10 : raw, 1), 30)
 }
 
 interface GhRepoItem {
@@ -52,9 +56,9 @@ export async function tryHandleGithubSearch(ctx: RouteContext): Promise<boolean>
     json(res, { error: 'q exceeds 500 character limit' }, 400)
     return true
   }
-  const max = Math.min(Math.max(isNaN(maxRaw) ? 10 : maxRaw, 1), 30)
+  const max = clampGithubMax(maxRaw)
 
-  const pat = readGithubPat()
+  const pat = patReader()
   if (!pat) {
     logger.error('github-search: GITHUB_PAT missing from .env')
     json(res, { error: 'GitHub PAT not configured' }, 503)
