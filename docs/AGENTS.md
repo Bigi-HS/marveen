@@ -12,6 +12,11 @@
 |----|-------------|-------|------|-----------------|------------|------------|
 | marveen | Genesis | claude-sonnet-4-6 | Orchestrator, personal assistant | Telegram (main bot), memory vault (hot/warm/cold/shared), kanban, calendar, email, all MCP servers | orchestrator | Boss (Dominik) |
 | dave | Dave | claude-opus-4-8[1m] | Lead engineer | Telegram (@DAVE_KALOZ_BOT), GitHub (PR open/merge), codebase full-write, buster delegation | developer-senior, merge-gate | marveen |
+| blackbeard | Blackbeard | claude-sonnet-4-6 | Programmer (dev executor) | channel-less, code implementation, full codebase access | developer-senior | dave |
+| kidd | Kidd | claude-sonnet-4-6 | Programmer (dev executor) | channel-less, code implementation, full codebase access | developer-senior | dave |
+| morgan | Morgan | claude-sonnet-4-6 | Programmer (dev executor) | channel-less, code implementation, full codebase access | developer-senior | dave |
+| rackham | Rackham | claude-sonnet-4-6 | Programmer (dev executor) | channel-less, code implementation, full codebase access | developer-senior | dave |
+| roberts | Roberts | claude-sonnet-4-6 | Programmer (dev executor) | channel-less, code implementation, full codebase access | developer-senior | dave |
 | thor | Thor | claude-sonnet-4-6 | QA peer + merge-gate | Telegram (@Thor_QA_bot), GitHub PR reviews, gauge delegation | developer-senior, merge-gate | marveen |
 | avery | Avery | claude-sonnet-4-6 | QA executor | channel-less, test design, coverage analysis | developer-senior | thor |
 | bellamy | Bellamy | claude-sonnet-4-6 | QA executor | channel-less, test design, coverage analysis | developer-senior | thor |
