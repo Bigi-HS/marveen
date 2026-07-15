@@ -322,7 +322,7 @@ ensure_agent_watchdogs() {
 # included so its standalone watchdog also becomes reboot-persistent (pgrep-skip keeps
 # an already-running one). 2026-06-05.
 ensure_channel_watchdogs() {
-  for n in forge chad thor claudia bigben hibiki devil-advocate bond scout; do
+  for n in forge chad thor claudia bigben hibiki devil-advocate bond scout gyore; do
     pgrep -f "scripts/${n}-watchdog.sh" >/dev/null 2>&1 && continue
     if [ -x "$INSTALL_DIR/scripts/${n}-watchdog.sh" ]; then
       if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start ${n}-watchdog.sh"; continue; fi
