@@ -386,21 +386,34 @@ export function buildScheduledTaskPrompt(task: ScheduledTask, agentName: string)
 
 type FireResult = 'fired' | 'busy' | 'missing' | 'error'
 
-function attemptFireTask(task: ScheduledTask, agentName: string, db = getNoaDb()): FireResult {
-  const isMainAgent = agentName === MAIN_AGENT_ID
-  // target_session is a B-block column: stored during migration but inert in A4 sweep.
-  const session = isMainAgent ? MAIN_CHANNELS_SESSION : agentSessionName(agentName)
-
-  let sessionExists = false
+// Snapshot the live tmux session names once. Resolved at the top of a sweep tick
+// and shared across every attemptFireTask call so we spawn `tmux list-sessions`
+// once per tick instead of once per due task. A session that dies mid-tick still
+// degrades gracefully: the subsequent isSessionReadyForPrompt (live capture-pane)
+// returns false -> 'busy' -> retry next tick.
+function listTmuxSessions(): Set<string> {
   try {
     const out = execFileSync(
       getTmux(), ['list-sessions', '-F', '#{session_name}'],
       { timeout: 3000, encoding: 'utf-8' }
     )
-    sessionExists = out.split('\n').some(s => s.trim() === session)
-  } catch { /* no tmux or no sessions */ }
+    return new Set(out.split('\n').map(s => s.trim()).filter(Boolean))
+  } catch {
+    return new Set() // no tmux or no sessions
+  }
+}
 
-  if (!sessionExists) {
+function attemptFireTask(
+  task: ScheduledTask,
+  agentName: string,
+  sessions: Set<string>,
+  db = getNoaDb(),
+): FireResult {
+  const isMainAgent = agentName === MAIN_AGENT_ID
+  // target_session is a B-block column: stored during migration but inert in A4 sweep.
+  const session = isMainAgent ? MAIN_CHANNELS_SESSION : agentSessionName(agentName)
+
+  if (!sessions.has(session)) {
     logger.warn({ task: task.id, agent: agentName, session }, 'scheduler: target session not running, skipping')
     return 'missing'
   }
@@ -566,6 +579,9 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb()): void {
   const nowS = Math.floor(nowMs / 1000)
   const catchUpS = Math.floor(catchUpMs / 1000)
 
+  // Resolve the live tmux session set once for the whole tick (see listTmuxSessions).
+  const sessions = listTmuxSessions()
+
   // Step 1: retry pending rows
   const pendingRows = listPendingRetries(db)
   const pendingKeys = new Set<string>()
@@ -580,7 +596,7 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb()): void {
     const key = `${row.task_name}@${row.agent_name}`
     pendingKeys.add(key)
 
-    const result = attemptFireTask(taskDef, row.agent_name, db)
+    const result = attemptFireTask(taskDef, row.agent_name, sessions, db)
     if (result === 'fired') {
       // Roll forward from the fired slot, not from "now" -- a look-ahead fire is
       // still before its cron minute and a now-basis would re-pick the same slot (295c94f2).
@@ -610,7 +626,7 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb()): void {
     const key = `${task.id}@${agentName}`
     if (pendingKeys.has(key)) continue
 
-    const result = attemptFireTask(task, agentName, db)
+    const result = attemptFireTask(task, agentName, sessions, db)
 
     if (result === 'fired') {
       // See Step 1: base the roll-forward on the fired slot to avoid look-ahead self-refire (295c94f2).

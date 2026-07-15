@@ -288,6 +288,30 @@ describe('runSweepTick', () => {
     expect(vi.mocked(sendPromptToSession)).toHaveBeenCalledOnce()
   })
 
+  it('caches the tmux session list: list-sessions spawns once per tick, not once per task', async () => {
+    const { execFileSync } = await import('node:child_process')
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    // Three due tasks in one tick. The old code spawned `tmux list-sessions`
+    // once per attemptFireTask (3 spawns); the cached version resolves the
+    // session set once at the top of the sweep and reuses it (1 spawn).
+    for (let i = 0; i < 3; i++) {
+      db.prepare(`
+        INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+        VALUES (?, 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?)
+      `).run(`cache-${i}`, nowS - 10, nowS - 100)
+    }
+
+    vi.mocked(execFileSync).mockClear()
+    runSweepTick(60000, db)
+
+    const listSessionsCalls = vi.mocked(execFileSync).mock.calls.filter(
+      (c) => Array.isArray(c[1]) && (c[1] as string[]).includes('list-sessions'),
+    )
+    expect(vi.mocked(sendPromptToSession)).toHaveBeenCalledTimes(3)
+    expect(listSessionsCalls).toHaveLength(1)
+  })
+
   it('double-fire guard: does not re-fire a task fired in the same window', () => {
     const db = getNoaDb()
     const nowS = Math.floor(Date.now() / 1000)
