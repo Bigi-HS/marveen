@@ -52,16 +52,29 @@ class RangeChecksTests(unittest.TestCase):
 
 
 class RangeChecksSyncTests(unittest.TestCase):
-    """RANGE_CHECKS must stay byte-for-byte in sync with hibiki-stats.py."""
+    """RANGE_CHECKS is a single source of truth (hibiki_ranges), shared by
+    hibiki-health-write.py and hibiki-stats.py -- so they cannot drift."""
 
-    def test_in_sync_with_stats(self):
+    def _load_stats(self):
         stats_path = _THIS_DIR / "hibiki-stats.py"
         spec = importlib.util.spec_from_file_location("hibiki_stats", stats_path)
         assert spec and spec.loader
         stats = importlib.util.module_from_spec(spec)
         sys.modules["hibiki_stats"] = stats
         spec.loader.exec_module(stats)
+        return stats
+
+    def test_in_sync_with_stats(self):
+        stats = self._load_stats()
         self.assertEqual(hw.RANGE_CHECKS, stats.RANGE_CHECKS)
+
+    def test_shared_single_source(self):
+        # Both scripts must reference the SAME object from hibiki_ranges, not
+        # two copies kept equal by chance -- this structurally forecloses drift.
+        import hibiki_ranges
+        stats = self._load_stats()
+        self.assertIs(hw.RANGE_CHECKS, hibiki_ranges.RANGE_CHECKS)
+        self.assertIs(stats.RANGE_CHECKS, hibiki_ranges.RANGE_CHECKS)
 
 
 if __name__ == "__main__":
