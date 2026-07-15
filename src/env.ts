@@ -33,3 +33,31 @@ export function readEnvFile(keys?: string[]): Record<string, string> {
   }
   return result
 }
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+// Parses a single `NAME=value` entry out of raw .env content. The match is
+// anchored to line start (multiline) so a prefixed var like MY_FOO= cannot
+// satisfy a request for FOO=, and the value stops at the first whitespace or
+// `#` so an inline comment is excluded. Pure (no I/O) so it is directly testable.
+export function parseEnvValue(content: string, name: string): string | null {
+  const re = new RegExp('^' + escapeRegExp(name) + '=([^#\\s]+)', 'm')
+  const m = content.match(re)
+  return m ? m[1].trim() : null
+}
+
+// File-backed convenience wrapper: reads the project .env and extracts one value.
+// Shared by the loopback relay routes (notify bot token, github-search PAT) so the
+// regex lives in one place.
+export function readEnvValue(name: string): string | null {
+  const envPath = join(PROJECT_ROOT, '.env')
+  let content: string
+  try {
+    content = readFileSync(envPath, 'utf-8')
+  } catch {
+    return null
+  }
+  return parseEnvValue(content, name)
+}

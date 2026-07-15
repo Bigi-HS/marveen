@@ -7,23 +7,13 @@
 // Request body: { chat_id: string, text: string, parse_mode?: string, reply_to?: number }
 // Response:     { ok: true, message_id: number } | { error: string }
 
-import { join } from 'node:path'
-import { readFileSync, existsSync } from 'node:fs'
 import { logger } from '../../logger.js'
-import { PROJECT_ROOT } from '../../config.js'
+import { readEnvValue } from '../../env.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
 
 function readBotToken(): string | null {
-  const envPath = join(PROJECT_ROOT, '.env')
-  if (!existsSync(envPath)) return null
-  try {
-    const content = readFileSync(envPath, 'utf8')
-    const m = content.match(/TELEGRAM_BOT_TOKEN=([^#\s]+)/)
-    return m ? m[1].trim() : null
-  } catch {
-    return null
-  }
+  return readEnvValue('TELEGRAM_BOT_TOKEN')
 }
 
 // Test seam (mirrors gate.ts __setGatePrFetcher): lets a test override the .env
