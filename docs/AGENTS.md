@@ -13,6 +13,10 @@
 | marveen | Genesis | claude-sonnet-4-6 | Orchestrator, personal assistant | Telegram (main bot), memory vault (hot/warm/cold/shared), kanban, calendar, email, all MCP servers | orchestrator | Boss (Dominik) |
 | dave | Dave | claude-opus-4-8[1m] | Lead engineer | Telegram (@DAVE_KALOZ_BOT), GitHub (PR open/merge), codebase full-write, buster delegation | developer-senior, merge-gate | marveen |
 | thor | Thor | claude-sonnet-4-6 | QA peer + merge-gate | Telegram (@Thor_QA_bot), GitHub PR reviews, gauge delegation | developer-senior, merge-gate | marveen |
+| avery | Avery | claude-sonnet-4-6 | QA executor | channel-less, test design, coverage analysis | developer-senior | thor |
+| bellamy | Bellamy | claude-sonnet-4-6 | QA executor | channel-less, test design, coverage analysis | developer-senior | thor |
+| bonny | Bonny | claude-sonnet-4-6 | QA executor | channel-less, test design, coverage analysis | developer-senior | thor |
+| vane | Vane | claude-sonnet-4-6 | QA executor | channel-less, test design, coverage analysis | developer-senior | thor |
 | chad | Chad | claude-sonnet-4-6 | Security auditor | Telegram, diff analysis (secrets/injection/path-traversal), AIDefence PII filter | developer-senior, security-gate | marveen |
 | quill | Quill | claude-sonnet-4-6 | Spec + acceptance criteria writer | channel-less; feeds Quill->Thor->Dave pipeline | researcher | marveen |
 | gauge | Gauge | claude-haiku-4-5-20251001 | Test-health monitor | channel-less, PR coverage delta + flaky + trend reports | developer-junior | thor |

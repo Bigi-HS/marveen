@@ -1,0 +1,11 @@
+{
+  "model": "claude-sonnet-4-6",
+  "securityProfile": "developer-senior",
+  "team": {
+    "role": "member",
+    "reportsTo": "thor",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": []
+  }
+}
