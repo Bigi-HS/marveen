@@ -12,6 +12,11 @@
 |----|-------------|-------|------|-----------------|------------|------------|
 | marveen | Genesis | claude-sonnet-4-6 | Orchestrator, personal assistant | Telegram (main bot), memory vault (hot/warm/cold/shared), kanban, calendar, email, all MCP servers | orchestrator | Boss (Dominik) |
 | dave | Dave | claude-opus-4-8[1m] | Lead engineer | Telegram (@DAVE_KALOZ_BOT), GitHub (PR open/merge), codebase full-write, buster delegation | developer-senior, merge-gate | marveen |
+| blackbeard | Blackbeard | claude-sonnet-4-6 | Programmer (dev executor) | channel-less, code implementation, full codebase access | developer-senior | dave |
+| kidd | Kidd | claude-sonnet-4-6 | Programmer (dev executor) | channel-less, code implementation, full codebase access | developer-senior | dave |
+| morgan | Morgan | claude-sonnet-4-6 | Programmer (dev executor) | channel-less, code implementation, full codebase access | developer-senior | dave |
+| rackham | Rackham | claude-sonnet-4-6 | Programmer (dev executor) | channel-less, code implementation, full codebase access | developer-senior | dave |
+| roberts | Roberts | claude-sonnet-4-6 | Programmer (dev executor) | channel-less, code implementation, full codebase access | developer-senior | dave |
 | thor | Thor | claude-sonnet-4-6 | QA peer + merge-gate | Telegram (@Thor_QA_bot), GitHub PR reviews, gauge delegation | developer-senior, merge-gate | marveen |
 | chad | Chad | claude-sonnet-4-6 | Security auditor | Telegram, diff analysis (secrets/injection/path-traversal), AIDefence PII filter | developer-senior, security-gate | marveen |
 | quill | Quill | claude-sonnet-4-6 | Spec + acceptance criteria writer | channel-less; feeds Quill->Thor->Dave pipeline | researcher | marveen |
