@@ -9,6 +9,7 @@ import {
 import { readAgentTeam } from '../agent-team.js'
 import { isAgentRunning } from '../agent-process.js'
 import { json } from '../http-helpers.js'
+import { toPriorityString, type PriorityValue } from '../../priority.js'
 import type { RouteContext } from './types.js'
 
 // Count "real" user turns (operator prompts, Telegram messages) in every
@@ -96,7 +97,18 @@ export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
       }
     }
 
-    const activity: Array<{ icon: string; text: string; at: number }> = []
+    // status/priority are only meaningful for the inter-agent-message rows
+    // (memories carry neither), so they are optional on the activity item.
+    // priority is normalized to its TEXT tier (low/normal/high/urgent) via the
+    // shared helper so the frontend gets a stable enum regardless of whether the
+    // live column stores the migrated INTEGER (25/50/75/100) or the legacy TEXT.
+    const activity: Array<{
+      icon: string
+      text: string
+      at: number
+      status?: 'pending' | 'delivered' | 'done' | 'failed'
+      priority?: 'low' | 'normal' | 'high' | 'urgent'
+    }> = []
     try {
       const memRows = db0.prepare("SELECT content, created_at, agent_id FROM memories ORDER BY created_at DESC LIMIT 6").all() as { content: string; created_at: number; agent_id: string }[]
       for (const r of memRows) {
@@ -108,12 +120,15 @@ export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
       }
     } catch { /* ignore */ }
     try {
-      const msgRows = db0.prepare("SELECT from_agent, to_agent, content, created_at FROM agent_messages ORDER BY created_at DESC LIMIT 4").all() as { from_agent: string; to_agent: string; content: string; created_at: number }[]
+      const msgRows = db0.prepare("SELECT from_agent, to_agent, content, created_at, status, priority FROM agent_messages ORDER BY created_at DESC LIMIT 4").all() as { from_agent: string; to_agent: string; content: string; created_at: number; status: string; priority: PriorityValue | null }[]
+      const knownStatus = new Set(['pending', 'delivered', 'done', 'failed'])
       for (const r of msgRows) {
         activity.push({
           icon: 'delegate',
           text: `${r.from_agent} → ${r.to_agent}: ${r.content.slice(0, 60)}${r.content.length > 60 ? '…' : ''}`,
           at: r.created_at * 1000,
+          status: knownStatus.has(r.status) ? (r.status as 'pending' | 'delivered' | 'done' | 'failed') : undefined,
+          priority: toPriorityString(r.priority),
         })
       }
     } catch { /* ignore */ }
