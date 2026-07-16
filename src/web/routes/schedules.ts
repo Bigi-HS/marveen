@@ -25,6 +25,16 @@ import {
 } from '../../noa-scheduler.js'
 import type { RouteContext } from './types.js'
 
+// Test seams: injectable so route unit tests can drive injectToSession / recordTriggerFire
+// return values without vi.mock-ing the entire dependency modules.
+let _inject: typeof injectToSession = injectToSession
+export function __setInjector(fn: typeof injectToSession): void { _inject = fn }
+export function __resetInjector(): void { _inject = injectToSession }
+
+let _recordFire: typeof recordTriggerFire = recordTriggerFire
+export function __setRecordFireFn(fn: typeof recordTriggerFire): void { _recordFire = fn }
+export function __resetRecordFireFn(): void { _recordFire = recordTriggerFire }
+
 export async function tryHandleSchedules(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method } = ctx
 
@@ -291,11 +301,13 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
   // mode: 'manual' (default) -- fires WITHOUT updating last_run/next_run so the
   //   native cron runner still fires at its scheduled time. Use for operator/debug runs.
   //
-  // mode: 'trigger' -- fires AND, on success-or-busy, rolls last_run/next_run forward
-  //   using the same formula as the native sweep tick. This makes the native runner
-  //   treat the task as "already fired" and skip its next poll -- converting native
-  //   into a true fallback. On session-offline or inject-error the schedule is NOT
-  //   advanced so the native runner can fire as recovery.
+  // mode: 'trigger' -- fires AND, ONLY on 'fired' success, rolls last_run/next_run
+  //   forward using the same formula as the native sweep tick. This makes the native
+  //   runner treat the task as "already fired" and skip its next poll -- converting
+  //   native into a true fallback.
+  //   LOST-INJECT safety: on 'offline' or 'busy', last_run/next_run are NOT advanced so
+  //   the native runner can fire as recovery. On 'busy' the prompt was not injected at
+  //   all; advancing would suppress the native retry with no actual execution.
   //
   // Narrow same-tick race: if the native poll query runs in the same second as this
   // UPDATE commits, both may fire. The 409-busy response from the second inject is
@@ -322,24 +334,21 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     const agentName = fileTask.agent || MAIN_AGENT_ID
     const session = fileTask.targetSession || resolveSession(agentName)
     const prompt = buildScheduledTaskPrompt(fileTask, agentName)
-    const status = injectToSession(session, prompt, { force })
+    const status = _inject(session, prompt, { force })
 
     if (status === 'offline') {
       json(res, { error: `Target session for "${name}" is not running`, status }, 503)
       return true
     }
     if (status === 'busy') {
-      if (triggerMode) {
-        const dbTask = getTask(name)
-        if (dbTask) recordTriggerFire(dbTask)
-      }
+      // Prompt was NOT injected; do NOT advance last_run/next_run -- native retries as recovery.
       json(res, { error: `Target session for "${name}" is busy; retry or use force`, status }, 409)
       return true
     }
 
     if (triggerMode) {
       const dbTask = getTask(name)
-      if (dbTask) recordTriggerFire(dbTask)
+      if (dbTask) _recordFire(dbTask)
     }
     logger.info({ name, agent: agentName, session, force, triggerMode }, 'Scheduled task fired on operator demand')
     json(res, { ok: true, status, agent: agentName })
