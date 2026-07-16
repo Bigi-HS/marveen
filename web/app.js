@@ -9140,6 +9140,21 @@ function tuFormatTokens(n) {
   return String(n)
 }
 
+// USD from the server-side cost fields (totalCostUsd / costUsd / childCostUsd),
+// priced at real Anthropic list prices per model in src/web/agent-config.ts. The
+// frontend never invents a price; it only formats what the backend computed.
+function tuFormatUsd(n) {
+  if (n == null || isNaN(n)) return '$0.00'
+  if (n >= 1000) return '$' + (n / 1000).toFixed(2) + 'k'
+  if (n >= 1) return '$' + n.toFixed(2)
+  if (n > 0) return '$' + n.toFixed(3)
+  return '$0.00'
+}
+
+// Chart metric: 'tokens' (default, stacked token bars + quota lines) or 'usd'
+// (per-agent cost bars from the timeline costUsd field).
+let tuMetric = 'tokens'
+
 function tuGetTimeRange() {
   const period = document.getElementById('tuPeriod')?.value || '7d'
   const now = Math.floor(Date.now() / 1000)
@@ -9158,15 +9173,20 @@ async function loadTokenUsage() {
   if (from) params.set('from', from)
   if (to) params.set('to', to)
 
-  const summaryRes = await fetch('/api/token-usage/summary?' + params)
-  if (!summaryRes.ok) return
-  const summary = await summaryRes.json()
+  // The /cost endpoint returns { agents: [...totalCostUsd], lineage: [...childCostUsd] }.
+  // agents is exactly getTokenSummary (same shape as /summary) plus it is the
+  // canonical source of the server-computed per-agent USD, so use it directly.
+  const costRes = await fetch('/api/token-usage/cost?' + params)
+  if (!costRes.ok) return
+  const cost = await costRes.json()
+  const summary = cost.agents || []
   summary.sort((a, b) => {
     const aTotal = (a.totalInput || 0) + (a.totalCacheRead || 0) + (a.totalCacheCreation || 0)
     const bTotal = (b.totalInput || 0) + (b.totalCacheRead || 0) + (b.totalCacheCreation || 0)
     return bTotal - aTotal
   })
   renderTuSummary(summary)
+  renderTuLineage(cost.lineage || [], summary)
 
   const agentSelect = document.getElementById('tuAgent')
   if (agentSelect && agentSelect.options.length <= 1) {
@@ -9202,16 +9222,21 @@ function renderTuSummary(summary) {
     el.innerHTML = '<div class="overview-stat"><div class="overview-stat-label">Nincs adat</div><div class="overview-stat-value">0</div><div class="overview-stat-sub">Kattints a "Gyűjtés" gombra</div></div>'
     return
   }
+  const totalCost = summary.reduce((sum, s) => sum + (s.totalCostUsd || 0), 0)
+  const totalCostEl = document.getElementById('tuTotalCost')
+  if (totalCostEl) totalCostEl.textContent = tuFormatUsd(totalCost)
+
   el.innerHTML = summary.map(s => {
     const totalIn = (s.totalInput || 0) + (s.totalCacheRead || 0) + (s.totalCacheCreation || 0)
     const isActive = tuSelectedAgent === s.agent
     const dimmed = tuSelectedAgent && !isActive
+    const usd = tuFormatUsd(s.totalCostUsd || 0)
     return `
       <div class="overview-stat tu-agent-card${isActive ? ' tu-active' : ''}" data-agent="${escapeHtml(s.agent)}"
         style="border-left:3px solid ${tuGetColor(s.agent)};cursor:pointer;${dimmed ? 'opacity:0.4;' : ''}transition:opacity 0.2s">
         <div class="overview-stat-label">${escapeHtml(s.agent)}</div>
-        <div class="overview-stat-value">${tuFormatTokens(totalIn)}</div>
-        <div class="overview-stat-sub">${(s.totalCalls || 0).toLocaleString()} hívás, out: ${tuFormatTokens(s.totalOutput)}</div>
+        <div class="overview-stat-value">${usd}</div>
+        <div class="overview-stat-sub">${tuFormatTokens(totalIn)} token, ${(s.totalCalls || 0).toLocaleString()} hívás</div>
       </div>`
   }).join('')
 
@@ -9228,6 +9253,57 @@ function renderTuSummary(summary) {
       loadTokenUsage()
     })
   })
+}
+
+// Parent -> phantom-child (lineage) cost breakdown. `lineage` is getLineageRollup
+// from /cost: one row per orchestrating agent that spawned workflow phantoms,
+// with the total USD its children incurred (separable from the parent's own
+// spend). `summary` gives the parent's total so we can show the child share.
+function renderTuLineage(lineage, summary) {
+  const el = document.getElementById('tuLineageCard')
+  if (!el) return
+  if (!lineage || !lineage.length) {
+    el.hidden = true
+    return
+  }
+  el.hidden = false
+  const ownCostByAgent = {}
+  for (const s of summary || []) ownCostByAgent[s.agent] = s.totalCostUsd || 0
+
+  const rows = lineage.map(l => {
+    const childCost = l.childCostUsd || 0
+    const ownTotal = ownCostByAgent[l.parent] || 0
+    // ownTotal already includes phantom children's spend (they share the parent's
+    // discovered project dir), so the parent's own-session share is total - child.
+    const ownShare = Math.max(0, ownTotal - childCost)
+    const childPct = ownTotal > 0 ? Math.round((childCost / ownTotal) * 100) : 0
+    return `<tr>
+      <td><span style="color:${tuGetColor(l.parent)};font-weight:600">${escapeHtml(l.parent)}</span></td>
+      <td style="text-align:right;font-variant-numeric:tabular-nums;font-weight:600">${tuFormatUsd(childCost)}</td>
+      <td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-secondary)">${tuFormatUsd(ownShare)}</td>
+      <td style="text-align:right;font-variant-numeric:tabular-nums">${(l.childSessions || 0).toLocaleString()}</td>
+      <td style="text-align:right;font-variant-numeric:tabular-nums">${(l.childCalls || 0).toLocaleString()}</td>
+      <td style="min-width:90px">
+        <div style="height:8px;border-radius:4px;background:var(--bg-input);overflow:hidden">
+          <div style="height:100%;width:${childPct}%;background:${tuGetColor(l.parent)}"></div>
+        </div>
+        <span style="font-size:11px;color:var(--text-secondary)">${childPct}% phantom</span>
+      </td>
+    </tr>`
+  }).join('')
+
+  el.innerHTML = `<h3 style="margin:0 0 12px">Alügynök (phantom) költség-bontás</h3>
+    <div style="overflow-x:auto"><table class="mem-table" style="width:100%;min-width:560px">
+      <thead><tr>
+        <th>Szülő ügynök</th>
+        <th style="text-align:right">Gyerek USD</th>
+        <th style="text-align:right">Saját USD</th>
+        <th style="text-align:right">Munkamenet</th>
+        <th style="text-align:right">Hívás</th>
+        <th>Arány</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`
 }
 
 function tuGetResetLines(bucketStart, bucketEnd) {
@@ -9268,7 +9344,7 @@ function tuFillBuckets(data, bucketSeconds) {
   for (let b = minB; b <= maxB; b += bucketSeconds) {
     for (const agent of agents) {
       const key = b + ':' + agent
-      filled.push(bucketMap[key] || { bucket: b, agent, calls: 0, inputTokens: 0, outputTokens: 0 })
+      filled.push(bucketMap[key] || { bucket: b, agent, calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 })
     }
   }
   return filled
@@ -9357,10 +9433,15 @@ function renderTuTimeline(data, filterAgent) {
   const w = cssW - pad.left - pad.right
   const h = cssH - pad.top - pad.bottom
 
+  // In USD mode the bars/axes read the server-computed costUsd per bucket; in
+  // token mode they read the token volume. The quota (5h/weekly) lines stay a
+  // token concept, so they are hidden in USD mode below.
+  const isUsd = tuMetric === 'usd'
   const bucketMap = {}
   for (const d of filled) {
     if (!bucketMap[d.bucket]) bucketMap[d.bucket] = {}
-    bucketMap[d.bucket][d.agent] = (bucketMap[d.bucket][d.agent] || 0) + (d.inputTokens || 0)
+    const v = isUsd ? (d.costUsd || 0) : (d.inputTokens || 0)
+    bucketMap[d.bucket][d.agent] = (bucketMap[d.bucket][d.agent] || 0) + v
   }
 
   const bucketTotals = {}
@@ -9467,10 +9548,14 @@ function renderTuTimeline(data, filterAgent) {
     ctx.restore()
   }
 
+  // The cumulative quota lines are a token-budget concept (5h/weekly token
+  // ceilings) and do not translate to USD, so draw them only in token mode.
   const is5hActive = tuBudgetView === '5h'
   const isWeeklyActive = tuBudgetView === 'weekly'
-  drawCumLine(winWeekly, '#8b5cf6', 1.5, isWeeklyActive)
-  drawCumLine(win5h, '#06b6d4', 2, is5hActive)
+  if (!isUsd) {
+    drawCumLine(winWeekly, '#8b5cf6', 1.5, isWeeklyActive)
+    drawCumLine(win5h, '#06b6d4', 2, is5hActive)
+  }
 
   // X axis
   ctx.strokeStyle = borderColor
@@ -9491,23 +9576,26 @@ function renderTuTimeline(data, filterAgent) {
     ctx.fillText(tuFormatLocalShort(buckets[i]), x, pad.top + h + 18)
   }
 
-  // Left Y axis (per-bucket)
+  // Left Y axis (per-bucket) -- USD or tokens depending on the metric.
+  const fmtAxis = isUsd ? tuFormatUsd : tuFormatTokens
   ctx.textAlign = 'right'
   ctx.fillStyle = textSecondary
   ctx.font = '10px sans-serif'
   for (let i = 0; i <= 4; i++) {
     const val = (maxVal / 4) * i
     const y = pad.top + h - (i / 4) * h
-    ctx.fillText(tuFormatTokens(val), pad.left - 8, y + 4)
+    ctx.fillText(fmtAxis(val), pad.left - 8, y + 4)
   }
 
-  // Right Y axis (cumulative)
-  ctx.textAlign = 'left'
-  ctx.fillStyle = '#06b6d4'
-  for (let i = 0; i <= 4; i++) {
-    const val = (maxCum / 4) * i
-    const y = pad.top + h - (i / 4) * h
-    ctx.fillText(tuFormatTokens(val), pad.left + w + 6, y + 4)
+  // Right Y axis (cumulative token quota) -- only meaningful in token mode.
+  if (!isUsd) {
+    ctx.textAlign = 'left'
+    ctx.fillStyle = '#06b6d4'
+    for (let i = 0; i <= 4; i++) {
+      const val = (maxCum / 4) * i
+      const y = pad.top + h - (i / 4) * h
+      ctx.fillText(tuFormatTokens(val), pad.left + w + 6, y + 4)
+    }
   }
 
   // Legend: single dynamic row with wrapping
@@ -9529,13 +9617,15 @@ function renderTuTimeline(data, filterAgent) {
   }
 
   const legendHits = []
-  const lineItems = [
+  // The cumulative-quota legend entries are only meaningful in token mode.
+  const lineItems = (isUsd ? [] : [
     { label: '5h ablak', color: '#06b6d4', lw: 2, dash: [], id: '5h', active: is5hActive },
     { label: 'heti ablak', color: '#8b5cf6', lw: 1.5, dash: [], id: 'weekly', active: isWeeklyActive },
+  ]).concat([
     { label: '5h', color: '#3b82f680', lw: 1, dash: [3, 3] },
     { label: 'nap', color: '#f59e0b60', lw: 1, dash: [4, 4] },
     { label: 'hét', color: '#ef444480', lw: 1.5, dash: [6, 4] },
-  ]
+  ])
   for (const li of lineItems) {
     const tw = ctx.measureText(li.label).width + 34
     legWrap(tw)
@@ -9556,7 +9646,7 @@ function renderTuTimeline(data, filterAgent) {
   ctx.fillText('csúcsidő', legendX + 14, legendY + 2)
 
   // Store legend hit areas for click handling
-  tuChartState = { barRects, pad, h, cssW, cssH, maxVal, maxCum, win5h, winWeekly, legendHits }
+  tuChartState = { barRects, pad, h, cssW, cssH, maxVal, maxCum, win5h, winWeekly, legendHits, isUsd }
 }
 
 ;(function setupTuTooltip() {
@@ -9584,14 +9674,15 @@ function renderTuTimeline(data, filterAgent) {
 
     if (hit && my >= pad.top && my <= pad.top + h) {
       const isPeak = tuIsPeakHour(hit.bucket)
+      const fmt = tuChartState.isUsd ? tuFormatUsd : tuFormatTokens
       let html = `<div style="font-weight:600;margin-bottom:4px">${tuFormatLocalShort(hit.bucket)}${isPeak ? ' <span style="color:#ef4444;font-size:10px">CSÚCSIDŐ</span>' : ''}</div>`
       let total = 0
       for (const seg of hit.segments) {
-        html += `<div><span style="color:${tuGetColor(seg.agent)}">&#9632;</span> ${seg.agent}: ${tuFormatTokens(seg.val)}</div>`
+        html += `<div><span style="color:${tuGetColor(seg.agent)}">&#9632;</span> ${seg.agent}: ${fmt(seg.val)}</div>`
         total += seg.val
       }
-      if (hit.segments.length > 1) html += `<div style="border-top:1px solid rgba(255,255,255,0.2);margin-top:4px;padding-top:4px;font-weight:600">Összesen: ${tuFormatTokens(total)}</div>`
-      if (tuChartState.win5h || tuChartState.winWeekly) {
+      if (hit.segments.length > 1) html += `<div style="border-top:1px solid rgba(255,255,255,0.2);margin-top:4px;padding-top:4px;font-weight:600">Összesen: ${fmt(total)}</div>`
+      if (!tuChartState.isUsd && (tuChartState.win5h || tuChartState.winWeekly)) {
         const idx = barRects.indexOf(hit)
         if (idx >= 0) {
           const c5 = tuChartState.win5h?.[idx]
@@ -9634,6 +9725,10 @@ function renderTuTimeline(data, filterAgent) {
 function renderTuBudgetCards() {
   const el = document.getElementById('tuBudgetCards')
   if (!el || !tuChartState) return
+  // The 5h/weekly quota cards are token-budget concepts; hide them in USD mode
+  // (where the chart buckets hold cost, not tokens).
+  if (tuMetric === 'usd') { el.innerHTML = ''; el.hidden = true; return }
+  el.hidden = false
   const { win5h, winWeekly } = tuChartState
   const cur5h = win5h?.length ? win5h[win5h.length - 1].cumulative : 0
   const curWeekly = winWeekly?.length ? winWeekly[winWeekly.length - 1].cumulative : 0
@@ -9802,6 +9897,25 @@ document.getElementById('tuCollectBtn')?.addEventListener('click', async () => {
 document.getElementById('tuPeriod')?.addEventListener('change', () => { tuSelectedAgent = ''; loadTokenUsage() })
 document.getElementById('tuAgent')?.addEventListener('change', () => { tuSelectedAgent = document.getElementById('tuAgent').value; loadTokenUsage() })
 document.getElementById('tuMinTokens')?.addEventListener('change', () => tuFetchDetails())
+
+// Token <-> USD chart metric toggle. Switching metric re-renders the same
+// timeline data (which already carries costUsd) without a refetch.
+document.querySelectorAll('.btn-metric').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const metric = btn.dataset.metric
+    if (metric === tuMetric) return
+    tuMetric = metric
+    document.querySelectorAll('.btn-metric').forEach(b => {
+      const active = b.dataset.metric === tuMetric
+      b.classList.toggle('tu-active', active)
+      b.style.background = active ? 'var(--accent-soft)' : 'transparent'
+      b.style.color = active ? 'var(--text-primary)' : 'var(--text-secondary)'
+    })
+    tuBudgetView = ''
+    if (renderTuTimeline.__lastData) renderTuTimeline(renderTuTimeline.__lastData, renderTuTimeline.__lastAgent)
+    renderTuBudgetCards()
+  })
+})
 
 window.addEventListener('resize', () => {
   if (!document.getElementById('tokenUsagePage')?.hidden) {
