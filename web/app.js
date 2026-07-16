@@ -7999,6 +7999,48 @@ function formatRelative(ts) {
   return `${day}n`
 }
 
+// Per-message status/priority cues for the overview ActivityFeed. Only the
+// inter-agent-message rows carry these (memory rows do not), so both are
+// optional and the badge row collapses to empty when absent. Colours reuse the
+// design tokens (success/info/accent/danger/text-muted) -- no raw hex.
+const ACTIVITY_STATUS_META = {
+  pending: { label: 'függőben', color: 'var(--text-muted)' },
+  delivered: { label: 'kézbesítve', color: 'var(--info, #6a9bcc)' },
+  done: { label: 'kész', color: 'var(--success)' },
+  failed: { label: 'sikertelen', color: 'var(--danger)' },
+}
+const ACTIVITY_PRIORITY_META = {
+  low: { label: 'alacsony', color: 'var(--text-muted)' },
+  normal: { label: 'normál', color: 'var(--text-muted)' },
+  high: { label: 'magas', color: 'var(--accent)' },
+  urgent: { label: 'sürgős', color: 'var(--danger)' },
+}
+function renderActivityMeta(a) {
+  const parts = []
+  const st = a.status && ACTIVITY_STATUS_META[a.status]
+  if (st) {
+    parts.push(
+      '<span class="activity-meta-badge" title="státusz: ' + escapeHtml(a.status) + '">' +
+        '<span class="activity-meta-dot" style="background:' + st.color + '"></span>' +
+        escapeHtml(st.label) +
+      '</span>'
+    )
+  }
+  // Only surface priority when it is above the noisy "normal" default so the
+  // feed stays quiet for routine messages.
+  const pr = a.priority && ACTIVITY_PRIORITY_META[a.priority]
+  if (pr && (a.priority === 'high' || a.priority === 'urgent')) {
+    parts.push(
+      '<span class="activity-meta-badge activity-meta-prio" title="prioritás: ' + escapeHtml(a.priority) + '"' +
+        ' style="color:' + pr.color + ';border-color:' + pr.color + '">' +
+        escapeHtml(pr.label) +
+      '</span>'
+    )
+  }
+  if (parts.length === 0) return ''
+  return '<div class="overview-activity-meta">' + parts.join('') + '</div>'
+}
+
 async function loadOverview() {
   try {
     const res = await fetch('/api/overview')
@@ -8039,6 +8081,7 @@ async function loadOverview() {
           <div class="overview-activity-icon">${icon}</div>
           <div class="overview-activity-body">
             <div class="overview-activity-title">${escapeHtml(a.text)}</div>
+            ${renderActivityMeta(a)}
             <div class="overview-activity-time">${formatRelative(a.at)}</div>
           </div>
         `

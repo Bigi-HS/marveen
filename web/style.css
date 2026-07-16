@@ -508,6 +508,35 @@ main {
 .overview-activity-body { flex: 1; }
 .overview-activity-title { color: var(--text); line-height: 1.4; }
 .overview-activity-time { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+/* Per-message status + priority cues on an inter-agent-message activity row. */
+.overview-activity-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+}
+.activity-meta-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.activity-meta-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.activity-meta-prio {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-weight: 600;
+}
 
 /* === Kanban Board === */
 .kanban-board {
