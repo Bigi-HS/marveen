@@ -5253,3 +5253,34 @@ main {
 .todo-confirm-no { font-size: 11px; padding: 3px 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); border-radius: var(--radius-sm); cursor: pointer; }
 .todo-done-wrap { margin-top: 8px; }
 .todo-done-list .todo-item-title { color: var(--text-muted); text-decoration: line-through; }
+
+/* === Gate / approval queue (card ba512371 #8) === */
+.gate-board-meta { color: var(--text-muted); font-size: 13px; margin-bottom: 10px; }
+.gate-loading, .gate-empty { color: var(--text-muted); font-size: 14px; padding: 24px 0; }
+.gate-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.gate-table thead th {
+  text-align: left; padding: 8px 10px; color: var(--text-muted); font-weight: 600;
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.gate-table tbody td { padding: 9px 10px; border-bottom: 1px solid var(--border); }
+.gate-table tbody tr:hover { background: var(--bg-card-hover); }
+.gate-pr a { color: var(--accent); font-weight: 600; text-decoration: none; }
+.gate-pr a:hover { text-decoration: underline; }
+.gate-author { color: var(--text-secondary, var(--text-muted)); }
+.gate-seat { text-align: center; font-weight: 700; width: 44px; }
+.gate-seat.ok { color: var(--success, #788c5d); }
+.gate-seat.bad { color: var(--danger, #bf4d43); }
+.gate-seat.pending { color: var(--text-muted); }
+.gate-ci { font-size: 12px; }
+.gate-ci.pass { color: var(--success, #788c5d); }
+.gate-ci.fail { color: var(--danger, #bf4d43); }
+.gate-ci.pending { color: var(--text-muted); }
+.gate-ci.off, .gate-ci.none { color: var(--text-muted); }
+.gate-badge {
+  display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600;
+}
+.gate-badge.ready { background: var(--success, #788c5d); color: #fff; }
+.gate-badge.blocked { background: var(--danger-soft, rgba(191,77,67,0.12)); color: var(--danger, #bf4d43); }
+.gate-badge.override { background: var(--accent-soft, rgba(217,119,87,0.1)); color: var(--accent); }
+.gate-activity { color: var(--text-muted); white-space: nowrap; }
+.gate-note { color: var(--text-muted); font-size: 12px; margin-top: 12px; line-height: 1.5; }

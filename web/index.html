@@ -82,6 +82,11 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
         <span class="sb-label">Státusz</span>
       </a>
+      <a href="#" class="sb-link" data-page="gate">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4"/><path d="M21 12c-1 0-3-1-3-3s2-3 3-3-2-3-3-3-3 2-3 3-3-2-3 0"/><circle cx="12" cy="12" r="9"/></svg>
+        <span class="sb-label">Gate</span>
+        <span class="sb-badge" id="gateNavBadge" hidden></span>
+      </a>
       <a href="#" class="sb-link" data-page="autonomy">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         <span class="sb-label">Autonómia</span>
@@ -781,6 +786,28 @@
             <p>Válassz ügynököt</p>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- === Gate / approval queue Page (card ba512371 #8; /api/gate/board) === -->
+    <div class="page" id="gatePage" hidden>
+      <div class="page-header">
+        <div class="page-header-row">
+          <div>
+            <h1>Gate</h1>
+            <p class="subtitle">Merge-gate státusz a legutóbb aktív PR-eken</p>
+          </div>
+          <button class="btn-secondary btn-compact" id="refreshGateBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+            Frissítés
+          </button>
+        </div>
+      </div>
+      <div class="gate-board-meta" id="gateBoardMeta"></div>
+      <div class="gate-board" id="gateBoard">
+        <div class="gate-loading">Betöltés…</div>
       </div>
     </div>
 

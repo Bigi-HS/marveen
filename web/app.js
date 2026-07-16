@@ -100,6 +100,7 @@ function switchPage(pageId) {
   if (pageId === 'connectors') loadConnectors()
   if (pageId === 'migrate') loadMigrateAgents()
   if (pageId === 'status') loadStatus()
+  if (pageId === 'gate') loadGateBoard()
   if (pageId === 'recall') loadRecallPage()
   if (pageId === 'bgTasks') loadBgTasksPage()
   if (pageId === 'vault') loadVaultPage()
@@ -6725,6 +6726,117 @@ const STATUS_COMPONENT_LABELS = {
 }
 
 document.getElementById('refreshStatusBtn').addEventListener('click', loadStatus)
+document.getElementById('refreshGateBtn')?.addEventListener('click', loadGateBoard)
+
+// === Gate / approval queue (card ba512371 #8) ===
+// Read-only view over GET /api/gate/board -- the DB-only merge-gate aggregation
+// (per-PR thor/dave/chad seats + ci + merge-ready). Non-authoritative by design:
+// the board never merges; the merge path re-checks the gate authoritatively.
+const GATE_REPO_URL = 'https://github.com/Bigi-HS/marveen/pull/'
+const GATE_SEAT_META = {
+  approved: { cls: 'ok', sym: '✓', label: 'jóváhagyva' },
+  blocked: { cls: 'bad', sym: '✕', label: 'blokkolva' },
+  none: { cls: 'pending', sym: '·', label: 'nincs' },
+}
+const GATE_CI_LABELS = { pass: 'CI zöld', fail: 'CI piros', none: 'nincs CI', pending: 'CI fut' }
+
+function gateAgoText(epochS) {
+  if (!epochS) return ''
+  const mins = Math.max(0, Math.floor(Date.now() / 1000 - epochS) / 60)
+  if (mins < 60) return `${Math.round(mins)} perce`
+  const hrs = mins / 60
+  if (hrs < 24) return `${Math.round(hrs)} órája`
+  return `${Math.round(hrs / 24)} napja`
+}
+
+function gateSeatCell(reviewer, seat, chadReviewed) {
+  // Chad seat carries the board's one honest uncertainty: when chad has not
+  // reviewed, the DB cannot tell whether the PR is security-sensitive, so the
+  // merge path may still require chad. Surface that instead of a false "not needed".
+  if (reviewer === 'chad' && !chadReviewed) {
+    return `<td class="gate-seat pending" title="Chad még nem nézte -- a merge-út dönti el, kell-e (security-sensitive fájloknál igen)">?</td>`
+  }
+  const m = GATE_SEAT_META[seat] || GATE_SEAT_META.none
+  return `<td class="gate-seat ${m.cls}" title="${reviewer}: ${m.label}">${m.sym}</td>`
+}
+
+function renderGateBoard(board) {
+  const wrap = document.getElementById('gateBoard')
+  const meta = document.getElementById('gateBoardMeta')
+  if (!wrap) return
+  const prs = Array.isArray(board?.prs) ? board.prs : []
+  if (meta) {
+    meta.textContent = prs.length
+      ? `${prs.length} PR az elmúlt ${board.window_days} napból · frissítve ${gateAgoText(board.generated_at)}`
+      : ''
+  }
+  if (!prs.length) {
+    wrap.innerHTML = '<div class="gate-empty">Nincs gate-aktivitás a megadott ablakban.</div>'
+    updateGateNavBadge(0)
+    return
+  }
+  const rows = prs.map((pr) => {
+    const ready = pr.override_active
+      ? '<span class="gate-badge override" title="Aktív override">override</span>'
+      : pr.merge_ready
+        ? '<span class="gate-badge ready">merge-kész</span>'
+        : '<span class="gate-badge blocked">függőben</span>'
+    const ci = pr.ci_required
+      ? `<span class="gate-ci ${pr.ci_status}">${escapeHtml(GATE_CI_LABELS[pr.ci_status] || pr.ci_status)}</span>`
+      : '<span class="gate-ci off">—</span>'
+    return `
+      <tr>
+        <td class="gate-pr"><a href="${GATE_REPO_URL}${pr.pr_number}" target="_blank" rel="noopener">#${pr.pr_number}</a></td>
+        <td class="gate-author">${escapeHtml(pr.author || '—')}</td>
+        ${gateSeatCell('thor', pr.seats?.thor, true)}
+        ${gateSeatCell('dave', pr.seats?.dave, true)}
+        ${gateSeatCell('chad', pr.seats?.chad, pr.chad_reviewed)}
+        <td class="gate-ci-cell">${ci}</td>
+        <td class="gate-ready-cell">${ready}</td>
+        <td class="gate-activity">${gateAgoText(pr.last_activity)}</td>
+      </tr>`
+  }).join('')
+  wrap.innerHTML = `
+    <table class="gate-table">
+      <thead><tr>
+        <th>PR</th><th>Szerző</th><th title="Thor">Thor</th><th title="Dave">Dave</th>
+        <th title="Chad (csak security-sensitive PR-nél kötelező)">Chad</th><th>CI</th><th>Állapot</th><th>Aktivitás</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p class="gate-note">Áttekintő nézet, nem maga a kapu: a tényleges merge újra-ellenőrzi a gate-et a GitHub fájllistával, így egy security-sensitive PR akkor is Chadre várhat, ha itt „merge-kész”.</p>`
+  updateGateNavBadge(prs.filter((p) => p.merge_ready).length)
+}
+
+function updateGateNavBadge(readyCount) {
+  const badge = document.getElementById('gateNavBadge')
+  if (!badge) return
+  if (readyCount > 0) { badge.textContent = String(readyCount); badge.hidden = false }
+  else { badge.hidden = true }
+}
+
+async function loadGateBoard() {
+  const wrap = document.getElementById('gateBoard')
+  if (wrap) wrap.innerHTML = '<div class="gate-loading">Betöltés…</div>'
+  try {
+    const res = await fetch('/api/gate/board')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    renderGateBoard(await res.json())
+  } catch (err) {
+    if (wrap) wrap.innerHTML = `<div class="gate-empty">Nem sikerült betölteni a gate-táblát (${escapeHtml(String(err.message || err))}).</div>`
+  }
+}
+
+// Lightweight nav-badge poll so the merge-ready count shows without opening the
+// page. The board is server-cached (30s), so a 60s cadence is cheap.
+async function pollGateNavBadge() {
+  try {
+    const res = await fetch('/api/gate/board')
+    if (!res.ok) return
+    const board = await res.json()
+    updateGateNavBadge((board.prs || []).filter((p) => p.merge_ready).length)
+  } catch { /* transient */ }
+}
 
 // Header status banner (card ba512371 #5): a thin always-visible strip that
 // appears only when the Claude API has an active incident, so an outage is
@@ -8390,6 +8502,10 @@ setInterval(pollUpdatesBadge, 5 * 60_000)
 document.getElementById('apiStatusLink')?.addEventListener('click', (e) => { e.preventDefault(); switchPage('status') })
 refreshStatusBanner()
 setInterval(refreshStatusBanner, 5 * 60_000)
+
+// Gate merge-ready badge poll (card ba512371 #8). Server board is 30s-cached.
+pollGateNavBadge()
+setInterval(pollGateNavBadge, 60_000)
 
 // === Init ===
 populateAvatarGrid()
