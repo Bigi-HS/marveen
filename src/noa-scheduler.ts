@@ -341,6 +341,23 @@ export function removeTaskFromNoa(id: string, db = getNoaDb()): void {
   db.prepare(`UPDATE scheduled_tasks SET status = 'deleted' WHERE id = ?`).run(id)
 }
 
+// Record a successful trigger-mode fire from an external caller (e.g. n8n cron).
+// Uses exactly the same last_run/next_run roll-forward as the native sweep tick so
+// the native runner's query (last_run < next_run) treats this as "already fired"
+// and skips the task on its next poll -- making the native runner a true fallback
+// rather than a duplicate trigger.
+//
+// Call ONLY when the inject actually reached the session (status 'fired' or 'busy').
+// Do NOT call on 'offline' / inject error -- the native must fire as fallback then.
+export function recordTriggerFire(task: ScheduledTask, db = getNoaDb()): void {
+  const nowMs = Date.now()
+  const nowS = Math.floor(nowMs / 1000)
+  const basisMs = Math.max(nowMs, task.next_run * 1000)
+  db.prepare(
+    `UPDATE scheduled_tasks SET last_run=?, last_result='fired', next_run=? WHERE id=?`
+  ).run(nowS, computeNextRun(task.schedule, basisMs), task.id)
+}
+
 export function getTask(id: string, db = getNoaDb()): ScheduledTask | null {
   return (db.prepare(
     'SELECT * FROM scheduled_tasks WHERE id = ?'

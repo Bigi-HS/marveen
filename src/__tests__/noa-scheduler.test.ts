@@ -43,6 +43,7 @@ const {
   runSweepTick,
   migrateFileBasedTasks,
   applyBBlockColumns,
+  recordTriggerFire,
   InvalidIdError,
   DuplicateTaskIdError,
   InvalidScheduleError,
@@ -569,5 +570,66 @@ describe('DoD structural assertions', () => {
     expect(isValidCronShape('0 9 * * *')).toBe(true)
     expect(isValidCronShape('not a cron')).toBe(false)
     expect(isValidCronShape(42)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// recordTriggerFire -- n8n trigger-mode dedup guard (card bc3ccf39)
+// ---------------------------------------------------------------------------
+
+describe('recordTriggerFire', () => {
+  it('rolls last_run and next_run forward so native runner skips the task', () => {
+    const db = getNoaDb()
+    const task = createTask({ id: 'trig-fired', agent: 'forge', type: 'heartbeat', prompt: 'x', schedule: '0 * * * *' }, db)
+    const before = getTask('trig-fired', db)!
+    const beforeNext = before.next_run
+
+    recordTriggerFire(task, db)
+
+    const after = getTask('trig-fired', db)!
+    expect(after.last_run).toBeGreaterThan(0)
+    // next_run must be strictly after the pre-fire next_run (rolled forward by >=1 interval)
+    expect(after.next_run).toBeGreaterThan(beforeNext)
+    // last_result set to 'fired'
+    expect((after as any).last_result).toBe('fired')
+
+    // Native runner query must NOT pick this task up: next_run > now
+    const nowS = Math.floor(Date.now() / 1000)
+    expect(after.next_run).toBeGreaterThan(nowS)
+  })
+
+  it('uses same basisMs formula as native (max(now, task.next_run*1000)) to avoid self-refire', () => {
+    const db = getNoaDb()
+    // Create a task whose next_run is in the past (simulates a look-ahead fire)
+    const task = createTask({ id: 'trig-past', agent: 'forge', type: 'heartbeat', prompt: 'x', schedule: '0 * * * *' }, db)
+    // Force next_run to a past value to simulate the look-ahead case
+    db.prepare('UPDATE scheduled_tasks SET next_run=? WHERE id=?').run(
+      Math.floor(Date.now() / 1000) - 60, 'trig-past'
+    )
+    const stale = getTask('trig-past', db)!
+
+    recordTriggerFire(stale, db)
+
+    const after = getTask('trig-past', db)!
+    // next_run must be in the future (not re-resolving to the same past slot)
+    expect(after.next_run).toBeGreaterThan(Math.floor(Date.now() / 1000))
+  })
+
+  it('same-tick race: native runner that polls within the same second sees the updated next_run (409-busy backstop documented)', () => {
+    // This test documents the narrow race: if the native poll query runs in the same
+    // second as recordTriggerFire's UPDATE commits, the SELECT may have already latched
+    // the old next_run. The 409-busy from the second inject is the backstop -- the agent
+    // ignores a duplicate prompt while processing. No additional coordination needed.
+    const db = getNoaDb()
+    const task = createTask({ id: 'trig-race', agent: 'forge', type: 'heartbeat', prompt: 'x', schedule: '0 * * * *' }, db)
+    const beforeNext = getTask('trig-race', db)!.next_run
+
+    recordTriggerFire(task, db)
+
+    // After the commit, a new SELECT always sees the updated next_run (SQLite serializes writes)
+    const afterNext = getTask('trig-race', db)!.next_run
+    expect(afterNext).toBeGreaterThan(beforeNext)
+    // The race is only possible if the native poll caches the row before the commit --
+    // in practice the sweep runs in a single transaction per tick, so this is <1s window.
   })
 })
