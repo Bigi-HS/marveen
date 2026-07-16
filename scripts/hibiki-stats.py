@@ -32,23 +32,12 @@ DEFAULT_STORE = os.path.join(
 
 MIN_WEIGHT_POINTS = 3
 
-# SEC-AC1 range validation bounds (shared with hibiki-health-write.py)
-RANGE_CHECKS: dict[str, tuple[float, float]] = {
-    "total_calories": (100, 5000),
-    "protein_g": (0, 350),
-    "carbs_g": (0, 600),
-    "fat_g": (0, 300),
-    "fiber_g": (0, 150),
-    "body_fat_pct": (5, 60),
-    "weight_kg": (30, 250),
-    "fat_mass_kg": (2, 150),
-    "lean_mass_kg": (20, 120),
-    "vat_area_cm2": (0, 400),
-    # bone_density is stored as a DEXA T-score (see hibiki-dexa.py: the
-    # bone_density_tscore input maps to the stored `bone_density` key).
-    # Plausible human T-scores span roughly -4 (severe osteoporosis) to +3.
-    "bone_density": (-4.0, 3.0),
-}
+# SEC-AC1 range validation bounds -- single source of truth in hibiki_ranges.py
+# (shared with hibiki-health-write.py).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+from hibiki_ranges import RANGE_CHECKS  # noqa: E402
 
 
 def load_json(path: str) -> Any:
