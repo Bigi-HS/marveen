@@ -109,6 +109,7 @@ function switchPage(pageId) {
   if (pageId === 'team') { loadTeamGraph() }
   if (pageId === 'messages') loadMessagesPage()
   if (pageId === 'tokenUsage') loadTokenUsage()
+  if (pageId === 'toolLog') loadToolLog()
   if (pageId === 'ideas') loadIdeasPage()
 }
 
@@ -9764,6 +9765,124 @@ window.addEventListener('resize', () => {
     if (tuChartState && renderTuTimeline.__lastData) renderTuTimeline(renderTuTimeline.__lastData, renderTuTimeline.__lastAgent)
   }
 })
+
+// ============================================================
+// Tool-workflow automation candidates (Workflow-jelöltek)
+// ============================================================
+// Lists repeated tool-call sequences from GET /api/tool-log/analyze so a
+// recurring session workflow can be promoted into a scheduled task. The
+// analyze endpoint returns per-session chunks with shape:
+//   { session_id, tool_count, duration_minutes, start_ts, end_ts,
+//     tools: string[], steps_preview: [{ tool, description }] }
+// There is no agent-name field on the response (the log is keyed by
+// session_id only), so we surface the session id + tool set as the identity.
+
+let toolLogCandidates = []
+
+async function loadToolLog() {
+  const list = document.getElementById('toolLogList')
+  if (!list) return
+  const since = document.getElementById('tlWindow')?.value || '86400'
+  const minCalls = document.getElementById('tlMinCalls')?.value || '5'
+  const params = new URLSearchParams({ since, min_calls: minCalls })
+  list.innerHTML = '<p class="activity-empty">Betöltés…</p>'
+  try {
+    const res = await fetch('/api/tool-log/analyze?' + params)
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    toolLogCandidates = await res.json()
+    renderToolLog(toolLogCandidates)
+  } catch (e) {
+    list.innerHTML = '<p class="activity-empty">Nem sikerült lekérni a jelölteket: ' + escapeHtml(String(e.message || e)) + '</p>'
+  }
+}
+
+function renderToolLog(candidates) {
+  const list = document.getElementById('toolLogList')
+  if (!list) return
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    list.innerHTML = '<div class="overview-card"><p class="activity-empty">Nincs ismétlődő eszközhívás-sorozat a kiválasztott időablakban. Növeld az ablakot vagy csökkentsd a minimális lépésszámot.</p></div>'
+    return
+  }
+  // Longest / most active sequences first.
+  const sorted = candidates.slice().sort((a, b) => (b.tool_count || 0) - (a.tool_count || 0))
+  list.innerHTML = sorted.map((c, i) => {
+    const tools = Array.isArray(c.tools) ? c.tools : []
+    const toolChips = tools.map((t) => '<span class="tl-chip">' + escapeHtml(t) + '</span>').join('')
+    const steps = Array.isArray(c.steps_preview) ? c.steps_preview : []
+    const stepsHtml = steps.map((s, n) =>
+      '<li><span class="tl-step-tool">' + escapeHtml(s.tool || '') + '</span>' +
+      (s.description && s.description !== s.tool ? '<span class="tl-step-desc">' + escapeHtml(s.description) + '</span>' : '') +
+      '</li>'
+    ).join('')
+    const sid = c.session_id || '?'
+    const shortSid = sid.length > 12 ? sid.slice(0, 8) + '…' : sid
+    const started = c.start_ts ? new Date(c.start_ts * 1000).toLocaleString('hu-HU') : '?'
+    return (
+      '<div class="overview-card tl-card" data-idx="' + i + '">' +
+        '<div class="tl-card-head">' +
+          '<div>' +
+            '<h3 style="margin:0">Sorozat #' + (i + 1) + '</h3>' +
+            '<span class="tl-sub">session <code>' + escapeHtml(shortSid) + '</code> · ' + escapeHtml(started) + '</span>' +
+          '</div>' +
+          '<div class="tl-metrics">' +
+            '<span class="tl-metric"><strong>' + (c.tool_count || 0) + '</strong> hívás</span>' +
+            '<span class="tl-metric"><strong>' + (c.duration_minutes || 0) + '</strong> perc</span>' +
+            '<span class="tl-metric"><strong>' + tools.length + '</strong> eszköz</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="tl-chips">' + toolChips + '</div>' +
+        (stepsHtml ? '<ol class="tl-steps">' + stepsHtml + '</ol>' : '') +
+        '<div class="tl-actions">' +
+          '<button class="btn-primary btn-compact tl-promote" data-idx="' + i + '">Feladattá alakítás</button>' +
+        '</div>' +
+      '</div>'
+    )
+  }).join('')
+
+  list.querySelectorAll('.tl-promote').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.idx, 10)
+      promoteToolLogCandidate(sorted[idx])
+    })
+  })
+}
+
+// Build a human prompt from a candidate's step preview and open the existing
+// schedule-create modal prefilled. We deliberately reuse the proven create
+// path (resetScheduleForm + openModal) rather than POSTing a schedule
+// directly, so the user reviews agent + cron + prompt before it is saved.
+function promoteToolLogCandidate(cand) {
+  if (!cand) return
+  const tools = Array.isArray(cand.tools) ? cand.tools : []
+  const steps = Array.isArray(cand.steps_preview) ? cand.steps_preview : []
+  const stepLines = steps
+    .map((s, n) => (n + 1) + '. ' + (s.description && s.description !== s.tool ? s.description : (s.tool || '')))
+    .join('\n')
+  const prompt =
+    'Automatizáld az alábbi ismétlődő munkafolyamatot, amit korábban kézzel végeztél el ' +
+    '(' + (cand.tool_count || 0) + ' eszközhívás, ' + (cand.duration_minutes || 0) + ' perc).\n\n' +
+    'Használt eszközök: ' + (tools.join(', ') || '—') + '\n\n' +
+    'Lépések:\n' + (stepLines || '(nincs előnézet)') + '\n\n' +
+    'Futtasd le ezt a sorozatot, és ha bármi eltérést vagy hibát tapasztalsz, jelezd Telegramon.'
+
+  resetScheduleForm()
+  document.getElementById('scheduleModalTitle').textContent = 'Új ütemezett feladat (workflow-jelöltből)'
+  document.getElementById('scheduleName').disabled = false
+  const sidTag = (cand.session_id || 'session').replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || 'auto'
+  document.getElementById('scheduleName').value = 'workflow-' + sidTag
+  document.getElementById('scheduleDesc').value = 'Automatizált ismétlődő eszköz-sorozat (' + tools.slice(0, 4).join(', ') + ')'
+  document.getElementById('schedulePrompt').value = prompt
+  // Default to a daily run at 09:00; the user picks the real cadence/agent.
+  parseCronToForm('0 9 * * *')
+  openModal(scheduleModalOverlay)
+  loadScheduleAgents().then(() => {
+    setTimeout(() => document.getElementById('scheduleName').focus(), 200)
+  })
+}
+
+document.getElementById('tlRefreshBtn')?.addEventListener('click', loadToolLog)
+document.getElementById('tlWindow')?.addEventListener('change', loadToolLog)
+document.getElementById('tlMinCalls')?.addEventListener('change', loadToolLog)
 
 // ============================================================
 // Ideas (Ötletláda)

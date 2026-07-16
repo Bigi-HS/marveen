@@ -99,6 +99,10 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
         <span class="sb-label">Token Monitor</span>
       </a>
+      <a href="#" class="sb-link" data-page="toolLog">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16"/><path d="M4 12h10"/><path d="M4 17h7"/><circle cx="18" cy="16" r="3"/><path d="M18 13v-1"/></svg>
+        <span class="sb-label">Workflow-jelöltek</span>
+      </a>
       <a href="#" class="sb-link" data-page="ideas">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
         <span class="sb-label">Ötletláda</span>
@@ -1058,6 +1062,24 @@
       </div>
     </div>
 
+    <!-- === Tool-workflow candidate styles === -->
+    <style>
+      .tl-card { margin-bottom: 12px; }
+      .tl-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+      .tl-sub { font-size: 12px; color: var(--text-muted); }
+      .tl-sub code { font-family: monospace; }
+      .tl-metrics { display: flex; gap: 14px; flex-wrap: wrap; }
+      .tl-metric { font-size: 12px; color: var(--text-secondary); }
+      .tl-metric strong { font-size: 15px; color: var(--text); }
+      .tl-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+      .tl-chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--bg-input); border: 1px solid var(--border); color: var(--text-secondary); }
+      .tl-steps { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--text-muted); }
+      .tl-steps li { margin-bottom: 3px; }
+      .tl-step-tool { color: var(--accent); font-weight: 600; }
+      .tl-step-desc { color: var(--text-muted); margin-left: 6px; }
+      .tl-actions { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
+    </style>
+
     <!-- === Token Usage Page === -->
     <style>
       .tu-active { outline: 2px solid var(--accent, #6366f1); outline-offset: -2px; }
@@ -1116,6 +1138,46 @@
         </div>
         <div id="tuDetailsTable"></div>
       </div>
+    </div>
+
+    <!-- === Tool-workflow automation candidates Page === -->
+    <div class="page" id="toolLogPage" hidden>
+      <div class="page-header">
+        <div class="page-header-row" style="flex-wrap:wrap">
+          <div style="flex:1;min-width:200px">
+            <h1>Workflow-jelöltek</h1>
+            <p class="subtitle">Ismétlődő eszközhívás-sorozatok, amikből ütemezett feladat lehet</p>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select id="tlWindow" class="input-compact" style="width:auto">
+              <option value="3600">1 óra</option>
+              <option value="21600">6 óra</option>
+              <option value="86400" selected>24 óra</option>
+              <option value="604800">7 nap</option>
+            </select>
+            <label style="font-size:13px;color:var(--text-secondary)">
+              Min. lépés: <input type="number" id="tlMinCalls" value="5" min="2" class="input-compact" style="width:64px">
+            </label>
+            <button class="btn-secondary btn-compact" id="tlRefreshBtn">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+              </svg>
+              Frissítés
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="overview-card" style="margin-bottom:16px">
+        <div style="padding:12px 14px;background:var(--bg-input);border-radius:var(--radius);border-left:3px solid var(--accent);font-size:13px;line-height:1.5;color:var(--text-muted)">
+          A rendszer a naplózott eszközhívásokból session-önként azonos időablakban ismétlődő
+          sorozatokat gyűjt. Ha egy sorozat rendszeresen visszatér, érdemes lehet ütemezett
+          feladatként automatizálni. A "Feladattá alakítás" gomb előtölti az ütemezés-űrlapot
+          a javasolt prompttal, amit még átnézhetsz mentés előtt.
+        </div>
+      </div>
+
+      <div id="toolLogList"></div>
     </div>
 
     <!-- === Updates Page === -->
