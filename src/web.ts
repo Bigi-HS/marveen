@@ -65,6 +65,7 @@ import { tryHandleIdeas } from './web/routes/ideas.js'
 import { tryHandleToolLog } from './web/routes/tool-log.js'
 import { tryHandleCodetree } from './web/routes/codetree.js'
 import { tryHandleGate } from './web/routes/gate.js'
+import { tryHandleGateBoard } from './web/routes/gate-board.js'
 import { tryHandleGithub } from './web/routes/github.js'
 import { tryHandleAck } from './web/routes/ack.js'
 import { tryHandleAgentCategories } from './web/routes/agent-categories.js'
@@ -302,6 +303,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleIdeas(routeCtx)) return
       if (await tryHandleToolLog(routeCtx)) return
       if (await tryHandleCodetree(routeCtx)) return
+      if (await tryHandleGateBoard(routeCtx)) return
       if (await tryHandleGate(routeCtx)) return
       if (await tryHandleGithub(routeCtx)) return
       if (await tryHandlePublicDigest(routeCtx)) return
