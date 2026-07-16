@@ -954,6 +954,7 @@ main {
 }
 .tg-dot.connected { background: var(--success); }
 .tg-dot.disconnected { background: var(--text-muted); }
+.tg-dot.warning { background: #f5a623; }
 
 /* === Process status === */
 .process-indicator {
@@ -5173,6 +5174,19 @@ main {
   margin: 8px 0 0;
 }
 .agent-reauth-reason { font-size: 11px; color: #ef4444; font-weight: 600; flex: 1; }
+/* Channel-drop warning banner (card ba512371 #6): amber, mirrors the reauth banner. */
+.agent-channel-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: color-mix(in srgb, #f5a623 12%, transparent);
+  border: 1px solid #f5a623;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin: 8px 0 0;
+}
+.agent-channel-warn { font-size: 11px; color: #b45309; font-weight: 600; flex: 1; }
 .btn-danger {
   background: #ef4444;
   color: #fff;

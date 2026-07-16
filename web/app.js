@@ -1651,8 +1651,14 @@ function renderAgents() {
     const modelClass = agent.model && agent.model !== 'inherit' ? agent.model : ''
     const modelLabel = agent.model || 'inherit'
     const chConnected = agentIsConnected(agent)
-    const chDotClass = chConnected ? 'connected' : 'disconnected'
-    const chLabel = chConnected ? 'Online' : 'Offline'
+    // Channel-health warning (card ba512371 #6): a running agent whose token is
+    // present (so it reads "Online") but whose channel the monitor flagged as
+    // dropped. This is the Györe-drop shape -- surface it inline instead of
+    // letting it look healthy. NB: only monitor-DETECTED (plugin-pane) drops set
+    // channelHealthy=false; a silent client-drop can still read healthy.
+    const chUnhealthy = agent.running && agent.channelHealthy === false
+    const chDotClass = chUnhealthy ? 'warning' : (chConnected ? 'connected' : 'disconnected')
+    const chLabel = chUnhealthy ? 'Csatorna hiba' : (chConnected ? 'Online' : 'Offline')
     const isRunning = agent.running || false
     const runDotClass = isRunning ? 'running' : 'stopped'
     const runLabel = isRunning ? 'Fut' : 'Leállva'
@@ -1669,12 +1675,17 @@ function renderAgents() {
         <span class="agent-model-badge ${escapeHtml(modelClass)}">${escapeHtml(modelLabel)}</span>
         ${contextBadgeHtml(agent)}
         <span class="process-indicator" title="${escapeHtml(processTip(isRunning))}"><span class="process-dot ${runDotClass}"></span>${runLabel}</span>
-        <span class="tg-status" title="${escapeHtml(channelTip(chConnected))}"><span class="tg-dot ${chDotClass}"></span>${chLabel}</span>
+        <span class="tg-status" title="${escapeHtml(chUnhealthy ? 'A csatorna-monitor csatorna-leszakadást észlelt. Az újracsatlakozás megpróbálja helyreállítani.' : channelTip(chConnected))}"><span class="tg-dot ${chDotClass}"></span>${chLabel}</span>
       </div>
       ${agent.needsReauth ? `
         <div class="agent-reauth-banner">
           <span class="agent-reauth-reason">${escapeHtml(agent.reauthReason || 'Újrabejelentkezés szükséges')}</span>
           <button class="btn-danger btn-compact agent-login-btn" data-phase="start">Bejelentkezés</button>
+        </div>` : ''}
+      ${chUnhealthy ? `
+        <div class="agent-channel-banner">
+          <span class="agent-channel-warn">Csatorna leszakadt${agent.channelReconnectAttempts ? ` (${agent.channelReconnectAttempts} újrapróba)` : ''}</span>
+          <button class="btn-secondary btn-compact agent-reconnect-btn">Újracsatlakozás</button>
         </div>` : ''}
       <div class="agent-card-actions">
         <button class="btn-secondary btn-compact agent-terminal-btn" title="Terminal">
@@ -1690,6 +1701,21 @@ function renderAgents() {
     // Terminal button
     card.querySelector('.agent-terminal-btn')?.addEventListener('click', (e) => {
       e.stopPropagation(); openTerminalModal(agent.name)
+    })
+    // Channel reconnect button (card ba512371 #6): fire the existing MCP-reconnect
+    // endpoint, then refresh so the warning clears if it recovered.
+    card.querySelector('.agent-reconnect-btn')?.addEventListener('click', async (e) => {
+      e.stopPropagation()
+      const btn = e.currentTarget
+      btn.disabled = true
+      try {
+        const res = await fetch(`/api/agents/${encodeURIComponent(agent.name)}/channel/reconnect`, { method: 'POST' })
+        showToast(res.ok ? `${label}: újracsatlakozás elindítva` : `${label}: az újracsatlakozás nem sikerült`)
+      } catch {
+        showToast(`${label}: az újracsatlakozás nem sikerült`)
+      } finally {
+        loadAgents()
+      }
     })
     card.addEventListener('click', () => openAgentDetail(agent.name))
     agentsGrid.insertBefore(card, addBtn)
