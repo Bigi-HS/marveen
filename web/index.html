@@ -1074,9 +1074,17 @@
         <div class="page-header-row" style="flex-wrap:wrap">
           <div style="flex:1;min-width:200px">
             <h1>Token Monitor</h1>
-            <p class="subtitle" id="tokenUsageSubtitle">Ügynök token-fogyasztás nyomon követése</p>
+            <p class="subtitle" id="tokenUsageSubtitle">Ügynök token- és költség-fogyasztás nyomon követése</p>
           </div>
           <div class="tu-header-controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <div style="text-align:right;margin-right:4px">
+              <div style="font-size:11px;color:var(--text-secondary);line-height:1.1">Összes költség</div>
+              <div id="tuTotalCost" style="font-size:18px;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums">$0.00</div>
+            </div>
+            <div class="tu-metric-toggle" style="display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+              <button type="button" class="btn-metric tu-active" data-metric="tokens" style="border:none;padding:5px 12px;font-size:13px;cursor:pointer;background:var(--accent-soft);color:var(--text-primary)">Token</button>
+              <button type="button" class="btn-metric" data-metric="usd" style="border:none;padding:5px 12px;font-size:13px;cursor:pointer;background:transparent;color:var(--text-secondary)">USD</button>
+            </div>
             <select id="tuPeriod" class="input-compact" style="width:auto">
               <option value="1h">1 óra</option>
               <option value="24h">24 óra</option>
@@ -1106,6 +1114,8 @@
           <canvas id="tuCanvas"></canvas>
         </div>
       </div>
+
+      <div class="overview-card" id="tuLineageCard" style="margin-bottom:16px" hidden></div>
 
       <div class="overview-card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">

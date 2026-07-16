@@ -417,6 +417,23 @@ export interface TimelineBucket {
   calls: number
   inputTokens: number
   outputTokens: number
+  /** Cache-aware USD cost for this bucket, priced per (bucket, agent, model) then
+   * summed, so each model prices at its own rate (same discipline as
+   * getTokenSummary). Server-side to avoid ever hardcoding prices in the UI. */
+  costUsd: number
+}
+
+// SQL grain for the timeline: per (bucket, agent, model) so cost can be priced at
+// each row's own model, then re-aggregated to per (bucket, agent) in JS.
+interface TimelineModelRow {
+  bucket: number
+  agent: string
+  model: string | null
+  calls: number
+  inputTokens: number
+  outputTokens: number
+  cacheRead: number
+  cacheCreation: number
 }
 
 export function getTokenTimeline(
@@ -431,9 +448,13 @@ export function getTokenTimeline(
     SELECT
       (timestamp / ${bucketSeconds}) * ${bucketSeconds} as bucket,
       agent,
+      model,
       COUNT(*) as calls,
       SUM(input_tokens + cache_read_tokens + cache_creation_tokens) as inputTokens,
-      SUM(output_tokens) as outputTokens
+      SUM(output_tokens) as outputTokens,
+      SUM(input_tokens) as rawInput,
+      SUM(cache_read_tokens) as cacheRead,
+      SUM(cache_creation_tokens) as cacheCreation
     FROM token_usage
   `
   const conditions: string[] = []
@@ -442,9 +463,31 @@ export function getTokenTimeline(
   if (to) { conditions.push('timestamp <= ?'); params.push(to) }
   if (agent) { conditions.push('agent = ?'); params.push(agent) }
   if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ')
-  sql += ' GROUP BY bucket, agent ORDER BY bucket ASC'
+  sql += ' GROUP BY bucket, agent, model ORDER BY bucket ASC'
 
-  return db.prepare(sql).all(...params) as TimelineBucket[]
+  const rows = db.prepare(sql).all(...params) as (TimelineModelRow & { rawInput: number })[]
+
+  // Re-aggregate per (bucket, agent), summing the per-model cost. inputTokens
+  // already includes cache tokens for the chart; cost is priced from the raw
+  // components (rawInput/output/cacheRead/cacheCreation) at each row's model.
+  const byKey = new Map<string, TimelineBucket>()
+  for (const r of rows) {
+    const key = `${r.bucket} ${r.agent}`
+    let b = byKey.get(key)
+    if (!b) {
+      b = { bucket: r.bucket, agent: r.agent, calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 }
+      byKey.set(key, b)
+    }
+    b.calls += r.calls
+    b.inputTokens += r.inputTokens
+    b.outputTokens += r.outputTokens
+    b.costUsd += costForGroup({
+      agent: r.agent, model: r.model,
+      input: r.rawInput, output: r.outputTokens,
+      cacheRead: r.cacheRead, cacheCreation: r.cacheCreation,
+    })
+  }
+  return [...byKey.values()].sort((a, b) => a.bucket - b.bucket)
 }
 
 export interface TokenDetail {
