@@ -287,6 +287,15 @@ interface AgentSummary {
    *  drives the dashboard "reauth needed" badge + one-click /login button. */
   needsReauth: boolean
   reauthReason?: string
+  /** Channel-health of a running agent as seen by the channel-health monitor:
+   *  true = no failure recorded, false = the monitor caught a plugin-pane
+   *  channel failure (drives the card's "channel dropped" warning + reconnect).
+   *  null when not running. NB: the monitor only sees plugin-pane failures, so a
+   *  silent live-session client-drop can still read healthy -- this surfaces the
+   *  DETECTED drops, not every drop. */
+  channelHealthy: boolean | null
+  /** How many auto-reconnect attempts the monitor has made for this agent. */
+  channelReconnectAttempts: number
 }
 
 interface AgentDetail extends AgentSummary {
@@ -325,6 +334,10 @@ function getAgentSummary(name: string): AgentSummary {
   // transcript drops), so a 1M-context Opus isn't mis-sized at the 200K default.
   const contextPercent = contextTokens != null ? contextPercentForModel(contextTokens, readAgentModel(name)) : null
 
+  // Channel health from the monitor's in-memory reconnect state (cheap map
+  // lookup, no pane capture here). Only meaningful for a running agent.
+  const channelHealth = proc.running ? getChannelHealth(name) : null
+
   return {
     name,
     displayName: readAgentDisplayName(name),
@@ -348,6 +361,8 @@ function getAgentSummary(name: string): AgentSummary {
     contextPercent,
     needsReauth: reauth.needsReauth,
     reauthReason: reauth.reason,
+    channelHealthy: channelHealth ? channelHealth.healthy : null,
+    channelReconnectAttempts: channelHealth ? channelHealth.reconnectAttempts : 0,
   }
 }
 
