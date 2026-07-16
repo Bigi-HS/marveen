@@ -78,14 +78,15 @@ def similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
-def find_best_srt_match(en_text: str, srt_segments: list[dict], used: set) -> dict | None:
+def find_best_srt_match(en_text: str, srt_segments: list[dict], used: set) -> tuple:
     """
     Global best-match across all SRT segments (not forward-only).
+    Returns (best_segment, best_score). best_segment is None if score below threshold.
     The YouTube source video has scenes in a different order than the CSV,
     so timestamps are non-monotone by design -- that is expected and correct.
     """
     if not en_text.strip():
-        return None
+        return None, 0.0
     best = None
     best_score = 0.0
     for seg in srt_segments:
@@ -98,8 +99,8 @@ def find_best_srt_match(en_text: str, srt_segments: list[dict], used: set) -> di
     # Accept if score > 0.30, or short line with > 0.20
     min_score = 0.30 if len(en_text.split()) > 3 else 0.20
     if best and best_score >= min_score:
-        return best
-    return None
+        return best, best_score
+    return None, best_score
 
 
 def parse_source_csv(path: str) -> tuple[list[dict], list[dict]]:
@@ -157,7 +158,16 @@ def main() -> int:
     ap.add_argument("--srt", required=True, help="faster-whisper SRT output (EN)")
     ap.add_argument("--out", required=True, help="Output CSV path")
     ap.add_argument("--min-score", type=float, default=0.25, help="Minimum match score (0-1)")
+    ap.add_argument("--override", default="", help="Manual TC overrides: GLOBAL_ID:SRT_IDX[,...] (e.g. S01-001:42,S02-003:87)")
     args = ap.parse_args()
+
+    overrides: dict = {}
+    if args.override:
+        for pair in args.override.split(","):
+            pair = pair.strip()
+            if ":" in pair:
+                gid, idx = pair.split(":", 1)
+                overrides[gid.strip()] = int(idx.strip())
 
     print(f"Loading SRT: {args.srt}")
     srt_segments = parse_srt(args.srt)
@@ -188,8 +198,20 @@ def main() -> int:
         tc_out = ""
         dur = ""
 
-        if en.strip():
-            best = find_best_srt_match(en, srt_segments, used_srt)
+        if global_id in overrides:
+            override_idx = overrides[global_id]
+            seg = next((s for s in srt_segments if s["idx"] == override_idx), None)
+            if seg:
+                used_srt.add(seg["idx"])
+                tc_in = fmt_tc(seg["start"])
+                tc_out = fmt_tc(seg["end"])
+                dur = f"{seg['end'] - seg['start']:.2f}"
+                matched += 1
+                print(f"  OVERRIDE: {global_id} -> SRT#{override_idx} ({seg['start']:.2f}s)")
+            else:
+                print(f"  WARNING: override SRT#{override_idx} not found for {global_id}", file=sys.stderr)
+        elif en.strip():
+            best, best_score = find_best_srt_match(en, srt_segments, used_srt)
             if best:
                 used_srt.add(best["idx"])
                 tc_in = fmt_tc(best["start"])
@@ -198,7 +220,7 @@ def main() -> int:
                 matched += 1
             else:
                 unmatched += 1
-                unmatched_rows.append((global_id, char, en[:60]))
+                unmatched_rows.append((global_id, char, en[:60], best_score))
 
         output_rows.append({
             "GLOBAL_ID": global_id,
@@ -222,8 +244,11 @@ def main() -> int:
     print(f"Matched: {matched}/{len(dialogue_rows)}, Unmatched: {unmatched}")
     if unmatched_rows:
         print(f"\nUnmatched rows ({len(unmatched_rows)}) -- no TC assigned, manual review needed:")
-        for gid, char, en_snip in unmatched_rows:
-            print(f"  {gid}  [{char}]  \"{en_snip}...\"" if len(en_snip) == 60 else f"  {gid}  [{char}]  \"{en_snip}\"")
+        print(f"  Use --override GLOBAL_ID:SRT_IDX to force-assign a specific SRT segment.")
+        for gid, char, en_snip, score in unmatched_rows:
+            score_str = f"best score: {score:.2f}" if score > 0 else "no candidate"
+            snip = f'"{en_snip}..."' if len(en_snip) == 60 else f'"{en_snip}"'
+            print(f"  {gid}  [{char}]  {snip}  ({score_str})")
 
     fieldnames = [
         "GLOBAL_ID", "#", "TC_IN", "TC_OUT", "DUR", "KAMERA", "KARAKTER",

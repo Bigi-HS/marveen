@@ -214,6 +214,13 @@ def main():
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
+    if args.mode in ("silence", "both"):
+        for binary, name in [(FFMPEG, "ffmpeg"), (FFPROBE, "ffprobe")]:
+            if not os.path.exists(binary):
+                print(f"ERROR: {name} not found at {binary}", file=sys.stderr)
+                print(f"  Update the FFMPEG/FFPROBE constants at the top of smart-cut.py", file=sys.stderr)
+                sys.exit(1)
+
     cuts = []
 
     if args.mode in ("srt", "both"):
