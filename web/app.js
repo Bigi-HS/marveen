@@ -218,6 +218,7 @@ let kanbanProjectFilter = ''
 // Matched case-insensitively against card.assignee so a casing mismatch
 // (e.g. card "gorcsevivan" vs list "GorcsevIvan") still filters correctly.
 let kanbanAssigneeFilter = ''
+let kanbanPriorityFilter = ''
 
 const cardModalOverlay = document.getElementById('cardModalOverlay')
 const cardDetailOverlay = document.getElementById('cardDetailOverlay')
@@ -405,6 +406,25 @@ function setupAssigneeFilter() {
     toolbar.appendChild(label)
     toolbar.appendChild(sel)
     toolbar.appendChild(ownerBtn)
+
+    // Priority filter (card ba512371 #4). Fixed enum, so built once alongside the
+    // assignee control rather than repopulated from the data.
+    const prLabel = document.createElement('label')
+    prLabel.setAttribute('for', 'kanbanPriorityFilter')
+    prLabel.textContent = 'Prioritás:'
+    prLabel.style.cssText = 'font-size:13px;color:var(--muted);white-space:nowrap;margin-left:8px;'
+    const prSel = document.createElement('select')
+    prSel.id = 'kanbanPriorityFilter'
+    prSel.style.cssText = 'font-size:13px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg);min-width:110px;'
+    prSel.innerHTML = '<option value="">Mind</option>'
+      + '<option value="urgent">Sürgős</option>'
+      + '<option value="high">Magas</option>'
+      + '<option value="normal">Normál</option>'
+      + '<option value="low">Alacsony</option>'
+    prSel.value = kanbanPriorityFilter
+    prSel.addEventListener('change', (e) => { kanbanPriorityFilter = e.target.value; renderKanban() })
+    toolbar.appendChild(prLabel)
+    toolbar.appendChild(prSel)
   }
 
   // (Re)populate options from the current assignee list, preserving selection.
@@ -431,6 +451,8 @@ function renderKanban() {
     if (kanbanProjectFilter && (card.project || '') !== kanbanProjectFilter) continue
     // Assignee filter (case-insensitive). Empty = no filter.
     if (assigneeFilter && String(card.assignee || '').trim().toLowerCase() !== assigneeFilter) continue
+    // Priority filter (fixed enum, default 'normal' when a card carries none).
+    if (kanbanPriorityFilter && (card.priority || 'normal') !== kanbanPriorityFilter) continue
     if (grouped[card.status]) grouped[card.status].push(card)
   }
 
@@ -1064,6 +1086,18 @@ document.getElementById('breakdownClose').addEventListener('click', () => closeM
 // === Elements: Agents ===
 const agentsGrid = document.getElementById('agentsGrid')
 const addBtn = document.getElementById('addAgentBtn')
+
+// Fleet-grid search filter (card ba512371 #3). Matches name/displayName/desc/
+// model/archetype + a running-state synonym so "offline"/"fut" narrow the grid.
+let agentSearchQuery = ''
+function agentMatchesSearch(agent) {
+  const q = agentSearchQuery.trim().toLowerCase()
+  if (!q) return true
+  const stateWords = agent.running ? 'fut running online aktiv' : 'leallva stopped offline'
+  const hay = [agent.name, agent.displayName, agent.description, agent.model, agent.archetype, stateWords]
+    .filter(Boolean).join(' ').toLowerCase()
+  return hay.includes(q)
+}
 const agentWizardOverlay = document.getElementById('agentWizardOverlay')
 const agentDetailOverlay = document.getElementById('agentDetailOverlay')
 const skillModalOverlay = document.getElementById('skillModalOverlay')
@@ -1563,8 +1597,12 @@ function channelTip(isConnected) {
 function renderAgents() {
   agentsGrid.querySelectorAll('.agent-card:not(.add-card)').forEach((el) => el.remove())
 
-  // Marveen card (always first)
-  if (window._marveen) {
+  // Marveen card (always first). Honour the search filter so it hides when the
+  // query does not match the main assistant.
+  const marveenMatches = window._marveen && agentMatchesSearch({
+    name: 'marveen', displayName: window._marveen.name, description: window._marveen.description, running: true,
+  })
+  if (marveenMatches) {
     const m = window._marveen
     const displayName = m.name || 'Marveen'
     const mCard = document.createElement('div')
@@ -1597,6 +1635,7 @@ function renderAgents() {
   }
 
   for (const agent of agents) {
+    if (!agentMatchesSearch(agent)) continue
     // agent.name is the sanitized id (API/filesystem); displayName keeps the
     // original accented/cased input the user typed.
     const label = agent.displayName || agent.name
@@ -6687,6 +6726,33 @@ const STATUS_COMPONENT_LABELS = {
 
 document.getElementById('refreshStatusBtn').addEventListener('click', loadStatus)
 
+// Header status banner (card ba512371 #5): a thin always-visible strip that
+// appears only when the Claude API has an active incident, so an outage is
+// noticed without opening the status page. Fed either by its own poll or by the
+// full status-page load (shared payload, no double fetch).
+function updateStatusBanner(data) {
+  const banner = document.getElementById('apiStatusBanner')
+  const textEl = document.getElementById('apiStatusText')
+  if (!banner || !textEl) return
+  const operational = !data || data.overall === 'operational'
+  if (operational) { banner.hidden = true; return }
+  const active = Array.isArray(data.incidents) ? data.incidents.filter((i) => i.status !== 'resolved') : []
+  const latest = active[0]
+  banner.classList.toggle('unknown', data.overall === 'unknown')
+  textEl.textContent = data.overall === 'unknown'
+    ? 'Claude API státusz nem elérhető'
+    : `Claude API incidens${active.length > 1 ? ` (${active.length})` : ''}${latest ? ': ' + latest.title : ''}`
+  banner.hidden = false
+}
+
+async function refreshStatusBanner() {
+  try {
+    const res = await fetch('/api/status')
+    if (!res.ok) return
+    updateStatusBanner(await res.json())
+  } catch { /* transient; keep last-known banner state */ }
+}
+
 async function loadStatus() {
   const overallEl = document.getElementById('statusOverall')
   const gridEl = document.getElementById('statusServiceGrid')
@@ -6700,6 +6766,7 @@ async function loadStatus() {
   try {
     const res = await fetch('/api/status')
     const data = await res.json()
+    updateStatusBanner(data)
 
     // Overall status
     const overallLabels = {
@@ -8316,6 +8383,13 @@ document.getElementById('updatesApplyBtn').addEventListener('click', async () =>
 // the cached status even on tabs other than the Updates page.
 pollUpdatesBadge()
 setInterval(pollUpdatesBadge, 5 * 60_000)
+
+// Status banner: poll independently of the status page so an incident surfaces
+// on any view. The RSS/components fetch is cached server-side, so a 5-min cadence
+// is cheap. The "Részletek" link jumps to the full status page.
+document.getElementById('apiStatusLink')?.addEventListener('click', (e) => { e.preventDefault(); switchPage('status') })
+refreshStatusBanner()
+setInterval(refreshStatusBanner, 5 * 60_000)
 
 // === Init ===
 populateAvatarGrid()
@@ -9957,10 +10031,10 @@ function renderAgentsTree() {
 
   // Combined dataset: the main agent (marveen) as a pseudo-agent + sub-agents.
   const all = []
-  if (window._marveen) {
+  if (window._marveen && agentMatchesSearch({ name: 'marveen', displayName: window._marveen.name, description: window._marveen.description, running: true })) {
     all.push({ name: 'marveen', displayName: window._marveen.name || 'Marveen', running: true, team: { reportsTo: null }, _main: true })
   }
-  for (const a of agents) all.push(a)
+  for (const a of agents) if (agentMatchesSearch(a)) all.push(a)
   const byName = new Map(all.map(a => [a.name, a]))
 
   const collapsed = getCollapsedCategories()
@@ -10052,4 +10126,6 @@ function renderAgentsTree() {
   const btnList = document.getElementById('viewToggleList')
   btnTree?.addEventListener('click', () => { setAgentsViewMode('tree'); renderActiveAgentsView() })
   btnList?.addEventListener('click', () => { setAgentsViewMode('list'); renderActiveAgentsView() })
+  const search = document.getElementById('agentSearchInput')
+  search?.addEventListener('input', (e) => { agentSearchQuery = e.target.value; renderActiveAgentsView() })
 })()
