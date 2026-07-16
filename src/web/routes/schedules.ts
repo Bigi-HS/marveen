@@ -21,6 +21,7 @@ import { buildScheduledTaskPrompt } from '../schedule-runner.js'
 import { injectToSession, resolveSession } from '../action-trigger.js'
 import {
   syncTaskToNoa, removeTaskFromNoa, updateTask, TaskNotFoundError,
+  recordTriggerFire, getTask,
 } from '../../noa-scheduler.js'
 import type { RouteContext } from './types.js'
 
@@ -285,36 +286,62 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     return true
   }
 
-  // Fire a scheduled task NOW, on operator demand, regardless of its cron.
-  // Composes the exact same prompt the cron loop would and injects it into the
-  // task's target session. Does NOT touch the cron last-run bookkeeping -- a
-  // manual run is intentional and must not suppress the next scheduled tick.
+  // Fire a scheduled task NOW, on operator demand or from an external trigger (n8n).
+  //
+  // mode: 'manual' (default) -- fires WITHOUT updating last_run/next_run so the
+  //   native cron runner still fires at its scheduled time. Use for operator/debug runs.
+  //
+  // mode: 'trigger' -- fires AND, on success-or-busy, rolls last_run/next_run forward
+  //   using the same formula as the native sweep tick. This makes the native runner
+  //   treat the task as "already fired" and skip its next poll -- converting native
+  //   into a true fallback. On session-offline or inject-error the schedule is NOT
+  //   advanced so the native runner can fire as recovery.
+  //
+  // Narrow same-tick race: if the native poll query runs in the same second as this
+  // UPDATE commits, both may fire. The 409-busy response from the second inject is
+  // harmless (the agent ignores duplicate prompts while processing). This race window
+  // is ~1s and non-blocking by design; no additional coordination is required.
   const scheduleRunMatch = path.match(/^\/api\/schedules\/([^/]+)\/run$/)
   if (scheduleRunMatch && method === 'POST') {
     const name = safeScheduleName(scheduleRunMatch[1])
     if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
-    const task = listScheduledTasks().find(t => t.name === name)
-    if (!task) { json(res, { error: 'Schedule not found' }, 404); return true }
+    const fileTask = listScheduledTasks().find(t => t.name === name)
+    if (!fileTask) { json(res, { error: 'Schedule not found' }, 404); return true }
 
     let force = false
+    let triggerMode = false
     try {
       const body = await readBody(req, { maxBytes: 4 * 1024 })
-      if (body.length) force = (JSON.parse(body.toString()) as { force?: boolean }).force === true
-    } catch { /* no/blank body -> force stays false */ }
+      if (body.length) {
+        const parsed = JSON.parse(body.toString()) as { force?: boolean; mode?: string }
+        force = parsed.force === true
+        triggerMode = parsed.mode === 'trigger'
+      }
+    } catch { /* no/blank body -> defaults */ }
 
-    const agentName = task.agent || MAIN_AGENT_ID
-    const session = task.targetSession || resolveSession(agentName)
-    const prompt = buildScheduledTaskPrompt(task, agentName)
+    const agentName = fileTask.agent || MAIN_AGENT_ID
+    const session = fileTask.targetSession || resolveSession(agentName)
+    const prompt = buildScheduledTaskPrompt(fileTask, agentName)
     const status = injectToSession(session, prompt, { force })
+
     if (status === 'offline') {
       json(res, { error: `Target session for "${name}" is not running`, status }, 503)
       return true
     }
     if (status === 'busy') {
+      if (triggerMode) {
+        const dbTask = getTask(name)
+        if (dbTask) recordTriggerFire(dbTask)
+      }
       json(res, { error: `Target session for "${name}" is busy; retry or use force`, status }, 409)
       return true
     }
-    logger.info({ name, agent: agentName, session, force }, 'Scheduled task fired on operator demand')
+
+    if (triggerMode) {
+      const dbTask = getTask(name)
+      if (dbTask) recordTriggerFire(dbTask)
+    }
+    logger.info({ name, agent: agentName, session, force, triggerMode }, 'Scheduled task fired on operator demand')
     json(res, { ok: true, status, agent: agentName })
     return true
   }
