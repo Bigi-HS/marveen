@@ -117,6 +117,13 @@
   </aside>
 
   <main>
+    <!-- Claude API status banner: hidden while operational, shows on any active incident. -->
+    <div class="api-status-banner" id="apiStatusBanner" hidden>
+      <span class="api-status-dot"></span>
+      <span class="api-status-text" id="apiStatusText"></span>
+      <a href="#status" class="api-status-link" id="apiStatusLink">Részletek</a>
+    </div>
+
     <!-- === Overview Page (default) === -->
     <div class="page" id="overviewPage">
       <div class="overview-stats">
@@ -255,6 +262,7 @@
       <div class="agents-view-toggle" id="agentsViewToggle">
         <button class="view-toggle-btn" data-view="tree" id="viewToggleTree">Fa nézet</button>
         <button class="view-toggle-btn" data-view="list" id="viewToggleList">Lista</button>
+        <input type="search" id="agentSearchInput" class="agent-search-input" placeholder="Keresés: név / státusz / szerep…" autocomplete="off" aria-label="Ügynök keresés">
       </div>
       <div class="agents-tree" id="agentsTree" hidden></div>
       <div class="agents-grid" id="agentsGrid">

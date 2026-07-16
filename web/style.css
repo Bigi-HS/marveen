@@ -981,6 +981,66 @@ main {
   display: flex;
   gap: 4px;
   margin-bottom: 16px;
+  align-items: center;
+}
+/* Fleet-grid search box (card ba512371 #3): pushed to the right of the toggles. */
+.agent-search-input {
+  margin-left: auto;
+  min-width: 240px;
+  padding: 6px 12px;
+  border: 1px solid var(--border, #2a2a2a);
+  background: var(--bg-input);
+  color: var(--fg, var(--text));
+  border-radius: 6px;
+  font-size: 13px;
+}
+.agent-search-input:focus {
+  outline: none;
+  border-color: var(--border-focus, var(--accent));
+}
+@media (max-width: 640px) {
+  .agent-search-input { min-width: 0; flex: 1 1 100%; margin-left: 0; }
+}
+
+/* Claude API status banner (card ba512371 #5): thin incident strip at the top of
+   the content area, hidden while operational. */
+.api-status-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--danger, #bf4d43);
+  background: var(--danger-soft, rgba(191, 77, 67, 0.12));
+  color: var(--text);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.api-status-banner[hidden] { display: none; }
+.api-status-banner.unknown {
+  border-color: var(--border);
+  background: var(--bg-input);
+}
+.api-status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--danger, #bf4d43);
+  flex: 0 0 auto;
+  animation: apiStatusPulse 1.8s ease-in-out infinite;
+}
+.api-status-banner.unknown .api-status-dot { background: var(--text-muted); animation: none; }
+.api-status-text { flex: 1 1 auto; min-width: 0; }
+.api-status-link {
+  flex: 0 0 auto;
+  color: var(--danger, #bf4d43);
+  font-weight: 600;
+  text-decoration: none;
+}
+.api-status-link:hover { text-decoration: underline; }
+@keyframes apiStatusPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 .view-toggle-btn {
   padding: 6px 14px;
