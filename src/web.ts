@@ -75,6 +75,8 @@ import { tryHandleAnalytics } from './web/routes/analytics.js'
 import { applyAnalyticsMigrations } from './analytics/storage.js'
 import { tryHandleNotify } from './web/routes/notify.js'
 import { tryHandleGithubSearch } from './web/routes/github-search.js'
+import { tryHandleBondSrs } from './web/routes/bond-srs.js'
+import { tryHandleHibikiNutrition } from './web/routes/hibiki-nutrition.js'
 import { tryHandleStatic } from './web/routes/static.js'
 import type { RouteContext } from './web/routes/types.js'
 
@@ -310,6 +312,8 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleAnalytics(routeCtx)) return
       if (await tryHandleNotify(routeCtx)) return
       if (await tryHandleGithubSearch(routeCtx)) return
+      if (await tryHandleBondSrs(routeCtx)) return
+      if (await tryHandleHibikiNutrition(routeCtx)) return
       if (await tryHandleStatic(routeCtx, WEB_DIR)) return
 
       res.writeHead(404)
