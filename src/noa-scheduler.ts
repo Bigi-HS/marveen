@@ -341,6 +341,23 @@ export function removeTaskFromNoa(id: string, db = getNoaDb()): void {
   db.prepare(`UPDATE scheduled_tasks SET status = 'deleted' WHERE id = ?`).run(id)
 }
 
+// Roll a just-fired task forward to its next cron slot. The next_run basis is the
+// fired slot (max of now and the task's own next_run), NOT "now": a look-ahead fire
+// is still before its cron minute and a now-basis would re-pick the same slot
+// (295c94f2). Single source for all three fire paths -- the inject-trigger record
+// and both sweep loops -- so their roll-forward can never drift apart.
+function rollForwardFired(
+  task: ScheduledTask,
+  nowMs: number,
+  nowS: number,
+  db: ReturnType<typeof getNoaDb>,
+): void {
+  const basisMs = Math.max(nowMs, task.next_run * 1000)
+  db.prepare(
+    `UPDATE scheduled_tasks SET last_run=?, last_result='fired', next_run=? WHERE id=?`
+  ).run(nowS, computeNextRun(task.schedule, basisMs), task.id)
+}
+
 // Record a successful trigger-mode fire from an external caller (e.g. n8n cron).
 // Uses exactly the same last_run/next_run roll-forward as the native sweep tick so
 // the native runner's query (last_run < next_run) treats this as "already fired"
@@ -352,10 +369,7 @@ export function removeTaskFromNoa(id: string, db = getNoaDb()): void {
 export function recordTriggerFire(task: ScheduledTask, db = getNoaDb()): void {
   const nowMs = Date.now()
   const nowS = Math.floor(nowMs / 1000)
-  const basisMs = Math.max(nowMs, task.next_run * 1000)
-  db.prepare(
-    `UPDATE scheduled_tasks SET last_run=?, last_result='fired', next_run=? WHERE id=?`
-  ).run(nowS, computeNextRun(task.schedule, basisMs), task.id)
+  rollForwardFired(task, nowMs, nowS, db)
 }
 
 export function getTask(id: string, db = getNoaDb()): ScheduledTask | null {
@@ -615,12 +629,7 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb()): void {
 
     const result = attemptFireTask(taskDef, row.agent_name, sessions, db)
     if (result === 'fired') {
-      // Roll forward from the fired slot, not from "now" -- a look-ahead fire is
-      // still before its cron minute and a now-basis would re-pick the same slot (295c94f2).
-      const basisMs = Math.max(nowMs, taskDef.next_run * 1000)
-      db.prepare(
-        `UPDATE scheduled_tasks SET last_run=?, last_result='fired', next_run=? WHERE id=?`
-      ).run(nowS, computeNextRun(taskDef.schedule, basisMs), taskDef.id)
+      rollForwardFired(taskDef, nowMs, nowS, db)
       deletePendingRetry(row.task_name, row.agent_name, db)
     } else if (result === 'missing') {
       deletePendingRetry(row.task_name, row.agent_name, db)
@@ -646,11 +655,7 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb()): void {
     const result = attemptFireTask(task, agentName, sessions, db)
 
     if (result === 'fired') {
-      // See Step 1: base the roll-forward on the fired slot to avoid look-ahead self-refire (295c94f2).
-      const basisMs = Math.max(nowMs, task.next_run * 1000)
-      db.prepare(
-        `UPDATE scheduled_tasks SET last_run=?, last_result='fired', next_run=? WHERE id=?`
-      ).run(nowS, computeNextRun(task.schedule, basisMs), task.id)
+      rollForwardFired(task, nowMs, nowS, db)
     } else if (result === 'busy') {
       insertPendingRetryIfNew(task.id, agentName, nowS, 'busy', db)
     } else if (result === 'missing') {
