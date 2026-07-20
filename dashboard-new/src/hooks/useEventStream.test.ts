@@ -114,6 +114,18 @@ describe('useEventStream event -> revision (thin-notify trigger)', () => {
     expect(result.current.revisions.message).toBe(0)
   })
 
+  it('a hook-event bumps revisions["hook-event"] independently (card 229a9000)', () => {
+    const { result } = renderHook(() => useEventStream())
+    act(() => MockEventSource.last().emitOpen())
+    expect(result.current.revisions['hook-event']).toBe(0)
+    act(() => {
+      MockEventSource.last().dispatch('hook-event', { type: 'hook-event', id: 'sess-1', action: 'Bash' })
+      vi.advanceTimersByTime(__TESTING.COALESCE_MS)
+    })
+    expect(result.current.revisions['hook-event']).toBe(1)
+    expect(result.current.revisions.kanban).toBe(0)
+  })
+
   it('an agent-status event bumps revisions["agent-status"] (card edf73bd7 F2)', () => {
     const { result } = renderHook(() => useEventStream())
     act(() => MockEventSource.last().emitOpen())
