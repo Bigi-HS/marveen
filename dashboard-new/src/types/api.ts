@@ -73,3 +73,16 @@ export interface AgentGridItem {
   hasAvatar: boolean
   isMain: boolean
 }
+
+/**
+ * GET /api/tool-log -- recent tool-call log rows (card 229a9000 hook-event relay).
+ * Timestamps are epoch SECONDS; `success` is a 0|1 int (SQLite boolean).
+ */
+export interface ToolCallEvent {
+  id: number
+  session_id: string
+  tool_name: string
+  input_summary: string | null
+  success: number
+  created_at: number
+}

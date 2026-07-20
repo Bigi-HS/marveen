@@ -1,4 +1,5 @@
 import { logToolCall, analyzeWorkflowCandidates, getRecentToolCalls, pruneToolCallLog } from '../../db.js'
+import { emitDashboardEvent } from '../../event-bus.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
 
@@ -15,7 +16,17 @@ export async function tryHandleToolLog(ctx: RouteContext): Promise<boolean> {
       success?: boolean
     }
     if (!data.session_id || !data.tool_name) { json(res, { error: 'session_id and tool_name required' }, 400); return true }
-    logToolCall(data.session_id, data.tool_name, data.input_summary ?? null, data.success !== false)
+    const ok = data.success !== false
+    logToolCall(data.session_id, data.tool_name, data.input_summary ?? null, ok)
+    // Live relay (card 229a9000, agent-flow event-relay steal): push a thin-notify
+    // frame so a connected dashboard streams tool activity in real time. Payload is
+    // metadata-only -- session id + tool name (with a :failed suffix on failure),
+    // never the input summary; the client re-fetches via the authed GET.
+    emitDashboardEvent({
+      type: 'hook-event',
+      id: data.session_id,
+      action: ok ? data.tool_name : `${data.tool_name}:failed`,
+    })
     json(res, { ok: true })
     return true
   }
