@@ -166,6 +166,70 @@ class DaemonDownTests(unittest.TestCase):
             self.assertIn("SERVE up", c, "must apply serve after the daemon comes up")
 
 
+class TailscaledPathFallbackTests(unittest.TestCase):
+    """Card 6342be48: the supervisor runs with a non-login PATH that lacks
+    /usr/sbin, where tailscaled is installed, so `command -v tailscaled` fails
+    there even though the binary exists. The script must fall back to well-known
+    absolute install locations (overridable for tests) so reboot-persistence
+    actually works. The tailscale client itself is on PATH (/usr/bin), so only
+    tailscaled resolution needs the fallback."""
+
+    def _stubs_without_tailscaled_on_path(self, d, backend_state="Running"):
+        """Like _make_stubs but the tailscaled stub lives in a sibling dir that
+        is NOT on PATH -- simulating tailscaled at /usr/sbin outside the login
+        PATH while the tailscale client stays reachable."""
+        calls, up, flag, serve, log = _make_stubs(d, backend_state=backend_state)
+        # Move the tailscaled stub off PATH into an "offpath" dir.
+        offpath = os.path.join(d, "offpath")
+        os.makedirs(offpath, exist_ok=True)
+        src = os.path.join(d, "tailscaled")
+        dst = os.path.join(offpath, "tailscaled")
+        os.replace(src, dst)
+        return calls, up, flag, serve, log, dst
+
+    def test_down_tailscaled_off_path_uses_fallback(self):
+        with tempfile.TemporaryDirectory() as d:
+            calls, _up, flag, serve, log, tsd_path = \
+                self._stubs_without_tailscaled_on_path(d, backend_state="Running")
+            _write(flag, "")
+            # Daemon down (no up-marker). `tailscaled` is NOT on PATH, but the
+            # fallback list points at the off-path stub -> must resolve + start.
+            r = _run(d, flag, serve, log,
+                     extra_env={"ENSURE_TS_TSD_FALLBACKS": tsd_path})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            c = _calls(calls)
+            self.assertIn("TSD", c,
+                          "must start tailscaled via the fallback path when off PATH")
+            self.assertIn("SERVE up", c, "must apply serve after the daemon comes up")
+
+    def test_explicit_absolute_tailscaled_bin_is_used(self):
+        with tempfile.TemporaryDirectory() as d:
+            calls, _up, flag, serve, log, tsd_path = \
+                self._stubs_without_tailscaled_on_path(d, backend_state="Running")
+            _write(flag, "")
+            # Explicit absolute TAILSCALED_BIN (supervisor-provided) -> trusted as-is.
+            r = _run(d, flag, serve, log,
+                     extra_env={"TAILSCALED_BIN": tsd_path})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            c = _calls(calls)
+            self.assertIn("TSD", c, "must honor an explicit absolute TAILSCALED_BIN")
+            self.assertIn("SERVE up", c)
+
+    def test_down_no_tailscaled_anywhere_skips_gracefully(self):
+        with tempfile.TemporaryDirectory() as d:
+            calls, _up, flag, serve, log, _tsd_path = \
+                self._stubs_without_tailscaled_on_path(d, backend_state="Running")
+            _write(flag, "")
+            # Off PATH AND no fallback exists -> graceful skip, never error.
+            r = _run(d, flag, serve, log,
+                     extra_env={"ENSURE_TS_TSD_FALLBACKS":
+                                os.path.join(d, "nonexistent", "tailscaled")})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            c = _calls(calls)
+            self.assertNotIn("TSD", c, "must not start a daemon that cannot be found")
+            self.assertNotIn("SERVE up", c, "must not serve when tailscaled is absent")
+
+
 if __name__ == "__main__":
     if not os.path.exists(SCRIPT):
         print(f"EXPECTED-FAIL (TDD red): {SCRIPT} not found")

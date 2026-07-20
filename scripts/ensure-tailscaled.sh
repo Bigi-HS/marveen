@@ -33,8 +33,33 @@ TSD="${TAILSCALED_BIN:-tailscaled}"
 SUDO="${ENSURE_TS_SUDO:-sudo}"
 SOCK="${TAILSCALE_SOCK:-/var/run/tailscale/tailscaled.sock}"
 STATE="${TAILSCALE_STATE:-/var/lib/tailscale/tailscaled.state}"
+# tailscaled ships in /usr/sbin, which is absent from the supervisor's non-login
+# PATH -- so a bare `command -v tailscaled` fails there even when it is installed
+# (card 6342be48: this silently broke reboot-persistence). Fall back to well-known
+# absolute install locations. Colon-separated; overridable for tests.
+TSD_FALLBACKS="${ENSURE_TS_TSD_FALLBACKS:-/usr/sbin/tailscaled:/usr/bin/tailscaled:/usr/local/bin/tailscaled}"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [ensure-tailscaled] $*" >&2; }
+
+# Resolve the tailscaled binary. An explicit absolute TSD (env override or already
+# resolved) is trusted as-is. Otherwise try PATH, then the fallback locations.
+# Sets TSD to an absolute path on success; returns 1 if nothing usable is found.
+resolve_tsd() {
+  case "$TSD" in
+    /*) [ -x "$TSD" ] && return 0 || return 1 ;;
+  esac
+  command -v "$TSD" >/dev/null 2>&1 && return 0
+  local cand
+  local IFS=:
+  for cand in $TSD_FALLBACKS; do
+    if [ -n "$cand" ] && [ -x "$cand" ]; then
+      TSD="$cand"
+      log "tailscaled not on PATH -- using fallback $cand"
+      return 0
+    fi
+  done
+  return 1
+}
 
 # 0) Deploy-flag gate. Inert until the operator/Genesis enables remote access.
 [ -f "$FLAG" ] || exit 0
@@ -57,7 +82,7 @@ except Exception: print("")' 2>/dev/null \
 # 2) Start the daemon if it is down. Userspace networking is the stable WSL mode
 #    (no TUN device needed); needs passwordless sudo (true on this host).
 if ! daemon_up; then
-  command -v "$TSD" >/dev/null 2>&1 || { log "tailscaled binary not found -- skipping"; exit 0; }
+  resolve_tsd || { log "tailscaled binary not found (PATH or $TSD_FALLBACKS) -- skipping"; exit 0; }
   mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
   log "tailscaled down -- starting (userspace-networking)"
   $SUDO nohup "$TSD" --tun=userspace-networking --state="$STATE" --socket="$SOCK" >> "$LOG" 2>&1 &
