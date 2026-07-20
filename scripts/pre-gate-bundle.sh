@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # pre-gate-bundle.sh -- mechanical pre-gate evidence bundle (Thor card b45884fb).
 #
-# Runs four DETERMINISTIC checks against a PR (base-branch ... head-sha) and emits a
+# Runs a set of DETERMINISTIC checks against a PR (base-branch ... head-sha) and emits a
 # single verdict (PASS / WARN / BLOCK) plus per-check evidence. The point is to hand
 # the merge gate (Thor + Dave [+ Chad]) a uniform, reproducible evidence sheet instead
 # of ad-hoc "I ran the tests" claims.
 #
 # Checks:
-#   typecheck  `npx tsc --noEmit`               -- type errors -> BLOCK; tooling missing -> WARN
-#   tests      `npx vitest run` (worktrees excl) -- any failure -> BLOCK; runner missing -> WARN
-#   diff-size  `git diff --numstat base...head`  -- additions count; over threshold -> WARN
-#   static     secret + unused-export grep       -- hardcoded secret -> BLOCK; unused export -> WARN
-#   gitleaks   gitleaks diff scan (card ea3720b3) -- secret found -> BLOCK; binary missing -> WARN
+#   typecheck      `npx tsc --noEmit`               -- type errors -> BLOCK; tooling missing -> WARN
+#   tests          `npx vitest run` (worktrees excl) -- any failure -> BLOCK; runner missing -> WARN
+#   diff-size      `git diff --numstat base...head`  -- additions count; over threshold -> WARN
+#   static         secret + unused-export grep       -- hardcoded secret -> BLOCK; unused export -> WARN
+#   gitleaks       gitleaks diff scan (card ea3720b3) -- secret found -> BLOCK; binary missing -> WARN
+#   mock-integrity self-mocked-unit scan (card d25ebf19) -- tautological test -> WARN (loki-mode steal)
+#   test-mutation  weakened/disabled-test scan (card d25ebf19) -- assertion removed/skipped -> WARN
 #
 # Usage:
 #   scripts/pre-gate-bundle.sh <base-branch> <head-sha> [--json] [--notify[=agent]]
@@ -331,6 +333,136 @@ PY
   record gitleaks BLOCK "gitleaks findings (secret value NOT shown): ${findings}"
 }
 
+# --------------------------------------------------------------------------- #
+# loki-mode gate steal (card d25ebf19): two static-diff test-quality heuristics #
+# borrowed from asklokesh/loki-mode. Both are WARN-only by design (heuristics   #
+# with real false-positive rates) -- they surface intent for the reviewer, they #
+# never BLOCK. Detection logic lives in pure, stdin-fed scan functions (like    #
+# pgb_count_additions) so it unit-tests without git/npx/network. The scanners   #
+# self-filter to test files via the diff's `+++ b/` headers; details name files #
+# and signal categories only, never the changed line content.                   #
+# --------------------------------------------------------------------------- #
+
+# Mock-integrity: flag a test that mocks the very unit it is named after
+# (`foo.test.ts` doing `vi.mock('./foo')`) -- the mock replaces the real
+# implementation, so the test verifies the mock, not the code (tautology).
+# Mocking a DEPENDENCY is legitimate and is NOT flagged. JS/TS scope: vi.mock /
+# jest.mock (python patch() self-mock is a distinct pattern, out of scope here).
+# Reads a unified diff on stdin; echoes "file:self-mock" entries (comma-joined),
+# empty when clean.
+pgb_scan_mock_integrity() {
+  # Read the diff from stdin into an env var: a `python3 - <<'PY'` heredoc claims
+  # stdin for the PROGRAM, so the diff must reach python another way (env, same
+  # idiom as check_cross_model). `cat` drains the piped diff.
+  local diff; diff="$(cat)"
+  PGB_DIFF="$diff" python3 - <<'PY'
+import re, os
+cur = None
+unit = None
+is_test = False
+seen = set()
+flags = []
+test_re = re.compile(r'\.(test|spec)\.[A-Za-z0-9]+$')
+mock_re = re.compile(r'(?:vi|jest)\.mock\s*\(\s*[\'"]([^\'"]+)[\'"]')
+for raw in os.environ.get("PGB_DIFF", "").splitlines():
+    line = raw
+    if line.startswith('+++ '):
+        path = line[4:].strip()
+        if path.startswith('b/'):
+            path = path[2:]
+        cur = path
+        base = path.rsplit('/', 1)[-1]
+        is_test = bool(test_re.search(base))
+        unit = test_re.sub('', base) if is_test else None
+        continue
+    if not is_test or not line.startswith('+') or line.startswith('+++'):
+        continue
+    m = mock_re.search(line)
+    if not m:
+        continue
+    target = m.group(1).rsplit('/', 1)[-1]
+    target = re.sub(r'\.[A-Za-z0-9]+$', '', target)
+    if unit and target == unit:
+        key = '%s:self-mock' % cur
+        if key not in seen:
+            seen.add(key)
+            flags.append(key)
+print(', '.join(flags))
+PY
+}
+
+# Test-mutation: flag PRs that WEAKEN tests to pass rather than fixing code --
+# removed assertions (`- expect(...)`, `- assert ...`) or newly added
+# skips/focus (`.skip(`, `.only(`, `xit(`, `*.todo`, `@unittest.skip`, ...).
+# Only test files are considered (JS/TS *.test.*/*.spec.*, python *.test.py or
+# test_*.py). Reads a unified diff on stdin; echoes "file:signal" entries
+# (comma-joined), empty when clean.
+pgb_scan_test_mutation() {
+  # See pgb_scan_mock_integrity: pass the piped diff via env, not the heredoc-stdin.
+  local diff; diff="$(cat)"
+  PGB_DIFF="$diff" python3 - <<'PY'
+import re, os
+cur = None
+is_test = False
+sigs = {}
+def is_test_file(base):
+    return bool(re.search(r'\.(test|spec)\.[A-Za-z0-9]+$', base)) or \
+           bool(re.match(r'test_.*\.py$', base))
+removed_assert = re.compile(r'(?:\bexpect\s*\(|\bassert\b|\bself\.assert)')
+added_disable = re.compile(
+    r'(?:\.skip\s*\(|\.only\s*\(|\bxit\s*\(|\bxdescribe\s*\(|\bfit\s*\('
+    r'|(?:it|test|describe)\.todo\b|@unittest\.skip|pytest\.mark\.skip'
+    r'|\bself\.skipTest\s*\()')
+for raw in os.environ.get("PGB_DIFF", "").splitlines():
+    line = raw
+    if line.startswith('+++ '):
+        path = line[4:].strip()
+        if path.startswith('b/'):
+            path = path[2:]
+        cur = path
+        base = path.rsplit('/', 1)[-1]
+        is_test = is_test_file(base)
+        continue
+    if not is_test:
+        continue
+    if line.startswith('-') and not line.startswith('---'):
+        if removed_assert.search(line):
+            sigs.setdefault(cur, set()).add('removed-assertion')
+    elif line.startswith('+') and not line.startswith('+++'):
+        if added_disable.search(line):
+            sigs.setdefault(cur, set()).add('added-skip-or-focus')
+out = []
+for f in sorted(sigs):
+    for s in sorted(sigs[f]):
+        out.append('%s:%s' % (f, s))
+print(', '.join(out))
+PY
+}
+
+# Wrapper: run the mock-integrity scan over the PR diff and record a check.
+check_mock_integrity() {
+  local hits
+  hits="$(git -C "$INSTALL_DIR" diff "${BASE}...${HEAD}" -- . \
+            ":(exclude)${VITEST_EXCLUDE}" 2>/dev/null | pgb_scan_mock_integrity)"
+  if [ -n "$hits" ]; then
+    record mock-integrity WARN "test(s) mock the unit under test (tautological): ${hits}"
+  else
+    record mock-integrity PASS "no self-mocked units in changed tests"
+  fi
+}
+
+# Wrapper: run the test-mutation scan over the PR diff and record a check.
+check_test_mutation() {
+  local hits
+  hits="$(git -C "$INSTALL_DIR" diff "${BASE}...${HEAD}" -- . \
+            ":(exclude)${VITEST_EXCLUDE}" 2>/dev/null | pgb_scan_test_mutation)"
+  if [ -n "$hits" ]; then
+    record test-mutation WARN "test assertions weakened/disabled (review intent): ${hits}"
+  else
+    record test-mutation PASS "no weakened or disabled tests"
+  fi
+}
+
 # Optional cross-model critic (--cross-model flag). Calls a local Ollama model to
 # surface same-model blind spots. Result is ADVISORY ONLY: FLAG lines must be
 # addressed by the gate reviewer in their APPROVE comment, but they never change
@@ -624,6 +756,8 @@ main() {
   check_diff_size
   check_static
   check_gitleaks
+  check_mock_integrity
+  check_test_mutation
   [ "$cross_model" -eq 1 ] && check_cross_model
   [ "$skill_check" -eq 1 ] && check_skill_regression
   check_da_sentinel

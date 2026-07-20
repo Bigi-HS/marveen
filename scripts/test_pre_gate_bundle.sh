@@ -81,6 +81,80 @@ sys.exit("; ".join(errs) if errs else 0)
 PY
 if [ $? -eq 0 ]; then ok "pgb_json emits schema-valid JSON (required fields + check shape)"; else bad "pgb_json JSON contract"; fi
 
+# --------------------------------------------------------------------------- #
+# loki-mode gate steal (card d25ebf19): mock-integrity + test-mutation scans.   #
+# Both are pure, stdin-fed static-diff heuristics (like pgb_count_additions) so #
+# they unit-test without touching git/npx/network. WARN-level by design         #
+# (false-positive tolerant) -- they never BLOCK, only flag for reviewer intent. #
+# --------------------------------------------------------------------------- #
+
+# 6) mock-integrity: a test that mocks its OWN unit is tautological -> flagged.
+MI_SELF="$(printf '%s\n' \
+  '+++ b/src/foo.test.ts' \
+  '@@ -1,2 +1,3 @@' \
+  "+vi.mock('./foo')" \
+  "+import { foo } from './foo'" | pgb_scan_mock_integrity)"
+case "$MI_SELF" in
+  *"src/foo.test.ts:self-mock"*) ok "mock-integrity flags a self-mocked unit" ;;
+  *) bad "mock-integrity flags a self-mocked unit (got '$MI_SELF')" ;;
+esac
+
+# 6b) mocking a DEPENDENCY (not the unit under test) is legitimate -> no flag.
+MI_DEP="$(printf '%s\n' \
+  '+++ b/src/foo.test.ts' \
+  "+vi.mock('./bar')" | pgb_scan_mock_integrity)"
+eq "$MI_DEP" "" "mock-integrity ignores dependency mocks"
+
+# 6c) jest.mock self-mock (double-quoted, parent-relative) is flagged too.
+MI_JEST="$(printf '%s\n' \
+  '+++ b/pkg/user.spec.ts' \
+  '+jest.mock("../user")' | pgb_scan_mock_integrity)"
+case "$MI_JEST" in
+  *"pkg/user.spec.ts:self-mock"*) ok "mock-integrity flags a jest self-mock" ;;
+  *) bad "mock-integrity flags a jest self-mock (got '$MI_JEST')" ;;
+esac
+
+# 7) test-mutation: a REMOVED assertion in a test file is flagged.
+TM_RM="$(printf '%s\n' \
+  '+++ b/src/foo.test.ts' \
+  '@@ -1,3 +1,2 @@' \
+  '-  expect(result).toBe(42)' \
+  '   doThing()' | pgb_scan_test_mutation)"
+case "$TM_RM" in
+  *"src/foo.test.ts:removed-assertion"*) ok "test-mutation flags a removed assertion" ;;
+  *) bad "test-mutation flags a removed assertion (got '$TM_RM')" ;;
+esac
+
+# 7b) an ADDED .skip/.only in a test file is flagged.
+TM_SKIP="$(printf '%s\n' \
+  '+++ b/src/foo.test.ts' \
+  "+  it.skip('does thing', () => {" | pgb_scan_test_mutation)"
+case "$TM_SKIP" in
+  *"src/foo.test.ts:added-skip-or-focus"*) ok "test-mutation flags an added skip/focus" ;;
+  *) bad "test-mutation flags an added skip/focus (got '$TM_SKIP')" ;;
+esac
+
+# 7c) an assertion change in a NON-test file is NOT a test-mutation signal.
+TM_NON="$(printf '%s\n' \
+  '+++ b/src/foo.ts' \
+  '-  expect(x).toBe(1)' | pgb_scan_test_mutation)"
+eq "$TM_NON" "" "test-mutation ignores non-test files"
+
+# 7d) a clean test edit (ADDS a real assertion) is not flagged.
+TM_CLEAN="$(printf '%s\n' \
+  '+++ b/src/foo.test.ts' \
+  '+  expect(result).toBe(7)' | pgb_scan_test_mutation)"
+eq "$TM_CLEAN" "" "test-mutation ignores added assertions"
+
+# 7e) a python unittest skip (test_*.py) is flagged (cross-language coverage).
+TM_PY="$(printf '%s\n' \
+  '+++ b/scripts/test_thing.py' \
+  '+    @unittest.skip("flaky")' | pgb_scan_test_mutation)"
+case "$TM_PY" in
+  *"scripts/test_thing.py:added-skip-or-focus"*) ok "test-mutation flags a python unittest skip" ;;
+  *) bad "test-mutation flags a python unittest skip (got '$TM_PY')" ;;
+esac
+
 echo "----"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
