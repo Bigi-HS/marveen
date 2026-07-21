@@ -15,7 +15,7 @@ import { readBody, json } from '../http-helpers.js'
 import { openPullRequest, PrRequestError, fetchPrInfo } from '../github-pr.js'
 import { mergePullRequest, MergeRequestError, validateMergeParams } from '../github-merge.js'
 import { runGateCheck, resolveCiStatus, isGateCiRequired, type GithubPrInfo } from '../gate-check.js'
-import { readApprovals, hasActiveOverride, insertPrAuthor, readLatestCiRun } from '../gate-db.js'
+import { readApprovals, hasActiveOverride, insertPrAuthor, readPrAuthor, readLatestCiRun } from '../gate-db.js'
 import { getDb } from '../../db.js'
 import type { RouteContext } from './types.js'
 
@@ -80,6 +80,10 @@ export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
         // /api/gate/check. Gated by GATE_CI_REQUIRED (default off).
         ciStatus: (pr, sha) => resolveCiStatus(readLatestCiRun(db, pr, sha)),
         ciRequired: isGateCiRequired(),
+        // Author recusal (card 46de122b): a reviewer-author is dropped from the
+        // required seats and the backup (chad) promoted, so an author-recused PR
+        // is no longer deadlocked at auto-merge. Trusted identity-bound record.
+        readAuthor: (prNum) => readPrAuthor(db, prNum),
       })
     } catch (err) {
       logger.warn({ caller: identity.agentId, pr: v.pr, err }, 'GitHub merge: gate check fetch failed')
