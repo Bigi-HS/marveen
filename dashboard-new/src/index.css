@@ -19,7 +19,7 @@
       radial-gradient(70rem 40rem at 100% 0%, color-mix(in srgb, var(--primary) 9%, transparent), transparent 55%);
     background-attachment: fixed;
     color: var(--text);
-    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     -webkit-font-smoothing: antialiased;
   }
 }

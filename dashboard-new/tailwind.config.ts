@@ -9,6 +9,13 @@ const config: Config = {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
+      // Approved v6 design fonts (store/dashboard-design-system.md): Inter for UI,
+      // JetBrains Mono for data (ids, timestamps, counts). Self-hosted via @fontsource
+      // (src/fonts.css) -- no third-party font CDN.
+      fontFamily: {
+        sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
+        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+      },
       colors: {
         'bg-deep': 'var(--bg-deep)',
         'bg-surface': 'var(--bg-surface)',

@@ -20,7 +20,7 @@ export function KanbanColumn({
         <span className={cn('text-sm font-semibold', KANBAN_COLUMN_ACCENT[status])}>
           {KANBAN_COLUMN_LABEL[status]}
         </span>
-        <span className="rounded bg-bg-elevated px-1.5 py-0.5 text-xs text-text-muted">{cards.length}</span>
+        <span className="rounded bg-bg-elevated px-1.5 py-0.5 font-mono text-xs tabular-nums text-text-muted">{cards.length}</span>
       </header>
       <div className="flex flex-col gap-2 p-2">
         {cards.length === 0 ? (

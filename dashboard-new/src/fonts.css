@@ -1,0 +1,25 @@
+/*
+ * Self-hosted app fonts -- the approved v6 design fonts (store/dashboard-design-system.md,
+ * store/dashboard-mission-control-mockup.html): Inter for UI/body, JetBrains Mono for
+ * data (ids, timestamps, counts). Served from our own origin via @fontsource, so there
+ * is NO third-party font CDN request -- zero external egress, works on the tailnet.
+ * latin + latin-ext subsets only (Hungarian accents), and only the weights the UI uses.
+ * @fontsource sets font-display: swap, so text paints immediately in the fallback.
+ */
+@import '@fontsource/inter/latin-400.css';
+@import '@fontsource/inter/latin-500.css';
+@import '@fontsource/inter/latin-600.css';
+@import '@fontsource/inter/latin-700.css';
+@import '@fontsource/inter/latin-ext-400.css';
+@import '@fontsource/inter/latin-ext-500.css';
+@import '@fontsource/inter/latin-ext-600.css';
+@import '@fontsource/inter/latin-ext-700.css';
+
+@import '@fontsource/jetbrains-mono/latin-400.css';
+@import '@fontsource/jetbrains-mono/latin-500.css';
+@import '@fontsource/jetbrains-mono/latin-600.css';
+@import '@fontsource/jetbrains-mono/latin-700.css';
+@import '@fontsource/jetbrains-mono/latin-ext-400.css';
+@import '@fontsource/jetbrains-mono/latin-ext-500.css';
+@import '@fontsource/jetbrains-mono/latin-ext-600.css';
+@import '@fontsource/jetbrains-mono/latin-ext-700.css';
