@@ -76,7 +76,7 @@ export function GateBoard({ prs, nowMs }: { prs: GateBoardPr[]; nowMs: number })
             <tbody>
               {rows.map((pr) => (
                 <tr key={pr.pr_number} className="border-b border-border/50 last:border-0">
-                  <td className="py-2 pr-3 font-medium text-text">#{pr.pr_number}</td>
+                  <td className="py-2 pr-3 font-mono font-medium tabular-nums text-text">#{pr.pr_number}</td>
                   <td className="py-2 pr-3 text-text-muted">{agentDisplayName(pr.author) ?? '—'}</td>
                   {REVIEWERS.map((r) => (
                     <td key={r} className="px-2 py-2 text-center">
@@ -89,7 +89,7 @@ export function GateBoard({ prs, nowMs }: { prs: GateBoardPr[]; nowMs: number })
                   <td className="px-2 py-2 text-center">
                     <MergeBadge pr={pr} />
                   </td>
-                  <td className="py-2 pl-2 text-right text-xs text-text-muted">
+                  <td className="py-2 pl-2 text-right font-mono text-xs tabular-nums text-text-muted">
                     {relativeTime(secToMs(pr.last_activity), nowMs)}
                   </td>
                 </tr>
