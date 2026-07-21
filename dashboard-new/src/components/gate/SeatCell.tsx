@@ -10,9 +10,11 @@ export function SeatCell({ seat }: { seat: GateSeat }) {
       role="img"
       aria-label={SEAT_LABEL[seat]}
       title={SEAT_LABEL[seat]}
-      className={cn('inline-flex h-6 w-6 items-center justify-center rounded-full text-xs', SEAT_CHIP[seat])}
+      className={cn('inline-flex h-6 w-6 items-center justify-center rounded-full', SEAT_CHIP[seat])}
     >
-      <span aria-hidden>{SEAT_GLYPH[seat]}</span>
+      <span aria-hidden className="text-sm font-semibold leading-none">
+        {SEAT_GLYPH[seat]}
+      </span>
     </span>
   )
 }

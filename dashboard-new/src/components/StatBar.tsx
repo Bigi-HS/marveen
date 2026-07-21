@@ -53,10 +53,10 @@ export function StatBar({ agents, cards }: { agents: AgentGridItem[]; cards: Kan
             </span>
             <div className="min-w-0">
               <div className="flex items-baseline gap-1.5">
-                <span className={cn('text-2xl font-semibold leading-none tabular-nums', tone.text)}>{s.value}</span>
+                <span className={cn('text-[1.75rem] font-semibold leading-none tabular-nums', tone.text)}>{s.value}</span>
                 <span className="text-xs text-text-muted">{s.sub}</span>
               </div>
-              <div className="mt-1 truncate text-xs font-medium uppercase tracking-wide text-text-muted">{s.label}</div>
+              <div className="mt-1.5 truncate text-[10px] font-semibold uppercase tracking-[0.1em] text-text-muted">{s.label}</div>
             </div>
           </div>
         )

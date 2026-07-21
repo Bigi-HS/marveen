@@ -4,6 +4,7 @@ import {
   awaitsSeat,
   MY_SEAT,
   SEAT_CHIP,
+  SEAT_GLYPH,
   CI_CHIP,
   MERGE_CHIP,
 } from './gate'
@@ -73,6 +74,26 @@ describe('merge badge invariant: uncertain state is never the confident-green "r
     expect(MERGE_CHIP.ready).toMatch(/bg-status-done/)
     expect(MERGE_CHIP['ready-unverified']).toMatch(/bg-transparent/)
     expect(MERGE_CHIP['ready-unverified']).not.toMatch(/bg-status-done\//)
+  })
+
+  it('hierarchy: only "ready" wears confident green text; "ready-unverified" is muted + dashed', () => {
+    // The tentative state keeps a green hint on the border only, never green text,
+    // so a "Ready (Chad?)" can never read as the confident go that "Merge ready" is.
+    expect(MERGE_CHIP.ready).toMatch(/text-status-done/)
+    expect(MERGE_CHIP['ready-unverified']).not.toMatch(/text-status-done/)
+    expect(MERGE_CHIP['ready-unverified']).toMatch(/text-text-muted/)
+    expect(MERGE_CHIP['ready-unverified']).toMatch(/border-dashed/)
+  })
+})
+
+describe('seat glyphs (legibility): each verdict is a distinct, legible mark', () => {
+  it('approved/blocked/pending are visually distinct and pending is not a middot', () => {
+    expect(SEAT_GLYPH.approved).toBe('✓')
+    expect(SEAT_GLYPH.blocked).toBe('✕')
+    // A mid-dot ('·') nearly disappears at seat size; pending uses a stroke instead.
+    expect(SEAT_GLYPH.none).not.toBe('·')
+    const glyphs = Object.values(SEAT_GLYPH)
+    expect(new Set(glyphs).size).toBe(glyphs.length)
   })
 })
 

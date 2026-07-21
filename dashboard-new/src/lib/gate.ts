@@ -56,10 +56,12 @@ export const SEAT_LABEL: Record<GateSeat, string> = {
   none: 'Pending',
 }
 
+// Pending is a horizontal stroke, not a mid-dot: at ~14px a middot nearly vanishes
+// on the faint seat chip, so "no verdict yet" reads as an empty seat, not dirt.
 export const SEAT_GLYPH: Record<GateSeat, string> = {
   approved: '✓',
   blocked: '✕',
-  none: '·',
+  none: '–',
 }
 
 export const SEAT_CHIP: Record<GateSeat, string> = {
@@ -88,11 +90,17 @@ export const MERGE_LABEL: Record<MergeState, string> = {
   pending: 'Pending',
 }
 
-// 'ready' is the ONLY solid-filled green; 'ready-unverified' is a dashed outline so
-// an uncertain state can never read as a confident go at a glance (marveen guard).
+// Merge-readiness hierarchy, most-to-least confident, so the eye can rank at a glance:
+//   ready            -> solid green fill + green text (the ONLY confident go)
+//   ready-unverified -> muted text on a dashed green outline (tentative: "almost, but
+//                       Chad hasn't been seen") -- the green moved to the border only,
+//                       the label reads muted so it never competes with a real go.
+//   override/blocked -> brand orange (attention), distinguished by their text label
+//   pending          -> quiet muted chip
+// 'ready' stays the single solid-filled green (marveen guard).
 export const MERGE_CHIP: Record<MergeState, string> = {
   ready: 'text-status-done bg-status-done/15 ring-1 ring-inset ring-status-done/40',
-  'ready-unverified': 'text-status-done bg-transparent border border-dashed border-status-done/50',
+  'ready-unverified': 'text-text-muted bg-transparent border border-dashed border-status-done/50',
   override: 'text-primary bg-primary/10 ring-1 ring-inset ring-primary/30',
   blocked: 'text-primary bg-primary/15 ring-1 ring-inset ring-primary/40',
   pending: 'text-text-muted bg-border/25 ring-1 ring-inset ring-border',
