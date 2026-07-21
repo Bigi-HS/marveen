@@ -21,6 +21,8 @@
   --success-soft: rgba(120, 140, 93, 0.12);
   --info: #6a9bcc;
   --info-soft: rgba(106, 155, 204, 0.12);
+  --warning: #9a6b1f;
+  --warning-soft: rgba(154, 107, 31, 0.12);
   --shadow-sm: 0 1px 3px rgba(20, 20, 19, 0.04);
   --shadow-md: 0 4px 16px rgba(20, 20, 19, 0.06);
   --shadow-lg: 0 8px 32px rgba(20, 20, 19, 0.1);
@@ -41,6 +43,8 @@
   --text-secondary: #b0aea5;
   --text-muted: #73726c;
   --border: #3d3d3a;
+  --warning: #d4a24e;
+  --warning-soft: rgba(212, 162, 78, 0.14);
   --shadow-sm: 0 1px 3px rgba(0,0,0,0.2);
   --shadow-md: 0 4px 16px rgba(0,0,0,0.25);
   --shadow-lg: 0 8px 32px rgba(0,0,0,0.35);
@@ -945,14 +949,28 @@ main {
   border-radius: 4px;
   font-size: 11px;
   font-weight: 600;
-  text-transform: uppercase;
   letter-spacing: 0.3px;
   background: var(--bg-input);
   color: var(--text-muted);
+  white-space: nowrap;
 }
-.agent-model-badge.opus { background: rgba(217,119,87,0.12); color: var(--accent); }
+.agent-model-badge.opus { background: var(--accent-soft); color: var(--accent); }
 .agent-model-badge.sonnet { background: var(--info-soft); color: var(--info); }
 .agent-model-badge.haiku { background: var(--success-soft); color: var(--success); }
+.agent-model-badge.fable { background: var(--warning-soft); color: var(--warning); }
+
+/* Context-usage severity (tokenized; replaces the old inline off-palette hex).
+   High usage is the balloon early-warning -> danger; mid -> warning. */
+.agent-ctx-badge {
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 6px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+.agent-ctx-badge.ctx-ok { background: var(--success-soft); color: var(--success); }
+.agent-ctx-badge.ctx-mid { background: var(--warning-soft); color: var(--warning); }
+.agent-ctx-badge.ctx-high { background: var(--danger-soft); color: var(--danger); }
 
 .marveen-card { border-left: 3px solid var(--accent); }
 .marveen-badge {
@@ -1033,15 +1051,17 @@ main {
 }
 
 /* Claude API status banner (card ba512371 #5): thin incident strip at the top of
-   the content area, hidden while operational. */
+   the content area, hidden while operational. An upstream incident is a
+   heads-up, not a fleet emergency: warning tone, no pulse. Red stays reserved
+   for destructive/danger states (fleet convention). */
 .api-status-banner {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-bottom: 16px;
   padding: 10px 14px;
-  border: 1px solid var(--danger, #bf4d43);
-  background: var(--danger-soft, rgba(191, 77, 67, 0.12));
+  border: 1px solid var(--warning);
+  background: var(--warning-soft);
   color: var(--text);
   border-radius: 8px;
   font-size: 13px;
@@ -1055,23 +1075,18 @@ main {
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: var(--danger, #bf4d43);
+  background: var(--warning);
   flex: 0 0 auto;
-  animation: apiStatusPulse 1.8s ease-in-out infinite;
 }
-.api-status-banner.unknown .api-status-dot { background: var(--text-muted); animation: none; }
+.api-status-banner.unknown .api-status-dot { background: var(--text-muted); }
 .api-status-text { flex: 1 1 auto; min-width: 0; }
 .api-status-link {
   flex: 0 0 auto;
-  color: var(--danger, #bf4d43);
+  color: var(--warning);
   font-weight: 600;
   text-decoration: none;
 }
 .api-status-link:hover { text-decoration: underline; }
-@keyframes apiStatusPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
-}
 .view-toggle-btn {
   padding: 6px 14px;
   border: 1px solid var(--border, #2a2a2a);
@@ -2091,12 +2106,19 @@ main {
   color: var(--success);
 }
 .badge-paused {
-  background: rgba(217, 119, 87, 0.12);
+  background: var(--accent-soft);
   color: var(--accent);
 }
+/* Heartbeat is a task TYPE, not an alarm: info tone, not the off-palette pink
+   that read as an error state on every second row. */
 .badge-heartbeat {
-  background: rgba(200, 80, 120, 0.12);
-  color: #c85078;
+  background: var(--info-soft);
+  color: var(--info);
+}
+/* Overdue/sent alert states on pending retries: a real heads-up, warning tone. */
+.badge-alert {
+  background: var(--warning-soft);
+  color: var(--warning);
 }
 
 .task-info {

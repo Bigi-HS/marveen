@@ -1430,9 +1430,28 @@ function formatContextTokens(n) {
 function contextBadgeHtml(agent) {
   if (!agent || !agent.running || typeof agent.contextPercent !== 'number') return ''
   const p = agent.contextPercent
-  const color = p >= 80 ? '#e5484d' : p >= 50 ? '#f5a623' : '#3fb950'
-  return `<span class="agent-ctx-badge" title="Kontextus-ablak kihasználtság: ${p}%" ` +
-    `style="font-size:11px;font-weight:600;color:${color};border:1px solid ${color}55;border-radius:6px;padding:1px 6px">${p}%</span>`
+  // Tokenized severity classes (style.css) instead of the old inline styles
+  // with off-palette hex -- keeps the card on the design tokens in both themes.
+  const level = p >= 80 ? 'high' : p >= 50 ? 'mid' : 'ok'
+  return `<span class="agent-ctx-badge ctx-${level}" title="Kontextus-ablak kihasználtság: ${p}%">${p}%</span>`
+}
+
+// "claude-opus-4-8" -> "Opus 4.8", "claude-haiku-4-5-20251001" -> "Haiku 4.5",
+// "claude-fable-5" -> "Fable 5". Unrecognized ids pass through untouched so a
+// future model never renders blank.
+function friendlyModelName(model) {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(model || '')
+  if (!m) return model || 'inherit'
+  const family = m[1].charAt(0).toUpperCase() + m[1].slice(1)
+  return m[3] ? `${family} ${m[2]}.${m[3]}` : `${family} ${m[2]}`
+}
+
+// The tint class is the model FAMILY: the full id ("claude-sonnet-4-6") never
+// matched the .opus/.sonnet/.haiku rules, so every configured badge rendered
+// untinted gray.
+function modelFamilyClass(model) {
+  const m = /^claude-(opus|sonnet|haiku|fable)\b/.exec(model || '')
+  return m ? m[1] : ''
 }
 
 // Populate the auto-restart controls + context display from an agent payload.
@@ -1618,7 +1637,7 @@ function renderAgents() {
         </div>
       </div>
       <div class="agent-card-footer">
-        <span class="agent-model-badge opus">opus</span>
+        <span class="agent-model-badge opus">Opus</span>
         <span class="process-indicator" title="Fut: a fő asszisztens mindig a --channels session-ben fut. Ez a kártya fixen Fut állapotot mutat, nincs per-ágens tmux-ellenőrzés."><span class="process-dot running"></span>Fut</span>
         <span class="tg-status" title="Online: a fő asszisztens csatornáját a --channels session kezeli, ezért fixen online (nincs külön token-ellenőrzés)."><span class="tg-dot connected"></span>Online</span>
       </div>
@@ -1650,8 +1669,11 @@ function renderAgents() {
       ? `<img src="/api/agents/${encodeURIComponent(agent.name)}/avatar?t=${Date.now()}" alt="${escapeHtml(label)}">`
       : initial
 
-    const modelClass = agent.model && agent.model !== 'inherit' ? agent.model : ''
-    const modelLabel = agent.model || 'inherit'
+    // Prefer the live model (activeModel) over the configured one, mirroring
+    // the detail modal; humanize the raw id for the chip.
+    const cardModel = agent.activeModel || agent.model
+    const modelClass = cardModel && cardModel !== 'inherit' ? modelFamilyClass(cardModel) : ''
+    const modelLabel = friendlyModelName(cardModel)
     const chConnected = agentIsConnected(agent)
     // Channel-health warning (card ba512371 #6): a running agent whose token is
     // present (so it reads "Online") but whose channel the monitor flagged as
@@ -3663,9 +3685,9 @@ function renderPendingRetries(container, rows) {
           ${escapeHtml(r.taskName)}
           <span class="badge badge-paused">${escapeHtml(r.agentName)}</span>
           ${r.alertSentAt
-            ? '<span class="badge badge-heartbeat" title="Telegram riasztás elküldve">⚠️ riasztás elküldve</span>'
+            ? '<span class="badge badge-alert" title="Telegram riasztás elküldve">riasztás elküldve</span>'
             : r.alertDue
-              ? '<span class="badge badge-heartbeat" title="Riasztás esedékes, a következő tick küldi">⏳ riasztás esedékes</span>'
+              ? '<span class="badge badge-alert" title="Riasztás esedékes, a következő tick küldi">riasztás esedékes</span>'
               : ''}
         </div>
         <div class="pending-retry-meta">
@@ -3721,7 +3743,7 @@ function renderScheduleList(tasks) {
       <div class="schedule-info">
         <div class="schedule-title">
           ${escapeHtml(task.description || task.name)}
-          ${task.type === 'heartbeat' ? '<span class="badge badge-heartbeat">💓 heartbeat</span>' : ''}
+          ${task.type === 'heartbeat' ? '<span class="badge badge-heartbeat">heartbeat</span>' : ''}
           <span class="badge ${task.enabled ? 'badge-active' : 'badge-paused'}">${task.enabled ? 'aktív' : 'szünet'}</span>
         </div>
         <div class="schedule-meta">
