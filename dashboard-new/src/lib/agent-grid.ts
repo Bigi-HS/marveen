@@ -1,5 +1,6 @@
 import type { AgentSummary, AgentHealth, AgentGridItem } from '@/types/api'
 import { liveStatusFromHealth } from './status'
+import { agentDisplayName } from './display-name'
 
 /**
  * Join the agent roster (GET /api/agents) with the health board
@@ -31,7 +32,9 @@ export function mergeAgentStatus(agents: AgentSummary[], health: AgentHealth[]):
         : 'offline'
     items.push({
       name,
-      displayName: a?.displayName || name,
+      // Boss display-name rule: when the backend has no better name than the raw
+      // id, fall back to the fleet remap (marveen -> NoA), never the bare id.
+      displayName: (a?.displayName && a.displayName !== name ? a.displayName : agentDisplayName(name)) || name,
       status,
       lastActiveTs: h?.lastProgressTs ?? null,
       hasAvatar: a?.hasAvatar ?? false,

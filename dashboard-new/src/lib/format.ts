@@ -7,22 +7,23 @@ export function secToMs(epochSeconds: number): number {
 }
 
 /**
- * Compact relative timestamp ("just now", "2m ago", "5h ago", "3d ago").
- * `tsMs` is epoch MILLISECONDS. Null/absent -> "Never" (AC-F0-3 edge case).
- * Future timestamps (clock skew) clamp to "just now".
+ * Compact relative timestamp in Hungarian ("most", "2 perce", "5 órája",
+ * "3 napja") -- the dashboard reads in Boss's language. `tsMs` is epoch
+ * MILLISECONDS. Null/absent -> "Soha" (AC-F0-3 edge case). Future timestamps
+ * (clock skew) clamp to "most".
  */
 export function relativeTime(tsMs: number | null | undefined, nowMs: number): string {
-  if (tsMs == null) return 'Never'
+  if (tsMs == null) return 'Soha'
   const deltaSec = Math.floor((nowMs - tsMs) / 1000)
-  if (deltaSec < 0) return 'just now'
-  if (deltaSec < 45) return 'just now'
+  if (deltaSec < 0) return 'most'
+  if (deltaSec < 45) return 'most'
   const min = Math.floor(deltaSec / 60)
-  if (min < 1) return 'just now'
-  if (min < 60) return `${min}m ago`
+  if (min < 1) return 'most'
+  if (min < 60) return `${min} perce`
   const hr = Math.floor(min / 60)
-  if (hr < 24) return `${hr}h ago`
+  if (hr < 24) return `${hr} órája`
   const day = Math.floor(hr / 24)
-  return `${day}d ago`
+  return `${day} napja`
 }
 
 /** Truncate to `max` chars, appending an ellipsis when cut. Shorter strings pass through. */

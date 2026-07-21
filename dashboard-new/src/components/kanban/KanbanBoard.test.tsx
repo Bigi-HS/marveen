@@ -32,10 +32,10 @@ describe('KanbanBoard (AC-F0-7..9)', () => {
         ]}
       />,
     )
-    expect(screen.getByText('Planned')).toBeInTheDocument()
-    expect(screen.getByText('In progress')).toBeInTheDocument()
-    expect(screen.getByText('Waiting')).toBeInTheDocument()
-    expect(screen.getByText('Done')).toBeInTheDocument()
+    expect(screen.getByText('Tervezett')).toBeInTheDocument()
+    expect(screen.getByText('Folyamatban')).toBeInTheDocument()
+    expect(screen.getByText('Várakozik')).toBeInTheDocument()
+    expect(screen.getByText('Kész')).toBeInTheDocument()
     // planned column count badge = 2
     expect(screen.getByText('2')).toBeInTheDocument()
   })
@@ -51,7 +51,26 @@ describe('KanbanBoard (AC-F0-7..9)', () => {
     // read-only: no edit/save/delete controls
     expect(within(dialog).queryByRole('button', { name: /save|edit|delete/i })).not.toBeInTheDocument()
 
-    fireEvent.click(within(dialog).getByLabelText('Close'))
+    fireEvent.click(within(dialog).getByLabelText('Bezárás'))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('hides the priority badge for normal cards, shows it for the rest', () => {
+    render(
+      <KanbanBoard
+        cards={[
+          card({ id: 'n', priority: 'normal' }),
+          card({ id: 'h', priority: 'high' }),
+        ]}
+      />,
+    )
+    expect(screen.queryByText('Normál')).not.toBeInTheDocument()
+    expect(screen.getByText('Magas')).toBeInTheDocument()
+  })
+
+  it('renders the assignee display name, never the raw agent id', () => {
+    render(<KanbanBoard cards={[card({ id: 'a', assignee: 'marveen' })]} />)
+    expect(screen.getByText('NoA')).toBeInTheDocument()
+    expect(screen.queryByText('marveen')).not.toBeInTheDocument()
   })
 })

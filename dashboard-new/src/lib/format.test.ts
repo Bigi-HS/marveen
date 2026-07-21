@@ -3,31 +3,31 @@ import { relativeTime, truncate, secToMs } from './format'
 
 const NOW = 1_700_000_000_000 // fixed epoch ms
 
-describe('relativeTime', () => {
-  it('returns "Never" for null/undefined (AC-F0-3 edge case)', () => {
-    expect(relativeTime(null, NOW)).toBe('Never')
-    expect(relativeTime(undefined, NOW)).toBe('Never')
+describe('relativeTime (Hungarian microcopy)', () => {
+  it('returns "Soha" for null/undefined (AC-F0-3 edge case)', () => {
+    expect(relativeTime(null, NOW)).toBe('Soha')
+    expect(relativeTime(undefined, NOW)).toBe('Soha')
   })
 
-  it('returns "just now" under 45s and for future skew', () => {
-    expect(relativeTime(NOW, NOW)).toBe('just now')
-    expect(relativeTime(NOW - 10_000, NOW)).toBe('just now')
-    expect(relativeTime(NOW + 60_000, NOW)).toBe('just now')
+  it('returns "most" under 45s and for future skew', () => {
+    expect(relativeTime(NOW, NOW)).toBe('most')
+    expect(relativeTime(NOW - 10_000, NOW)).toBe('most')
+    expect(relativeTime(NOW + 60_000, NOW)).toBe('most')
   })
 
   it('formats minutes', () => {
-    expect(relativeTime(NOW - 2 * 60_000, NOW)).toBe('2m ago')
-    expect(relativeTime(NOW - 59 * 60_000, NOW)).toBe('59m ago')
+    expect(relativeTime(NOW - 2 * 60_000, NOW)).toBe('2 perce')
+    expect(relativeTime(NOW - 59 * 60_000, NOW)).toBe('59 perce')
   })
 
   it('formats hours', () => {
-    expect(relativeTime(NOW - 60 * 60_000, NOW)).toBe('1h ago')
-    expect(relativeTime(NOW - 23 * 60 * 60_000, NOW)).toBe('23h ago')
+    expect(relativeTime(NOW - 60 * 60_000, NOW)).toBe('1 órája')
+    expect(relativeTime(NOW - 23 * 60 * 60_000, NOW)).toBe('23 órája')
   })
 
   it('formats days', () => {
-    expect(relativeTime(NOW - 24 * 60 * 60_000, NOW)).toBe('1d ago')
-    expect(relativeTime(NOW - 5 * 24 * 60 * 60_000, NOW)).toBe('5d ago')
+    expect(relativeTime(NOW - 24 * 60 * 60_000, NOW)).toBe('1 napja')
+    expect(relativeTime(NOW - 5 * 24 * 60 * 60_000, NOW)).toBe('5 napja')
   })
 })
 

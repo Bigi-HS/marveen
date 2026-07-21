@@ -32,10 +32,10 @@ export function StatBar({ agents, cards }: { agents: AgentGridItem[]; cards: Kan
   ).length
 
   const stats: Stat[] = [
-    { label: 'Fleet online', value: online, sub: `of ${agents.length}`, icon: Users, tone: 'accent' },
-    { label: 'Working now', value: working, sub: 'active', icon: Zap, tone: 'primary' },
-    { label: 'Needs a look', value: attention, sub: 'stalled / offline', icon: AlertTriangle, tone: attention > 0 ? 'primary' : 'neutral' },
-    { label: 'Open cards', value: openCards, sub: 'on the board', icon: KanbanSquare, tone: 'neutral' },
+    { label: 'Flotta online', value: online, sub: `/ ${agents.length}`, icon: Users, tone: 'accent' },
+    { label: 'Épp dolgozik', value: working, sub: 'aktív', icon: Zap, tone: 'primary' },
+    { label: 'Figyelmet kér', value: attention, sub: 'beragadt / offline', icon: AlertTriangle, tone: attention > 0 ? 'primary' : 'neutral' },
+    { label: 'Nyitott kártya', value: openCards, sub: 'a táblán', icon: KanbanSquare, tone: 'neutral' },
   ]
 
   return (

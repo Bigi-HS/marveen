@@ -32,7 +32,7 @@ export function AgentChip({ agent, nowMs }: { agent: AgentGridItem; nowMs: numbe
           <span className="truncate font-semibold text-text">{agent.displayName}</span>
           {agent.isMain && (
             <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent">
-              you
+              te
             </span>
           )}
         </div>
