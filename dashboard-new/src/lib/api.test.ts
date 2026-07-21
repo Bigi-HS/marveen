@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { buildAuthHeaders, apiGet, ApiError, getToken } from './api'
+import { buildAuthHeaders, apiGet, ApiError, getToken, captureTokenFromUrl } from './api'
 
 describe('buildAuthHeaders (AC-G5)', () => {
   it('adds a Bearer header when a token is present', () => {
@@ -19,6 +19,36 @@ describe('getToken', () => {
   })
   it('returns null when nothing is set', () => {
     expect(getToken()).toBeNull()
+  })
+})
+
+describe('captureTokenFromUrl -- /v2 deep-link login', () => {
+  it('persists and strips a ?token= value, returns true', () => {
+    const persist = vi.fn()
+    const stripUrl = vi.fn()
+    expect(captureTokenFromUrl('?token=deeptok', persist, stripUrl)).toBe(true)
+    expect(persist).toHaveBeenCalledWith('deeptok')
+    expect(stripUrl).toHaveBeenCalledOnce()
+  })
+
+  it('does nothing when there is no token param', () => {
+    const persist = vi.fn()
+    const stripUrl = vi.fn()
+    expect(captureTokenFromUrl('?other=1', persist, stripUrl)).toBe(false)
+    expect(persist).not.toHaveBeenCalled()
+    expect(stripUrl).not.toHaveBeenCalled()
+  })
+
+  it('ignores an empty ?token= (no blank token persisted)', () => {
+    const persist = vi.fn()
+    expect(captureTokenFromUrl('?token=', persist, vi.fn())).toBe(false)
+    expect(persist).not.toHaveBeenCalled()
+  })
+
+  it('the default persist path writes to the same key getToken reads', () => {
+    localStorage.clear()
+    captureTokenFromUrl('?token=fromlink', undefined, vi.fn())
+    expect(getToken()).toBe('fromlink')
   })
 })
 

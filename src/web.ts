@@ -78,9 +78,11 @@ import { tryHandleGithubSearch } from './web/routes/github-search.js'
 import { tryHandleBondSrs } from './web/routes/bond-srs.js'
 import { tryHandleHibikiNutrition } from './web/routes/hibiki-nutrition.js'
 import { tryHandleStatic } from './web/routes/static.js'
+import { tryHandleDashboardNew } from './web/routes/dashboard-new.js'
 import type { RouteContext } from './web/routes/types.js'
 
 const WEB_DIR = join(PROJECT_ROOT, 'web')
+const DASHBOARD_NEW_DIST = join(PROJECT_ROOT, 'dashboard-new', 'dist')
 
 function ensureDirs() {
   mkdirSync(AGENTS_BASE_DIR, { recursive: true })
@@ -314,6 +316,9 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleGithubSearch(routeCtx)) return
       if (await tryHandleBondSrs(routeCtx)) return
       if (await tryHandleHibikiNutrition(routeCtx)) return
+      // dashboard-new SPA on /v2, side-by-side with the legacy web/ app on '/'.
+      // Mounted before the legacy static handler so the /v2 prefix is claimed first.
+      if (tryHandleDashboardNew(routeCtx, DASHBOARD_NEW_DIST)) return
       if (await tryHandleStatic(routeCtx, WEB_DIR)) return
 
       res.writeHead(404)

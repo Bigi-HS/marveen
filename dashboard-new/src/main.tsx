@@ -7,6 +7,11 @@ import './fonts.css'
 import '../styles/tokens.css'
 import './index.css'
 import App from './App'
+import { captureTokenFromUrl } from './lib/api'
+
+// Deep-link login before first render: a `?token=` in the URL is persisted and
+// stripped so the /v2 SPA authenticates on first visit (own localStorage key).
+captureTokenFromUrl()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

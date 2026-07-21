@@ -28,6 +28,40 @@ export function getToken(): string | null {
   }
 }
 
+function defaultStripToken(): void {
+  if (typeof window === 'undefined') return
+  const url = new URL(window.location.href)
+  url.searchParams.delete('token')
+  window.history.replaceState({}, '', url.pathname + url.search + url.hash)
+}
+
+/**
+ * One-time deep-link login (mirrors web/app.js). dashboard-new keeps its bearer
+ * token under its OWN localStorage key, separate from the legacy web/ app, so a
+ * first visit to /v2 would otherwise land on the "Authentication required"
+ * screen. If the URL carries `?token=<value>`, persist it and strip it from the
+ * address bar (so it never lingers in history or a shared link). This is the
+ * same entry path used for mobile onboarding. Returns true when a token was
+ * captured. Dependencies are injectable for testing.
+ */
+export function captureTokenFromUrl(
+  search: string = typeof window !== 'undefined' ? window.location.search : '',
+  persist: (token: string) => void = (token) => {
+    try {
+      localStorage.setItem(TOKEN_STORAGE_KEY, token)
+    } catch {
+      /* storage unavailable (private mode) -- nothing else we can do */
+    }
+  },
+  stripUrl: () => void = defaultStripToken,
+): boolean {
+  const token = new URLSearchParams(search).get('token')
+  if (!token) return false
+  persist(token)
+  stripUrl()
+  return true
+}
+
 /** Pure header builder (AC-G5). Adds Authorization only when a token exists. */
 export function buildAuthHeaders(token: string | null): Record<string, string> {
   const headers: Record<string, string> = { Accept: 'application/json' }
