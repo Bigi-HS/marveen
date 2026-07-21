@@ -22,7 +22,7 @@ import { Readable } from 'node:stream'
 import { rmSync } from 'node:fs'
 import { initDatabase, getDb } from '../db.js'
 import { tryHandleGithub, __setGithubMergeDeps, __resetGithubMergeDeps } from '../web/routes/github.js'
-import { insertApproval, insertOverride, insertCiRun } from '../web/gate-db.js'
+import { insertApproval, insertOverride, insertCiRun, insertPrAuthor } from '../web/gate-db.js'
 import type { GithubPrInfo } from '../web/gate-check.js'
 import type { AgentIdentity } from '../web/agent-token-registry.js'
 
@@ -194,6 +194,63 @@ describe('POST /api/github/merge -- same-final-head gate enforcement (card 194f4
 
     expect(r.status).toBe(403)
     expect(r.body.gate.override_active).toBe(false)
+    expect(merge.calls).toHaveLength(0)
+  })
+})
+
+// Card 46de122b: the merge route applies author recusal. A reviewer who authored
+// the PR cannot fill their own seat (MG-SEC5), so hard-requiring them deadlocked
+// the merge (PR#417). With a recorded author, that reviewer is dropped from
+// `required` and the backup (chad) is promoted, unblocking the author-recused
+// merge -- while never letting a security PR pass without a security seat.
+describe('POST /api/github/merge -- author recusal (card 46de122b)', () => {
+  const seedAuthor = (agent: string) => insertPrAuthor(getDb(), PR, agent, 900)
+
+  it('(h) dave-authored non-security PR: thor+chad approved -> merges (dave recused, chad promoted)', async () => {
+    // Exactly PR#417: dave cannot self-approve, so before recusal required=[thor,dave]
+    // deadlocked at 403. Now dave is recused and chad's approval fills the promoted seat.
+    seedAuthor('dave')
+    seed('thor', 'approved', SHA_A)
+    seed('chad', 'approved', SHA_A)
+    const merge = mergeSpy()
+    wire({ liveHead: SHA_A, merge })
+
+    const r = await callMerge({ pr_number: PR, head_sha: SHA_A, merge_method: 'merge' })
+
+    expect(r.status).toBe(200)
+    expect(r.body.merged).toBe(true)
+    expect(merge.calls).toHaveLength(1)
+  })
+
+  it('(i) dave-authored non-security PR with only thor -> 403 missing chad, merge NOT called', async () => {
+    seedAuthor('dave')
+    seed('thor', 'approved', SHA_A)
+    const merge = mergeSpy()
+    wire({ liveHead: SHA_A, merge })
+
+    const r = await callMerge({ pr_number: PR, head_sha: SHA_A, merge_method: 'merge' })
+
+    expect(r.status).toBe(403)
+    expect(r.body.gate.required).toEqual(['thor', 'chad'])
+    expect(r.body.gate.recused).toEqual(['dave'])
+    expect(r.body.gate.missing).toEqual(['chad'])
+    expect(merge.calls).toHaveLength(0)
+  })
+
+  it('(j) chad-authored SECURITY PR: thor+dave approved must NOT pass (security seat unfilled)', async () => {
+    // Red-team attack #2: recusing chad on a security PR would strip the only
+    // security review. chad stays required -> missing -> 403, no merge egress.
+    seedAuthor('chad')
+    seed('thor', 'approved', SHA_A)
+    seed('dave', 'approved', SHA_A)
+    const merge = mergeSpy()
+    wire({ liveHead: SHA_A, files: ['scripts/hooks/guardrail-x.py'], merge })
+
+    const r = await callMerge({ pr_number: PR, head_sha: SHA_A, merge_method: 'merge' })
+
+    expect(r.status).toBe(403)
+    expect(r.body.gate.required).toEqual(['thor', 'dave', 'chad'])
+    expect(r.body.gate.missing).toEqual(['chad'])
     expect(merge.calls).toHaveLength(0)
   })
 })

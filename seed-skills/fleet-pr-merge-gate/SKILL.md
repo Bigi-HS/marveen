@@ -106,6 +106,29 @@ reviewer (e.g. production-down hotfix), `POST /api/gate/override {"pr_number":N,
 sha-locked + single-use; the enforced-merge flow consumes it after a successful merge. Never self-issue
 an override for routine convenience -- it is logged with `recorded_by` and a mandatory reason.
 
+## Author recusal (card 46de122b)
+
+A reviewer cannot approve their OWN PR (MG-SEC5 self-approval block), so hard-requiring a
+reviewer who authored the PR deadlocks the merge (PR#417: `required=[thor,dave]`,
+author=dave, the `dave` seat is unfillable -> 403 forever). The gate now **auto-recuses** a
+reviewer-author: when the trusted author record says the PR's author is a gate reviewer,
+that reviewer is dropped from `required` and the backup seat `chad` is promoted (e.g.
+dave-authored non-security PR -> `required=[thor,chad]`). A security PR authored by chad is
+the one exception: chad stays required (it is the sole security seat) so the gate blocks
+until an operator relay records a real security approval -- recusal never lets a security PR
+pass without security review. The gate result carries `author` + `recused` so the decision
+is auditable.
+
+Recusal only engages when authorship is **recorded** in `gate_pr_authors`, and that record
+must carry the AUTHORING AGENT's identity. It is written on the identity-bound proxy
+`POST /api/github/pr` from `identity.agentId`. **Gap (Part A, follow-up):** opening a PR via
+the direct GitHub REST `POST /pulls` (the snippet below) records NO author; opening via the
+proxy with the shared admin token records the OPERATOR (`marveen`), not you -- both leave
+recusal inert (fail-safe: no record -> today's behavior, the operator relay below still
+works). Wiring per-agent-identity PR-open so `dave`-authored PRs record `dave` is the
+remaining step to make recusal fire automatically. Until then, the operator-relay fallback
+(NoA records the recused seat, or a Boss override) remains the path for author-recused PRs.
+
 ## API snippets (python3 urllib)
 
 ```python

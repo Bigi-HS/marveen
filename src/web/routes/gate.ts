@@ -232,6 +232,10 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
         // GATE_CI_REQUIRED rollout flag (default off = observability only).
         ciStatus: (p, sha) => resolveCiStatus(readLatestCiRun(db, p, sha)),
         ciRequired: isGateCiRequired(),
+        // Author recusal (card 46de122b): the preflight must show the same
+        // recusal-adjusted required set the merge route enforces, so an agent
+        // that preflights /api/gate/check sees the identical pass decision.
+        readAuthor: (p) => readPrAuthor(db, p),
       })
       json(res, result)
     } catch (err) {

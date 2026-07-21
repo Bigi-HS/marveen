@@ -159,6 +159,53 @@ export function requiredReviewers(securityTouched: boolean): Reviewer[] {
   return securityTouched ? ['thor', 'dave', 'chad'] : ['thor', 'dave']
 }
 
+// The standing backup seat promoted when a required reviewer recuses (card
+// 46de122b). Chad is the fleet's technical/security second seat.
+const RECUSAL_BACKUP: Reviewer = 'chad'
+
+export interface RecusalResult {
+  required: Reviewer[]
+  recused: Reviewer[]
+}
+
+// Author recusal (card 46de122b, MG-SEC7). A PR's author cannot fill their own
+// gate seat -- MG-SEC5 blocks self-approval -- so hard-requiring a reviewer who
+// authored the PR deadlocks the merge (PR#417: required=[thor,dave], author=dave,
+// dave-seat unfillable -> 403 forever). This recuses a reviewer-author and
+// promotes the backup seat (chad), but ONLY when that preserves coverage:
+//   - author must be a gate reviewer AND currently in `required` (else identity);
+//   - NEVER recuse the backup itself: on a security PR chad IS the sole security
+//     seat, and recusing it would let the PR pass with zero security review
+//     (#206 class). Keep it required so the seat stays unfillable-by-author and
+//     the gate blocks until an operator relay records a real approval;
+//   - NEVER drop below 2 distinct required reviewers.
+// The trusted author identity comes ONLY from the identity-bound gate_pr_authors
+// record (readPrAuthor) -- never from the GitHub PR user, which is the shared bot
+// for every agent. A null / non-reviewer author is the identity function, so the
+// gate behaves exactly as before recusal existed (fail-safe, strictly additive).
+export function applyAuthorRecusal(required: Reviewer[], author: string | null): RecusalResult {
+  if (!isValidReviewer(author) || !required.includes(author)) {
+    return { required, recused: [] }
+  }
+  // Never recuse the backup seat -- it has no further substitute, and on a
+  // security PR it is the only security review. Leave it required so the gate
+  // blocks until an operator relay fills it.
+  if (author === RECUSAL_BACKUP) {
+    return { required, recused: [] }
+  }
+  // author is thor or dave: drop them, ensure the backup is present. Preserve the
+  // original relative order (thor, dave, chad) rather than sorting -- the set is a
+  // display convention, not alphabetical.
+  const next = required.filter((r) => r !== author)
+  if (!next.includes(RECUSAL_BACKUP)) next.push(RECUSAL_BACKUP)
+  // Defensive floor: never emit a sub-2 required set (cannot occur for the
+  // thor/dave x {security,non-security} matrix, but never weaken below 2).
+  if (new Set(next).size < 2) {
+    return { required, recused: [] }
+  }
+  return { required: next, recused: [author] }
+}
+
 export interface ApprovalRow {
   reviewer: string
   verdict: string
@@ -220,6 +267,10 @@ export interface GateCheckDeps {
   // Whether a CI PASS is required for the gate to pass (env GATE_CI_REQUIRED).
   // Default false -> observability only.
   ciRequired?: boolean
+  // Trusted PR author from the identity-bound gate_pr_authors record (card
+  // 46de122b). Optional so existing callers are unchanged: omitted -> null author
+  // -> no recusal (fail-safe identity behavior).
+  readAuthor?: (pr: number) => string | null
 }
 
 export interface GateCheckResult {
@@ -236,6 +287,11 @@ export interface GateCheckResult {
   ci_status: CiStatus
   ci_required: boolean
   ci_pass: boolean
+  // Author-recusal surface (card 46de122b). `author` is the trusted recorded
+  // author (null when unknown -> no recusal, diagnosable rather than silent);
+  // `recused` lists reviewers dropped from `required` because they authored the PR.
+  author: string | null
+  recused: string[]
 }
 
 // MG-AC3 / MG-AC6 -- the gate check. Always evaluates against the CURRENT
@@ -246,7 +302,12 @@ export interface GateCheckResult {
 export async function runGateCheck(pr: number, deps: GateCheckDeps): Promise<GateCheckResult> {
   const { headSha, files } = await deps.fetchPr(pr)
   const securityTouched = files.some(isSecuritySensitivePath)
-  const required = requiredReviewers(securityTouched)
+  // Author recusal (card 46de122b): a reviewer who authored the PR cannot fill
+  // their own seat, so drop them from `required` and promote the backup. Author
+  // comes from the trusted identity-bound record; null (or no dep) -> no recusal.
+  const author = deps.readAuthor ? deps.readAuthor(pr) : null
+  const recusal = applyAuthorRecusal(requiredReviewers(securityTouched), author)
+  const required = recusal.required
   const evaluation = evaluateApprovals(deps.readApprovals(pr, headSha), required)
   const overrideActive = deps.hasActiveOverride(pr, headSha)
 
@@ -272,5 +333,7 @@ export async function runGateCheck(pr: number, deps: GateCheckDeps): Promise<Gat
     ci_status: ciStatus,
     ci_required: ciRequired,
     ci_pass: ciPass,
+    author: author ?? null,
+    recused: recusal.recused,
   }
 }

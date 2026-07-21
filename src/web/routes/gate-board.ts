@@ -27,6 +27,7 @@ import { json } from '../http-helpers.js'
 import { subscribeDashboardEvents } from '../../event-bus.js'
 import {
   evaluateApprovals,
+  applyAuthorRecusal,
   resolveCiStatus,
   isGateCiRequired,
   type Reviewer,
@@ -131,14 +132,18 @@ export function computeGateBoard(db: Database.Database, nowS: number): GateBoard
     const chadReviewed = seats.chad !== 'none'
     const overrideActive = hasActiveOverride(db, prNumber, sha)
     const ciStatus = resolveCiStatus(readLatestCiRun(db, prNumber, sha))
-    // Mirror runGateCheck's pass semantics with a DB-derived `required` set.
-    const required: Reviewer[] = chadReviewed ? ['thor', 'dave', 'chad'] : ['thor', 'dave']
+    const prAuthor = readPrAuthor(db, prNumber)
+    // Mirror runGateCheck's pass semantics with a DB-derived `required` set, then
+    // apply author recusal (card 46de122b) so the board's merge_ready matches the
+    // merge route: a reviewer-author is dropped and the backup (chad) promoted.
+    const baseRequired: Reviewer[] = chadReviewed ? ['thor', 'dave', 'chad'] : ['thor', 'dave']
+    const required = applyAuthorRecusal(baseRequired, prAuthor).required
     const evaluation = evaluateApprovals(approvals, required)
     const ciSatisfied = ciRequired ? ciStatus === 'pass' : true
     const mergeReady = overrideActive ? true : evaluation.pass && ciSatisfied
     prs.push({
       pr_number: prNumber,
-      author: readPrAuthor(db, prNumber),
+      author: prAuthor,
       seats,
       ci_status: ciStatus,
       ci_required: ciRequired,

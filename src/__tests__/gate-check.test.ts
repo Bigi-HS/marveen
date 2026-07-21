@@ -6,6 +6,7 @@ import {
   isPositiveInt,
   isSecuritySensitivePath,
   requiredReviewers,
+  applyAuthorRecusal,
   evaluateApprovals,
   runGateCheck,
   type ApprovalRow,
@@ -268,6 +269,7 @@ function deps(over: Partial<GateCheckDeps> & { headSha?: string; files?: string[
     fetchPr: async () => ({ headSha: over.headSha ?? SHA_A, files: over.files ?? [] }),
     readApprovals: over.readApprovals ?? (() => over.approvals ?? []),
     hasActiveOverride: over.hasActiveOverride ?? (() => over.override ?? false),
+    readAuthor: over.readAuthor,
   }
 }
 
@@ -301,5 +303,138 @@ describe('runGateCheck (MG-AC3, MG-AC6 staleness, MG-AC7 override)', () => {
     expect(r.override_active).toBe(true)
     expect(r.pass).toBe(true)
     expect(r.missing).toEqual(['thor', 'dave']) // transparency: still reported
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Author recusal (card 46de122b). The author of a PR cannot fill their own gate
+// seat (MG-SEC5 self-approval block), so a hard requirement deadlocks the merge.
+// applyAuthorRecusal removes a reviewer-author from `required` and promotes the
+// backup seat (chad) -- but only when that preserves coverage and >=2 seats.
+// ---------------------------------------------------------------------------
+describe('applyAuthorRecusal (card 46de122b)', () => {
+  it('non-security: dave-authored -> [thor, chad] (chad promoted)', () => {
+    const r = applyAuthorRecusal(['thor', 'dave'], 'dave')
+    expect(r.required).toEqual(['thor', 'chad'])
+    expect(r.recused).toEqual(['dave'])
+  })
+
+  it('non-security: thor-authored -> [dave, chad]', () => {
+    const r = applyAuthorRecusal(['thor', 'dave'], 'thor')
+    expect(r.required).toEqual(['dave', 'chad'])
+    expect(r.recused).toEqual(['thor'])
+  })
+
+  it('non-security: chad-authored -> unchanged (chad not in required)', () => {
+    const r = applyAuthorRecusal(['thor', 'dave'], 'chad')
+    expect(r.required).toEqual(['thor', 'dave'])
+    expect(r.recused).toEqual([])
+  })
+
+  it('security: dave-authored -> [thor, chad] (chad already present, dave removed)', () => {
+    const r = applyAuthorRecusal(['thor', 'dave', 'chad'], 'dave')
+    expect(r.required).toEqual(['thor', 'chad'])
+    expect(r.recused).toEqual(['dave'])
+  })
+
+  it('security: thor-authored -> [dave, chad]', () => {
+    const r = applyAuthorRecusal(['thor', 'dave', 'chad'], 'thor')
+    expect(r.required).toEqual(['dave', 'chad'])
+    expect(r.recused).toEqual(['thor'])
+  })
+
+  // RED-TEAM FIX (attack #2): a chad-authored SECURITY PR must NOT recuse chad,
+  // or the sole security seat vanishes and the PR could pass with zero security
+  // review (#206 class). Keep chad required -> it stays unfillable-by-chad ->
+  // the gate blocks until an operator relay records a real security approval.
+  it('security: chad-authored -> chad STAYS required (no security bypass)', () => {
+    const r = applyAuthorRecusal(['thor', 'dave', 'chad'], 'chad')
+    expect(r.required).toEqual(['thor', 'dave', 'chad'])
+    expect(r.recused).toEqual([])
+  })
+
+  it('fail-safe: null author -> identity (unchanged required)', () => {
+    const r = applyAuthorRecusal(['thor', 'dave'], null)
+    expect(r.required).toEqual(['thor', 'dave'])
+    expect(r.recused).toEqual([])
+  })
+
+  it('fail-safe: a non-reviewer author (marveen) does not alter required', () => {
+    const r = applyAuthorRecusal(['thor', 'dave'], 'marveen')
+    expect(r.required).toEqual(['thor', 'dave'])
+    expect(r.recused).toEqual([])
+  })
+
+  it('never yields fewer than 2 distinct required reviewers', () => {
+    for (const base of [['thor', 'dave'], ['thor', 'dave', 'chad']] as const) {
+      for (const author of ['thor', 'dave', 'chad', 'marveen', null]) {
+        const r = applyAuthorRecusal([...base], author)
+        expect(new Set(r.required).size).toBeGreaterThanOrEqual(2)
+      }
+    }
+  })
+})
+
+describe('runGateCheck author recusal integration (card 46de122b)', () => {
+  it('dave-authored non-security PR passes on thor+chad (dave recused, chad promoted)', async () => {
+    const r = await runGateCheck(701, deps({
+      files: ['src/db.ts'],
+      approvals: [approval('thor', 'approved'), approval('chad', 'approved')],
+      readAuthor: () => 'dave',
+    }))
+    expect(r.required).toEqual(['thor', 'chad'])
+    expect(r.recused).toEqual(['dave'])
+    expect(r.author).toBe('dave')
+    expect(r.pass).toBe(true)
+  })
+
+  it('dave-authored non-security PR with only thor -> missing chad, blocked', async () => {
+    const r = await runGateCheck(702, deps({
+      files: ['src/db.ts'],
+      approvals: [approval('thor', 'approved')],
+      readAuthor: () => 'dave',
+    }))
+    expect(r.required).toEqual(['thor', 'chad'])
+    expect(r.missing).toEqual(['chad'])
+    expect(r.pass).toBe(false)
+  })
+
+  // RED-TEAM FIX (attack #2): a chad-authored security PR with thor+dave (but no
+  // security seat) must NOT pass -- chad stays required and missing.
+  it('chad-authored security PR does NOT pass on thor+dave (security seat unfilled)', async () => {
+    const r = await runGateCheck(703, deps({
+      files: ['scripts/hooks/guardrail-x.py'],
+      approvals: [approval('thor', 'approved'), approval('dave', 'approved')],
+      readAuthor: () => 'chad',
+    }))
+    expect(r.required).toEqual(['thor', 'dave', 'chad'])
+    expect(r.missing).toEqual(['chad'])
+    expect(r.pass).toBe(false)
+  })
+
+  // RED-TEAM #4: fail-safe -- no readAuthor dep (null author) behaves exactly as
+  // pre-change: required stays [thor,dave], no recusal, no observability noise.
+  it('fail-safe: omitted readAuthor -> today behavior (no recusal)', async () => {
+    const r = await runGateCheck(704, deps({
+      files: ['src/db.ts'],
+      approvals: [approval('thor', 'approved'), approval('dave', 'approved')],
+    }))
+    expect(r.required).toEqual(['thor', 'dave'])
+    expect(r.recused).toEqual([])
+    expect(r.author).toBeNull()
+    expect(r.pass).toBe(true)
+  })
+
+  // RED-TEAM #5: a recused reviewer who nonetheless posted a `blocked` verdict must
+  // STILL fail the gate (blocked-stickiness is independent of the required set).
+  it('a recused author with a stale blocked row still fails the gate', async () => {
+    const r = await runGateCheck(705, deps({
+      files: ['src/db.ts'],
+      approvals: [approval('thor', 'approved'), approval('chad', 'approved'), approval('dave', 'blocked')],
+      readAuthor: () => 'dave',
+    }))
+    expect(r.recused).toEqual(['dave'])
+    expect(r.blocked).toEqual(['dave'])
+    expect(r.pass).toBe(false)
   })
 })
