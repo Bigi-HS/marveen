@@ -47,13 +47,14 @@ export function Home() {
         <StatBar agents={grid} cards={cards} />
       )}
 
+      {/* No SectionTitle here: the block carries its own "Figyelmet kér" header,
+          the doubled title read as a stutter. */}
       <section>
-        <SectionTitle>Needs attention</SectionTitle>
         <NeedsAttentionBlock agents={grid} cards={cards} />
       </section>
 
       <section>
-        <SectionTitle>Fleet</SectionTitle>
+        <SectionTitle>Flotta</SectionTitle>
         {loadingGrid ? (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
             {Array.from({ length: 6 }).map((_, i) => (
@@ -66,7 +67,7 @@ export function Home() {
       </section>
 
       <section>
-        <SectionTitle>Latest activity</SectionTitle>
+        <SectionTitle>Friss aktivitás</SectionTitle>
         {messages.loading && !messages.data ? (
           <Skeleton className="h-32" />
         ) : (

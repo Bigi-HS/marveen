@@ -7,7 +7,7 @@ import type { AgentGridItem } from '@/types/api'
  * Empty roster -> explicit empty state (section 7), grid not rendered.
  */
 export function AgentGrid({ agents, nowMs }: { agents: AgentGridItem[]; nowMs: number }) {
-  if (agents.length === 0) return <EmptyState message="No agents found" />
+  if (agents.length === 0) return <EmptyState message="Nincs elérhető ágens." />
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
       {agents.map((a) => (

@@ -13,13 +13,13 @@ describe('AgentChip (AC-F0-3)', () => {
   it('shows the display name, status label, and relative last-active', () => {
     render(<AgentChip agent={item({ status: 'busy', lastActiveTs: NOW - 2 * 60_000 })} nowMs={NOW} />)
     expect(screen.getByText('Dave')).toBeInTheDocument()
-    expect(screen.getByLabelText('Working')).toBeInTheDocument()
-    expect(screen.getByText('2m ago')).toBeInTheDocument()
+    expect(screen.getByLabelText('Dolgozik')).toBeInTheDocument()
+    expect(screen.getByText('2 perce')).toBeInTheDocument()
   })
 
-  it('renders "Never" when last-active is null', () => {
+  it('renders "Soha" when last-active is null', () => {
     render(<AgentChip agent={item({ lastActiveTs: null })} nowMs={NOW} />)
-    expect(screen.getByText('Never')).toBeInTheDocument()
+    expect(screen.getByText('Soha')).toBeInTheDocument()
   })
 
   it('falls back to initials when there is no avatar', () => {
