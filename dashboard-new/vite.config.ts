@@ -8,6 +8,10 @@ import path from 'node:path'
 // never opens the SQLite DB). The proxy keeps the browser same-origin in dev, so
 // no CORS handshake is needed for F0 (CORS lands in F1 with the SSE stream).
 export default defineConfig({
+  // Served side-by-side under /v2 by the backend static route (legacy web/ keeps
+  // '/'). The prefix must be baked into asset URLs so index.html references
+  // /v2/assets/* rather than /assets/* (which would collide with web/).
+  base: '/v2/',
   plugins: [react()],
   resolve: {
     alias: { '@': path.resolve(__dirname, 'src') },
