@@ -46,7 +46,9 @@ export function NavShell({
         </div>
       </header>
 
-      <nav className="mb-4 flex gap-1 border-b border-border">
+      {/* One swipeable row on narrow screens: labels stay whole and the tab bar
+          scrolls horizontally instead of wrapping into broken two-line tabs (390px). */}
+      <nav className="mb-4 flex gap-1 overflow-x-auto border-b border-border [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {TABS.map((tab) => (
           <button
             key={tab.key}
@@ -54,7 +56,7 @@ export function NavShell({
             disabled={!tab.enabled}
             onClick={() => tab.enabled && onSelect(tab.key)}
             className={cn(
-              '-mb-px border-b-2 px-3 py-2 text-sm transition-colors',
+              '-mb-px shrink-0 whitespace-nowrap border-b-2 px-3 py-2 text-sm transition-colors',
               active === tab.key
                 ? 'border-primary text-text'
                 : 'border-transparent text-text-muted hover:text-text',

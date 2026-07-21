@@ -24,7 +24,7 @@ export function KanbanColumn({
       </header>
       <div className="flex flex-col gap-2 p-2">
         {cards.length === 0 ? (
-          <EmptyState message="Üres" />
+          <EmptyState message="Üres" compact />
         ) : (
           cards.map((c) => <KanbanCardChip key={c.id} card={c} onClick={() => onSelect(c)} />)
         )}
