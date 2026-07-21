@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { cn } from '@/lib/cn'
 
-export type TabKey = 'home' | 'kanban' | 'gate' | 'hooks' | 'brain'
+export type TabKey = 'home' | 'kanban' | 'gate' | 'hooks' | 'usage' | 'brain'
 
 interface TabDef {
   key: TabKey
@@ -14,6 +14,7 @@ const TABS: TabDef[] = [
   { key: 'kanban', label: 'Kanban', enabled: true },
   { key: 'gate', label: 'Gate Board', enabled: true },
   { key: 'hooks', label: 'Hook Stream', enabled: true },
+  { key: 'usage', label: 'Usage', enabled: true }, // card 7fe5662f (dormant until store/.claude-session)
   { key: 'brain', label: 'Brain', enabled: false }, // F1
 ]
 
