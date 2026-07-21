@@ -59,6 +59,9 @@ _CRED_FILE_RE = re.compile(
 #   - SSH PRIVATE keys ~/.ssh/id_*  (the .pub is public -> excluded via lookahead)
 #   - ~/.netrc, ~/.aws/credentials
 #   - store/.session-secret, store/.dashboard-session-secret (dashboard signing keys)
+#   - store/.claude-session  (Dominik's claude.ai sessionKey + cf_clearance; a
+#     FULL-ACCOUNT bearer credential -- card 7fe5662f usage panel. Additive
+#     hardening: strengthens the blocklist, never a bypass.)
 #   - oauth-tokens.json  (OAuth refresh tokens, in any channel dir)
 # DELIBERATELY OUT OF SCOPE: store/.dashboard-token (fleet-ops idiom, read in every
 # recipe), .env/.env.* (covered by the permission-ruleset R2), ~/.git-credentials
@@ -70,6 +73,7 @@ _SENSITIVE_FILE_RES = (
     re.compile(rf"^{_HOME_PREFIX}/\.aws/credentials$"),
     re.compile(r"^(?:.*/)?store/\.session-secret$"),
     re.compile(r"^(?:.*/)?store/\.dashboard-session-secret$"),
+    re.compile(r"^(?:.*/)?store/\.claude-session$"),
     re.compile(r"^(?:.*/)?oauth-tokens\.json$"),
 )
 

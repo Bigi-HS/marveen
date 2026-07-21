@@ -20,6 +20,7 @@ import { compactDeliverySentinelsOnBoot, startDeliverySentinelMaintenance } from
 import { startUpdateChecker } from './web/update-checker.js'
 import { startMcpListChecker } from './web/mcp-list.js'
 import { startScheduleRunner } from './web/schedule-runner.js'
+import { startUsageRefresher } from './web/usage-refresher.js'
 import { applyKanbanMigrations } from './noa-kanban.js'
 import { startChannelPluginMonitor } from './web/channel-monitor.js'
 import { startInboundProber } from './web/inbound-probe.js'
@@ -61,6 +62,7 @@ import { tryHandleUpdates } from './web/routes/updates.js'
 import { tryHandleStatus } from './web/routes/status.js'
 import { tryHandleAutonomy } from './web/routes/autonomy.js'
 import { tryHandleTokenUsage } from './web/routes/token-usage.js'
+import { tryHandleUsage } from './web/routes/usage.js'
 import { tryHandleIdeas } from './web/routes/ideas.js'
 import { tryHandleToolLog } from './web/routes/tool-log.js'
 import { tryHandleCodetree } from './web/routes/codetree.js'
@@ -304,6 +306,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleStatus(routeCtx)) return
       if (await tryHandleAutonomy(routeCtx)) return
       if (await tryHandleTokenUsage(routeCtx)) return
+      if (await tryHandleUsage(routeCtx)) return
       if (await tryHandleIdeas(routeCtx)) return
       if (await tryHandleToolLog(routeCtx)) return
       if (await tryHandleCodetree(routeCtx)) return
@@ -433,6 +436,12 @@ export function startWebServer(port = 3420): http.Server {
   const scheduleInterval = startScheduleRunner()
   logger.info('Schedule runner started (60s poll)')
 
+  // Claude usage refresher (card 7fe5662f). Dormant behind the feature-flag:
+  // with no store/.claude-session file it is a no-op that leaves the cache in
+  // feature-absent, so /api/usage/current serves 503 and the panel stays hidden.
+  const usageRefresherInterval = startUsageRefresher()
+  logger.info('Claude usage refresher started (15min poll, 10s boot offset) -- dormant until store/.claude-session is provided')
+
   const pluginMonitorInterval = startChannelPluginMonitor()
   logger.info('Channel plugin health monitor started (60s poll)')
 
@@ -550,6 +559,7 @@ export function startWebServer(port = 3420): http.Server {
     clearInterval(ackObserverInterval)
     clearInterval(sentinelMaintenanceInterval)
     clearInterval(scheduleInterval)
+    clearInterval(usageRefresherInterval)
     if (pluginMonitorInterval) clearInterval(pluginMonitorInterval)
     clearInterval(channelHealthInterval)
     clearInterval(stuckInputInterval)

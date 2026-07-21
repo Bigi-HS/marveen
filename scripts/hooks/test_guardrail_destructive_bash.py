@@ -172,6 +172,9 @@ class SensitiveFilePrintTests(unittest.TestCase):
         "cat store/.session-secret",
         "echo $(cat store/.dashboard-session-secret)",
         "cat /home/fakeuser/marveen/store/.dashboard-session-secret",
+        "cat store/.claude-session",                                        # claude.ai full-account credential (card 7fe5662f)
+        "echo $(cat store/.claude-session)",
+        "base64 /home/fakeuser/marveen/store/.claude-session",
         "cat agents/claudia/.claude/channels/google/oauth-tokens.json",
         "strings /home/fakeuser/.ssh/id_ecdsa",
     ]
