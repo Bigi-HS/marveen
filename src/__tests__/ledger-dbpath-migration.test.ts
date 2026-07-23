@@ -36,4 +36,8 @@ describe('ledger live-DB resolution + conversation_log migration', () => {
   it('conversation_log migration suite passes (exit 0)', () => {
     expect(() => runPy('scripts/hooks/test_migrate_ledger.py')).not.toThrow()
   })
+
+  it('inbound reconcile self-heal suite passes (exit 0)', () => {
+    expect(() => runPy('scripts/hooks/test_ledger_reconcile.py')).not.toThrow()
+  })
 })

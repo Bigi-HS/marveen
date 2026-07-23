@@ -145,15 +145,24 @@ def connect():
     return con
 
 
-def log_inbound(agent_id, chat_id, message_id, text, ts):
-    """Record an inbound user message. Idempotent on (agent_id, chat_id, in, message_id)."""
+def log_inbound(agent_id, chat_id, message_id, text, ts, created_at=None):
+    """Record an inbound user message. Idempotent on (agent_id, chat_id, in, message_id).
+
+    created_at defaults to the current time -- correct for the live UserPromptSubmit
+    hook, which records the message as it arrives. The reconcile (ledger-reconcile.py)
+    passes the REAL transcript ts as created_at so backfilled rows keep their true
+    arrival time: chronological ordering (recent() replay) and the open-question
+    later-outbound check depend on it, otherwise an already-answered message would
+    re-surface at reconcile-run time.
+    """
+    ca = int(time.time()) if created_at is None else int(created_at)
     con = connect()
     try:
         con.execute(
             "INSERT OR IGNORE INTO conversation_log"
             " (agent_id, chat_id, direction, message_id, text, ts, created_at)"
             " VALUES (?, ?, 'in', ?, ?, ?, ?)",
-            (str(agent_id), str(chat_id), str(message_id), text, ts, int(time.time())),
+            (str(agent_id), str(chat_id), str(message_id), text, ts, ca),
         )
         con.commit()
     finally:
