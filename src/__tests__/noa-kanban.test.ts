@@ -40,6 +40,8 @@ import {
   ColumnNotEmptyError,
   BuiltinColumnError,
   InvalidPriorityScoreError,
+  DependencyNotFoundError,
+  SelfDependencyError,
   applyKanbanMigrations,
   staleThresholdSeconds,
   isCardStale,
@@ -936,5 +938,88 @@ describe('applyKanbanMigrations', () => {
     expect(colIds).not.toContain('someday')
     // a parked card stays unscored even after backfill
     expect(getCard('park1')!.priority_score).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// AC-DEP: depends_on -- read-only dependency field (card ac37d123, slice 1).
+// Persist + validate the edge only. NO auto-unblock / dispatch behaviour yet
+// (that is the separate later slice); these tests lock that boundary in.
+// ---------------------------------------------------------------------------
+describe('AC-DEP: depends_on read-only dependency field', () => {
+  it('createCard defaults depends_on to null', () => {
+    const card = createCard({ title: 'No dep', suppressIntake: true })
+    expect(card.depends_on).toBeNull()
+  })
+
+  it('createCard persists a depends_on referencing an existing card', () => {
+    const blocker = createCard({ title: 'Blocker', suppressIntake: true })
+    const dep = createCard({ title: 'Dependent', depends_on: blocker.id, suppressIntake: true })
+    expect(dep.depends_on).toBe(blocker.id)
+    // survives a round-trip through the DB (SELECT *), not just the in-memory return
+    expect(getCard(dep.id)!.depends_on).toBe(blocker.id)
+  })
+
+  it('updateCard sets depends_on on an existing card', () => {
+    const blocker = createCard({ title: 'Blocker', suppressIntake: true })
+    const card = createCard({ title: 'Dependent', suppressIntake: true })
+    updateCard(card.id, { depends_on: blocker.id })
+    expect(getCard(card.id)!.depends_on).toBe(blocker.id)
+  })
+
+  it('updateCard clears depends_on when set to null', () => {
+    const blocker = createCard({ title: 'Blocker', suppressIntake: true })
+    const card = createCard({ title: 'Dependent', depends_on: blocker.id, suppressIntake: true })
+    updateCard(card.id, { depends_on: null })
+    expect(getCard(card.id)!.depends_on).toBeNull()
+  })
+
+  it('updateCard leaves depends_on untouched when the field is omitted', () => {
+    const blocker = createCard({ title: 'Blocker', suppressIntake: true })
+    const card = createCard({ title: 'Dependent', depends_on: blocker.id, suppressIntake: true })
+    updateCard(card.id, { title: 'Renamed' })
+    const after = getCard(card.id)!
+    expect(after.title).toBe('Renamed')
+    expect(after.depends_on).toBe(blocker.id)
+  })
+
+  it('createCard with a nonexistent depends_on throws DependencyNotFoundError', () => {
+    expect(() => createCard({ title: 'Dangling', depends_on: 'no-such-card', suppressIntake: true }))
+      .toThrow(DependencyNotFoundError)
+  })
+
+  it('createCard with an archived depends_on target throws DependencyNotFoundError', () => {
+    const blocker = createCard({ title: 'Blocker', suppressIntake: true })
+    archiveCard(blocker.id)
+    expect(() => createCard({ title: 'Dependent', depends_on: blocker.id, suppressIntake: true }))
+      .toThrow(DependencyNotFoundError)
+  })
+
+  it('updateCard with a nonexistent depends_on throws DependencyNotFoundError', () => {
+    const card = createCard({ title: 'Dependent', suppressIntake: true })
+    expect(() => updateCard(card.id, { depends_on: 'no-such-card' }))
+      .toThrow(DependencyNotFoundError)
+  })
+
+  it('updateCard rejects a self-dependency with SelfDependencyError', () => {
+    const card = createCard({ title: 'Self', suppressIntake: true })
+    expect(() => updateCard(card.id, { depends_on: card.id }))
+      .toThrow(SelfDependencyError)
+  })
+
+  it('is read-only: a card with depends_on set is still listed and dispatchable normally', () => {
+    const blocker = createCard({ title: 'Blocker', suppressIntake: true })
+    const card = createCard({ title: 'Dependent', depends_on: blocker.id, suppressIntake: true })
+    // no blocking behaviour yet: the dependent appears in the normal board listing
+    const ids = listCards().map((c) => c.id)
+    expect(ids).toContain(card.id)
+  })
+
+  it('applyKanbanMigrations is idempotent and backfills existing rows to null depends_on', () => {
+    // a row inserted through the raw schema (no depends_on supplied) reads back null
+    const card = createCard({ title: 'Legacy', suppressIntake: true })
+    applyKanbanMigrations()
+    applyKanbanMigrations() // second run must not throw (column already exists)
+    expect(getCard(card.id)!.depends_on).toBeNull()
   })
 })

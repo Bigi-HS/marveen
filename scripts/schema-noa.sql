@@ -114,7 +114,10 @@ CREATE TABLE kanban_cards (
   archived_at INTEGER, dispatched_at INTEGER,
   -- 1-10 fine-grained attention rank (1 = top, 10 = lowest active). NULL = parked
   -- (icebox lane), excluded from drain/heartbeat ordering. Card 65afc67e.
-  priority_score INTEGER CHECK(priority_score IS NULL OR priority_score BETWEEN 1 AND 10)
+  priority_score INTEGER CHECK(priority_score IS NULL OR priority_score BETWEEN 1 AND 10),
+  -- Card id this card depends on (its blocker), or NULL. Read-only dependency
+  -- edge (card ac37d123): persisted + validated, no auto-unblock behaviour yet.
+  depends_on TEXT REFERENCES kanban_cards(id)
 );
 
 CREATE TABLE kanban_comments (
