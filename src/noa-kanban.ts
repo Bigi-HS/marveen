@@ -78,6 +78,20 @@ export class ParentNotFoundError extends Error {
   }
 }
 
+export class DependencyNotFoundError extends Error {
+  constructor(dependsOn: string) {
+    super(`Dependency card '${dependsOn}' not found or is archived`)
+    this.name = 'DependencyNotFoundError'
+  }
+}
+
+export class SelfDependencyError extends Error {
+  constructor(id: string) {
+    super(`Card '${id}' cannot depend on itself`)
+    this.name = 'SelfDependencyError'
+  }
+}
+
 export class HasActiveChildrenError extends Error {
   constructor(id: string) {
     super(`Card '${id}' has active (non-done/archived) children`)
@@ -120,6 +134,12 @@ export interface KanbanCard {
   dispatched_at: number | null
   /** 1-10 fine-grained attention rank (1 = top). NULL = parked (icebox lane). */
   priority_score: number | null
+  /**
+   * Card id this card depends on (its blocker), or null. Read-only slice
+   * (card ac37d123): the edge is persisted and validated but does NOT yet
+   * drive dispatch/unblock behaviour -- that is the separate later slice.
+   */
+  depends_on: string | null
 }
 
 export interface BoardColumn {
@@ -149,6 +169,7 @@ export interface CreateCardParams {
   priority_score?: number | null
   project?: string | null
   parent_id?: string | null
+  depends_on?: string | null
   due_date?: number | null
   sort_order?: number
   suppressIntake?: boolean
@@ -163,6 +184,7 @@ export interface UpdateCardParams {
   priority_score?: number | null
   project?: string | null
   parent_id?: string | null
+  depends_on?: string | null
   due_date?: number | null
   sort_order?: number
   suppressIntake?: boolean
@@ -269,6 +291,7 @@ export function isCardStale(card: Pick<KanbanCard, 'priority_score' | 'updated_a
 
 const KANBAN_MIGRATIONS = [
   `ALTER TABLE kanban_cards ADD COLUMN priority_score INTEGER`,
+  `ALTER TABLE kanban_cards ADD COLUMN depends_on TEXT REFERENCES kanban_cards(id)`,
 ]
 
 export function applyKanbanMigrations(db = getNoaDb()): void {
@@ -438,6 +461,16 @@ function dispatchCard(card: KanbanCard): void {
 // Card CRUD
 // ---------------------------------------------------------------------------
 
+// Validate a depends_on edge (card ac37d123). null clears it (always allowed).
+// A non-null blocker must exist, not be archived, and not be the card itself.
+// selfId is the id of the card carrying the edge (known on update, generated on
+// create) so a self-dependency is rejected before it can be stored.
+function validateDependsOn(db: ReturnType<typeof getNoaDb>, dependsOn: string, selfId: string): void {
+  if (dependsOn === selfId) throw new SelfDependencyError(selfId)
+  const blocker = db.prepare('SELECT id, archived_at FROM kanban_cards WHERE id = ?').get(dependsOn) as { id: string; archived_at: number | null } | undefined
+  if (!blocker || blocker.archived_at !== null) throw new DependencyNotFoundError(dependsOn)
+}
+
 export function createCard(params: CreateCardParams): KanbanCard {
   const db = getNoaDb()
   const now = Math.floor(Date.now() / 1000)
@@ -454,18 +487,21 @@ export function createCard(params: CreateCardParams): KanbanCard {
     if (!parent || parent.archived_at !== null) throw new ParentNotFoundError(params.parent_id)
   }
 
+  // Check the dependency edge before insert (self-ref uses the id we are about to assign)
+  if (params.depends_on != null) validateDependsOn(db, params.depends_on, id)
+
   const sortOrder = params.sort_order !== undefined ? params.sort_order : maxSortOrderInStatus(status) + 1.0
   const priority = params.priority ?? 'normal'
   const priorityScore = resolvePriorityScore(status, priority, params.priority_score)
 
   db.prepare(
-    `INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, priority_score)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, priority_score, depends_on)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id, params.title, params.description ?? null, status,
     params.assignee ?? null, priority,
     params.project ?? null, params.parent_id ?? null, params.due_date ?? null,
-    sortOrder, now, now, priorityScore,
+    sortOrder, now, now, priorityScore, params.depends_on ?? null,
   )
 
   emitOrDefer({ type: 'kanban', id, action: 'created' })
@@ -490,6 +526,9 @@ export function updateCard(id: string, params: UpdateCardParams): boolean {
     assertValidTransition(card.status, params.status)
   }
 
+  // Validate the dependency edge if it is being set (null clears it, always allowed)
+  if (params.depends_on != null) validateDependsOn(getNoaDb(), params.depends_on, id)
+
   const now = Math.floor(Date.now() / 1000)
   const prevTitle = card.title
   const prevDescription = card.description
@@ -507,15 +546,16 @@ export function updateCard(id: string, params: UpdateCardParams): boolean {
     priority_score: computeUpdatedScore(card, params, newStatus, newPriority),
     project: params.project !== undefined ? params.project : card.project,
     parent_id: params.parent_id !== undefined ? params.parent_id : card.parent_id,
+    depends_on: params.depends_on !== undefined ? params.depends_on : card.depends_on,
     due_date: params.due_date !== undefined ? params.due_date : card.due_date,
     sort_order: params.sort_order ?? card.sort_order,
     updated_at: now,
   }
 
   const changed = getNoaDb().prepare(
-    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, due_date=?, sort_order=?, updated_at=?, priority_score=?
+    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, depends_on=?, due_date=?, sort_order=?, updated_at=?, priority_score=?
      WHERE id=?`
-  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.due_date, f.sort_order, f.updated_at, f.priority_score, id).changes > 0
+  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.depends_on, f.due_date, f.sort_order, f.updated_at, f.priority_score, id).changes > 0
 
   if (!changed) return false
 
