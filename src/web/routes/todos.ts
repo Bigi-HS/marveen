@@ -1,14 +1,48 @@
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   type TodoItem, type TodoOwner,
   listActiveTodos, createTodoItem, updateTodoItem, markTodoDone,
   tickTodoProgress, deleteTodoItem, getTodoItem,
   todoLastWriteAgoSeconds, trainingAdherence, dayBucket, nowEpochS,
+  createAgentMessage,
 } from '../../db.js'
+import { STORE_DIR, MAIN_AGENT_ID } from '../../config.js'
+import { atomicWriteFileSync } from '../atomic-write.js'
+import { runFreshnessCheck, type FreshnessAlertState } from '../../todo-freshness.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
 
 const OWNERS: TodoOwner[] = ['claudia', 'hibiki', 'bond']
+
+// Freshness-check alert wiring (card 9ad7334e). The alert is enqueued to the main
+// agent directly via the agent-message queue -- no self-HTTP. 'forge' is kept as
+// the historical ops-sender id the freshness heartbeat has always used, so the
+// recipient's handling is unchanged even though the check now runs server-side
+// (moved off the busy-prone agent-injected scheduled task).
+const FRESHNESS_ALERT_FROM = 'forge'
+const FRESHNESS_STATE_PATH = join(STORE_DIR, '.todo-freshness-state.json')
+
+interface FreshnessStore {
+  load: () => FreshnessAlertState
+  save: (state: FreshnessAlertState) => void
+}
+const _fileFreshnessStore: FreshnessStore = {
+  load() {
+    try { return JSON.parse(readFileSync(FRESHNESS_STATE_PATH, 'utf8')) as FreshnessAlertState }
+    catch { return {} }
+  },
+  save(state) {
+    // Best-effort: a failed persist only risks one duplicate alert next run.
+    try { atomicWriteFileSync(FRESHNESS_STATE_PATH, JSON.stringify(state)) }
+    catch { /* ignore */ }
+  },
+}
+// Test seam: override the suppression-state store so route tests stay hermetic.
+let _freshnessStore: FreshnessStore = _fileFreshnessStore
+export function __setFreshnessStore(store: FreshnessStore): void { _freshnessStore = store }
+export function __resetFreshnessStore(): void { _freshnessStore = _fileFreshnessStore }
 function isOwner(v: unknown): v is TodoOwner { return v === 'claudia' || v === 'hibiki' || v === 'bond' }
 
 export interface OwnerView {
@@ -146,6 +180,23 @@ export async function tryHandleTodos(ctx: RouteContext): Promise<boolean> {
     const id = decodeURIComponent(doneMatch[1])
     if (markTodoDone(id)) { json(res, { ok: true }); return true }
     json(res, { error: 'Tétel nem található' }, 404)
+    return true
+  }
+
+  // Server-side freshness heartbeat (card 9ad7334e): runs in-process, so it never
+  // depends on a busy agent session. The scheduler (n8n schedule-trigger / native
+  // cron) POSTs this hourly; ?dry_run=1 reports without sending/persisting.
+  if (path === '/api/todos/freshness-check' && method === 'POST') {
+    const dryRun = url.searchParams.get('dry_run') === '1'
+    const result = runFreshnessCheck({
+      now: nowEpochS(),
+      agoFn: (owner) => todoLastWriteAgoSeconds(owner as TodoOwner),
+      loadState: _freshnessStore.load,
+      saveState: _freshnessStore.save,
+      send: (alert) => { createAgentMessage(FRESHNESS_ALERT_FROM, MAIN_AGENT_ID, alert.content) },
+      dryRun,
+    })
+    json(res, { ok: true, ...result })
     return true
   }
 
