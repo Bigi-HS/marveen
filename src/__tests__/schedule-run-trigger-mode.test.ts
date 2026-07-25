@@ -15,6 +15,7 @@ import {
   __setRecordFireFn,
   __resetRecordFireFn,
 } from '../web/routes/schedules.js'
+import { listScheduledTasks } from '../web/scheduled-tasks-io.js'
 import type { TriggerStatus } from '../web/action-trigger.js'
 
 // ---------------------------------------------------------------------------
@@ -175,5 +176,79 @@ describe('POST /api/schedules/:name/run -- trigger-mode LOST-INJECT safety (card
     const r = await callRun()
     expect(r.status).toBe(200)
     expect(recordCalls).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Busy-benign for skipIfBusy tasks (card 9ad7334e). A skipIfBusy:true task
+// treats a busy target as an EXPECTED benign skip, not an error: the /run must
+// return 200 status:'skipped' so status-keying consumers (dashboard last-run,
+// the wf-noa-003r n8n workflow) never surface benign busy-contention as a Boss
+// FAIL alert. Native-retry safety is unchanged -- recordTriggerFire is still NOT
+// called (last_run/next_run not advanced), so the native runner retries.
+// ---------------------------------------------------------------------------
+
+describe('POST /api/schedules/:name/run -- busy is benign for skipIfBusy tasks (card 9ad7334e)', () => {
+  let recordCalls: Array<unknown[]> = []
+
+  beforeEach(() => {
+    recordCalls = []
+    __setRecordFireFn((...args) => { recordCalls.push(args) })
+    // A skipIfBusy:true task (the todo-freshness-check shape) for this block only.
+    vi.mocked(listScheduledTasks).mockReturnValue([
+      {
+        name: 'todo-freshness-check',
+        agent: 'forge',
+        type: 'heartbeat' as const,
+        prompt: 'check todo freshness',
+        schedule: '0 * * * *',
+        enabled: true,
+        skipIfBusy: true,
+      },
+    ] as any)
+  })
+
+  afterEach(() => {
+    __resetInjector()
+    __resetRecordFireFn()
+    // Restore the default (skipIfBusy-less) task for the other suites.
+    vi.mocked(listScheduledTasks).mockReturnValue([
+      {
+        name: 'todo-freshness-check',
+        agent: 'forge',
+        type: 'heartbeat' as const,
+        prompt: 'check todo freshness',
+        schedule: '0 * * * *',
+        enabled: true,
+      },
+    ] as any)
+  })
+
+  it('busy + trigger mode: returns 200 status:skipped, deferred, and does NOT advance', async () => {
+    __setInjector(() => 'busy')
+    const r = await callRun({ mode: 'trigger' })
+    expect(r.status).toBe(200)
+    expect(r.body.ok).toBe(true)
+    expect(r.body.status).toBe('skipped')
+    expect(r.body.deferred).toBe(true)
+    expect(r.body.reason).toBe('busy')
+    // Native-retry safety preserved: no fire recorded.
+    expect(recordCalls).toHaveLength(0)
+  })
+
+  it('busy + manual mode: returns 200 status:skipped (benign, no FAIL surface)', async () => {
+    __setInjector(() => 'busy')
+    const r = await callRun()
+    expect(r.status).toBe(200)
+    expect(r.body.status).toBe('skipped')
+    expect(recordCalls).toHaveLength(0)
+  })
+
+  it('fired still wins for a skipIfBusy task (200 ok, trigger advances)', async () => {
+    __setInjector(() => 'fired')
+    const r = await callRun({ mode: 'trigger' })
+    expect(r.status).toBe(200)
+    expect(r.body.ok).toBe(true)
+    expect(recordCalls).toHaveLength(1)
   })
 })

@@ -342,6 +342,14 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     }
     if (status === 'busy') {
       // Prompt was NOT injected; do NOT advance last_run/next_run -- native retries as recovery.
+      // A skipIfBusy:true task treats a busy target as an EXPECTED benign skip, not an error.
+      // Return 200 status:'skipped' so status-keying consumers (dashboard last-run, the
+      // wf-noa-003r n8n workflow) never surface benign busy-contention as a Boss FAIL alert.
+      // Native-retry safety is unchanged -- recordTriggerFire is still not called. Card 9ad7334e.
+      if (fileTask.skipIfBusy === true) {
+        json(res, { ok: true, status: 'skipped', reason: 'busy', deferred: true, agent: agentName })
+        return true
+      }
       json(res, { error: `Target session for "${name}" is busy; retry or use force`, status }, 409)
       return true
     }
