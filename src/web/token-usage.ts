@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline'
 import { getDb } from '../db.js'
 import { getNoaDb } from '../noa-memory.js'
 import { logger } from '../logger.js'
-import { MAIN_AGENT_ID } from '../config.js'
+import { MAIN_AGENT_ID, FABLE_DAILY_TOKEN_CEILING } from '../config.js'
 import { costForUsageDetailedUsd, readAgentModel, listAgentNames } from './agent-config.js'
 import { FABLE_MODEL_TAGS, isFableModel } from '../fable-config.js'
 
@@ -444,6 +444,47 @@ export function getFableBudget(opts: { nowMs?: number; agentsOnFable?: string[] 
   const blind = agentsOnFable.length > 0 && week.rows === 0
 
   return { now, tags: [...FABLE_MODEL_TAGS], agentsOnFable, blind, fableRowsSeenTotal, fiveHour, today, week }
+}
+
+// --- Fable safety-net F1 slice-4: configurable daily ceiling + restrict signal ---
+// Adds an operator-set daily fable TOKEN ceiling on top of the budget windows.
+// restrict = exceeded OR blind, so a downstream watchdog (F2 auto-revert, Forge)
+// can poll one boolean.
+//
+// DORMANT-CAP NOTE (intentional in F1, per card d1ca8650 design): the absolute
+// Max-plan fable quota is opaque, so we ship NO guessed ceiling -- the default is
+// 0 = DISABLED. With the ceiling disabled the CONSUMPTION-CAP is dormant
+// (exceeded/warn can never trip) and ONLY the blind-restrict fail-safe is active.
+// This is visibility-first: at the current moderate real spend there is no
+// urgency for a hard cap, and a guessed number would only cause false-positive
+// restricts. The hard cap wakes once the ceiling is calibrated from real
+// burn-rate data (follow-up F1.5) and the F2 auto-revert lands.
+export const FABLE_BUDGET_WARN_RATIO = 0.8
+
+export interface FableBudgetStatus extends FableBudget {
+  /** Operator-set daily fable token budget; null when disabled (dormant cap). */
+  ceiling: { dailyTotalTokens: number | null }
+  warnRatio: number
+  /** today >= warnRatio * ceiling (only meaningful when the ceiling is set). */
+  warn: boolean
+  /** today >= ceiling (only when the ceiling is set). */
+  exceeded: boolean
+  /** The one boolean a watchdog polls: exceeded OR blind. */
+  restrict: boolean
+}
+
+export function getFableBudgetStatus(
+  opts: { nowMs?: number; agentsOnFable?: string[]; dailyTokenCeiling?: number | null; warnRatio?: number } = {},
+): FableBudgetStatus {
+  const budget = getFableBudget({ nowMs: opts.nowMs, agentsOnFable: opts.agentsOnFable })
+  const rawCeiling = opts.dailyTokenCeiling ?? FABLE_DAILY_TOKEN_CEILING
+  const ceiling = rawCeiling && rawCeiling > 0 ? rawCeiling : null
+  const warnRatio = opts.warnRatio ?? FABLE_BUDGET_WARN_RATIO
+  const todayTokens = budget.today.totalTokens
+  const exceeded = ceiling !== null && todayTokens >= ceiling
+  const warn = ceiling !== null && todayTokens >= ceiling * warnRatio
+  const restrict = exceeded || budget.blind
+  return { ...budget, ceiling: { dailyTotalTokens: ceiling }, warnRatio, warn, exceeded, restrict }
 }
 
 export function getTokenSummary(from?: number, to?: number): TokenSummary[] {

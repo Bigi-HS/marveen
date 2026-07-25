@@ -106,6 +106,19 @@ if (webHostResult.source === 'process') {
 export const DASHBOARD_PUBLIC_URL = env['DASHBOARD_PUBLIC_URL'] ?? ''
 export const OLLAMA_URL = env['OLLAMA_URL'] ?? 'http://localhost:11434'
 
+// Fable safety-net F1 slice-4: operator-set daily fable TOKEN ceiling for
+// /api/token-usage/fable-budget/status. Fable's absolute Max-plan quota is
+// opaque, so we do NOT ship a guessed number -- default 0 = DISABLED, so the
+// consumption-cap stays dormant (no spurious restrict) until it is calibrated
+// from real burn-rate data (follow-up F1.5). The blind-restrict fail-safe is
+// independent of this knob. Card d1ca8650.
+const fableCeilingResult = resolveIntEnv('FABLE_DAILY_TOKEN_CEILING', env, 0)
+export const FABLE_DAILY_TOKEN_CEILING = fableCeilingResult.value
+if (fableCeilingResult.source === 'process') {
+  logger.warn({ key: 'FABLE_DAILY_TOKEN_CEILING', source: 'process.env', value: FABLE_DAILY_TOKEN_CEILING },
+    'Boot knob FABLE_DAILY_TOKEN_CEILING sourced from process environment -- verify this is intentional')
+}
+
 export const CHANNEL_PROVIDER: ChannelProviderType = getProviderType(env['CHANNEL_PROVIDER'])
 export const CHANNEL_TOKEN = getChannelToken(CHANNEL_PROVIDER, env)
 export const CHANNEL_CHAT_ID = getChannelChatId(CHANNEL_PROVIDER, env)

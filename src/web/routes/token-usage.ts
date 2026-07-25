@@ -8,6 +8,7 @@ import {
   correlateWithKanban,
   getTokenUsageLiveness,
   getFableBudget,
+  getFableBudgetStatus,
 } from '../token-usage.js'
 import { json } from '../http-helpers.js'
 import { logger } from '../../logger.js'
@@ -83,6 +84,20 @@ export async function tryHandleTokenUsage(ctx: RouteContext): Promise<boolean> {
   // truncation). The daily figure is what the slice-4 ceiling checks against.
   if (path === '/api/token-usage/fable-budget' && method === 'GET') {
     json(res, getFableBudget())
+    return true
+  }
+
+  // Fable safety-net F1 slice-4: one-boolean restrict signal for a watchdog to
+  // poll (F2 auto-revert). 503 when restrict=true (today over the ceiling, or
+  // blind telemetry), else 200. ?ceiling= overrides the daily token ceiling for
+  // ops/testing; absent -> the FABLE_DAILY_TOKEN_CEILING config default (0 =
+  // dormant cap, only blind restricts).
+  if (path === '/api/token-usage/fable-budget/status' && method === 'GET') {
+    const ceilRaw = url.searchParams.get('ceiling')
+    const parsed = ceilRaw !== null ? parseInt(ceilRaw, 10) : NaN
+    const dailyTokenCeiling = Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+    const status = getFableBudgetStatus({ dailyTokenCeiling })
+    json(res, status, status.restrict ? 503 : 200)
     return true
   }
 
