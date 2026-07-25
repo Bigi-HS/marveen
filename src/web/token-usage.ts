@@ -288,6 +288,46 @@ function timeFilter(from?: number, to?: number): { clause: string; params: any[]
   return { clause: conditions.length ? ' WHERE ' + conditions.join(' AND ') : '', params }
 }
 
+// --- Fable safety-net F1 slice-2: telemetry liveness / stale flag ---
+// The collector feeding token_usage has silently stalled before (~5h gap, card
+// d1ca8650). A safety-net reading a blind stream must fail CONSERVATIVELY: an
+// empty table or a most-recent row older than the window reports stale=true, so
+// downstream guards never mistake "no data" for "no spend". Model-agnostic --
+// this only looks at recency, not which model produced the rows.
+export const TOKEN_USAGE_DEFAULT_STALE_MS = 20 * 60 * 1000
+
+export interface TokenUsageLiveness {
+  /** Epoch SECONDS of the most recent token_usage row, or null if the table is empty. */
+  lastTimestamp: number | null
+  /** now - lastTimestamp (ms), or null when there are no rows. */
+  ageMs: number | null
+  /** True when there is no fresh data: no rows at all, or age strictly beyond the threshold. */
+  stale: boolean
+  /** The threshold used for the stale decision (ms). */
+  staleThresholdMs: number
+  /** The "now" (epoch ms) the decision was made against. */
+  now: number
+  /** Whether any row exists at all (distinguishes "blind" from "merely old"). */
+  rowsSeen: boolean
+}
+
+export function getTokenUsageLiveness(
+  opts: { nowMs?: number; staleThresholdMs?: number } = {},
+): TokenUsageLiveness {
+  const now = opts.nowMs ?? Date.now()
+  const staleThresholdMs = opts.staleThresholdMs ?? TOKEN_USAGE_DEFAULT_STALE_MS
+  const db = getDb()
+  const row = db.prepare('SELECT MAX(timestamp) as maxTs FROM token_usage').get() as
+    | { maxTs: number | null }
+    | undefined
+  const lastTimestamp = row?.maxTs ?? null
+  const rowsSeen = lastTimestamp !== null
+  // token_usage.timestamp is epoch SECONDS (Math.floor(ts/1000) at ingest).
+  const ageMs = rowsSeen ? now - lastTimestamp * 1000 : null
+  const stale = !rowsSeen || (ageMs as number) > staleThresholdMs
+  return { lastTimestamp, ageMs, stale, staleThresholdMs, now, rowsSeen }
+}
+
 export function getTokenSummary(from?: number, to?: number): TokenSummary[] {
   const db = getDb()
   const { clause, params } = timeFilter(from, to)

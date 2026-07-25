@@ -6,6 +6,7 @@ import {
   getCostBySession,
   getLineageRollup,
   correlateWithKanban,
+  getTokenUsageLiveness,
 } from '../token-usage.js'
 import { json } from '../http-helpers.js'
 import { logger } from '../../logger.js'
@@ -62,6 +63,17 @@ export async function tryHandleTokenUsage(ctx: RouteContext): Promise<boolean> {
       to ? parseInt(to) : undefined,
     )
     json(res, summary)
+    return true
+  }
+
+  // Fable safety-net F1 slice-2: is the token_usage stream fresh? Fail-safe --
+  // an empty/stalled table reports stale=true so guards never read blindness as
+  // "no spend". Optional ?stale_ms= overrides the 20-min default for ops.
+  if (path === '/api/token-usage/liveness' && method === 'GET') {
+    const staleMsRaw = url.searchParams.get('stale_ms')
+    const parsed = staleMsRaw !== null ? parseInt(staleMsRaw, 10) : NaN
+    const staleThresholdMs = Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+    json(res, getTokenUsageLiveness({ staleThresholdMs }))
     return true
   }
 
