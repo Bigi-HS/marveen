@@ -6,8 +6,9 @@ import { createInterface } from 'node:readline'
 import { getDb } from '../db.js'
 import { getNoaDb } from '../noa-memory.js'
 import { logger } from '../logger.js'
-import { MAIN_AGENT_ID } from '../config.js'
-import { costForUsageDetailedUsd, readAgentModel } from './agent-config.js'
+import { MAIN_AGENT_ID, FABLE_DAILY_TOKEN_CEILING } from '../config.js'
+import { costForUsageDetailedUsd, readAgentModel, listAgentNames } from './agent-config.js'
+import { FABLE_MODEL_TAGS, isFableModel } from '../fable-config.js'
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 
@@ -286,6 +287,204 @@ function timeFilter(from?: number, to?: number): { clause: string; params: any[]
   if (from) { conditions.push('timestamp >= ?'); params.push(from) }
   if (to) { conditions.push('timestamp <= ?'); params.push(to) }
   return { clause: conditions.length ? ' WHERE ' + conditions.join(' AND ') : '', params }
+}
+
+// --- Fable safety-net F1 slice-2: telemetry liveness / stale flag ---
+// The collector feeding token_usage has silently stalled before (~5h gap, card
+// d1ca8650). A safety-net reading a blind stream must fail CONSERVATIVELY: an
+// empty table or a most-recent row older than the window reports stale=true, so
+// downstream guards never mistake "no data" for "no spend". Model-agnostic --
+// this only looks at recency, not which model produced the rows.
+export const TOKEN_USAGE_DEFAULT_STALE_MS = 20 * 60 * 1000
+
+export interface TokenUsageLiveness {
+  /** Epoch SECONDS of the most recent token_usage row, or null if the table is empty. */
+  lastTimestamp: number | null
+  /** now - lastTimestamp (ms), or null when there are no rows. */
+  ageMs: number | null
+  /** True when there is no fresh data: no rows at all, or age strictly beyond the threshold. */
+  stale: boolean
+  /** The threshold used for the stale decision (ms). */
+  staleThresholdMs: number
+  /** The "now" (epoch ms) the decision was made against. */
+  now: number
+  /** Whether any row exists at all (distinguishes "blind" from "merely old"). */
+  rowsSeen: boolean
+}
+
+export function getTokenUsageLiveness(
+  opts: { nowMs?: number; staleThresholdMs?: number } = {},
+): TokenUsageLiveness {
+  const now = opts.nowMs ?? Date.now()
+  const staleThresholdMs = opts.staleThresholdMs ?? TOKEN_USAGE_DEFAULT_STALE_MS
+  const db = getDb()
+  const row = db.prepare('SELECT MAX(timestamp) as maxTs FROM token_usage').get() as
+    | { maxTs: number | null }
+    | undefined
+  const lastTimestamp = row?.maxTs ?? null
+  const rowsSeen = lastTimestamp !== null
+  // token_usage.timestamp is epoch SECONDS (Math.floor(ts/1000) at ingest).
+  const ageMs = rowsSeen ? now - lastTimestamp * 1000 : null
+  const stale = !rowsSeen || (ageMs as number) > staleThresholdMs
+  return { lastTimestamp, ageMs, stale, staleThresholdMs, now, rowsSeen }
+}
+
+// --- Fable safety-net F1 slice-3: fable-only budget windows ---
+// Fable runs on the Max-plan quota, not per-token billing, so the actionable
+// currency is TOKENS / requests; costUsd is best-effort (fable is unpriced in the
+// model registry -> 0). Aggregation is a direct DB window-query (SUM/GROUP BY over
+// the window), never the limit-capped detail endpoint which would silently
+// truncate historical rows. Model filtering goes through the shared FABLE_MODEL_TAGS
+// single source of truth (card d1ca8650).
+
+export interface FableWindowAgg {
+  /** Window bounds, epoch SECONDS, inclusive. */
+  from: number
+  to: number
+  windowHours: number
+  /** Fable requests (rows) in the window. */
+  rows: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  totalTokens: number
+  /** Best-effort USD (0 while fable is unpriced in the registry); never negative. */
+  costUsd: number
+  burnRateTokensPerHour: number
+  burnRateUsdPerHour: number
+}
+
+export interface FableBudget {
+  now: number
+  tags: string[]
+  /** Agents currently configured on a fable model (drives the blind flag). */
+  agentsOnFable: string[]
+  /** Fail-safe: an agent is on fable but no fable rows are visible in the week window. */
+  blind: boolean
+  /** All-time fable row count (has the stream EVER carried fable telemetry?). */
+  fableRowsSeenTotal: number
+  fiveHour: FableWindowAgg
+  today: FableWindowAgg
+  week: FableWindowAgg
+}
+
+// Budapest local midnight (epoch seconds) for the instant nowMs. Standard Intl
+// offset trick; on a DST-transition day the boundary can be off by the 1h shift,
+// which is acceptable for a daily budget window.
+function startOfBudapestDaySeconds(nowMs: number): number {
+  const tz = 'Europe/Budapest'
+  const asUTC = new Date(new Date(nowMs).toLocaleString('en-US', { timeZone: 'UTC' })).getTime()
+  const asLocal = new Date(new Date(nowMs).toLocaleString('en-US', { timeZone: tz })).getTime()
+  const offsetMs = asLocal - asUTC
+  const localWall = new Date(nowMs + offsetMs)
+  localWall.setUTCHours(0, 0, 0, 0)
+  return Math.floor((localWall.getTime() - offsetMs) / 1000)
+}
+
+function fableWindowAgg(db: ReturnType<typeof getDb>, fromSec: number, toSec: number): FableWindowAgg {
+  const likeClause = FABLE_MODEL_TAGS.map(() => 'model LIKE ?').join(' OR ')
+  const likeParams = FABLE_MODEL_TAGS.map((t) => t + '%')
+  const groups = db.prepare(`
+    SELECT model,
+      COUNT(*) as rows,
+      COALESCE(SUM(input_tokens), 0) as input,
+      COALESCE(SUM(output_tokens), 0) as output,
+      COALESCE(SUM(cache_read_tokens), 0) as cacheRead,
+      COALESCE(SUM(cache_creation_tokens), 0) as cacheCreation
+    FROM token_usage
+    WHERE timestamp >= ? AND timestamp <= ? AND (${likeClause})
+    GROUP BY model
+  `).all(fromSec, toSec, ...likeParams) as Array<{
+    model: string; rows: number; input: number; output: number; cacheRead: number; cacheCreation: number
+  }>
+
+  let rows = 0, inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheCreationTokens = 0, costUsd = 0
+  for (const g of groups) {
+    rows += g.rows
+    inputTokens += g.input
+    outputTokens += g.output
+    cacheReadTokens += g.cacheRead
+    cacheCreationTokens += g.cacheCreation
+    // Each model prices at its own rate (fable -> null -> 0 until priced).
+    costUsd += costForUsageDetailedUsd(g.model, {
+      input: g.input, output: g.output, cacheRead: g.cacheRead, cacheCreation: g.cacheCreation,
+    }) ?? 0
+  }
+  const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens
+  const windowHours = Math.max(0, (toSec - fromSec) / 3600)
+  const burnRateTokensPerHour = windowHours > 0 ? totalTokens / windowHours : 0
+  const burnRateUsdPerHour = windowHours > 0 ? costUsd / windowHours : 0
+  return {
+    from: fromSec, to: toSec, windowHours, rows,
+    inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, totalTokens,
+    costUsd, burnRateTokensPerHour, burnRateUsdPerHour,
+  }
+}
+
+export function getFableBudget(opts: { nowMs?: number; agentsOnFable?: string[] } = {}): FableBudget {
+  const now = opts.nowMs ?? Date.now()
+  const nowSec = Math.floor(now / 1000)
+  const db = getDb()
+
+  const agentsOnFable = opts.agentsOnFable
+    ?? listAgentNames().filter((a) => isFableModel(readAgentModel(a)))
+
+  const likeClause = FABLE_MODEL_TAGS.map(() => 'model LIKE ?').join(' OR ')
+  const likeParams = FABLE_MODEL_TAGS.map((t) => t + '%')
+  const totalRow = db.prepare(
+    `SELECT COUNT(*) as n FROM token_usage WHERE ${likeClause}`,
+  ).get(...likeParams) as { n: number } | undefined
+  const fableRowsSeenTotal = totalRow?.n ?? 0
+
+  const fiveHour = fableWindowAgg(db, nowSec - 5 * 3600, nowSec)
+  const today = fableWindowAgg(db, startOfBudapestDaySeconds(now), nowSec)
+  const week = fableWindowAgg(db, nowSec - 7 * 86400, nowSec)
+
+  const blind = agentsOnFable.length > 0 && week.rows === 0
+
+  return { now, tags: [...FABLE_MODEL_TAGS], agentsOnFable, blind, fableRowsSeenTotal, fiveHour, today, week }
+}
+
+// --- Fable safety-net F1 slice-4: configurable daily ceiling + restrict signal ---
+// Adds an operator-set daily fable TOKEN ceiling on top of the budget windows.
+// restrict = exceeded OR blind, so a downstream watchdog (F2 auto-revert, Forge)
+// can poll one boolean.
+//
+// DORMANT-CAP NOTE (intentional in F1, per card d1ca8650 design): the absolute
+// Max-plan fable quota is opaque, so we ship NO guessed ceiling -- the default is
+// 0 = DISABLED. With the ceiling disabled the CONSUMPTION-CAP is dormant
+// (exceeded/warn can never trip) and ONLY the blind-restrict fail-safe is active.
+// This is visibility-first: at the current moderate real spend there is no
+// urgency for a hard cap, and a guessed number would only cause false-positive
+// restricts. The hard cap wakes once the ceiling is calibrated from real
+// burn-rate data (follow-up F1.5) and the F2 auto-revert lands.
+export const FABLE_BUDGET_WARN_RATIO = 0.8
+
+export interface FableBudgetStatus extends FableBudget {
+  /** Operator-set daily fable token budget; null when disabled (dormant cap). */
+  ceiling: { dailyTotalTokens: number | null }
+  warnRatio: number
+  /** today >= warnRatio * ceiling (only meaningful when the ceiling is set). */
+  warn: boolean
+  /** today >= ceiling (only when the ceiling is set). */
+  exceeded: boolean
+  /** The one boolean a watchdog polls: exceeded OR blind. */
+  restrict: boolean
+}
+
+export function getFableBudgetStatus(
+  opts: { nowMs?: number; agentsOnFable?: string[]; dailyTokenCeiling?: number | null; warnRatio?: number } = {},
+): FableBudgetStatus {
+  const budget = getFableBudget({ nowMs: opts.nowMs, agentsOnFable: opts.agentsOnFable })
+  const rawCeiling = opts.dailyTokenCeiling ?? FABLE_DAILY_TOKEN_CEILING
+  const ceiling = rawCeiling && rawCeiling > 0 ? rawCeiling : null
+  const warnRatio = opts.warnRatio ?? FABLE_BUDGET_WARN_RATIO
+  const todayTokens = budget.today.totalTokens
+  const exceeded = ceiling !== null && todayTokens >= ceiling
+  const warn = ceiling !== null && todayTokens >= ceiling * warnRatio
+  const restrict = exceeded || budget.blind
+  return { ...budget, ceiling: { dailyTotalTokens: ceiling }, warnRatio, warn, exceeded, restrict }
 }
 
 export function getTokenSummary(from?: number, to?: number): TokenSummary[] {
