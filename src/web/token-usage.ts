@@ -7,7 +7,8 @@ import { getDb } from '../db.js'
 import { getNoaDb } from '../noa-memory.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
-import { costForUsageDetailedUsd, readAgentModel } from './agent-config.js'
+import { costForUsageDetailedUsd, readAgentModel, listAgentNames } from './agent-config.js'
+import { FABLE_MODEL_TAGS, isFableModel } from '../fable-config.js'
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 
@@ -326,6 +327,123 @@ export function getTokenUsageLiveness(
   const ageMs = rowsSeen ? now - lastTimestamp * 1000 : null
   const stale = !rowsSeen || (ageMs as number) > staleThresholdMs
   return { lastTimestamp, ageMs, stale, staleThresholdMs, now, rowsSeen }
+}
+
+// --- Fable safety-net F1 slice-3: fable-only budget windows ---
+// Fable runs on the Max-plan quota, not per-token billing, so the actionable
+// currency is TOKENS / requests; costUsd is best-effort (fable is unpriced in the
+// model registry -> 0). Aggregation is a direct DB window-query (SUM/GROUP BY over
+// the window), never the limit-capped detail endpoint which would silently
+// truncate historical rows. Model filtering goes through the shared FABLE_MODEL_TAGS
+// single source of truth (card d1ca8650).
+
+export interface FableWindowAgg {
+  /** Window bounds, epoch SECONDS, inclusive. */
+  from: number
+  to: number
+  windowHours: number
+  /** Fable requests (rows) in the window. */
+  rows: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  totalTokens: number
+  /** Best-effort USD (0 while fable is unpriced in the registry); never negative. */
+  costUsd: number
+  burnRateTokensPerHour: number
+  burnRateUsdPerHour: number
+}
+
+export interface FableBudget {
+  now: number
+  tags: string[]
+  /** Agents currently configured on a fable model (drives the blind flag). */
+  agentsOnFable: string[]
+  /** Fail-safe: an agent is on fable but no fable rows are visible in the week window. */
+  blind: boolean
+  /** All-time fable row count (has the stream EVER carried fable telemetry?). */
+  fableRowsSeenTotal: number
+  fiveHour: FableWindowAgg
+  today: FableWindowAgg
+  week: FableWindowAgg
+}
+
+// Budapest local midnight (epoch seconds) for the instant nowMs. Standard Intl
+// offset trick; on a DST-transition day the boundary can be off by the 1h shift,
+// which is acceptable for a daily budget window.
+function startOfBudapestDaySeconds(nowMs: number): number {
+  const tz = 'Europe/Budapest'
+  const asUTC = new Date(new Date(nowMs).toLocaleString('en-US', { timeZone: 'UTC' })).getTime()
+  const asLocal = new Date(new Date(nowMs).toLocaleString('en-US', { timeZone: tz })).getTime()
+  const offsetMs = asLocal - asUTC
+  const localWall = new Date(nowMs + offsetMs)
+  localWall.setUTCHours(0, 0, 0, 0)
+  return Math.floor((localWall.getTime() - offsetMs) / 1000)
+}
+
+function fableWindowAgg(db: ReturnType<typeof getDb>, fromSec: number, toSec: number): FableWindowAgg {
+  const likeClause = FABLE_MODEL_TAGS.map(() => 'model LIKE ?').join(' OR ')
+  const likeParams = FABLE_MODEL_TAGS.map((t) => t + '%')
+  const groups = db.prepare(`
+    SELECT model,
+      COUNT(*) as rows,
+      COALESCE(SUM(input_tokens), 0) as input,
+      COALESCE(SUM(output_tokens), 0) as output,
+      COALESCE(SUM(cache_read_tokens), 0) as cacheRead,
+      COALESCE(SUM(cache_creation_tokens), 0) as cacheCreation
+    FROM token_usage
+    WHERE timestamp >= ? AND timestamp <= ? AND (${likeClause})
+    GROUP BY model
+  `).all(fromSec, toSec, ...likeParams) as Array<{
+    model: string; rows: number; input: number; output: number; cacheRead: number; cacheCreation: number
+  }>
+
+  let rows = 0, inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheCreationTokens = 0, costUsd = 0
+  for (const g of groups) {
+    rows += g.rows
+    inputTokens += g.input
+    outputTokens += g.output
+    cacheReadTokens += g.cacheRead
+    cacheCreationTokens += g.cacheCreation
+    // Each model prices at its own rate (fable -> null -> 0 until priced).
+    costUsd += costForUsageDetailedUsd(g.model, {
+      input: g.input, output: g.output, cacheRead: g.cacheRead, cacheCreation: g.cacheCreation,
+    }) ?? 0
+  }
+  const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens
+  const windowHours = Math.max(0, (toSec - fromSec) / 3600)
+  const burnRateTokensPerHour = windowHours > 0 ? totalTokens / windowHours : 0
+  const burnRateUsdPerHour = windowHours > 0 ? costUsd / windowHours : 0
+  return {
+    from: fromSec, to: toSec, windowHours, rows,
+    inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, totalTokens,
+    costUsd, burnRateTokensPerHour, burnRateUsdPerHour,
+  }
+}
+
+export function getFableBudget(opts: { nowMs?: number; agentsOnFable?: string[] } = {}): FableBudget {
+  const now = opts.nowMs ?? Date.now()
+  const nowSec = Math.floor(now / 1000)
+  const db = getDb()
+
+  const agentsOnFable = opts.agentsOnFable
+    ?? listAgentNames().filter((a) => isFableModel(readAgentModel(a)))
+
+  const likeClause = FABLE_MODEL_TAGS.map(() => 'model LIKE ?').join(' OR ')
+  const likeParams = FABLE_MODEL_TAGS.map((t) => t + '%')
+  const totalRow = db.prepare(
+    `SELECT COUNT(*) as n FROM token_usage WHERE ${likeClause}`,
+  ).get(...likeParams) as { n: number } | undefined
+  const fableRowsSeenTotal = totalRow?.n ?? 0
+
+  const fiveHour = fableWindowAgg(db, nowSec - 5 * 3600, nowSec)
+  const today = fableWindowAgg(db, startOfBudapestDaySeconds(now), nowSec)
+  const week = fableWindowAgg(db, nowSec - 7 * 86400, nowSec)
+
+  const blind = agentsOnFable.length > 0 && week.rows === 0
+
+  return { now, tags: [...FABLE_MODEL_TAGS], agentsOnFable, blind, fableRowsSeenTotal, fiveHour, today, week }
 }
 
 export function getTokenSummary(from?: number, to?: number): TokenSummary[] {

@@ -7,6 +7,7 @@ import {
   getLineageRollup,
   correlateWithKanban,
   getTokenUsageLiveness,
+  getFableBudget,
 } from '../token-usage.js'
 import { json } from '../http-helpers.js'
 import { logger } from '../../logger.js'
@@ -74,6 +75,14 @@ export async function tryHandleTokenUsage(ctx: RouteContext): Promise<boolean> {
     const parsed = staleMsRaw !== null ? parseInt(staleMsRaw, 10) : NaN
     const staleThresholdMs = Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
     json(res, getTokenUsageLiveness({ staleThresholdMs }))
+    return true
+  }
+
+  // Fable safety-net F1 slice-3: fable-only spend over 5h / today / week windows,
+  // with a fail-safe blind flag. Direct DB window-query (no detail-endpoint
+  // truncation). The daily figure is what the slice-4 ceiling checks against.
+  if (path === '/api/token-usage/fable-budget' && method === 'GET') {
+    json(res, getFableBudget())
     return true
   }
 
