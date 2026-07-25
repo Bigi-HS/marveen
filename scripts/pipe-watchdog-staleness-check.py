@@ -22,7 +22,6 @@ from pathlib import Path
 
 STORE = Path(os.environ.get("NOA_STORE", "store"))
 MESSAGES_URL = "http://localhost:3420/api/messages"
-STALE_MS = 90 * 60 * 1000          # 1.5h: pipe considered dropped
 CHECKED_WINDOW_MS = 2 * 60 * 60 * 1000  # watchdog must have checked within 2h
 REALERT_SUPPRESS_SECONDS = 23 * 3600    # suppress repeat alert within 23h
 DEFAULT_STATE_FILE = "store/.pipe-watchdog-staleness-state.json"
