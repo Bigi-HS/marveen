@@ -87,6 +87,57 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(verdicts["claudia"]["state"], "ok")
 
 
+class AdversarialThresholdTests(unittest.TestCase):
+    """Thor adversarial fixture (card 9ad7334e): now that the check runs from the
+    always-on supervisor tick instead of an agent-injected task, a "busy" agent can
+    no longer manufacture a spurious FAIL -- the invocation is a plain, session-free
+    python run. What must still hold is the semantic guarantee the Boss-visible
+    FAIL surface depended on: a benign tick NEVER alerts, and only a genuine
+    >26h staleness does. These pin that boundary end-to-end through main()."""
+
+    def test_exactly_at_threshold_is_not_stale(self):
+        # Strict > threshold: an owner exactly at 26h is still ok (no FAIL).
+        db = _make_db([("hibiki", NOW - mod.THRESHOLD_SECONDS)])
+        conn = sqlite3.connect(db)
+        try:
+            verdicts = {v["owner"]: v for v in mod.evaluate(conn, NOW, mod.THRESHOLD_SECONDS)}
+        finally:
+            conn.close()
+        self.assertEqual(verdicts["hibiki"]["state"], "ok")
+
+    def test_one_second_over_threshold_is_stale(self):
+        db = _make_db([("hibiki", NOW - mod.THRESHOLD_SECONDS - 1)])
+        conn = sqlite3.connect(db)
+        try:
+            verdicts = {v["owner"]: v for v in mod.evaluate(conn, NOW, mod.THRESHOLD_SECONDS)}
+        finally:
+            conn.close()
+        self.assertEqual(verdicts["hibiki"]["state"], "stale")
+
+    def test_benign_tick_never_alerts(self):
+        # Mixed benign board: one fresh owner + one with no rows at all. No FAIL.
+        db = _make_db([("claudia", NOW - 600)])  # hibiki has no rows
+        state = str(Path(tempfile.mkdtemp()) / "state.json")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = mod.main(["--db", db, "--state", state, "--dry-run", "--now", str(NOW)])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("WOULD ALERT", buf.getvalue())
+
+    def test_genuine_staleness_still_alerts_amid_a_fresh_owner(self):
+        # One fresh + one genuinely >26h stale -> exactly the stale owner alerts.
+        db = _make_db([("claudia", NOW - 600), ("hibiki", NOW - 40 * 3600)])
+        state = str(Path(tempfile.mkdtemp()) / "state.json")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = mod.main(["--db", db, "--state", state, "--dry-run", "--now", str(NOW)])
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("WOULD ALERT", out)
+        self.assertIn("hibiki has not written", out)
+        self.assertNotIn("claudia has not written", out)
+
+
 class DryRunTests(unittest.TestCase):
     def test_dry_run_reports_would_alert_for_stale(self):
         db = _make_db([("hibiki", NOW - 27 * 3600)])
