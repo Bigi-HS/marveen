@@ -7,7 +7,7 @@
 # client required. This is the DELIBERATE opposite of tailscale-serve-private.sh,
 # which hard-refuses Funnel. Use ONLY after:
 #   1. Username+password credentials are configured
-#      (scripts/dashboard-set-credentials.py / .mjs) -- a public login without a
+#      (scripts/dashboard-set-credentials.mjs) -- a public login without a
 #      strong password is the dominant risk.
 #   2. A security review (Chad) has PASSED the public-exposure change.
 #

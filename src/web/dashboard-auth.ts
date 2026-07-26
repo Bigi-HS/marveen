@@ -201,7 +201,7 @@ export function buildDashboardAccessMessage(port: number, token: string, publicU
 // per-credential random salt at store/.dashboard-credentials.json (mode 0600).
 // The bearer token stays valid in parallel as the strong machine credential
 // (scripts / curl / agents) AND as an always-available recovery path if the
-// operator forgets the password. Set/rotate via scripts/dashboard-set-credentials.py.
+// operator forgets the password. Set/rotate via scripts/dashboard-set-credentials.mjs.
 const DASHBOARD_CREDENTIALS_PATH = join(PROJECT_ROOT, 'store', '.dashboard-credentials.json')
 
 // scrypt output length in bytes. 64 is comfortably above the 32-byte minimum

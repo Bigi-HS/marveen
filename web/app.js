@@ -6,26 +6,114 @@
 // re-prompt for the token and re-login. A legacy ?token=XXX URL is still honored
 // for backward compat: we log in with it, then strip it from the visible URL.
 (() => {
-  async function login(token) {
-    if (!token) return false
+  const originalFetch = window.fetch.bind(window)
+
+  // POST a credential set to the login endpoint. `creds` is either
+  // { token } (bearer/recovery) or { username, password } (operator login).
+  async function login(creds) {
     try {
       const res = await originalFetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: token.trim() }),
+        credentials: 'same-origin',
+        body: JSON.stringify(creds),
       })
       return res.ok
     } catch { return false }
   }
 
-  const originalFetch = window.fetch.bind(window)
+  // Ask the server which login form to present: username+password (when
+  // credentials are configured) or the legacy token paste. Fail safe to token.
+  async function passwordLoginEnabled() {
+    try {
+      const res = await originalFetch('/api/auth/status', { credentials: 'same-origin' })
+      if (!res.ok) return false
+      const body = await res.json()
+      return body && body.passwordLogin === true
+    } catch { return false }
+  }
+
+  // Render a full-screen login overlay and resolve true once a login succeeds.
+  // Replaces the old window.prompt so the dashboard is usable from a phone and
+  // supports username+password. Only one overlay is ever mounted at a time.
+  function showLoginOverlay() {
+    if (window.__marveenLoginPromise) return window.__marveenLoginPromise
+    window.__marveenLoginPromise = (async () => {
+      const usePassword = await passwordLoginEnabled()
+      return await new Promise((resolve) => {
+        const backdrop = document.createElement('div')
+        backdrop.setAttribute('role', 'dialog')
+        backdrop.setAttribute('aria-modal', 'true')
+        backdrop.style.cssText =
+          'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;' +
+          'background:rgba(9,14,22,0.82);backdrop-filter:blur(3px);padding:16px'
+        backdrop.innerHTML =
+          '<form id="mvLoginForm" style="width:100%;max-width:360px;background:#141b26;color:#e8edf4;' +
+          'border:1px solid #2a3646;border-radius:14px;padding:24px 22px;box-shadow:0 12px 40px rgba(0,0,0,0.5);' +
+          'font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">' +
+          '<div style="font-size:18px;font-weight:600;margin-bottom:4px">NoA Dashboard</div>' +
+          '<div style="font-size:13px;color:#9fb0c3;margin-bottom:18px">Belépés a folytatáshoz</div>' +
+          (usePassword
+            ? '<label style="display:block;font-size:12px;color:#9fb0c3;margin-bottom:4px">Felhasználónév</label>' +
+              '<input id="mvUser" autocomplete="username" autocapitalize="none" autocorrect="off" ' +
+              'style="width:100%;box-sizing:border-box;padding:11px 12px;margin-bottom:12px;border-radius:9px;' +
+              'border:1px solid #2a3646;background:#0d131c;color:#e8edf4;font-size:15px">' +
+              '<label style="display:block;font-size:12px;color:#9fb0c3;margin-bottom:4px">Jelszó</label>' +
+              '<input id="mvPass" type="password" autocomplete="current-password" ' +
+              'style="width:100%;box-sizing:border-box;padding:11px 12px;margin-bottom:6px;border-radius:9px;' +
+              'border:1px solid #2a3646;background:#0d131c;color:#e8edf4;font-size:15px">'
+            : '<label style="display:block;font-size:12px;color:#9fb0c3;margin-bottom:4px">Hozzáférési token</label>' +
+              '<input id="mvToken" type="password" autocomplete="off" ' +
+              'style="width:100%;box-sizing:border-box;padding:11px 12px;margin-bottom:6px;border-radius:9px;' +
+              'border:1px solid #2a3646;background:#0d131c;color:#e8edf4;font-size:15px">') +
+          '<div id="mvLoginErr" style="min-height:18px;font-size:12px;color:#ff8080;margin:2px 0 10px"></div>' +
+          '<button type="submit" id="mvLoginBtn" ' +
+          'style="width:100%;padding:12px;border:none;border-radius:9px;background:#3b82f6;color:#fff;' +
+          'font-size:15px;font-weight:600;cursor:pointer">Belépés</button>' +
+          '</form>'
+        document.body.appendChild(backdrop)
+        const form = backdrop.querySelector('#mvLoginForm')
+        const err = backdrop.querySelector('#mvLoginErr')
+        const btn = backdrop.querySelector('#mvLoginBtn')
+        const first = backdrop.querySelector('#mvUser') || backdrop.querySelector('#mvToken')
+        if (first) first.focus()
+        form.addEventListener('submit', async (e) => {
+          e.preventDefault()
+          err.textContent = ''
+          btn.disabled = true
+          btn.textContent = 'Belépés...'
+          let creds
+          if (usePassword) {
+            const u = backdrop.querySelector('#mvUser').value.trim()
+            const p = backdrop.querySelector('#mvPass').value
+            if (!u || !p) { err.textContent = 'Add meg a felhasználónevet és a jelszót.'; btn.disabled = false; btn.textContent = 'Belépés'; return }
+            creds = { username: u, password: p }
+          } else {
+            const t = backdrop.querySelector('#mvToken').value.trim()
+            if (!t) { err.textContent = 'Add meg a tokent.'; btn.disabled = false; btn.textContent = 'Belépés'; return }
+            creds = { token: t }
+          }
+          const ok = await login(creds)
+          if (ok) {
+            backdrop.remove()
+            resolve(true)
+          } else {
+            err.textContent = 'Hibás belépési adatok.'
+            btn.disabled = false
+            btn.textContent = 'Belépés'
+          }
+        })
+      })
+    })()
+    return window.__marveenLoginPromise
+  }
 
   // Bootstrap from a legacy ?token= URL (logs in, then scrubs the URL).
   const bootstrapLogin = (async () => {
     const urlParams = new URLSearchParams(window.location.search)
     const urlToken = urlParams.get('token')
     if (urlToken) {
-      await login(urlToken)
+      await login({ token: urlToken.trim() })
       urlParams.delete('token')
       const clean = window.location.pathname + (urlParams.toString() ? '?' + urlParams : '') + window.location.hash
       window.history.replaceState({}, '', clean)
@@ -47,19 +135,10 @@
     }
     let res = await originalFetch(input, init)
     if (res.status === 401 && isSameOriginApi && !url.startsWith('/api/auth/')) {
-      // Session missing, expired, or revoked. Prompt for the token once and
+      // Session missing, expired, or revoked. Show the login overlay once and
       // re-login; on success, replay the original request transparently.
-      if (!window.__marveenAuthPrompting) {
-        window.__marveenAuthPrompting = (async () => {
-          const entered = window.prompt(
-            'Dashboard access token required.\n' +
-            'Paste the token from the server log ("Dashboard access" → access token):'
-          )
-          return entered && entered.trim() ? login(entered) : false
-        })()
-      }
-      const ok = await window.__marveenAuthPrompting
-      window.__marveenAuthPrompting = null
+      const ok = await showLoginOverlay()
+      window.__marveenLoginPromise = null
       if (ok) res = await originalFetch(input, init)
     }
     return res
