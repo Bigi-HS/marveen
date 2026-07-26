@@ -96,6 +96,15 @@ RETRY_MAX_SECONDS=$((30*60))  # cap: token-exhaustion long-wait
 # tick loop (the push script is itself idempotent; this only bounds how often we
 # spawn python). Matches the old cron cadence. Env-overridable for tests.
 HIBIKI_PUSH_THROTTLE_SECONDS="${HIBIKI_PUSH_THROTTLE_SECONDS:-300}"
+# To-Do freshness heartbeat + auth-token expiry monitor (cards 9ad7334e + 540511e1).
+# Both used to run from the WSL OS cron daemon, which has no systemd here: it dies
+# on reboot and can silently die mid-session (the literal ~6-week silence of the
+# token-expiry cron). Both detector scripts are idempotent (per-owner alert
+# suppression / per-level escalation state), so the always-on supervisor is a
+# strictly better host -- it self-heals on the next tick instead of staying mute.
+# The throttles below only bound how often we spawn python. Env-overridable for tests.
+FRESHNESS_CHECK_THROTTLE_SECONDS="${FRESHNESS_CHECK_THROTTLE_SECONDS:-3600}"          # hourly, matches old cron
+TOKEN_EXPIRY_CHECK_THROTTLE_SECONDS="${TOKEN_EXPIRY_CHECK_THROTTLE_SECONDS:-86400}"   # daily, matches old cron
 # Delivery-abandonment sentinel consumer (card d37df625): minimum seconds
 # between reader invocations from the tick loop. The CLI is idempotent (a cursor
 # file dedupes already-escalated drops); this only bounds how often we spawn
@@ -490,6 +499,53 @@ ensure_hibiki_push() {
   if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: hibiki-daily-push.py --quiet"; return 0; fi
   python3 "$push" --quiet >> "$STORE/hibiki-push.log" 2>&1 \
     || log "hibiki-push: tick invocation failed (non-fatal, retries next window)"
+}
+
+# To-Do freshness heartbeat (card 9ad7334e). Alerts marveen if Claudia/Hibiki
+# stop writing to todo_items for >26h. Reads noa.db only (no Claude auth), and is
+# idempotent (a per-owner state file dedupes re-alerts), so ticking it here can
+# never double-alert; the throttle only bounds python spawns. Replaces the fragile
+# WSL cron entry -- self-heals on the next tick instead of staying mute after a
+# reboot or a silent cron-daemon death.
+freshness_check_due() {        # -> 0 if the throttle window has elapsed, 1 if not
+  local nextf="$STATE_DIR/freshness-check.next" now next
+  now=$(date +%s)
+  [ -f "$nextf" ] || return 0
+  next=$(cat "$nextf" 2>/dev/null || echo 0); case "$next" in (*[!0-9]*|'') next=0;; esac
+  [ "$now" -ge "$next" ]
+}
+ensure_freshness_check() {
+  local check="$INSTALL_DIR/scripts/todo-freshness-check.py"
+  [ -f "$check" ] || return 0         # not installed -> nothing to do
+  freshness_check_due || return 0     # throttled this tick
+  echo $(( $(date +%s) + FRESHNESS_CHECK_THROTTLE_SECONDS )) > "$STATE_DIR/freshness-check.next"
+  if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: todo-freshness-check.py"; return 0; fi
+  python3 "$check" >> "$STORE/todo-freshness-check.log" 2>&1 \
+    || log "freshness-check: tick invocation failed (non-fatal, retries next window)"
+}
+
+# Auth-token expiry monitor (cards 1493e3e8 + 540511e1). Warns the Boss FAR ahead
+# of the shared setup-token's expiry so re-login is calm, never a fleet-down fire.
+# It is token-free / model-free by design (it must survive the very auth-death it
+# guards) and idempotent (alerts once per severity level crossed), so the tick can
+# never spam; the throttle only bounds python spawns. It ran on WSL cron and went
+# SILENT for ~6 weeks after the daemon died -- exactly the failure class the
+# always-on supervisor removes.
+token_expiry_check_due() {     # -> 0 if the throttle window has elapsed, 1 if not
+  local nextf="$STATE_DIR/token-expiry-check.next" now next
+  now=$(date +%s)
+  [ -f "$nextf" ] || return 0
+  next=$(cat "$nextf" 2>/dev/null || echo 0); case "$next" in (*[!0-9]*|'') next=0;; esac
+  [ "$now" -ge "$next" ]
+}
+ensure_token_expiry_check() {
+  local mon="$INSTALL_DIR/scripts/token-expiry-monitor.py"
+  [ -f "$mon" ] || return 0           # not installed -> nothing to do
+  token_expiry_check_due || return 0  # throttled this tick
+  echo $(( $(date +%s) + TOKEN_EXPIRY_CHECK_THROTTLE_SECONDS )) > "$STATE_DIR/token-expiry-check.next"
+  if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: token-expiry-monitor.py --once"; return 0; fi
+  python3 "$mon" --once >> "$STORE/token-expiry-monitor.log" 2>&1 \
+    || log "token-expiry-check: tick invocation failed (non-fatal, retries next window)"
 }
 
 # Hot-cache auto-refresh (card fedb4b5f Phase 2). Regenerates each channel agent's
@@ -966,6 +1022,10 @@ tick() {
   ensure_token_outage_watch
   # 7) HIBIKI TOKEN-FREE DAILY PUSH (throttled; reboot-safe replacement for WSL cron)
   ensure_hibiki_push
+  # 7b) TO-DO FRESHNESS HEARTBEAT (hourly; reboot-safe replacement for WSL cron -- card 9ad7334e)
+  ensure_freshness_check
+  # 7c) AUTH-TOKEN EXPIRY MONITOR (daily; reboot-safe replacement for WSL cron -- cards 1493e3e8 + 540511e1)
+  ensure_token_expiry_check
   # 8) MEDIC BREAK-GLASS OPERATOR BOT (token-free recovery bot -- always-on, reboot-persistent)
   ensure_medic_watchdog
   # 9) OLLAMA DAEMON (core embedding backend -- always-on) + LOCAL-OLLAMA HYBRID
