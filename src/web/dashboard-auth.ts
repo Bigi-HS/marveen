@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { randomBytes, timingSafeEqual, createHmac } from 'node:crypto'
+import { randomBytes, timingSafeEqual, createHmac, createHash, scryptSync } from 'node:crypto'
 import { PROJECT_ROOT } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 
@@ -193,6 +193,111 @@ export function buildDashboardAccessMessage(port: number, token: string, publicU
   ].join('\n')
 }
 
+// === Username + password credentials (card 2c16a868) ===
+// The dashboard historically authenticated with a single high-entropy bearer
+// token. To make it usable from a plain browser on any device (no token to
+// paste, no Tailscale client), we add an OPTIONAL username + password login.
+// The password is NEVER stored in plaintext: we persist a scrypt hash + a
+// per-credential random salt at store/.dashboard-credentials.json (mode 0600).
+// The bearer token stays valid in parallel as the strong machine credential
+// (scripts / curl / agents) AND as an always-available recovery path if the
+// operator forgets the password. Set/rotate via scripts/dashboard-set-credentials.mjs.
+const DASHBOARD_CREDENTIALS_PATH = join(PROJECT_ROOT, 'store', '.dashboard-credentials.json')
+
+// scrypt output length in bytes. 64 is comfortably above the 32-byte minimum
+// and matches the session-secret entropy elsewhere in this file.
+const SCRYPT_KEYLEN = 64
+// Minimum password length. Enforced at set-time only; a public-facing login
+// makes a weak password the dominant risk, so we refuse anything short here and
+// document the "pick a strong one" expectation in the operator flow.
+export const MIN_PASSWORD_LENGTH = 12
+
+interface StoredCredentials {
+  username: string
+  salt: string // hex
+  hash: string // hex, scryptSync(password, salt, SCRYPT_KEYLEN)
+  createdAt: number
+}
+
+// undefined = not yet loaded from disk; null = loaded, none configured.
+let cachedCredentials: StoredCredentials | null | undefined
+
+function loadCredentials(): StoredCredentials | null {
+  if (cachedCredentials !== undefined) return cachedCredentials
+  try {
+    if (existsSync(DASHBOARD_CREDENTIALS_PATH)) {
+      const obj = JSON.parse(readFileSync(DASHBOARD_CREDENTIALS_PATH, 'utf-8')) as StoredCredentials
+      if (obj && obj.username && obj.salt && obj.hash) {
+        cachedCredentials = obj
+        return obj
+      }
+    }
+  } catch { /* fall through: treat unreadable/corrupt file as "none configured" */ }
+  cachedCredentials = null
+  return null
+}
+
+// True when a username+password has been configured. The frontend reads this
+// (via /api/auth/status) to decide whether to show the password form or fall
+// back to the token-paste prompt.
+export function hasPasswordCredentials(): boolean {
+  return loadCredentials() !== null
+}
+
+// Constant-time string compare that tolerates differing lengths without leaking
+// the length via an early return/throw. Hash both to a fixed 32-byte digest and
+// compare those constant-time. (timingSafeEqual throws on length mismatch, which
+// would itself be a timing/exception oracle.)
+function constantTimeStrEqual(a: string, b: string): boolean {
+  const da = createHash('sha256').update(String(a)).digest()
+  const db = createHash('sha256').update(String(b)).digest()
+  return timingSafeEqual(da, db)
+}
+
+// Persist a fresh username+password. Random per-credential salt, scrypt hash,
+// atomic write mode 0600. Swaps the in-memory cache so a subsequent verify sees
+// the new credential WITHOUT a server restart.
+export function setDashboardCredentials(username: string, password: string): void {
+  const u = String(username ?? '').trim()
+  if (!u) throw new Error('username must not be empty')
+  if (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH) {
+    throw new Error(`password must be at least ${MIN_PASSWORD_LENGTH} characters`)
+  }
+  const salt = randomBytes(16)
+  const hash = scryptSync(password, salt, SCRYPT_KEYLEN)
+  const rec: StoredCredentials = {
+    username: u,
+    salt: salt.toString('hex'),
+    hash: hash.toString('hex'),
+    createdAt: Math.floor(Date.now() / 1000),
+  }
+  mkdirSync(join(PROJECT_ROOT, 'store'), { recursive: true })
+  atomicWriteFileSync(DASHBOARD_CREDENTIALS_PATH, JSON.stringify(rec), { mode: 0o600 })
+  cachedCredentials = rec
+}
+
+// Verify a username+password pair. Returns false when no credentials are
+// configured. SECURITY: always runs scrypt (even on unknown username / no creds)
+// against a reference value so total response time does not reveal whether the
+// username exists or whether password auth is enabled at all (user-enumeration /
+// enable-probe resistance). Both the username and the derived hash must match.
+export function verifyPassword(username: string, password: string): boolean {
+  const creds = loadCredentials()
+  // Reference salt/hash: real values when configured, otherwise fixed dummies so
+  // the scrypt cost is still paid and the compare still runs (and fails).
+  const salt = creds ? Buffer.from(creds.salt, 'hex') : Buffer.alloc(16)
+  const expected = creds ? Buffer.from(creds.hash, 'hex') : Buffer.alloc(SCRYPT_KEYLEN)
+  let derived: Buffer
+  try {
+    derived = scryptSync(String(password ?? ''), salt, SCRYPT_KEYLEN)
+  } catch {
+    return false
+  }
+  const hashOk = derived.length === expected.length && timingSafeEqual(derived, expected)
+  const userOk = creds ? constantTimeStrEqual(String(username ?? ''), creds.username) : false
+  return Boolean(creds) && hashOk && userOk
+}
+
 // === Session cookie layer ===
 // A signed, opaque session value gates the browser UI without the raw access
 // token ever living in localStorage. The value is base64url("<payload>.<sig>")
@@ -380,4 +485,7 @@ export function __resetSessionStateForTests(): void {
   // Drop the in-memory revocation cache so the next call reloads from disk --
   // this models a server restart (the very case the stateless fix targets).
   revokedSessions = null
+  // Drop the credentials cache too, so a test that writes/removes the creds file
+  // between cases sees the fresh on-disk state.
+  cachedCredentials = undefined
 }

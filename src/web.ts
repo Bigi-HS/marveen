@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL } from './config.js'
 import { SERVER_BOOT_AT_PATH } from './server-boot-path.js'
-import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, extractBearer, buildDashboardAccessMessage, createSession, verifySession, revokeSession, parseCookies, classifyRequestOrigin, rateLimitKey, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from './web/dashboard-auth.js'
+import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, extractBearer, buildDashboardAccessMessage, createSession, verifySession, revokeSession, parseCookies, classifyRequestOrigin, rateLimitKey, verifyPassword, hasPasswordCredentials, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from './web/dashboard-auth.js'
 import { getDb } from './db.js'
 import { resolveRequestIdentity, logFromBindingStatus } from './web/agent-identity-binding.js'
 import { type AgentIdentity } from './web/agent-token-registry.js'
@@ -207,22 +207,41 @@ export function startWebServer(port = 3420): http.Server {
     // Login: exchange the access token for a session cookie. Public (it IS the
     // authentication step), but rate-limited only by the token check itself.
     if (path === '/api/auth/login' && method === 'POST') {
+      // Two accepted credential shapes, either mints the same session cookie:
+      //   { token }                -> the high-entropy bearer token (scripts, recovery)
+      //   { username, password }   -> the operator's password login (browser, any device)
       let token = ''
+      let username = ''
+      let password = ''
       try {
         const raw = (await readBody(req, { maxBytes: 4096 })).toString('utf-8')
-        token = raw ? (JSON.parse(raw).token ?? '') : ''
-      } catch { token = '' }
+        if (raw) {
+          const parsed = JSON.parse(raw)
+          token = parsed.token ?? ''
+          username = parsed.username ?? ''
+          password = parsed.password ?? ''
+        }
+      } catch { /* leave all empty -> rejected below */ }
       const lo = reqOrigin(req)
-      if (!checkBearerToken(`Bearer ${token}`, getDashboardToken())) {
-        // AC8: tag the audit trail remote/local + source IP. A rejected login
-        // from a remote (tailnet) IP is the signal worth watching once the
-        // dashboard is reachable off-box.
-        logger.warn({ remote: lo.remote, sourceIp: lo.sourceIp }, 'dashboard login rejected (bad token)')
+      const tokenOk = token !== '' && checkBearerToken(`Bearer ${token}`, getDashboardToken())
+      const passwordOk = (username !== '' || password !== '') && verifyPassword(username, password)
+      const usedPassword = username !== '' || password !== ''
+      if (!tokenOk && !passwordOk) {
+        // AC8: tag the audit trail remote/local + source IP + which credential
+        // shape was attempted. A rejected login from a remote IP is the signal
+        // worth watching once the dashboard is reachable off-box.
+        logger.warn(
+          { remote: lo.remote, sourceIp: lo.sourceIp, method: usedPassword ? 'password' : 'token' },
+          'dashboard login rejected (bad credentials)',
+        )
         res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'Invalid token' }))
+        res.end(JSON.stringify({ error: 'Invalid credentials' }))
         return
       }
-      logger.info({ remote: lo.remote, sourceIp: lo.sourceIp }, 'dashboard login ok')
+      logger.info(
+        { remote: lo.remote, sourceIp: lo.sourceIp, method: passwordOk ? 'password' : 'token' },
+        'dashboard login ok',
+      )
       const cookie = [
         `${SESSION_COOKIE_NAME}=${createSession()}`,
         'HttpOnly', 'SameSite=Strict', 'Path=/', `Max-Age=${SESSION_MAX_AGE_SECONDS}`,
@@ -244,7 +263,13 @@ export function startWebServer(port = 3420): http.Server {
         /^\/api\/agents\/[^/]+\/avatar$/.test(path)
       ))
     if (path === '/api/auth/status' && method === 'GET') {
-      return json(res, { authenticated: hasValidSession() || hasValidBearer() })
+      // `passwordLogin` lets the login UI pick its form: show username+password
+      // fields when credentials are configured, else fall back to token-paste.
+      // It reveals only that SOME credential exists, never the username itself.
+      return json(res, {
+        authenticated: hasValidSession() || hasValidBearer(),
+        passwordLogin: hasPasswordCredentials(),
+      })
     }
     // The live pane SSE stream is consumed via EventSource, which cannot set an
     // Authorization header. Same-origin EventSource sends the HttpOnly session
