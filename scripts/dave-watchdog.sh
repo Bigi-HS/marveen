@@ -26,37 +26,16 @@ MAX_PER_HOUR=8
 
 log() { echo "$(date -Is) $*" >> "$LOG"; }
 
-# T8 (Thor stack-review spec-gap): this reads the EXPLICIT `model` field only.
-# It does NOT know about archetype-based resolution (PR#8
-# resolveAgentModelFromConfig). Today both Dave and Thor carry an explicit model,
-# so the fallback below never fires -- but if a future archetype migration REMOVES
-# the explicit model field, this watchdog would silently relaunch on the
-# claude-sonnet-4-6 fallback instead of the archetype-resolved model. DO NOT drop
-# the explicit `model` field from agent-config.json while these bash watchdogs are
-# in use, or teach read_model the archetype map first.
-read_model() {
-  # Prints the configured model on the happy path. On a missing/unparseable
-  # config or absent 'model' field, emit a LOUD warning (log + stderr) so the
-  # misconfig is visible, then still default (don't hard-stop the agent).
-  local model
-  model="$(python3 -c "import json,sys
-try:
-    m=json.load(open('$ACONF')).get('model')
-except Exception:
-    sys.exit(3)
-if not m:
-    sys.exit(4)
-print(m)" 2>/dev/null)"
-  case "$?" in
-    0) printf '%s\n' "$model" ;;
-    3) log "WARN read_model: $ACONF missing or unparseable -> defaulting to claude-sonnet-4-6"
-       echo "WARN read_model: $ACONF missing or unparseable -> defaulting to claude-sonnet-4-6" >&2
-       echo claude-sonnet-4-6 ;;
-    *) log "WARN read_model: $ACONF has no 'model' field -> defaulting to claude-sonnet-4-6"
-       echo "WARN read_model: $ACONF has no 'model' field -> defaulting to claude-sonnet-4-6" >&2
-       echo claude-sonnet-4-6 ;;
-  esac
-}
+# Shared watchdog helpers (card 0b282eb0 A1). F1: fail CLOSED -- if the lib is
+# missing/broken, exit rather than silently degrade to a false-healthy loop.
+. "$(dirname "$0")/lib/watchdog-common.sh" || { log "FATAL: watchdog-common.sh source failed"; exit 1; }
+WD_LOG_FILE="$LOG"
+
+# read_model: thin wrapper over the shared wd_read_model (keeps the call sites
+# below unchanged). Reads the explicit `.model` from $ACONF; LOUD-warns (log +
+# stderr) and defaults to claude-sonnet-4-6 on a missing/unparseable config or
+# absent model field.
+read_model() { wd_read_model "$ACONF"; }
 
 # Fresh channel launch + first-run dialog guard (mirrors thor-watchdog /
 # channels.sh). No --continue: keeps --channels activation intact so Dave keeps

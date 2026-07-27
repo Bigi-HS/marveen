@@ -184,8 +184,13 @@ GUARD_RC=$?
   && ok "F1: missing lib file -> guard exits 1, never continues" \
   || bad "F1: missing lib did NOT fail closed (rc=$GUARD_RC out='$GUARD_OUT')"
 
-# ---- the 3 wired watchdogs actually carry the F1 guard + wrapper -----------
-for w in thor hibiki bond; do
+# ---- every phase-1 watchdog actually carries the F1 guard + wrapper --------
+# thor/hibiki/bond were the PR#423 pilot; the rest are wired in this change.
+# Every read_model-bearing watchdog ON DEVELOP must source the lib with the
+# fail-CLOSED guard, call wd_read_model, and no longer carry the inline python
+# heredoc. (scout-watchdog.sh is untracked / not yet on develop -> wired when it
+# lands upstream, deliberately excluded here.)
+for w in thor hibiki bond agent bigben chad claudia dave devil-advocate forge gyore percy; do
   f="$ROOT/scripts/${w}-watchdog.sh"
   { grep -q '\. "\$(dirname "\$0")/lib/watchdog-common.sh" || { log "FATAL' "$f" \
       && grep -q 'wd_read_model "\$ACONF"' "$f" \

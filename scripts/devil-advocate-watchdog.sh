@@ -20,29 +20,16 @@ MAX_PER_HOUR=8
 
 log() { echo "$(date -Is) $*" >> "$LOG"; }
 
-read_model() {
-  # Prints the configured model on the happy path. On a missing/unparseable
-  # config or absent 'model' field, emit a LOUD warning (log + stderr) so the
-  # misconfig is visible, then still default (don't hard-stop the agent).
-  local model
-  model="$(python3 -c "import json,sys
-try:
-    m=json.load(open('$ACONF')).get('model')
-except Exception:
-    sys.exit(3)
-if not m:
-    sys.exit(4)
-print(m)" 2>/dev/null)"
-  case "$?" in
-    0) printf '%s\n' "$model" ;;
-    3) log "WARN read_model: $ACONF missing or unparseable -> defaulting to claude-sonnet-4-6"
-       echo "WARN read_model: $ACONF missing or unparseable -> defaulting to claude-sonnet-4-6" >&2
-       echo claude-sonnet-4-6 ;;
-    *) log "WARN read_model: $ACONF has no 'model' field -> defaulting to claude-sonnet-4-6"
-       echo "WARN read_model: $ACONF has no 'model' field -> defaulting to claude-sonnet-4-6" >&2
-       echo claude-sonnet-4-6 ;;
-  esac
-}
+# Shared watchdog helpers (card 0b282eb0 A1). F1: fail CLOSED -- if the lib is
+# missing/broken, exit rather than silently degrade to a false-healthy loop.
+. "$(dirname "$0")/lib/watchdog-common.sh" || { log "FATAL: watchdog-common.sh source failed"; exit 1; }
+WD_LOG_FILE="$LOG"
+
+# read_model: thin wrapper over the shared wd_read_model (keeps the call sites
+# below unchanged). Reads the explicit `.model` from $ACONF; LOUD-warns (log +
+# stderr) and defaults to claude-sonnet-4-6 on a missing/unparseable config or
+# absent model field.
+read_model() { wd_read_model "$ACONF"; }
 
 # Fresh channel launch + first-run dialog guard (mirrors channels.sh). No
 # --continue: keeps --channels activation intact. Auto-accept the Bypass
