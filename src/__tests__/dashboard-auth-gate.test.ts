@@ -92,7 +92,7 @@ function req(
   method: string,
   path: string,
   opts: { headers?: Record<string, string>; body?: string } = {},
-): Promise<{ status: number; body: any; setCookie?: string; hsts?: string }> {
+): Promise<{ status: number; body: any; setCookie?: string; hsts?: string; csp?: string; nosniff?: string; frameOptions?: string }> {
   return new Promise((resolve, reject) => {
     const u = new URL(base + path)
     const r = http.request(
@@ -109,6 +109,9 @@ function req(
             body,
             setCookie: resp.headers['set-cookie']?.[0],
             hsts: resp.headers['strict-transport-security'],
+            csp: resp.headers['content-security-policy'] as string | undefined,
+            nosniff: resp.headers['x-content-type-options'] as string | undefined,
+            frameOptions: resp.headers['x-frame-options'] as string | undefined,
           })
         })
       },
@@ -280,6 +283,26 @@ describe('HSTS security header', () => {
     const r = await req('GET', '/api/anything', { headers: { 'X-Forwarded-Proto': 'https' } })
     expect(r.status).toBe(401)
     expect(r.hsts).toBe('max-age=31536000; includeSubDomains')
+  })
+})
+
+describe('content security headers (public-Funnel hardening, card e5b96bfe)', () => {
+  it('emits CSP + nosniff + frame-deny on a plain-HTTP loopback response', async () => {
+    const r = await req('GET', '/api/anything', { headers: { Authorization: `Bearer ${TOKEN}` } })
+    expect(r.status).toBe(200)
+    expect(r.nosniff).toBe('nosniff')
+    expect(r.frameOptions).toBe('DENY')
+    expect(r.csp).toContain("default-src 'self'")
+    expect(r.csp).toContain("frame-ancestors 'none'")
+    expect(r.csp).not.toMatch(/script-src [^;]*'unsafe-inline'/)
+  })
+
+  it('emits the same content headers on an unauthenticated 401', async () => {
+    const r = await req('GET', '/api/anything')
+    expect(r.status).toBe(401)
+    expect(r.nosniff).toBe('nosniff')
+    expect(r.frameOptions).toBe('DENY')
+    expect(r.csp).toBeTruthy()
   })
 })
 
