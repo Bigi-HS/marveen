@@ -142,6 +142,15 @@ class VerifySchemaSyncTest(unittest.TestCase):
         r = _run(self.a, self.b)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_table_name_with_quote_does_not_crash(self):
+        """Chad hardening: a crafted table name containing a single quote must not
+        crash the PRAGMA table_info lookup (f-string interpolation would break)."""
+        weird = 'CREATE TABLE "o\'brien" (id INTEGER PRIMARY KEY, name TEXT);\n'
+        _build(self.a, BASE_SCHEMA + weird)
+        _build(self.b, BASE_SCHEMA + weird)
+        r = _run(self.a, self.b)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_memory_path_builds_from_schema_file(self):
         schema_file = os.path.join(self.tmp, "schema.sql")
         with open(schema_file, "w", encoding="utf-8") as f:
