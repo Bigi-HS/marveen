@@ -54,8 +54,13 @@ def _schema(conn: sqlite3.Connection):
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
     ).fetchall():
         cols = {}
-        for row in conn.execute(f"PRAGMA table_info('{tname}')").fetchall():
-            cols[row[1]] = (row[2] or "").upper()
+        # Parameterized table-valued form (SQLite 3.16+) -- a bound argument is
+        # safe against table names carrying quotes; f-string interpolation into a
+        # bare PRAGMA would break on a crafted DB (Chad hardening).
+        for row in conn.execute(
+            "SELECT name, type FROM pragma_table_info(?)", (tname,)
+        ).fetchall():
+            cols[row[0]] = (row[1] or "").upper()
         tables[tname] = cols
 
     indexes = {}
