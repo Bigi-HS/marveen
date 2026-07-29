@@ -65,4 +65,24 @@ describe('POST /api/notify/telegram (route guard + validation)', () => {
     expect(r.status).toBe(500)
     expect(r.body.error).toMatch(/bot token/)
   })
+
+  // Regression (card fa3f5012): callers (NoA relay / claudia) serialize chat_id as a
+  // JSON NUMBER (8643929442). The route trimmed chat_id assuming a string, so
+  // `chat_id.trim()` threw `chat_id?.trim is not a function` -> uncaught -> generic
+  // 500, silently breaking the Boss-DM server-side fallback. A numeric chat_id must
+  // be coerced, not crash.
+  it('accepts a NUMERIC chat_id without crashing (reaches token check, not a TypeError)', async () => {
+    __setBotTokenReader(() => null)
+    const r = await call('POST', '/api/notify/telegram', JSON.stringify({ chat_id: 8643929442, text: 'hi' }))
+    expect(r.handled).toBe(true)
+    expect(r.status).toBe(500)
+    expect(r.body.error).toMatch(/bot token/)
+  })
+
+  it('rejects a numeric chat_id with missing text as 400 (validation, not a crash)', async () => {
+    const r = await call('POST', '/api/notify/telegram', JSON.stringify({ chat_id: 8643929442 }))
+    expect(r.handled).toBe(true)
+    expect(r.status).toBe(400)
+    expect(r.body.error).toMatch(/chat_id and text/)
+  })
 })

@@ -30,7 +30,7 @@ export async function tryHandleNotify(ctx: RouteContext): Promise<boolean> {
   if (path !== '/api/notify/telegram' || method !== 'POST') return false
 
   const body = await readBody(req)
-  let parsed: { chat_id?: string; text?: string; parse_mode?: string; reply_to?: number }
+  let parsed: { chat_id?: string | number; text?: string; parse_mode?: string; reply_to?: number }
   try {
     parsed = JSON.parse(body.toString())
   } catch {
@@ -39,7 +39,11 @@ export async function tryHandleNotify(ctx: RouteContext): Promise<boolean> {
   }
 
   const { chat_id, text, parse_mode, reply_to } = parsed
-  if (!chat_id?.trim() || !text?.trim()) {
+  // Telegram chat_ids are numeric, so callers (NoA relay / claudia) legitimately
+  // serialize chat_id as a JSON number. Coerce before trimming -- a bare
+  // `chat_id.trim()` on a number threw and 500'd the whole fallback (card fa3f5012).
+  const chatId = chat_id == null ? '' : String(chat_id).trim()
+  if (!chatId || !text?.trim()) {
     json(res, { error: 'chat_id and text are required' }, 400)
     return true
   }
@@ -51,7 +55,7 @@ export async function tryHandleNotify(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
-  const payload: Record<string, unknown> = { chat_id: chat_id.trim(), text }
+  const payload: Record<string, unknown> = { chat_id: chatId, text }
   if (parse_mode) payload.parse_mode = parse_mode
   if (reply_to) payload.reply_to_message_id = reply_to
 
