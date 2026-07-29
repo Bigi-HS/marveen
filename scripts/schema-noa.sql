@@ -122,6 +122,9 @@ CREATE TABLE kanban_cards (
 
 CREATE TABLE kanban_comments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- NOTE: card_id FK not enforced at DB level (SQLite cannot ALTER TABLE ADD
+  -- FOREIGN KEY on the populated live table). Application layer validates card
+  -- existence before insert. Accepted deviation (spec A1 v5, AC-8).
   card_id TEXT NOT NULL,
   author TEXT NOT NULL,
   content TEXT NOT NULL,
@@ -222,6 +225,22 @@ CREATE TABLE gate_pr_authors (
   pr_number    INTEGER PRIMARY KEY,
   author_agent TEXT NOT NULL,
   recorded_at  INTEGER NOT NULL
+);
+
+CREATE TABLE gate_ci_runs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  pr_number   INTEGER NOT NULL,
+  head_sha    TEXT    NOT NULL,
+  status      TEXT    NOT NULL,
+  tsc_ok      INTEGER,
+  tests_pass  INTEGER,
+  tests_fail  INTEGER,
+  diff_files  INTEGER,
+  insertions  INTEGER,
+  deletions   INTEGER,
+  recorded_by TEXT    NOT NULL,
+  recorded_at INTEGER NOT NULL,
+  note        TEXT
 );
 
 CREATE TABLE idea_box (
@@ -363,6 +382,7 @@ CREATE INDEX idx_memories_topic     ON memories(agent_id, topic_key) WHERE topic
 
 -- agent_messages: delivery queue (recipient + status + priority sort)
 CREATE INDEX idx_messages_queue     ON agent_messages(to_agent, status, priority DESC, id);
+CREATE INDEX idx_agent_messages_status ON agent_messages(status, to_agent);
 
 -- kanban_cards: board view + parent hierarchy
 CREATE INDEX idx_kanban_status      ON kanban_cards(status, archived_at, sort_order);
@@ -370,10 +390,15 @@ CREATE INDEX idx_kanban_parent      ON kanban_cards(parent_id) WHERE parent_id I
 
 -- scheduled_tasks: next-fire sweep
 CREATE INDEX idx_tasks_next         ON scheduled_tasks(agent, status, next_run) WHERE status = 'active';
+CREATE INDEX idx_tasks_status_next  ON scheduled_tasks(status, next_run);
 
 -- token_usage: dedup + agent/time aggregation
+-- NOTE: 3 redundant indexes (idx_token_usage_dedup/_agent_ts/_agent) that
+-- accumulated on the live DB are dropped by scripts/cleanup-noa-indexes.py
+-- (spec A1 v5, AC-3) and are intentionally NOT recreated here.
 CREATE UNIQUE INDEX idx_token_dedup ON token_usage(agent, session_id, timestamp, input_tokens, output_tokens);
 CREATE INDEX idx_token_agent_ts     ON token_usage(agent, timestamp);
+CREATE INDEX idx_token_usage_ts     ON token_usage(timestamp);
 
 -- daily_logs: date lookup
 CREATE INDEX idx_daily_agent_date   ON daily_logs(agent_id, date);
@@ -389,6 +414,7 @@ CREATE INDEX idx_convlog_agent               ON conversation_log(agent_id, creat
 CREATE INDEX idx_gate_pr_sha                 ON gate_approvals(pr_number, head_sha);
 CREATE INDEX idx_gate_reviewer               ON gate_approvals(pr_number, reviewer);
 CREATE INDEX idx_gate_override_pr_sha        ON gate_overrides(pr_number, head_sha);
+CREATE INDEX idx_gate_ci_pr_sha              ON gate_ci_runs(pr_number, head_sha);
 CREATE INDEX idx_idea_box_status             ON idea_box(status);
 CREATE INDEX idx_idea_box_category           ON idea_box(category);
 CREATE UNIQUE INDEX idx_pcr_agent_channel    ON pending_channel_requests(agent, channel_id) WHERE status = 'pending';
