@@ -596,20 +596,20 @@ describe('listProjects', () => {
   })
 
   it('returns distinct project names sorted alphabetically', () => {
-    createCard({ title: 'A', project: 'zebra', suppressIntake: true })
-    createCard({ title: 'B', project: 'alpha', suppressIntake: true })
-    createCard({ title: 'C', project: 'zebra', suppressIntake: true })
-    expect(listProjects()).toEqual(['alpha', 'zebra'])
+    createCard({ title: 'A', project: 'RES', suppressIntake: true })
+    createCard({ title: 'B', project: 'DASH', suppressIntake: true })
+    createCard({ title: 'C', project: 'RES', suppressIntake: true })
+    expect(listProjects()).toEqual(['DASH', 'RES'])
   })
 
   it('excludes null and empty-string projects', () => {
     createCard({ title: 'No project', suppressIntake: true })
-    createCard({ title: 'Has project', project: 'valid', suppressIntake: true })
-    expect(listProjects()).toEqual(['valid'])
+    createCard({ title: 'Has project', project: 'ENG', suppressIntake: true })
+    expect(listProjects()).toEqual(['ENG'])
   })
 
   it('excludes archived cards', () => {
-    const card = createCard({ title: 'Archived', project: 'secret', suppressIntake: true })
+    const card = createCard({ title: 'Archived', project: 'SEC', suppressIntake: true })
     archiveCard(card.id)
     expect(listProjects()).toEqual([])
   })

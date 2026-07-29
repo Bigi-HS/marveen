@@ -85,6 +85,6 @@ describe('W5-2a ideas.ts promote -> noa-kanban.createCard', () => {
     const arg = (createCard as any).mock.calls[0][0]
     expect(arg.title).toBe('Teszt otlet')
     expect(arg.status).toBe('planned')
-    expect(arg.project).toBe('Fejlesztési ötletek')
+    expect(arg.project).toBe('ENG') // canonical taxonomy (card cf0d1bfe); promoted ideas default to ENG
   })
 })

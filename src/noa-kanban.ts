@@ -113,6 +113,60 @@ export class BuiltinColumnError extends Error {
   }
 }
 
+export class InvalidProjectError extends Error {
+  constructor(project: unknown) {
+    super(
+      `Invalid project ${JSON.stringify(project)}. ` +
+      `Must be one of the canonical taxonomy prefixes: ${CARD_PROJECTS.join(', ')}`
+    )
+    this.name = 'InvalidProjectError'
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Project taxonomy (card cf0d1bfe, validation slice)
+// ---------------------------------------------------------------------------
+
+// The stored `project` field IS the taxonomy bucket. All live cards are already
+// classified into exactly these 14 canonical prefixes (zero non-canonical on the
+// board). BIGI/DL/DUB/DISC are content sub-topics that fold into CONT, so they
+// are NOT valid standalone project values. Adding a prefix is a one-line change
+// here. The routing key stays the hex id -- this only constrains the label bucket.
+export const CARD_PROJECTS = [
+  'DASH', 'CORE', 'MEM', 'OPS', 'ENG', 'CONT', 'SEC',
+  'PA', 'EDU', 'WELL', 'DEC', 'RES', 'DND', 'BUCC',
+] as const
+
+export type CardProject = (typeof CARD_PROJECTS)[number]
+
+export const VALID_PROJECTS: ReadonlySet<string> = new Set(CARD_PROJECTS)
+
+/**
+ * Normalize + validate a supplied project value for storage.
+ *   - null/undefined -> null (absence is allowed at this layer; the route
+ *     enforces presence on create). This grace protects internal system-card
+ *     callers and partial PUT updates from throwing.
+ *   - a supplied value is trimmed + upper-cased ('dash'/'Dash' -> 'DASH') then
+ *     checked against the enum; anything out of enum (incl. empty string or a
+ *     multi-token value like 'DASH,ENG') throws InvalidProjectError.
+ */
+export function normalizeProject(project: string | null | undefined): string | null {
+  if (project == null) return null
+  const norm = String(project).trim().toUpperCase()
+  if (!VALID_PROJECTS.has(norm)) throw new InvalidProjectError(project)
+  return norm
+}
+
+/**
+ * Route policy for POST /api/kanban: a project is MANDATORY on create. Returns
+ * the normalized canonical value, or throws InvalidProjectError when the value
+ * is absent, blank, or non-canonical (the route maps that to HTTP 400).
+ */
+export function assertProjectPresent(project: string | null | undefined): string {
+  if (project == null || String(project).trim() === '') throw new InvalidProjectError(project)
+  return normalizeProject(project)!
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -481,6 +535,10 @@ export function createCard(params: CreateCardParams): KanbanCard {
   const validIds = getValidStatusIds()
   if (!validIds.has(status)) throw new InvalidStatusError(status)
 
+  // Validate + normalize the project taxonomy value (card cf0d1bfe). Absence is
+  // allowed here (grace for internal callers); a supplied non-canonical value throws.
+  const project = normalizeProject(params.project)
+
   // Check parent exists and is not archived
   if (params.parent_id) {
     const parent = db.prepare('SELECT id, archived_at FROM kanban_cards WHERE id = ?').get(params.parent_id) as { id: string; archived_at: number | null } | undefined
@@ -500,7 +558,7 @@ export function createCard(params: CreateCardParams): KanbanCard {
   ).run(
     id, params.title, params.description ?? null, status,
     params.assignee ?? null, priority,
-    params.project ?? null, params.parent_id ?? null, params.due_date ?? null,
+    project, params.parent_id ?? null, params.due_date ?? null,
     sortOrder, now, now, priorityScore, params.depends_on ?? null,
   )
 
@@ -544,7 +602,10 @@ export function updateCard(id: string, params: UpdateCardParams): boolean {
     assignee: params.assignee !== undefined ? params.assignee : card.assignee,
     priority: newPriority,
     priority_score: computeUpdatedScore(card, params, newStatus, newPriority),
-    project: params.project !== undefined ? params.project : card.project,
+    // Validate-when-supplied (card cf0d1bfe): omitting project keeps the current
+    // value (partial-update grace); a supplied value is normalized/validated,
+    // and an explicit null clears it (graceful, no throw).
+    project: params.project !== undefined ? normalizeProject(params.project) : card.project,
     parent_id: params.parent_id !== undefined ? params.parent_id : card.parent_id,
     depends_on: params.depends_on !== undefined ? params.depends_on : card.depends_on,
     due_date: params.due_date !== undefined ? params.due_date : card.due_date,

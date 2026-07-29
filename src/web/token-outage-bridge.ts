@@ -154,7 +154,7 @@ function defaultCreateCard(pending: AgentMessage[], resetAtText: string | null, 
       `${resetAtText ? ` Reset: ${resetAtText}.` : ''}\n\nQueued inbound for marveen:\n${head}`,
     status: 'waiting',
     priority: 'high',
-    project: 'token-outage-queue',
+    project: 'CORE', // canonical taxonomy (card cf0d1bfe): CORE owns token-usage/outage
   })
   return id
 }
