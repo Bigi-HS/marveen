@@ -408,7 +408,15 @@ function renderArchiveList(cards) {
       ? new Date(card.archived_at * 1000).toLocaleDateString('hu-HU', { year: 'numeric', month: 'short', day: 'numeric' })
       : ''
     const project = card.project ? `<span class="kanban-card-project">${escapeHtml(card.project)}</span>` : ''
-    const assignee = card.assignee ? `<span style="color:var(--muted)">${escapeHtml(String(card.assignee))}</span>` : ''
+    // Resolve the assignee id to its Boss display name (falling back to the raw
+    // id when the list has no match), mirroring the live-board chip so archived
+    // cards show "Dampier"/"Grace"/"NoA", never the internal agent id.
+    const rawArchAssignee = card.assignee ? String(card.assignee).trim() : ''
+    const archAssigneeMatch = rawArchAssignee
+      ? kanbanAssignees.find((a) => a.name.toLowerCase() === rawArchAssignee.toLowerCase())
+      : null
+    const archAssigneeLabel = archAssigneeMatch ? (archAssigneeMatch.displayName || archAssigneeMatch.name) : rawArchAssignee
+    const assignee = archAssigneeLabel ? `<span style="color:var(--muted)">${escapeHtml(archAssigneeLabel)}</span>` : ''
     row.innerHTML = `
       <div style="font-weight:500">${seq}${escapeHtml(card.title)}</div>
       <div style="font-size:12px;color:var(--muted);display:flex;gap:10px;align-items:center;flex-wrap:wrap">
