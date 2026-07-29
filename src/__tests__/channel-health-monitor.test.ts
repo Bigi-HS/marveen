@@ -55,7 +55,17 @@ vi.mock('../channel-provider.js', () => ({
   }),
 }))
 
-import { getChannelHealth, startChannelHealthMonitor, recoverPipeFromPane } from '../web/channel-health-monitor.js'
+const mockCreateAgentMessage = vi.fn()
+vi.mock('../db.js', () => ({
+  createAgentMessage: (...args: unknown[]) => mockCreateAgentMessage(...args),
+}))
+
+import {
+  getChannelHealth,
+  startChannelHealthMonitor,
+  recoverPipeFromPane,
+  decideDeferralEscalation,
+} from '../web/channel-health-monitor.js'
 import type { ProcEnvScan } from '../web/channel-poller-reap.js'
 
 describe('getChannelHealth', () => {
@@ -118,5 +128,100 @@ describe('recoverPipeFromPane (shared seam)', () => {
     mockReconnect.mockReturnValue({ ok: true })
     recoverPipeFromPane('seam-test-agent', 'plugin:telegram:telegram  ✘ failed', {} as ProcEnvScan)
     expect(mockReconnect).toHaveBeenCalledWith('seam-test-agent')
+  })
+})
+
+describe('decideDeferralEscalation (stuck-busy operator alert)', () => {
+  const T = { threshold: 5, cooldownMs: 30 * 60 * 1000 }
+  const START = { consecutiveDeferrals: 0, lastEscalatedAtMs: null }
+
+  it('does not escalate below the threshold, but counts the deferral', () => {
+    const d = decideDeferralEscalation({ deferred: true, prev: START, nowMs: 1000 }, T)
+    expect(d.escalate).toBe(false)
+    expect(d.next.consecutiveDeferrals).toBe(1)
+    expect(d.next.lastEscalatedAtMs).toBeNull()
+  })
+
+  it('escalates exactly once when the threshold is reached', () => {
+    const prev = { consecutiveDeferrals: 4, lastEscalatedAtMs: null }
+    const d = decideDeferralEscalation({ deferred: true, prev, nowMs: 5000 }, T)
+    expect(d.escalate).toBe(true)
+    expect(d.next.consecutiveDeferrals).toBe(5)
+    expect(d.next.lastEscalatedAtMs).toBe(5000)
+  })
+
+  it('suppresses a re-alert inside the cooldown while still stuck', () => {
+    const prev = { consecutiveDeferrals: 5, lastEscalatedAtMs: 5000 }
+    const d = decideDeferralEscalation({ deferred: true, prev, nowMs: 5000 + 60_000 }, T)
+    expect(d.escalate).toBe(false)
+    expect(d.next.consecutiveDeferrals).toBe(6)
+    expect(d.next.lastEscalatedAtMs).toBe(5000) // unchanged
+  })
+
+  it('re-alerts once the cooldown has elapsed and it is still stuck', () => {
+    const prev = { consecutiveDeferrals: 9, lastEscalatedAtMs: 5000 }
+    const d = decideDeferralEscalation({ deferred: true, prev, nowMs: 5000 + T.cooldownMs }, T)
+    expect(d.escalate).toBe(true)
+    expect(d.next.lastEscalatedAtMs).toBe(5000 + T.cooldownMs)
+  })
+
+  it('a non-deferred outcome (recovered / real drive) resets the spell', () => {
+    const prev = { consecutiveDeferrals: 4, lastEscalatedAtMs: null }
+    const d = decideDeferralEscalation({ deferred: false, prev, nowMs: 9000 }, T)
+    expect(d.escalate).toBe(false)
+    expect(d.next.consecutiveDeferrals).toBe(0)
+    expect(d.next.lastEscalatedAtMs).toBeNull()
+  })
+})
+
+describe('recoverPipeFromPane: stuck-busy deferral wiring', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  const FAILING_PANE = 'plugin:telegram:telegram  ✘ failed'
+  const CYCLE_MS = 31_000 // > DEFERRAL_RETRY_MS so each call passes the backoff gate
+
+  it('escalates to the operator (marveen) after 5 consecutive busy deferrals, once', () => {
+    mockReconnect.mockReturnValue({ ok: false, deferred: true, message: 'Pane not idle' })
+    const agent = 'stuck-busy-agent'
+    let t = 1_000_000
+    for (let i = 0; i < 6; i++) {
+      recoverPipeFromPane(agent, FAILING_PANE, {} as ProcEnvScan, t)
+      t += CYCLE_MS
+    }
+    // Fired exactly once at the 5th deferral (6th cycle is inside cooldown).
+    expect(mockCreateAgentMessage).toHaveBeenCalledTimes(1)
+    const [from, to, content, , priority] = mockCreateAgentMessage.mock.calls[0]
+    expect(from).toBe('channel-health-monitor')
+    expect(to).toBe('marveen') // operator channel, not a direct Boss DM
+    expect(priority).toBe('high')
+    expect(String(content)).toContain(agent)
+  })
+
+  it('does not escalate while the pane keeps deferring below threshold', () => {
+    mockReconnect.mockReturnValue({ ok: false, deferred: true, message: 'Pane not idle' })
+    const agent = 'briefly-busy-agent'
+    let t = 2_000_000
+    for (let i = 0; i < 4; i++) {
+      recoverPipeFromPane(agent, FAILING_PANE, {} as ProcEnvScan, t)
+      t += CYCLE_MS
+    }
+    expect(mockCreateAgentMessage).not.toHaveBeenCalled()
+  })
+
+  it('a deferral does NOT exhaust the reconnect-retry budget (agent still recovers later)', () => {
+    // Ten busy deferrals then an idle cycle where /mcp finally drives: because
+    // deferrals never advanced `attempts`, the reconnect still runs (not stuck in
+    // the MAX_RETRIES 30-min cooldown).
+    const agent = 'eventually-idle-agent'
+    let t = 3_000_000
+    mockReconnect.mockReturnValue({ ok: false, deferred: true, message: 'Pane not idle' })
+    for (let i = 0; i < 10; i++) {
+      recoverPipeFromPane(agent, FAILING_PANE, {} as ProcEnvScan, t)
+      t += CYCLE_MS
+    }
+    mockReconnect.mockClear()
+    mockReconnect.mockReturnValue({ ok: true, message: 'Activated Reconnect' })
+    recoverPipeFromPane(agent, FAILING_PANE, {} as ProcEnvScan, t)
+    expect(mockReconnect).toHaveBeenCalledWith(agent) // the drive actually ran
   })
 })

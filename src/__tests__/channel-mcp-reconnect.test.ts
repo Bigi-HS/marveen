@@ -59,6 +59,7 @@ import {
   resolveAgentProviderType,
   selectedSubmenuLine,
   chooseSubmenuTarget,
+  pollForIdleWindow,
 } from '../web/channel-mcp-reconnect.js'
 
 // Submenu panes Claude Code renders for each plugin state. The `❯` marks the
@@ -239,8 +240,8 @@ describe('attemptChannelMcpReconnect', () => {
     mockReady.mockReturnValue(true) // pane idle by default; the gate tests override
   })
 
-  it('wedge-safe gate: aborts WITHOUT sending any keys when the pane is not idle', () => {
-    mockReady.mockReturnValue(false) // agent is mid-generation / busy
+  it('wedge-safe gate: aborts WITHOUT sending any keys when the pane stays busy', () => {
+    mockReady.mockReturnValue(false) // agent is mid-generation / busy the whole window
     // Provide submenu captures that WOULD succeed -- proving the abort is the
     // gate's doing, not a downstream failure.
     mockCapturePane.mockReturnValue(SUBMENU_FAILED_TOP)
@@ -249,10 +250,15 @@ describe('attemptChannelMcpReconnect', () => {
 
     expect(result.ok).toBe(false)
     expect(result.message).toContain('not idle')
+    expect(result.deferred).toBe(true) // flagged as a deferral, not a drive failure
     // The whole point: NO tmux keys are sent into a busy pane (no Escape, no
     // /mcp, no Enter) -- so the agent's turn can never be interrupted/wedged.
-    // (The idle-gate=true path is exercised by every other test below.)
-    expect(mockExecFileSync).not.toHaveBeenCalled()
+    // The idle-catch's off-pane `/bin/sleep` polls are fine; only tmux send-keys
+    // would touch the pane, and there must be zero of those.
+    const sentKeys = mockExecFileSync.mock.calls.filter(
+      (c) => String(c[0]).includes('tmux') && Array.isArray(c[1]) && c[1][0] === 'send-keys',
+    )
+    expect(sentKeys).toHaveLength(0)
   })
 
   it('connected state: steps Down onto Reconnect, then activates it', () => {
@@ -405,5 +411,48 @@ describe('attemptChannelMcpReconnect', () => {
       (c) => Array.isArray(c[1]) && c[1].includes('Escape'),
     )
     expect(escapeCalls.length).toBeGreaterThan(0)
+  })
+})
+
+describe('pollForIdleWindow (aggressive idle-catch)', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('returns true immediately when the pane is already idle (no sleep)', () => {
+    mockReady.mockReturnValue(true)
+    expect(pollForIdleWindow('agent-x', 6, 500)).toBe(true)
+    expect(mockReady).toHaveBeenCalledTimes(1)
+    // No inter-poll sleep when the first sample already succeeds.
+    const sleeps = mockExecFileSync.mock.calls.filter((c) => String(c[0]).includes('sleep'))
+    expect(sleeps).toHaveLength(0)
+  })
+
+  it('catches a tool-boundary beat: busy, busy, then idle -> true', () => {
+    mockReady
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true)
+    expect(pollForIdleWindow('agent-x', 6, 500)).toBe(true)
+    expect(mockReady).toHaveBeenCalledTimes(3)
+    // Two waits before the third (successful) sample.
+    const sleeps = mockExecFileSync.mock.calls.filter((c) => String(c[0]).includes('sleep'))
+    expect(sleeps).toHaveLength(2)
+  })
+
+  it('defers (false) when the pane stays busy for the whole window', () => {
+    mockReady.mockReturnValue(false)
+    expect(pollForIdleWindow('agent-x', 6, 500)).toBe(false)
+    // Sampled `attempts` times, slept between each (attempts - 1).
+    expect(mockReady).toHaveBeenCalledTimes(6)
+    const sleeps = mockExecFileSync.mock.calls.filter((c) => String(c[0]).includes('sleep'))
+    expect(sleeps).toHaveLength(5)
+  })
+
+  it('never sends a keystroke -- the poll is observe-only (wedge-safe)', () => {
+    mockReady.mockReturnValue(false)
+    pollForIdleWindow('agent-x', 3, 100)
+    const sentKeys = mockExecFileSync.mock.calls.filter(
+      (c) => String(c[0]).includes('tmux') && Array.isArray(c[1]) && c[1][0] === 'send-keys',
+    )
+    expect(sentKeys).toHaveLength(0)
   })
 })

@@ -10,9 +10,46 @@ import { getProvider, type ChannelProviderType } from '../channel-provider.js'
 const TMUX = resolveFromPath('tmux')
 const MAX_UP_ATTEMPTS = 8
 
+// Aggressive idle-catch window (card fa3f5012 slice-2). A single
+// isSessionReadyForPrompt() snapshot misses the brief idle BEAT a busy agent
+// returns to between tool calls, so a continuously-working agent (e.g. an
+// always-generating PA) deferred forever and its dead pipe never self-healed.
+// We instead SAMPLE readiness a few times over a short window to catch that beat
+// at a tool boundary. Kept small so a genuinely stuck-busy pane still defers
+// within a couple of seconds (the health monitor's escalation is the backstop).
+const IDLE_CATCH_ATTEMPTS = 6
+const IDLE_CATCH_GAP_MS = 500
+
 export interface ReconnectResult {
   ok: boolean
   message: string
+  // true when we backed off because the pane stayed busy through the whole
+  // idle-catch window -- a DEFERRAL, not a drive failure. Callers use this to
+  // avoid burning the reconnect-retry budget on a busy pane and to escalate a
+  // persistently-stuck-busy agent to the operator instead (channel-health-monitor).
+  deferred?: boolean
+}
+
+/**
+ * Poll for a momentary idle window at a tool boundary. Returns true as soon as
+ * the pane reports ready, false if it stayed busy for the whole window. The
+ * inter-poll sleep is an off-pane `/bin/sleep` (never a keystroke), so this is
+ * wedge-safe even against a busy pane -- it observes, it does not touch.
+ */
+export function pollForIdleWindow(
+  session: string,
+  attempts: number = IDLE_CATCH_ATTEMPTS,
+  gapMs: number = IDLE_CATCH_GAP_MS,
+): boolean {
+  for (let i = 0; i < attempts; i++) {
+    if (isSessionReadyForPrompt(session)) return true
+    if (i < attempts - 1) {
+      try {
+        execFileSync('/bin/sleep', [String(gapMs / 1000)], { timeout: gapMs + 1000 })
+      } catch { /* best effort -- a failed sleep just tightens the poll cadence */ }
+    }
+  }
+  return false
 }
 
 export function resolveAgentSession(agentName: string): string {
@@ -164,9 +201,14 @@ export function attemptChannelMcpReconnect(agentName: string): ReconnectResult {
     // defense-in-depth + serialisation, not an absolute interrupt-prevention.
     // A dead pipe does not need INSTANT recovery: if not idle, abort and let the
     // next cycle retry once the pane has settled.
-    if (!isSessionReadyForPrompt(session)) {
-      logger.warn({ agentName, session }, 'channel-mcp-reconnect: pane not idle -- deferring /mcp drive to next cycle')
-      return { ok: false, message: 'Pane not idle (busy/unknown) -- deferred /mcp drive' }
+    // Aggressive idle-catch: sample readiness across a short window so a busy
+    // agent's tool-boundary beat is caught instead of deferred forever (the old
+    // single snapshot). Only after the whole window stays busy do we defer -- and
+    // we flag it as a DEFERRAL so the caller escalates a stuck-busy agent rather
+    // than silently retrying into a 30-min cooldown (card fa3f5012 slice-2).
+    if (!pollForIdleWindow(session)) {
+      logger.warn({ agentName, session }, 'channel-mcp-reconnect: pane stayed busy through idle-catch window -- deferring /mcp drive')
+      return { ok: false, message: 'Pane not idle (busy/unknown) -- deferred /mcp drive', deferred: true }
     }
 
     execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })

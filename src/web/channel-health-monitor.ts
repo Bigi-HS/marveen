@@ -1,5 +1,6 @@
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
+import { createAgentMessage } from '../db.js'
 import { listAgentNames, agentDir } from './agent-config.js'
 import { isAgentRunning, capturePane, isAgentChannelIntentionallyEnabled, agentHasChannel } from './agent-process.js'
 import {
@@ -27,10 +28,86 @@ const BACKOFF_MULTIPLIER = 3
 const MAX_RETRIES = 3
 const COOLDOWN_MS = 30 * 60 * 1000
 
+// Stuck-busy escalation (card fa3f5012 slice-2). A reconnect that DEFERS (pane
+// stayed busy through the idle-catch window) must not burn the MAX_RETRIES
+// budget -- that would cool a continuously-busy agent into a 30-min silence and
+// its dead pipe would never self-heal. Instead we count CONSECUTIVE deferrals
+// and, past the threshold, alert the operator (marveen channel, NOT the Boss
+// directly) that the agent is stuck-busy and needs a manual look. Re-alerts no
+// more than once per cooldown while still stuck.
+const DEFERRAL_ESCALATION_THRESHOLD = 5           // ~5 monitor cycles (~5 min) stuck-busy
+const DEFERRAL_ESCALATION_COOLDOWN_MS = 30 * 60 * 1000
+// Keep re-attempting the idle-catch every cycle instead of exhausting retries.
+const DEFERRAL_RETRY_MS = BACKOFF_BASE_MS
+
 const reconnectState = new Map<string, AgentReconnectState>()
+
+export interface DeferralEscalationState {
+  consecutiveDeferrals: number
+  lastEscalatedAtMs: number | null
+}
+
+const NO_DEFERRAL_STATE: DeferralEscalationState = { consecutiveDeferrals: 0, lastEscalatedAtMs: null }
+
+const deferralState = new Map<string, DeferralEscalationState>()
+
+export interface DeferralEscalationDecision {
+  escalate: boolean
+  next: DeferralEscalationState
+}
+
+/**
+ * Pure decision for the stuck-busy operator escalation. A busy-pane deferral
+ * that repeats past `threshold` consecutive cycles means the idle-catch never
+ * found a window -- the agent is genuinely stuck-busy and the pipe cannot
+ * self-heal. Escalate ONCE at threshold, then re-fire no more than once per
+ * `cooldownMs` while still stuck. Any non-deferred outcome (recovered, or a real
+ * /mcp drive that ran) resets the spell.
+ */
+export function decideDeferralEscalation(
+  input: { deferred: boolean; prev: DeferralEscalationState; nowMs: number },
+  t: { threshold: number; cooldownMs: number },
+): DeferralEscalationDecision {
+  if (!input.deferred) return { escalate: false, next: NO_DEFERRAL_STATE }
+
+  const consecutiveDeferrals = input.prev.consecutiveDeferrals + 1
+  const atThreshold = consecutiveDeferrals >= t.threshold
+  const cooldownElapsed =
+    input.prev.lastEscalatedAtMs == null || input.nowMs - input.prev.lastEscalatedAtMs >= t.cooldownMs
+  const fireNow = atThreshold && cooldownElapsed
+
+  return {
+    escalate: fireNow,
+    next: {
+      consecutiveDeferrals,
+      lastEscalatedAtMs: fireNow ? input.nowMs : input.prev.lastEscalatedAtMs,
+    },
+  }
+}
 
 function getBackoffMs(attempt: number): number {
   return BACKOFF_BASE_MS * Math.pow(BACKOFF_MULTIPLIER, attempt)
+}
+
+// Operator alert for a stuck-busy agent: routed to the orchestrator (marveen)
+// as an inter-agent message, NOT a direct Boss DM -- marveen decides whether/how
+// to relay (card fa3f5012 slice-2 decision). Best-effort: a DB hiccup must never
+// throw out of the monitor sweep.
+function escalateStuckBusy(agentName: string, consecutiveDeferrals: number): void {
+  const content =
+    `⚠️ Csatorna-recovery: a(z) ${agentName} Telegram MCP-pipe-ja ${consecutiveDeferrals} egymas utani cikluson at ` +
+    `(~${consecutiveDeferrals} perc) halott, de a pane vegig busy volt -> az idle-catch nem talalt ablakot a ` +
+    `/mcp-hez, magatol nem gyogyul. Nezd meg a sessiont (input-buffer tiszta-e), es kezi /mcp reconnect kell. ` +
+    `A szerver-oldali POST /api/notify/telegram fallback addig is kezbesit a valaszaihoz.`
+  try {
+    createAgentMessage('channel-health-monitor', MAIN_AGENT_ID, content, false, 'high')
+    logger.error(
+      { agentName, consecutiveDeferrals },
+      'channel-health-monitor: agent stuck-busy through idle-catch -- escalated to operator',
+    )
+  } catch (err) {
+    logger.warn({ err, agentName }, 'channel-health-monitor: stuck-busy operator escalation failed')
+  }
 }
 
 function isPluginFailedInPane(pane: string, pluginPaneId: string): boolean {
@@ -95,8 +172,7 @@ function checkAgent(agentName: string, session: string, psScan: ProcEnvScan): vo
 // so both share ONE backoff/anti-flap state (reconnectState) -- the idle path
 // must not hammer reconnect on rapid busy/idle flapping. Backoff-gated: a recent
 // attempt or an exhausted-retry cooldown short-circuits before any tmux/ps work.
-export function recoverPipeFromPane(agentName: string, pane: string, psScan: ProcEnvScan): void {
-  const now = Date.now()
+export function recoverPipeFromPane(agentName: string, pane: string, psScan: ProcEnvScan, now: number = Date.now()): void {
   const state = reconnectState.get(agentName)
 
   if (state && state.attempts >= MAX_RETRIES) {
@@ -128,6 +204,7 @@ export function recoverPipeFromPane(agentName: string, pane: string, psScan: Pro
       logger.info({ agentName, provider: providerType }, 'channel-health-monitor: plugin recovered')
       reconnectState.delete(agentName)
     }
+    deferralState.delete(agentName)
     return
   }
 
@@ -138,6 +215,36 @@ export function recoverPipeFromPane(agentName: string, pane: string, psScan: Pro
   )
 
   const result = attemptChannelMcpReconnect(agentName)
+
+  if (result.deferred) {
+    // The pane stayed busy through the whole idle-catch window: /mcp never ran,
+    // so this is NOT a spent reconnect attempt. Do NOT advance the MAX_RETRIES
+    // budget (which would silence the agent for 30 min); keep retrying the
+    // idle-catch next cycle, and escalate to the operator once the agent has
+    // been stuck-busy past the threshold (card fa3f5012 slice-2).
+    reconnectState.set(agentName, {
+      attempts: attempt,
+      lastAttemptAt: now,
+      nextRetryAt: now + DEFERRAL_RETRY_MS,
+    })
+
+    const decision = decideDeferralEscalation(
+      { deferred: true, prev: deferralState.get(agentName) ?? NO_DEFERRAL_STATE, nowMs: now },
+      { threshold: DEFERRAL_ESCALATION_THRESHOLD, cooldownMs: DEFERRAL_ESCALATION_COOLDOWN_MS },
+    )
+    deferralState.set(agentName, decision.next)
+    if (decision.escalate) escalateStuckBusy(agentName, decision.next.consecutiveDeferrals)
+
+    logger.warn(
+      { agentName, attempt, consecutiveDeferrals: decision.next.consecutiveDeferrals },
+      'channel-health-monitor: reconnect deferred (pane busy) -- idle-catch will retry next cycle',
+    )
+    return
+  }
+
+  // A real /mcp drive ran (succeeded or genuinely failed): the stuck-busy spell,
+  // if any, is over.
+  deferralState.delete(agentName)
 
   const backoffMs = getBackoffMs(attempt)
   reconnectState.set(agentName, {
