@@ -3,7 +3,7 @@ import {
   listCards, listArchived, createCard, updateCard, deleteCard, moveCard, archiveCard,
   listComments, addComment, listProjects, getCard, getChildCards, runInTransaction,
   InvalidTransitionError, InvalidStatusError, InvalidSortOrderError, HasActiveChildrenError,
-  ParentNotFoundError,
+  ParentNotFoundError, InvalidProjectError, assertProjectPresent,
 } from '../../noa-kanban.js'
 import { OWNER_NAME, BOT_NAME } from '../../config.js'
 import { listAgentNames, readAgentDisplayName, findAvatarForAgent } from '../agent-config.js'
@@ -93,8 +93,12 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     const data = JSON.parse(body.toString())
     const id = randomUUID().slice(0, 8)
     try {
-      createCard({ id, ...data })
+      // A new card must carry a canonical project code (card cf0d1bfe). Presence
+      // is a create-time policy; the normalized value flows into the stored card.
+      const project = assertProjectPresent(data.project)
+      createCard({ id, ...data, project })
     } catch (err) {
+      if (err instanceof InvalidProjectError) { json(res, { error: err.message }, 400); return true }
       if (err instanceof InvalidStatusError) { json(res, { error: err.message }, 400); return true }
       if (err instanceof ParentNotFoundError) { json(res, { error: err.message }, 404); return true }
       throw err
@@ -111,7 +115,11 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     try {
       if (updateCard(id, data)) { json(res, { ok: true }); return true }
     } catch (err) {
-      if (err instanceof InvalidTransitionError || err instanceof InvalidStatusError) {
+      if (
+        err instanceof InvalidTransitionError ||
+        err instanceof InvalidStatusError ||
+        err instanceof InvalidProjectError
+      ) {
         json(res, { error: (err as Error).message }, 400)
         return true
       }

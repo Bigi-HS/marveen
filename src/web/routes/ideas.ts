@@ -111,7 +111,7 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
       status,
       priority: 'normal',
       assignee: 'marveen',
-      project: 'Fejlesztési ötletek',
+      project: 'ENG', // canonical taxonomy (card cf0d1bfe); promoted ideas default to ENG, re-prefix via updateCard if they belong elsewhere
     })
     updateIdea(ideaId, { status: 'kanban', kanban_id: cardId })
     json(res, { ok: true, kanban_id: cardId })
@@ -158,7 +158,7 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
       status: 'planned',
       priority: 'normal',
       assignee: 'marveen',
-      project: 'Fejlesztési ötletek',
+      project: 'ENG', // canonical taxonomy (card cf0d1bfe); promoted ideas default to ENG, re-prefix via updateCard if they belong elsewhere
     })
     const childIds: string[] = []
     for (const st of subtasks) {
@@ -171,7 +171,7 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
         status: 'planned',
         priority: (st.priority && VALID_PRIORITIES.has(st.priority) ? st.priority : 'normal') as 'low' | 'normal' | 'high' | 'urgent',
         assignee: st.assignee || 'marveen',
-        project: 'Fejlesztési ötletek',
+        project: 'ENG', // canonical taxonomy (card cf0d1bfe); promoted ideas default to ENG, re-prefix via updateCard if they belong elsewhere
         parent_id: parentId,
       })
       childIds.push(childId)
