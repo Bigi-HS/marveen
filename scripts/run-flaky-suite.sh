@@ -102,7 +102,7 @@ for i in $(seq 1 "$RUNS"); do
 
     # Early exit check: after at least 3 runs, if we have a flaky candidate
     if [[ $EARLY_EXIT -eq 1 && $COMPLETED -ge 3 && $SUITE_FAIL -ge 1 && $SUITE_PASS -ge 1 ]]; then
-        [[ $QUIET -eq 0 ]] && echo "[early-exit] flaky confirmed after $COMPLETED runs"
+        echo "[early-exit] flaky confirmed after $COMPLETED runs (stopped early, not all $RUNS runs completed)" >&2
         break
     fi
 done
@@ -132,13 +132,24 @@ for fname in sorted(os.listdir(tmp_dir)):
     try:
         with open(fpath) as f:
             data = json.load(f)
-    except Exception:
+    except (IOError, OSError) as e:
+        print(f"WARNING: could not read {fpath}: {e}", file=sys.stderr)
+        continue
+    except json.JSONDecodeError as e:
+        print(f"WARNING: invalid JSON in {fpath}: {e}", file=sys.stderr)
         continue
 
     # vitest JSON reporter format: testResults[].assertionResults[]
     for suite in data.get("testResults", []):
         raw_path = suite.get("name") or suite.get("testFilePath") or ""
-        suite_name = os.path.relpath(raw_path, project_dir) if raw_path else "<unknown>"
+        if raw_path:
+            try:
+                suite_name = os.path.relpath(raw_path, project_dir)
+            except (ValueError, TypeError):
+                # relpath fails if raw_path is not under project_dir or has invalid chars
+                suite_name = raw_path
+        else:
+            suite_name = "<unknown>"
         for t in suite.get("assertionResults", []):
             # Build a unique key: file > describe > test
             ancestors = " > ".join(t.get("ancestorTitles", []))

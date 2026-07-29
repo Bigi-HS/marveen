@@ -63,6 +63,8 @@ def open_db(path: Path = DB_PATH) -> sqlite3.Connection:
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cf_snapshot ON coverage_files(snapshot_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cs_pr_number ON coverage_snapshots(pr_number)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cs_recorded_at ON coverage_snapshots(recorded_at)")
     conn.commit()
     return conn
 
@@ -72,6 +74,10 @@ def open_db(path: Path = DB_PATH) -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 def cmd_record(args):
+    # Validate that at least one identifying field is provided
+    if not args.pr and not args.branch and not args.sha:
+        print("ERROR: must provide at least one of: --pr, --branch, --sha", file=sys.stderr)
+        sys.exit(1)
     raw = sys.stdin.read().strip()
     if not raw:
         print("ERROR: no JSON on stdin", file=sys.stderr)
