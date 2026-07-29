@@ -1,7 +1,7 @@
 {
   "model": "claude-opus-4-8",
   "securityProfile": "researcher",
-  "displayName": "Radar",
+  "displayName": "Grace",
   "claudeConfigDir": "/home/domin/marveen/agents/radar/.claude-config",
   "channelProvider": "telegram",
   "team": {

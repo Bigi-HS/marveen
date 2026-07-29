@@ -1,7 +1,7 @@
 {
   "model": "claude-haiku-4-5-20251001",
   "securityProfile": "developer-junior",
-  "displayName": "Gauge",
+  "displayName": "Dampier",
   "team": {
     "role": "member",
     "reportsTo": "thor",
