@@ -117,7 +117,11 @@ CREATE TABLE kanban_cards (
   priority_score INTEGER CHECK(priority_score IS NULL OR priority_score BETWEEN 1 AND 10),
   -- Card id this card depends on (its blocker), or NULL. Read-only dependency
   -- edge (card ac37d123): persisted + validated, no auto-unblock behaviour yet.
-  depends_on TEXT REFERENCES kanban_cards(id)
+  depends_on TEXT REFERENCES kanban_cards(id),
+  -- Canonical taxonomy category (card cf0d1bfe), or NULL for pre-backfill cards.
+  -- Display code KAT-<hex-id> is derived from this + id; enum enforced in-app
+  -- (strict create, graceful update).
+  category TEXT
 );
 
 CREATE TABLE kanban_comments (

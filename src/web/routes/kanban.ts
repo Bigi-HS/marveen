@@ -3,7 +3,7 @@ import {
   listCards, listArchived, createCard, updateCard, deleteCard, moveCard, archiveCard,
   listComments, addComment, listProjects, getCard, getChildCards, runInTransaction,
   InvalidTransitionError, InvalidStatusError, InvalidSortOrderError, HasActiveChildrenError,
-  ParentNotFoundError,
+  ParentNotFoundError, InvalidCategoryError,
 } from '../../noa-kanban.js'
 import { OWNER_NAME, BOT_NAME } from '../../config.js'
 import { listAgentNames, readAgentDisplayName, findAvatarForAgent } from '../agent-config.js'
@@ -92,9 +92,17 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     const body = await readBody(req)
     const data = JSON.parse(body.toString())
     const id = randomUUID().slice(0, 8)
+    // Category is REQUIRED on create (card cf0d1bfe): missing / null / empty is a
+    // 400. The value is then validated against the canonical enum inside
+    // createCard (an out-of-enum value throws InvalidCategoryError -> 400 below).
+    if (data.category == null || String(data.category).trim() === '') {
+      json(res, { error: 'category kötelező (kanonikus kategória-enum)' }, 400)
+      return true
+    }
     try {
       createCard({ id, ...data })
     } catch (err) {
+      if (err instanceof InvalidCategoryError) { json(res, { error: err.message }, 400); return true }
       if (err instanceof InvalidStatusError) { json(res, { error: err.message }, 400); return true }
       if (err instanceof ParentNotFoundError) { json(res, { error: err.message }, 404); return true }
       throw err
@@ -111,7 +119,9 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     try {
       if (updateCard(id, data)) { json(res, { ok: true }); return true }
     } catch (err) {
-      if (err instanceof InvalidTransitionError || err instanceof InvalidStatusError) {
+      // Update is GRACEFUL on an absent category (never rejected); only an
+      // explicitly-supplied out-of-enum category is a 400.
+      if (err instanceof InvalidTransitionError || err instanceof InvalidStatusError || err instanceof InvalidCategoryError) {
         json(res, { error: (err as Error).message }, 400)
         return true
       }

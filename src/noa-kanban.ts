@@ -85,6 +85,13 @@ export class DependencyNotFoundError extends Error {
   }
 }
 
+export class InvalidCategoryError extends Error {
+  constructor(category: string) {
+    super(`Invalid card category '${category}' (not in the canonical enum)`)
+    this.name = 'InvalidCategoryError'
+  }
+}
+
 export class SelfDependencyError extends Error {
   constructor(id: string) {
     super(`Card '${id}' cannot depend on itself`)
@@ -140,6 +147,15 @@ export interface KanbanCard {
    * drive dispatch/unblock behaviour -- that is the separate later slice.
    */
   depends_on: string | null
+  /**
+   * Canonical taxonomy category (card cf0d1bfe), or null for legacy/pre-backfill
+   * cards. The display code KAT-<hex-id> is derived from this + the id via
+   * cardCode(); the id itself stays the internal routing key.
+   */
+  category: string | null
+  /** Derived display code KAT-<hex-id> (from category + id), or null when the
+   *  card has no category yet. Read-only: attached by the read paths, never stored. */
+  card_code: string | null
 }
 
 export interface BoardColumn {
@@ -173,6 +189,7 @@ export interface CreateCardParams {
   due_date?: number | null
   sort_order?: number
   suppressIntake?: boolean
+  category?: string | null
 }
 
 export interface UpdateCardParams {
@@ -188,6 +205,51 @@ export interface UpdateCardParams {
   due_date?: number | null
   sort_order?: number
   suppressIntake?: boolean
+  category?: string | null
+}
+
+// ---------------------------------------------------------------------------
+// Card-code taxonomy (card cf0d1bfe, Boss-GO TG4452)
+// ---------------------------------------------------------------------------
+
+// Canonical category enum, system-enforced. The stored card owner stays the hex
+// id (routing / nudge-pairing key); a category prefix yields the display code
+// KAT-<hex-id> (e.g. DASH-06a63515). Standalone categories plus the CONT family
+// (CONT is the main content collector; BIGI/DL/DUB/DISC are its channel-specific
+// members). Adding a new category is a one-line change here + schema-noa.sql.
+export const CARD_CATEGORIES = [
+  'DASH', 'CORE', 'MEM', 'OPS', 'ENG', 'RES', 'SEC', 'ASST', 'EDU', 'WELL',
+  'DEC', 'KANB', 'DND', 'BUCC', 'FIX', 'KHOOT', 'VOICE', 'FABLE', 'AGENT',
+  'OAUTH', 'WEB', 'CV',
+  'CONT', 'BIGI', 'DL', 'DUB', 'DISC',
+] as const
+
+export type CardCategory = (typeof CARD_CATEGORIES)[number]
+
+const CARD_CATEGORY_SET: ReadonlySet<string> = new Set(CARD_CATEGORIES)
+
+/** Enum membership check (case-sensitive: the canonical codes are upper-case). */
+export function isValidCategory(category: string): category is CardCategory {
+  return CARD_CATEGORY_SET.has(category)
+}
+
+/** Derive the display code KAT-<hex-id> from a category + card id. Returns null
+ *  when the card has no category yet (legacy / pre-backfill), so the caller can
+ *  fall back to the bare id. The hex id is never mutated -- it stays the routing key. */
+export function cardCode(category: string | null | undefined, id: string): string | null {
+  return category ? `${category}-${id}` : null
+}
+
+/** Normalize + validate a supplied category for storage. null/undefined stays
+ *  null (absence is allowed at this layer -- the route enforces presence on
+ *  create). A non-null value is trimmed and upper-cased ('dash'/'Dash' -> DASH),
+ *  then checked against the enum; anything out of enum (incl. empty, or a
+ *  combined/separator value like 'DASH,ENG') throws InvalidCategoryError. */
+function normalizeCardCategory(category: string | null | undefined): string | null {
+  if (category == null) return null
+  const norm = category.trim().toUpperCase()
+  if (!isValidCategory(norm)) throw new InvalidCategoryError(category)
+  return norm
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +354,11 @@ export function isCardStale(card: Pick<KanbanCard, 'priority_score' | 'updated_a
 const KANBAN_MIGRATIONS = [
   `ALTER TABLE kanban_cards ADD COLUMN priority_score INTEGER`,
   `ALTER TABLE kanban_cards ADD COLUMN depends_on TEXT REFERENCES kanban_cards(id)`,
+  // Canonical taxonomy category (card cf0d1bfe). Nullable: legacy rows stay NULL
+  // until the backfill PR. Enum is enforced at the application layer (strict on
+  // create, graceful on update) rather than a DB CHECK, so a category-less update
+  // of a legacy card is never rejected.
+  `ALTER TABLE kanban_cards ADD COLUMN category TEXT`,
 ]
 
 export function applyKanbanMigrations(db = getNoaDb()): void {
@@ -380,8 +447,17 @@ function assertValidTransition(fromStatus: string, toStatus: string): void {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+// Attach the derived display code to a raw row so every card the read paths
+// return carries card_code (card cf0d1bfe). Kept in one place so the derivation
+// (KAT-<hex-id>) stays single-source.
+function hydrateCard(row: Record<string, unknown> | undefined): KanbanCard | undefined {
+  if (!row) return undefined
+  const category = (row.category as string | null) ?? null
+  return { ...(row as unknown as KanbanCard), category, card_code: cardCode(category, row.id as string) }
+}
+
 function getCard(id: string): KanbanCard | undefined {
-  return getNoaDb().prepare('SELECT * FROM kanban_cards WHERE id = ?').get(id) as KanbanCard | undefined
+  return hydrateCard(getNoaDb().prepare('SELECT * FROM kanban_cards WHERE id = ?').get(id) as Record<string, unknown> | undefined)
 }
 
 function maxSortOrderInStatus(status: string): number {
@@ -490,18 +566,25 @@ export function createCard(params: CreateCardParams): KanbanCard {
   // Check the dependency edge before insert (self-ref uses the id we are about to assign)
   if (params.depends_on != null) validateDependsOn(db, params.depends_on, id)
 
+  // Normalize + validate the category VALUE if one is supplied (strict enum after
+  // an upper-case normalize, so 'dash'/'Dash' resolve to DASH). Presence is NOT
+  // required here so internal creators (subtask breakdown) + the existing test
+  // suite still work with a null category; the required-on-create contract is
+  // enforced at the route layer.
+  const category = normalizeCardCategory(params.category)
+
   const sortOrder = params.sort_order !== undefined ? params.sort_order : maxSortOrderInStatus(status) + 1.0
   const priority = params.priority ?? 'normal'
   const priorityScore = resolvePriorityScore(status, priority, params.priority_score)
 
   db.prepare(
-    `INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, priority_score, depends_on)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, priority_score, depends_on, category)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id, params.title, params.description ?? null, status,
     params.assignee ?? null, priority,
     params.project ?? null, params.parent_id ?? null, params.due_date ?? null,
-    sortOrder, now, now, priorityScore, params.depends_on ?? null,
+    sortOrder, now, now, priorityScore, params.depends_on ?? null, category,
   )
 
   emitOrDefer({ type: 'kanban', id, action: 'created' })
@@ -529,6 +612,13 @@ export function updateCard(id: string, params: UpdateCardParams): boolean {
   // Validate the dependency edge if it is being set (null clears it, always allowed)
   if (params.depends_on != null) validateDependsOn(getNoaDb(), params.depends_on, id)
 
+  // Category is GRACEFUL on absence: an update that omits category must never be
+  // rejected (so the ~290 legacy category-less cards keep updating before the
+  // backfill). Only when a category is explicitly supplied do we normalize +
+  // validate it strictly (out-of-enum throws InvalidCategoryError); an explicit
+  // null clears it.
+  const newCategory = params.category !== undefined ? normalizeCardCategory(params.category) : card.category
+
   const now = Math.floor(Date.now() / 1000)
   const prevTitle = card.title
   const prevDescription = card.description
@@ -549,13 +639,14 @@ export function updateCard(id: string, params: UpdateCardParams): boolean {
     depends_on: params.depends_on !== undefined ? params.depends_on : card.depends_on,
     due_date: params.due_date !== undefined ? params.due_date : card.due_date,
     sort_order: params.sort_order ?? card.sort_order,
+    category: newCategory,
     updated_at: now,
   }
 
   const changed = getNoaDb().prepare(
-    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, depends_on=?, due_date=?, sort_order=?, updated_at=?, priority_score=?
+    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, depends_on=?, due_date=?, sort_order=?, updated_at=?, priority_score=?, category=?
      WHERE id=?`
-  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.depends_on, f.due_date, f.sort_order, f.updated_at, f.priority_score, id).changes > 0
+  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.depends_on, f.due_date, f.sort_order, f.updated_at, f.priority_score, f.category, id).changes > 0
 
   if (!changed) return false
 
@@ -674,28 +765,32 @@ export function deleteCard(id: string): boolean {
   return true
 }
 
+function hydrateCards(rows: unknown[]): KanbanCard[] {
+  return rows.map((r) => hydrateCard(r as Record<string, unknown>)!)
+}
+
 export function listCards(filter?: { status?: string }): KanbanCard[] {
   const db = getNoaDb()
   if (filter?.status) {
-    return db.prepare(
+    return hydrateCards(db.prepare(
       'SELECT * FROM kanban_cards WHERE status=? AND archived_at IS NULL ORDER BY sort_order ASC'
-    ).all(filter.status) as KanbanCard[]
+    ).all(filter.status))
   }
-  return db.prepare(
+  return hydrateCards(db.prepare(
     'SELECT * FROM kanban_cards WHERE archived_at IS NULL ORDER BY status, sort_order ASC'
-  ).all() as KanbanCard[]
+  ).all())
 }
 
 export function listArchived(): KanbanCard[] {
-  return getNoaDb().prepare(
+  return hydrateCards(getNoaDb().prepare(
     'SELECT * FROM kanban_cards WHERE archived_at IS NOT NULL ORDER BY archived_at DESC'
-  ).all() as KanbanCard[]
+  ).all())
 }
 
 export function getChildCards(parentId: string): KanbanCard[] {
-  return getNoaDb().prepare(
+  return hydrateCards(getNoaDb().prepare(
     'SELECT * FROM kanban_cards WHERE parent_id=? AND archived_at IS NULL ORDER BY sort_order ASC'
-  ).all(parentId) as KanbanCard[]
+  ).all(parentId))
 }
 
 export function reorderCards(updates: Array<{ id: string; sort_order: number }>): void {
