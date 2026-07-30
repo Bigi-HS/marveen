@@ -92,3 +92,46 @@ describe('groupCardsByProject (cf0d1bfe S3)', () => {
     expect(groupCardsByProject([])).toEqual([])
   })
 })
+
+describe('groupCardsByProject CONT-family folding (cf0d1bfe enum-widen)', () => {
+  it('folds the CONT-family (DUB/DL/DISC/BIGI) into the single CONT lane', () => {
+    const groups = groupCardsByProject([
+      pcard('c1', 'CONT'),
+      pcard('du1', 'DUB'),
+      pcard('dl1', 'DL'),
+      pcard('di1', 'DISC'),
+      pcard('b1', 'BIGI'),
+    ])
+    // one visual lane, keyed CONT -- no separate DUB/DL/DISC/BIGI lanes
+    expect(groups.map((g) => g.project)).toEqual(['CONT'])
+    expect(groups[0].cards.map((c) => c.id)).toEqual(['c1', 'du1', 'dl1', 'di1', 'b1'])
+  })
+
+  it('produces a CONT lane even when only family members (no bare CONT) are present', () => {
+    const groups = groupCardsByProject([pcard('du1', 'DUB'), pcard('b1', 'BIGI')])
+    expect(groups.map((g) => g.project)).toEqual(['CONT'])
+    expect(groups[0].cards.map((c) => c.id)).toEqual(['du1', 'b1'])
+  })
+
+  it('never emits a standalone DUB/DL/DISC/BIGI lane', () => {
+    const groups = groupCardsByProject([pcard('du1', 'DUB'), pcard('e1', 'ENG')])
+    // ENG precedes CONT in the canonical lane order
+    expect(groups.map((g) => g.project)).toEqual(['ENG', 'CONT'])
+    expect(groups.some((g) => ['DUB', 'DL', 'DISC', 'BIGI'].includes(g.project ?? ''))).toBe(false)
+  })
+
+  it('treats the new granular codes (AGENT/ASST) as canonical, not Egyéb', () => {
+    const groups = groupCardsByProject([pcard('a1', 'AGENT'), pcard('as1', 'ASST')])
+    const keys = groups.map((g) => g.project)
+    expect(keys).toContain('AGENT')
+    expect(keys).toContain('ASST')
+    expect(keys).not.toContain(null)
+  })
+
+  it('still routes a genuinely non-canonical value to the Egyéb lane', () => {
+    const groups = groupCardsByProject([pcard('e1', 'ENG'), pcard('pa1', 'PA')])
+    // PA is retired from the frontend enum too -> uncategorized
+    expect(groups.map((g) => g.project)).toEqual(['ENG', null])
+    expect(groups.find((g) => g.project === null)?.cards.map((c) => c.id)).toEqual(['pa1'])
+  })
+})
