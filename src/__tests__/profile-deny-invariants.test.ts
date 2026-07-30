@@ -35,7 +35,7 @@ const UNIVERSAL_DENY = [
   'Write(**/access.json)',
   'Edit(**/access.json)',
   // card 0680cf34: fleet credential files must not be Read-able by any agent
-  'Read(store/.dashboard-token)',
+  'Read(**/.dashboard-token)',
   'Read(**/.git-credentials)',
   'Read(**/.claude.json)',
 ]

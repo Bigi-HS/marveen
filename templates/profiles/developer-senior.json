@@ -21,7 +21,7 @@
       "Bash(npm publish:*)",
       "Write(**/access.json)",
       "Edit(**/access.json)",
-      "Read(store/.dashboard-token)",
+      "Read(**/.dashboard-token)",
       "Read(**/.git-credentials)",
       "Read(**/.claude.json)"
     ]
