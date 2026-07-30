@@ -59,9 +59,14 @@ function wipe(): void {
 beforeEach(wipe)
 afterEach(wipe)
 
+// cf0d1bfe enum-widen (Boss TG4599): 14 -> 27 canonical prefixes. PA retired
+// (folded to ASST via PROJECT_VALUE_REMAP); 14 new granular codes added, incl.
+// the CONT-family (DUB/DL/DISC/BIGI) which are now VALID standalone project
+// values (they still fold into the CONT lane on the board, a display concern).
 const CANONICAL = [
-  'DASH', 'CORE', 'MEM', 'OPS', 'ENG', 'CONT', 'SEC',
-  'PA', 'EDU', 'WELL', 'DEC', 'RES', 'DND', 'BUCC',
+  'AGENT', 'ASST', 'BIGI', 'BUCC', 'CONT', 'CORE', 'CV', 'DASH', 'DEC',
+  'DISC', 'DL', 'DND', 'DUB', 'EDU', 'ENG', 'FABLE', 'FIX', 'KANB', 'KHOOT',
+  'MEM', 'OAUTH', 'OPS', 'RES', 'SEC', 'VOICE', 'WEB', 'WELL',
 ]
 
 // ---------------------------------------------------------------------------
@@ -69,13 +74,18 @@ const CANONICAL = [
 // ---------------------------------------------------------------------------
 
 describe('CF0D1BFE enum shape', () => {
-  it('CARD_PROJECTS is exactly the 14 canonical prefixes', () => {
+  it('CARD_PROJECTS is exactly the 27 canonical prefixes', () => {
     expect([...CARD_PROJECTS].sort()).toEqual([...CANONICAL].sort())
   })
 
   it('VALID_PROJECTS set mirrors CARD_PROJECTS', () => {
     for (const p of CANONICAL) expect(VALID_PROJECTS.has(p)).toBe(true)
-    expect(VALID_PROJECTS.size).toBe(14)
+    expect(VALID_PROJECTS.size).toBe(27)
+  })
+
+  it('PA is retired from the enum (folded to ASST via remap)', () => {
+    expect(VALID_PROJECTS.has('PA')).toBe(false)
+    expect(VALID_PROJECTS.has('ASST')).toBe(true)
   })
 })
 
@@ -84,7 +94,7 @@ describe('CF0D1BFE enum shape', () => {
 // ---------------------------------------------------------------------------
 
 describe('CF0D1BFE false-positive: canonical project values accepted', () => {
-  it('all 14 canonical values are accepted by createCard', () => {
+  it('all 27 canonical values are accepted by createCard', () => {
     for (const p of CANONICAL) {
       const card = createCard({ title: `Task ${p}`, project: p, suppressIntake: true })
       expect(card.project).toBe(p)
@@ -115,9 +125,8 @@ describe('CF0D1BFE false-negative: non-canonical project values rejected', () =>
     'DASH|ENG',      // pipe multi-token
     'DASH ENG',      // space multi-token
     'CONT-BIGI',     // hyphen composite
-    'BIGI',          // folds into CONT -- not standalone
-    'DL', 'DUB', 'DISC', // CONT-family members -- not standalone
-    'ASST', 'KANB', 'FIX', 'KHOOT', // never-canonical codes from the old 27-draft
+    'PA',            // retired by the enum-widen (folded to ASST via remap)
+    'KB', 'DUBLER',  // still-unknown near-misses
   ]
   for (const bad of BAD) {
     it(`rejects ${JSON.stringify(bad)} with InvalidProjectError`, () => {
@@ -163,7 +172,13 @@ describe('CF0D1BFE updateCard validation + PUT grace', () => {
 
   it('supplying a non-canonical project throws InvalidProjectError', () => {
     const card = createCard({ title: 'Bad update', project: 'ENG', suppressIntake: true })
-    expect(() => updateCard(card.id, { project: 'BIGI' })).toThrow(InvalidProjectError)
+    expect(() => updateCard(card.id, { project: 'PA' })).toThrow(InvalidProjectError)
+  })
+
+  it('accepts a newly-canonical CONT-family value (BIGI) on update', () => {
+    const card = createCard({ title: 'Reproject to family', project: 'CONT', suppressIntake: true })
+    updateCard(card.id, { project: 'bigi' })
+    expect(getCard(card.id)!.project).toBe('BIGI')
   })
 
   it('supplying project: null clears it gracefully (no throw)', () => {
@@ -210,7 +225,13 @@ describe('assertProjectPresent helper (route POST policy)', () => {
   })
 
   it('throws InvalidProjectError on a non-canonical value', () => {
-    expect(() => assertProjectPresent('BIGI')).toThrow(InvalidProjectError)
+    expect(() => assertProjectPresent('PA')).toThrow(InvalidProjectError)
+  })
+
+  it('accepts the CONT-family + ASST values as present + canonical', () => {
+    expect(assertProjectPresent('BIGI')).toBe('BIGI')
+    expect(assertProjectPresent('dub')).toBe('DUB')
+    expect(assertProjectPresent('asst')).toBe('ASST')
   })
 
   it('error message lists the canonical set', () => {

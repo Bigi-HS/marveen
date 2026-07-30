@@ -127,14 +127,19 @@ export class InvalidProjectError extends Error {
 // Project taxonomy (card cf0d1bfe, validation slice)
 // ---------------------------------------------------------------------------
 
-// The stored `project` field IS the taxonomy bucket. All live cards are already
-// classified into exactly these 14 canonical prefixes (zero non-canonical on the
-// board). BIGI/DL/DUB/DISC are content sub-topics that fold into CONT, so they
-// are NOT valid standalone project values. Adding a prefix is a one-line change
-// here. The routing key stays the hex id -- this only constrains the label bucket.
+// The stored `project` field IS the taxonomy bucket. Card-code enum-widen (Boss
+// TG4599): 27 canonical prefixes. PA is retired -- its cards fold to ASST via
+// PROJECT_VALUE_REMAP while keeping their historical PA-NNN code. The 14 new
+// granular codes break domains out of the old CONT/OPS/PA buckets. The
+// CONT-family (DUB/DL/DISC/BIGI) ARE valid standalone project values now; on the
+// board they still render under the single CONT lane (a frontend display fold,
+// see dashboard-new lib/project.ts), but as stored values they are first-class.
+// Adding a prefix is a one-line change here. The routing key stays the hex id --
+// this only constrains the label bucket.
 export const CARD_PROJECTS = [
-  'DASH', 'CORE', 'MEM', 'OPS', 'ENG', 'CONT', 'SEC',
-  'PA', 'EDU', 'WELL', 'DEC', 'RES', 'DND', 'BUCC',
+  'DASH', 'CORE', 'MEM', 'OPS', 'ENG', 'AGENT', 'KANB', 'FIX', 'WEB', 'OAUTH', 'SEC',
+  'CONT', 'DUB', 'DL', 'DISC', 'BIGI', 'FABLE', 'KHOOT', 'VOICE', 'CV',
+  'ASST', 'EDU', 'WELL', 'DEC', 'RES', 'DND', 'BUCC',
 ] as const
 
 export type CardProject = (typeof CARD_PROJECTS)[number]
@@ -468,6 +473,11 @@ export function applyKanbanMigrations(db = getNoaDb()): void {
 // value is deliberately left as-is so it stays visible as drift.
 export const PROJECT_VALUE_REMAP: Readonly<Record<string, CardProject>> = {
   'test-metrics': 'ENG',
+  // enum-widen (Boss TG4599): PA retired -> ASST. Value-based fold, so live
+  // PA cards move buckets while their code-backfill runs AFTER this remap and
+  // only touches code-less rows -- an existing PA-NNN code stays immutable
+  // (identical to any other reproject; the code is a permanent historical id).
+  PA: 'ASST',
 }
 
 // ---------------------------------------------------------------------------
