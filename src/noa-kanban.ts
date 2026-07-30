@@ -377,6 +377,26 @@ export function applyKanbanMigrations(db = getNoaDb()): void {
         WHEN 'urgent' THEN 2 WHEN 'high' THEN 4 WHEN 'low' THEN 9 ELSE 6 END
       WHERE priority_score IS NULL AND status != 'icebox' AND archived_at IS NULL`)
   } catch { /* ok */ }
+  // Fold pre-enforcement drifted project VALUES into the canonical taxonomy
+  // (card cf0d1bfe S1). #439 closed the write-path gate, but rows created before
+  // it can still carry a non-canonical value; on the live board 'test-metrics'
+  // (test-tooling cards) drifted in. This is VALUE-based, never card-id based --
+  // ephemeral ids do not belong in permanent migration code. Mirrors the
+  // someday->icebox canonical rename above; idempotent. Every target is a
+  // canonical prefix (CardProject), so a rule can never point outside the enum.
+  for (const [from, to] of Object.entries(PROJECT_VALUE_REMAP)) {
+    try {
+      db.prepare(`UPDATE kanban_cards SET project = ? WHERE project = ?`).run(to, from)
+    } catch { /* table absent in a partial schema -- ok */ }
+  }
+}
+
+// Legacy/drifted project value -> canonical prefix. Only values that appeared on
+// the board before enum enforcement need an entry; an UNSET project is left for a
+// one-off operational cleanup (it needs a human category call), and an unknown
+// value is deliberately left as-is so it stays visible as drift.
+export const PROJECT_VALUE_REMAP: Readonly<Record<string, CardProject>> = {
+  'test-metrics': 'ENG',
 }
 
 // ---------------------------------------------------------------------------
