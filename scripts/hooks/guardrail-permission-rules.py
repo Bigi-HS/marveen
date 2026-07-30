@@ -182,6 +182,12 @@ _CURL_BODY_SHORT = frozenset({'d', 'F', 'T'})
 # .env file pattern: basename is `.env` or `.env.<something>`.
 _ENV_FILE_RE = re.compile(r'(?:^|/)\.env(?:\.[^/\s]+)?$')
 
+# Fleet credential files (card 0680cf34): dashboard API token, GitHub PAT, Claude auth.
+# Reading these via shell print-verbs exposes raw secrets to the agent's output context.
+_TOKEN_PATHS_RE = re.compile(
+    r'(?:^|/)(?:\.dashboard-token|\.git-credentials|\.claude\.json)$'
+)
+
 
 # ── R1: external-directory (Write / Edit) ────────────────────────────────────
 
@@ -202,31 +208,32 @@ def match_external_dir(tool_name: str, path: str) -> bool:
 # ── R2: .env file print via Bash ─────────────────────────────────────────────
 
 def match_env_file_print(command: str) -> bool:
-    """R2: A print-style Bash command reading a .env or .env.* file.
-    .env files commonly hold the most sensitive credentials in a project;
-    reading them via shell is almost never the right approach (use os.environ
-    or a dotenv library). The guard triggers on the FILENAME, not the env var
-    name, so it does not interfere with env var expansion like $MY_SECRET.
+    """R2: A print-style Bash command reading a .env/.env.* file or a fleet
+    credential file (store/.dashboard-token, ~/.git-credentials, ~/.claude.json).
+    .env files hold project credentials; credential files hold fleet API / GitHub
+    PAT / Claude auth secrets. Reading either via shell exposes raw content to the
+    agent's output context (in-process read; card 0680cf34 extends to token paths).
     """
+    def _is_sensitive(tok: str) -> bool:
+        return bool(_ENV_FILE_RE.search(tok) or _TOKEN_PATHS_RE.search(tok))
+
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
         if tokens is _PARSE_FAIL:
-            # Targeted fail-closed: _CMD_SUBST_RE + heredocs can produce
-            # malformed fragments in legitimate commands; only block when the
-            # unparseable piece ALSO contains the specific threat pattern
-            # (a .env filename), so we don't false-positive on git commits etc.
-            if _ENV_FILE_RE.search(piece):
+            # Targeted fail-closed: only block when the unparseable piece also
+            # contains the specific threat pattern (a sensitive filename).
+            if _is_sensitive(piece):
                 return True
             continue
         if not tokens:
             continue
         if _command_word(tokens) not in _FILE_READ_VERBS:
             continue
-        # Check every non-flag argument for a .env file pattern.
+        # Check every non-flag argument for a sensitive file pattern.
         for tok in tokens[1:]:
             if tok.startswith('-'):
                 continue
-            if _ENV_FILE_RE.search(tok):
+            if _is_sensitive(tok):
                 return True
     return False
 
@@ -245,6 +252,14 @@ _INTERPRETER_CMDS = frozenset({'python3', 'python', 'node', 'nodejs'})
 # argument. Single or double quotes, with or without a trailing extension.
 _OPEN_ENV_RE = re.compile(
     r'(?:open|readFileSync)\s*\(\s*[\'"]\.env(?:\.[^\s)\'"]*)?\s*[\'"]',
+    re.IGNORECASE,
+)
+
+# Matches open()/readFileSync() taking a fleet credential file as the argument
+# (card 0680cf34). Covers any path ending in the credential basename.
+_OPEN_TOKEN_RE = re.compile(
+    r'(?:open|readFileSync)\s*\(\s*[\'"][^\'"]*'
+    r'(?:\.dashboard-token|\.git-credentials|\.claude\.json)\s*[\'"]',
     re.IGNORECASE,
 )
 
@@ -286,7 +301,7 @@ def match_interpreter_env_read(command: str) -> bool:
         else:
             i += 1
             continue
-        if code and _OPEN_ENV_RE.search(code):
+        if code and (_OPEN_ENV_RE.search(code) or _OPEN_TOKEN_RE.search(code)):
             return True
     return False
 
