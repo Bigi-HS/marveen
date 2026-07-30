@@ -12,6 +12,7 @@ function card(over: Partial<KanbanCard>): KanbanCard {
     assignee: null,
     priority: over.priority ?? 'normal',
     project: null,
+    code: null,
     parent_id: null,
     due_date: null,
     created_at: 1_700_000_000,
@@ -72,5 +73,33 @@ describe('KanbanBoard (AC-F0-7..9)', () => {
     render(<KanbanBoard cards={[card({ id: 'a', assignee: 'marveen' })]} />)
     expect(screen.getByText('NoA')).toBeInTheDocument()
     expect(screen.queryByText('marveen')).not.toBeInTheDocument()
+  })
+
+  it('shows the taxonomy code on a card chip (Boss-facing reference)', () => {
+    render(<KanbanBoard cards={[card({ id: 'a', title: 'Coded', project: 'ENG', code: 'ENG-042' })]} />)
+    expect(screen.getByText('ENG-042')).toBeInTheDocument()
+  })
+
+  it('toggles to the project-grouped view and back to status', () => {
+    render(
+      <KanbanBoard
+        cards={[
+          card({ id: 'a', status: 'planned', project: 'ENG', code: 'ENG-001' }),
+          card({ id: 'b', status: 'done', project: 'OPS', code: 'OPS-001' }),
+        ]}
+      />,
+    )
+    // default view groups by status
+    expect(screen.getByText('Tervezett')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Projekt' }))
+    // now grouped by project: project lane headers appear, status headers gone
+    expect(screen.getByText('ENG')).toBeInTheDocument()
+    expect(screen.getByText('OPS')).toBeInTheDocument()
+    expect(screen.queryByText('Tervezett')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Státusz' }))
+    expect(screen.getByText('Tervezett')).toBeInTheDocument()
+    expect(screen.queryByText('ENG')).not.toBeInTheDocument()
   })
 })

@@ -11,6 +11,11 @@ export function KanbanCardChip({ card, onClick }: { card: KanbanCard; onClick: (
       onClick={onClick}
       className="w-full rounded-lg border border-border bg-bg-elevated p-2.5 text-left transition-colors hover:border-accent/50 focus:outline-none focus:ring-1 focus:ring-accent"
     >
+      {/* The immutable taxonomy code is the Boss-facing reference id (cf0d1bfe);
+          surface it so a card can be cited by code, not raw hex. */}
+      {card.code && (
+        <div className="mb-1 font-mono text-[10px] tabular-nums tracking-wide text-text-muted">{card.code}</div>
+      )}
       <div className="text-sm text-text">{truncate(card.title, 60)}</div>
       <div className="mt-1.5 flex items-center justify-between gap-2">
         <span className="truncate text-xs text-text-muted">{agentDisplayName(card.assignee) ?? 'kiosztatlan'}</span>

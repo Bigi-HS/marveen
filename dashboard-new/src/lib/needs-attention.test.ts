@@ -15,6 +15,7 @@ function card(over: Partial<KanbanCard>): KanbanCard {
     assignee: null,
     priority: 'normal',
     project: null,
+    code: null,
     parent_id: null,
     due_date: null,
     created_at: 0,
