@@ -390,6 +390,32 @@ fi
             self.assertIn("gitleaks", r.stdout.lower())
 
 
+class BaseBranchResolutionTests(unittest.TestCase):
+    """Regression: base param 'develop' must resolve to origin/develop.
+
+    When the caller passes a bare branch name (e.g. 'develop'), a stale local
+    branch causes git's 3-dot diff to include intermediate PR commits. Those
+    commits may contain test fixtures with auth-like patterns (e.g.
+    'password: nope-nope-nope') that trip the generic-secret-assign detector ->
+    false-positive BLOCK on every PR (#434-#439). Fix: fetch + resolve to
+    origin/<branch> in main(). PR: eng/9c607f2a-bundle-base.
+    """
+
+    def test_source_fetches_origin_before_diff(self):
+        """Script source must call 'git ... fetch origin' in main before running checks."""
+        with open(BUNDLE_SCRIPT, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn('fetch origin', src,
+            'pre-gate-bundle must fetch origin before computing the diff')
+
+    def test_source_resolves_bare_branch_to_origin(self):
+        """Script source must prepend 'origin/' when base has no slash."""
+        with open(BUNDLE_SCRIPT, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn('origin/', src,
+            'pre-gate-bundle must rewrite bare branch names to origin/<branch>')
+
+
 if __name__ == '__main__':
     if not os.path.exists(BUNDLE_SCRIPT):
         print(f'SKIP: {BUNDLE_SCRIPT} not yet implemented (expected -- scaffold test)')

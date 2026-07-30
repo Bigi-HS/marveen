@@ -749,6 +749,15 @@ main() {
   done
   [ -n "$base" ] && [ -n "$head" ] || usage
 
+  # Ensure the remote tip is up-to-date so the 3-dot diff does not pick up
+  # intermediate commits from a stale local branch. If the caller passes a bare
+  # branch name (e.g. "develop"), resolve it to origin/<branch> so git diff
+  # always compares against the remote ancestor, not a potentially-behind local ref.
+  git -C "$INSTALL_DIR" fetch origin --quiet 2>/dev/null || true
+  if [[ "$base" != */* ]]; then
+    base="origin/$base"
+  fi
+
   BASE="$base"; HEAD="$head"; DIFF_ADDITIONS=0
 
   check_typecheck
