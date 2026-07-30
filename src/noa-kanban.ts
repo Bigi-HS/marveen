@@ -194,6 +194,13 @@ export interface KanbanCard {
    * drive dispatch/unblock behaviour -- that is the separate later slice.
    */
   depends_on: string | null
+  /**
+   * Human-facing taxonomy code `PREFIX-NNN` (e.g. `ENG-042`), assigned once at
+   * create from the card's canonical project prefix and IMMUTABLE thereafter --
+   * a later project change never re-sequences it (card cf0d1bfe S2). NULL when
+   * the card has no project.
+   */
+  code: string | null
 }
 
 export interface BoardColumn {
@@ -346,7 +353,37 @@ export function isCardStale(card: Pick<KanbanCard, 'priority_score' | 'updated_a
 const KANBAN_MIGRATIONS = [
   `ALTER TABLE kanban_cards ADD COLUMN priority_score INTEGER`,
   `ALTER TABLE kanban_cards ADD COLUMN depends_on TEXT REFERENCES kanban_cards(id)`,
+  `ALTER TABLE kanban_cards ADD COLUMN code TEXT`,
 ]
+
+// ---------------------------------------------------------------------------
+// Card-code auto-sequence (card cf0d1bfe S2)
+// ---------------------------------------------------------------------------
+
+/** Render a per-prefix sequence number as the canonical `PREFIX-NNN` code. */
+export function formatCode(prefix: string, seq: number): string {
+  return `${prefix}-${String(seq).padStart(3, '0')}`
+}
+
+/**
+ * Allocate the next code for a canonical prefix and return it, bumping the
+ * per-prefix counter. The counter (kanban_code_seq) is monotonic: it only ever
+ * increases, so a deleted card's number is never reused (the gap stays). This is
+ * why the sequence is NOT derived from MAX(code): a MAX would rewind when the
+ * highest card is deleted. better-sqlite3 runs synchronously in-process, so the
+ * read-then-upsert pair is effectively atomic (single writer).
+ */
+function allocateCode(db: ReturnType<typeof getNoaDb>, prefix: string): string {
+  const row = db.prepare('SELECT last_seq FROM kanban_code_seq WHERE prefix = ?').get(prefix) as
+    | { last_seq: number }
+    | undefined
+  const next = (row?.last_seq ?? 0) + 1
+  db.prepare(
+    `INSERT INTO kanban_code_seq (prefix, last_seq) VALUES (?, ?)
+       ON CONFLICT(prefix) DO UPDATE SET last_seq = excluded.last_seq`,
+  ).run(prefix, next)
+  return formatCode(prefix, next)
+}
 
 export function applyKanbanMigrations(db = getNoaDb()): void {
   for (const stmt of KANBAN_MIGRATIONS) {
@@ -389,6 +426,40 @@ export function applyKanbanMigrations(db = getNoaDb()): void {
       db.prepare(`UPDATE kanban_cards SET project = ? WHERE project = ?`).run(to, from)
     } catch { /* table absent in a partial schema -- ok */ }
   }
+  // Card-code backfill (card cf0d1bfe S2). Runs AFTER the project value-remap so a
+  // folded value (test-metrics -> ENG) is coded under its canonical prefix. Assign
+  // a `PREFIX-NNN` code to every code-less card that carries a CANONICAL project,
+  // in created_at ASC order per prefix (tie-break rowid for determinism), and leave
+  // the counter positioned to continue after the highest number assigned. Cards
+  // with an unset or non-canonical project get no code (they are not groupable).
+  // Idempotent: a second run finds no code-less carded rows and does nothing.
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS kanban_code_seq (prefix TEXT PRIMARY KEY, last_seq INTEGER NOT NULL)`)
+    const prefixes = db
+      .prepare(`SELECT DISTINCT project AS p FROM kanban_cards WHERE project IS NOT NULL AND code IS NULL`)
+      .all() as Array<{ p: string }>
+    const pickRows = db.prepare(
+      `SELECT id FROM kanban_cards WHERE project = ? AND code IS NULL ORDER BY created_at ASC, rowid ASC`,
+    )
+    const setCode = db.prepare(`UPDATE kanban_cards SET code = ? WHERE id = ?`)
+    const bumpSeq = db.prepare(
+      `INSERT INTO kanban_code_seq (prefix, last_seq) VALUES (?, ?)
+         ON CONFLICT(prefix) DO UPDATE SET last_seq = excluded.last_seq`,
+    )
+    for (const { p } of prefixes) {
+      if (!VALID_PROJECTS.has(p)) continue // only canonical prefixes get codes
+      const seqRow = db.prepare('SELECT last_seq FROM kanban_code_seq WHERE prefix = ?').get(p) as
+        | { last_seq: number }
+        | undefined
+      let n = seqRow?.last_seq ?? 0
+      const rows = pickRows.all(p) as Array<{ id: string }>
+      for (const { id } of rows) {
+        n += 1
+        setCode.run(formatCode(p, n), id)
+      }
+      if (rows.length > 0) bumpSeq.run(p, n)
+    }
+  } catch { /* table absent in a partial schema -- ok */ }
 }
 
 // Legacy/drifted project value -> canonical prefix. Only values that appeared on
@@ -572,14 +643,19 @@ export function createCard(params: CreateCardParams): KanbanCard {
   const priority = params.priority ?? 'normal'
   const priorityScore = resolvePriorityScore(status, priority, params.priority_score)
 
+  // Assign the immutable taxonomy code from the project prefix (card cf0d1bfe S2).
+  // Allocated last, after every validation has passed, so a rejected create does
+  // not burn a sequence number. Absent project -> no code.
+  const code = project != null ? allocateCode(db, project) : null
+
   db.prepare(
-    `INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, priority_score, depends_on)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, priority_score, depends_on, code)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id, params.title, params.description ?? null, status,
     params.assignee ?? null, priority,
     project, params.parent_id ?? null, params.due_date ?? null,
-    sortOrder, now, now, priorityScore, params.depends_on ?? null,
+    sortOrder, now, now, priorityScore, params.depends_on ?? null, code,
   )
 
   emitOrDefer({ type: 'kanban', id, action: 'created' })
@@ -613,6 +689,14 @@ export function updateCard(id: string, params: UpdateCardParams): boolean {
 
   const newStatus = params.status ?? card.status
   const newPriority = params.priority ?? card.priority
+  // Validate-when-supplied (card cf0d1bfe): omitting project keeps the current
+  // value (partial-update grace); a supplied value is normalized/validated, and
+  // an explicit null clears it (graceful, no throw).
+  const newProject = params.project !== undefined ? normalizeProject(params.project) : card.project
+  // Code is IMMUTABLE once set (card cf0d1bfe S2): a project change never
+  // re-sequences an existing code. The ONLY mutation is a first assignment -- a
+  // card that never had a code gains one when it acquires a project.
+  const newCode = card.code != null ? card.code : (newProject != null ? allocateCode(getNoaDb(), newProject) : null)
 
   const f: KanbanCard = {
     ...card,
@@ -622,21 +706,19 @@ export function updateCard(id: string, params: UpdateCardParams): boolean {
     assignee: params.assignee !== undefined ? params.assignee : card.assignee,
     priority: newPriority,
     priority_score: computeUpdatedScore(card, params, newStatus, newPriority),
-    // Validate-when-supplied (card cf0d1bfe): omitting project keeps the current
-    // value (partial-update grace); a supplied value is normalized/validated,
-    // and an explicit null clears it (graceful, no throw).
-    project: params.project !== undefined ? normalizeProject(params.project) : card.project,
+    project: newProject,
     parent_id: params.parent_id !== undefined ? params.parent_id : card.parent_id,
     depends_on: params.depends_on !== undefined ? params.depends_on : card.depends_on,
     due_date: params.due_date !== undefined ? params.due_date : card.due_date,
     sort_order: params.sort_order ?? card.sort_order,
     updated_at: now,
+    code: newCode,
   }
 
   const changed = getNoaDb().prepare(
-    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, depends_on=?, due_date=?, sort_order=?, updated_at=?, priority_score=?
+    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, depends_on=?, due_date=?, sort_order=?, updated_at=?, priority_score=?, code=?
      WHERE id=?`
-  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.depends_on, f.due_date, f.sort_order, f.updated_at, f.priority_score, id).changes > 0
+  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.depends_on, f.due_date, f.sort_order, f.updated_at, f.priority_score, f.code, id).changes > 0
 
   if (!changed) return false
 
