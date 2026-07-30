@@ -117,3 +117,60 @@ describe('cf0d1bfe S1: project-backfill migration', () => {
     expect(VALID_PROJECTS.has(result as string)).toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// cf0d1bfe enum-widen (Boss TG4599): PA -> ASST rename.
+//
+// PA is retired from the enum; the assistant/personal-admin cards move to the
+// new ASST prefix. Design (A): historical PA-NNN codes stay IMMUTABLE (exactly
+// as an ENG->OPS reproject keeps its ENG-NNN code) -- only the project VALUE
+// folds. Same VALUE-based, idempotent PROJECT_VALUE_REMAP mechanism as
+// test-metrics -> ENG above.
+// ---------------------------------------------------------------------------
+
+function codeOf(id: string): string | null {
+  const row = getNoaDb().prepare('SELECT code FROM kanban_cards WHERE id = ?').get(id) as
+    | { code: string | null }
+    | undefined
+  return row?.code ?? null
+}
+
+describe('cf0d1bfe enum-widen: PA -> ASST rename', () => {
+  it('remaps a PA card to the canonical ASST prefix', () => {
+    seedRaw('pa-1', 'PA')
+    applyKanbanMigrations()
+    expect(projectOf('pa-1')).toBe('ASST')
+  })
+
+  it('remaps every PA card, not just the first', () => {
+    seedRaw('pa-a', 'PA')
+    seedRaw('pa-b', 'PA', 'in_progress')
+    applyKanbanMigrations()
+    expect(projectOf('pa-a')).toBe('ASST')
+    expect(projectOf('pa-b')).toBe('ASST')
+  })
+
+  it('preserves a historical PA-NNN code as IMMUTABLE while the project folds to ASST', () => {
+    seedRaw('pa-coded', 'PA')
+    // Simulate the live board: this card already carries a PA-003 code from the
+    // S2 backfill. The rename must NOT re-sequence it.
+    getNoaDb().prepare("UPDATE kanban_cards SET code = 'PA-003' WHERE id = ?").run('pa-coded')
+    applyKanbanMigrations()
+    expect(projectOf('pa-coded')).toBe('ASST')
+    expect(codeOf('pa-coded')).toBe('PA-003')
+  })
+
+  it('is idempotent -- a second run keeps ASST and the historical code', () => {
+    seedRaw('pa-idem', 'PA')
+    getNoaDb().prepare("UPDATE kanban_cards SET code = 'PA-006' WHERE id = ?").run('pa-idem')
+    applyKanbanMigrations()
+    expect(() => applyKanbanMigrations()).not.toThrow()
+    expect(projectOf('pa-idem')).toBe('ASST')
+    expect(codeOf('pa-idem')).toBe('PA-006')
+  })
+
+  it('ASST is a canonical enum value the remap can target', () => {
+    expect(VALID_PROJECTS.has('ASST')).toBe(true)
+    expect(VALID_PROJECTS.has('PA')).toBe(false)
+  })
+})

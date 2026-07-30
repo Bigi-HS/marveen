@@ -1,6 +1,6 @@
 import type { KanbanCard, KanbanStatus } from '@/types/api'
 import { KANBAN_COLUMNS } from './status'
-import { CARD_PROJECTS } from './project'
+import { CARD_PROJECTS, CONT_FAMILY, PROJECT_LANES } from './project'
 
 export type KanbanGroups = Record<KanbanStatus, KanbanCard[]>
 
@@ -32,11 +32,13 @@ export function groupCardsByStatus(cards: KanbanCard[]): KanbanGroups {
 }
 
 /**
- * Group cards by their project taxonomy prefix (card cf0d1bfe S3), for the
- * project-grouped board view. Canonical projects come first in CARD_PROJECTS
- * order; empty canonical projects are omitted (no 14 empty lanes). Cards whose
- * project is null or non-canonical collect into a single trailing group keyed
- * `null` (the "Egyéb" lane). Backend order is preserved within each group.
+ * Group cards by their project taxonomy prefix (card cf0d1bfe S3, enum-widen
+ * Boss TG4599), for the project-grouped board view. Lanes come first in
+ * PROJECT_LANES order; empty lanes are omitted (no empty columns). The
+ * CONT-family (DUB/DL/DISC/BIGI) are canonical VALUES that fold into the single
+ * CONT lane -- 5 codes, 1 visual lane. Cards whose project is null or
+ * non-canonical collect into a single trailing group keyed `null` (the "Egyéb"
+ * lane). Backend order is preserved within each group.
  *
  * Non-column statuses (someday/icebox) are dropped, exactly as groupCardsByStatus
  * does, so both board views render the same set of active cards. Pure.
@@ -44,23 +46,28 @@ export function groupCardsByStatus(cards: KanbanCard[]): KanbanGroups {
 export function groupCardsByProject(cards: KanbanCard[]): ProjectGroup[] {
   const board = cards.filter((c) => (KANBAN_COLUMNS as readonly string[]).includes(c.status))
   const canonical = new Set<string>(CARD_PROJECTS)
+  const family = new Set<string>(CONT_FAMILY)
+  // Map a canonical project value to its display lane: CONT-family members fold
+  // into the CONT lane; every other canonical value is its own lane.
+  const laneOf = (project: string): string => (family.has(project) ? 'CONT' : project)
 
-  const byProject = new Map<string, KanbanCard[]>()
+  const byLane = new Map<string, KanbanCard[]>()
   const other: KanbanCard[] = []
   for (const card of board) {
     if (card.project != null && canonical.has(card.project)) {
-      const bucket = byProject.get(card.project) ?? []
+      const lane = laneOf(card.project)
+      const bucket = byLane.get(lane) ?? []
       bucket.push(card)
-      byProject.set(card.project, bucket)
+      byLane.set(lane, bucket)
     } else {
       other.push(card)
     }
   }
 
   const groups: ProjectGroup[] = []
-  for (const project of CARD_PROJECTS) {
-    const bucket = byProject.get(project)
-    if (bucket && bucket.length > 0) groups.push({ project, cards: bucket })
+  for (const lane of PROJECT_LANES) {
+    const bucket = byLane.get(lane)
+    if (bucket && bucket.length > 0) groups.push({ project: lane, cards: bucket })
   }
   if (other.length > 0) groups.push({ project: null, cards: other })
   return groups
