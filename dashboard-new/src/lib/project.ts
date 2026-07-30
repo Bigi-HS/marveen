@@ -10,14 +10,5 @@ export const CARD_PROJECTS = [
   'PA', 'EDU', 'WELL', 'DEC', 'RES', 'DND', 'BUCC',
 ] as const
 
-export type CardProject = (typeof CARD_PROJECTS)[number]
-
-/** Rank of a project in canonical order; unknown/non-canonical sorts last. */
-export function projectOrder(project: string | null | undefined): number {
-  const i = (CARD_PROJECTS as readonly string[]).indexOf(project ?? '')
-  return i === -1 ? CARD_PROJECTS.length : i
-}
-
-/** Header label for a project group. The uncategorized bucket (null) reads as a
- *  short Hungarian dash-label; a canonical prefix is shown verbatim. */
+/** Header label for the uncategorized (null / non-canonical) project lane. */
 export const PROJECT_GROUP_OTHER_LABEL = 'Egyéb'
