@@ -16,6 +16,7 @@ function card(status: KanbanStatus, id: string = status): KanbanCard {
     assignee: null,
     priority: 'normal',
     project: null,
+    code: null,
     parent_id: null,
     due_date: null,
     created_at: 1_700_000_000,

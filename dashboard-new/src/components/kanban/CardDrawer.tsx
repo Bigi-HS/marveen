@@ -68,7 +68,8 @@ export function CardDrawer({ card, onClose }: { card: KanbanCard | null; onClose
           <Field label="Létrehozva" value={fmt(card.created_at)} />
           <Field label="Frissítve" value={fmt(card.updated_at)} />
           <Field label="Kártya ID" value={card.id} />
-          {card.seq != null && <Field label="#" value={String(card.seq)} />}
+          {/* Immutable taxonomy code (cf0d1bfe) -- the Boss-facing reference id. */}
+          {card.code && <Field label="Kód" value={card.code} />}
         </dl>
       </aside>
     </div>

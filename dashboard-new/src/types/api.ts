@@ -44,6 +44,9 @@ export interface KanbanCard {
   assignee: string | null
   priority: Priority
   project: string | null
+  /** Immutable taxonomy code `PREFIX-NNN` (e.g. `ENG-042`), or null when the card
+   *  has no project. Assigned server-side at create (card cf0d1bfe S2). */
+  code: string | null
   parent_id: string | null
   due_date: number | null
   created_at: number
