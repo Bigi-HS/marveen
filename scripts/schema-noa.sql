@@ -117,7 +117,20 @@ CREATE TABLE kanban_cards (
   priority_score INTEGER CHECK(priority_score IS NULL OR priority_score BETWEEN 1 AND 10),
   -- Card id this card depends on (its blocker), or NULL. Read-only dependency
   -- edge (card ac37d123): persisted + validated, no auto-unblock behaviour yet.
-  depends_on TEXT REFERENCES kanban_cards(id)
+  depends_on TEXT REFERENCES kanban_cards(id),
+  -- Human-facing taxonomy code `PREFIX-NNN` (e.g. ENG-042), assigned once at
+  -- create from the canonical project prefix and IMMUTABLE thereafter -- a later
+  -- project change never re-sequences it. NULL when the card has no project.
+  -- Card cf0d1bfe S2.
+  code TEXT
+);
+
+-- Per-prefix monotonic counter backing the card `code` auto-sequence (card
+-- cf0d1bfe S2). last_seq is the highest number handed out for a prefix; it only
+-- ever increases, so a deleted card's number is never reused (the gap stays).
+CREATE TABLE kanban_code_seq (
+  prefix TEXT PRIMARY KEY,
+  last_seq INTEGER NOT NULL
 );
 
 CREATE TABLE kanban_comments (
