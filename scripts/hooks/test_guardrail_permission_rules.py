@@ -75,7 +75,7 @@ class EnvFilePrintTests(unittest.TestCase):
         'od -c .env',                      # octal-dump exfil (card 6f5af73d)
     ]
     ALLOW = [
-        'cat store/.dashboard-token',      # fleet idiom, NOT a .env file
+        # 'cat store/.dashboard-token' MOVED to TokenPathReadTests.DENY (card 0680cf34)
         'grep SECRET .env',                # grep is not a print verb in this context
         'ls -la .env',                     # listing, not printing content
         'echo ".env"',                     # printing the string literal, not the file
@@ -91,6 +91,111 @@ class EnvFilePrintTests(unittest.TestCase):
     def test_allow(self):
         for c in self.ALLOW:
             self.assertFalse(guard.match_env_file_print(c), f'should ALLOW: {c!r}')
+
+
+# ── R2 extension: token-path read via Bash print verb (card 0680cf34) ───────
+class TokenPathReadTests(unittest.TestCase):
+    """fleet-critical credential files: store/.dashboard-token, ~/.git-credentials,
+    ~/.claude.json.  Reading them via shell print-verbs (cat, head, ...) exposes
+    the raw secret to the agent's output context (in-process read).
+
+    FN guard: at least 2 must-DENY cases per file.
+    FP guard: benign commands touching the path in non-reading ways must PASS.
+    Opposing combination: grep (not in FILE_READ_VERBS) on token file must PASS.
+    """
+    DENY = [
+        # dashboard-token reads
+        'cat store/.dashboard-token',
+        'head -1 store/.dashboard-token',
+        'base64 store/.dashboard-token',
+        'cat /home/domin/marveen/store/.dashboard-token',
+        # git-credentials reads
+        'cat ~/.git-credentials',
+        'head ~/.git-credentials',
+        'cat /home/domin/.git-credentials',
+        'tac ~/.git-credentials',
+        # claude.json reads
+        'cat ~/.claude.json',
+        'head -c 100 ~/.claude.json',
+        'cat /home/domin/.claude.json',
+        'strings ~/.claude.json',
+        # subcommand embedding (still blocked -- content would reach agent output)
+        'echo $(cat store/.dashboard-token)',
+        'echo $(cat ~/.git-credentials)',
+    ]
+    ALLOW = [
+        # grep is NOT a FILE_READ_VERB (opposing combination: touches file but passes)
+        'grep token store/.dashboard-token',
+        'grep credential ~/.git-credentials',
+        # listing/stat operations -- no content read
+        'ls -la store/.dashboard-token',
+        'wc -c ~/.claude.json',
+        # reads of similarly named but non-sensitive files
+        'cat store/.dashboard-settings',
+        'cat store/dashboard-token.bak',
+        'cat .dashboard',
+        # legitimate fleet curl with hardcoded/env-var token (no shell file read)
+        'curl -s -H "Authorization: Bearer $TOKEN" http://localhost:3420/api/kanban',
+        'curl -s http://localhost:3420/api/memories',
+        # python script file (not inspectable inline)
+        'python3 scripts/read-config.py',
+    ]
+
+    def test_deny(self):
+        for c in self.DENY:
+            with self.subTest(cmd=c):
+                self.assertTrue(
+                    guard.match_env_file_print(c),
+                    f'should DENY (token-path): {c!r}',
+                )
+
+    def test_allow(self):
+        for c in self.ALLOW:
+            with self.subTest(cmd=c):
+                self.assertFalse(
+                    guard.match_env_file_print(c),
+                    f'should ALLOW (token-path): {c!r}',
+                )
+
+
+# ── R2b extension: token-path inline interpreter read (card 0680cf34) ────────
+class TokenPathInterpreterReadTests(unittest.TestCase):
+    """Complements TokenPathReadTests: catches interpreter -c/-e inline code
+    that directly opens a fleet credential file."""
+    DENY = [
+        "python3 -c \"print(open('store/.dashboard-token').read())\"",
+        "python3 -c \"print(open('/home/domin/marveen/store/.dashboard-token').read())\"",
+        "python3 -c \"data=open('~/.git-credentials').read()\"",
+        "node -e \"console.log(require('fs').readFileSync('~/.claude.json','utf8'))\"",
+        "python3 <<< \"print(open('store/.dashboard-token').read())\"",
+    ]
+    ALLOW = [
+        # variable indirection -- no static literal match
+        "python3 -c \"f='store/dashboard-settings'; open(f).read()\"",
+        # script file -- not inspectable
+        'python3 scripts/load-config.py',
+        # opens a .json but not .claude.json
+        "python3 -c \"import json; json.load(open('config.json'))\"",
+        # legitimate env-var usage (not a file open)
+        "python3 -c \"import os; print(os.environ.get('TOKEN'))\"",
+    ]
+
+    def test_deny(self):
+        for cmd in self.DENY:
+            with self.subTest(cmd=cmd):
+                denied, name, _ = guard.classify(
+                    {'tool_name': 'Bash', 'tool_input': {'command': cmd}}
+                )
+                self.assertTrue(denied, f'should DENY: {cmd!r}')
+                self.assertEqual(name, 'interpreter-env-read')
+
+    def test_allow(self):
+        for cmd in self.ALLOW:
+            with self.subTest(cmd=cmd):
+                denied, _, _ = guard.classify(
+                    {'tool_name': 'Bash', 'tool_input': {'command': cmd}}
+                )
+                self.assertFalse(denied, f'should ALLOW: {cmd!r}')
 
 
 # ── R3: external curl (non-fleet mutating request) ──────────────────────────
