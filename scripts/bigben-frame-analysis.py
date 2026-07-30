@@ -50,6 +50,10 @@ OVERLAY_POSITIONS = {
 }
 
 
+class NoDetectionError(Exception):
+    """Raised when frame_analyses is empty or all composite scores are zero."""
+
+
 def get_video_info(video_path):
     cmd = [
         FFPROBE, "-v", "quiet", "-print_format", "json",
@@ -141,6 +145,10 @@ def consensus_zone(frame_analyses):
     for fa in frame_analyses:
         for name, scores in fa["quadrant_scores"].items():
             totals[name] += scores["composite"]
+    if not frame_analyses or sum(totals.values()) == 0.0:
+        raise NoDetectionError(
+            f"No usable frames ({len(frame_analyses)} analyzed, all composites zero)"
+        )
     speaker_zone = max(totals, key=totals.get)
     safe_zone = SAFE_ZONE_OPPOSITE.get(speaker_zone, "top-right")
     return speaker_zone, safe_zone, totals
@@ -183,7 +191,35 @@ def main():
                 "quadrant_scores": scores
             })
 
-    speaker_zone, safe_zone, totals = consensus_zone(frame_analyses)
+    try:
+        speaker_zone, safe_zone, totals = consensus_zone(frame_analyses)
+    except NoDetectionError as exc:
+        print(f"  Warning: {exc}", file=sys.stderr)
+        no_det = {
+            "video": args.video,
+            "resolution": f"{info['width']}x{info['height']}",
+            "duration_s": round(info["duration"], 1),
+            "frames_analyzed": len(frame_analyses),
+            "speaker_zone": "no-detection",
+            "safe_overlay_zone": "no-detection",
+            "overlay_position_ffmpeg": None,
+            "zone_scores": {},
+            "frame_details": frame_analyses,
+            "hyperframes_hint": {"note": str(exc)},
+        }
+        if args.out:
+            with open(args.out, "w") as f:
+                json.dump(no_det, f, indent=2)
+            print(f"Result saved to: {args.out}", file=sys.stderr)
+        print(json.dumps({
+            "speaker_zone": "no-detection",
+            "safe_overlay_zone": "no-detection",
+            "overlay_ffmpeg_x": None,
+            "overlay_ffmpeg_y": None,
+            "confidence": 0.0,
+        }, indent=2))
+        return
+
     overlay_pos = OVERLAY_POSITIONS.get(safe_zone, OVERLAY_POSITIONS["top-right"])
 
     result = {
