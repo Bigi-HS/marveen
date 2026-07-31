@@ -242,11 +242,21 @@ export async function runCycle(now: number = Date.now(), deps: OutageDeps = DEFA
     } catch (err) {
       logger.debug({ err }, 'token-outage: queue read failed')
     }
-    try {
-      state.capturedCardId = deps.createCard(pending, det.resetAtText, now)
-      captured = !!state.capturedCardId
-    } catch (err) {
-      logger.debug({ err }, 'token-outage: kanban capture failed')
+    // Card 9c067880 (Boss TG4726): only snapshot to kanban when there is actually
+    // queued inbound to preserve. A 0-queued window is benign -- the operator is
+    // already ACKed above -- so creating a [Token-outage] card for it is pure
+    // board noise (5 such cards in 24h on 07-26). Skip the card, log only. The
+    // edge-trigger already caps this at one card per window; the queued>0 guard
+    // additionally suppresses the empty-window cards entirely.
+    if (pending.length > 0) {
+      try {
+        state.capturedCardId = deps.createCard(pending, det.resetAtText, now)
+        captured = !!state.capturedCardId
+      } catch (err) {
+        logger.debug({ err }, 'token-outage: kanban capture failed')
+      }
+    } else {
+      logger.info('token-outage: entered a limit window with 0 queued inbound -- ACK sent, no card created (benign)')
     }
   } else if (!det.limited && state.limited) {
     // EXITING the outage (reset detected): back-online message + re-dispatch.
