@@ -40,13 +40,15 @@ describe('buildAuthUrl', () => {
     expect(u.searchParams.get('scope')).toBe(SCOPES.join(' '))
   })
 
-  it('scopes are exactly the 5 bounded v2 scopes (SEC-AC3 / F-AC9)', () => {
+  it('scopes are exactly the bounded v2 scopes + ENG-048 full Drive (SEC-AC3 / F-AC9)', () => {
     expect(SCOPES).toEqual([
       'https://www.googleapis.com/auth/gmail.modify',
       'https://www.googleapis.com/auth/gmail.send',
       'https://www.googleapis.com/auth/gmail.labels',
       'https://www.googleapis.com/auth/gmail.settings.basic',
       'https://www.googleapis.com/auth/calendar',
+      // ENG-048 (Boss TG4809): full Drive read+write, not drive.file.
+      'https://www.googleapis.com/auth/drive',
     ])
   })
 

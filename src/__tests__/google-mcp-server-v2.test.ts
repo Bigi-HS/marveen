@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { FetchLike } from '../mcp/google-oauth.js'
@@ -36,6 +36,8 @@ const EXPECTED_TOOLS = [
   'calendar_list_calendars', 'calendar_list_events', 'calendar_search_events',
   // calendar write
   'calendar_create_event', 'calendar_update_event', 'calendar_update_event_all', 'calendar_delete_event',
+  // ENG-048 drive
+  'drive_list_files', 'drive_download_file', 'drive_upload_file',
 ]
 
 const GUARDED = [
@@ -47,10 +49,17 @@ const GUARDED = [
   TOOL_GMAIL_UPDATE_VACATION,
   TOOL_CALENDAR_DELETE_EVENT,
   TOOL_CALENDAR_UPDATE_EVENT_ALL,
+  'drive_upload_file',
 ]
 
 function jsonRes(obj: unknown, ok = true, status = 200): any {
-  return { ok, status, json: async () => obj, text: async () => JSON.stringify(obj) }
+  return {
+    ok,
+    status,
+    json: async () => obj,
+    text: async () => JSON.stringify(obj),
+    arrayBuffer: async () => new TextEncoder().encode(JSON.stringify(obj)).buffer,
+  }
 }
 
 function makeDeps(channelDir: string, fetchFn: FetchLike, nowMs = Date.UTC(2026, 5, 14, 12, 0, 0)): ToolDeps {
@@ -62,7 +71,7 @@ describe('buildToolDefs registry', () => {
   const defs = buildToolDefs(deps)
   const names = defs.map((d) => d.name)
 
-  it('registers exactly the v1 + 28 v2 tools', () => {
+  it('registers exactly the v1 + v2 + ENG-048 drive tools', () => {
     expect(new Set(names)).toEqual(new Set(EXPECTED_TOOLS))
     expect(names.length).toBe(EXPECTED_TOOLS.length)
   })
@@ -156,5 +165,96 @@ describe('write handlers append to the audit log (SEC-AC4)', () => {
     expect(log).toContain('ev9')
     // audit summary must be metadata-only -- never the event title (SEC-AC2)
     expect(log).not.toContain('secret meeting')
+  })
+})
+
+// ENG-048: the drive_upload_file handler owns the guard -> backup -> write order.
+// The ask-first guard is enforced by the python hook (cross-pinned separately);
+// here we prove the backup wiring inside the handler.
+describe('drive_upload_file handler: pre-write backup (Boss requirement)', () => {
+  let dir: string // channel dir (audit)
+  let bak: string // backup dir
+  let src: string // local source dir
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'srv-drive-'))
+    bak = mkdtempSync(join(tmpdir(), 'srv-drivebak-'))
+    src = mkdtempSync(join(tmpdir(), 'srv-drivesrc-'))
+  })
+  afterEach(() => {
+    for (const d of [dir, bak, src]) rmSync(d, { recursive: true, force: true })
+  })
+
+  function driveDeps(fetchFn: FetchLike): ToolDeps {
+    return { getToken: async () => 'tok', channelDir: dir, now: () => Date.UTC(2026, 0, 1, 0, 0, 0), fetchFn, driveBackupDir: bak }
+  }
+  function writeSrc(name: string, content: string): string {
+    const p = join(src, name)
+    writeFileSync(p, content)
+    return p
+  }
+
+  it('OVERWRITE: snapshots the current Drive version to the backup dir BEFORE the PATCH', async () => {
+    const order: string[] = []
+    const fetchFn = (async (url: string, init: any) => {
+      const method = init?.method ?? 'GET'
+      if (method === 'GET' && !url.includes('alt=media')) { order.push('meta'); return jsonRes({ id: 'D1', name: 'live.txt' }) }
+      if (method === 'GET' && url.includes('alt=media')) { order.push('download'); return { ok: true, status: 200, json: async () => ({}), text: async () => '', arrayBuffer: async () => new TextEncoder().encode('CURRENT-DRIVE-BYTES').buffer } }
+      if (method === 'PATCH') { order.push('write'); return jsonRes({ id: 'D1', name: 'live.txt' }) }
+      throw new Error('unexpected ' + method + ' ' + url)
+    }) as unknown as FetchLike
+    const def = buildToolDefs(driveDeps(fetchFn)).find((d) => d.name === 'drive_upload_file')!
+    const out = await def.handler({ srcPath: writeSrc('new.txt', 'NEW-LOCAL'), fileId: 'D1' })
+
+    // backup happened before write
+    expect(order).toEqual(['meta', 'download', 'write'])
+    // a backup file exists carrying the OLD Drive version
+    const files = readdirSync(bak) as string[]
+    expect(files).toHaveLength(1)
+    expect(files[0]).toContain('__D1__live.txt')
+    expect(readFileSync(join(bak, files[0]), 'utf-8')).toBe('CURRENT-DRIVE-BYTES')
+    // audit line records the overwrite + backup path
+    const log = readFileSync(join(dir, 'mcp-audit.log'), 'utf-8')
+    expect(log).toContain('drive_upload_file')
+    expect(log).toContain('mode=overwrite')
+    expect(out.content[0].text).toContain('"backup"')
+  })
+
+  it('NEW file: makes NO backup, only an audit line (mode=new)', async () => {
+    const fetchFn = (async (url: string, init: any) => {
+      const method = init?.method ?? 'GET'
+      if (method === 'POST') return jsonRes({ id: 'N9', name: 'g.txt' })
+      throw new Error('a NEW upload must not GET/PATCH (no backup): ' + method)
+    }) as unknown as FetchLike
+    const def = buildToolDefs(driveDeps(fetchFn)).find((d) => d.name === 'drive_upload_file')!
+    await def.handler({ srcPath: writeSrc('g.txt', 'data') })
+    expect(readdirSync(bak)).toHaveLength(0)
+    const log = readFileSync(join(dir, 'mcp-audit.log'), 'utf-8')
+    expect(log).toContain('mode=new')
+    expect(log).toContain('backup=none')
+  })
+
+  it('BACKUP FAILS -> upload is ABORTED (no PATCH, no audit)', async () => {
+    let patched = false
+    const fetchFn = (async (url: string, init: any) => {
+      const method = init?.method ?? 'GET'
+      if (method === 'GET' && !url.includes('alt=media')) return jsonRes({ error: { code: 404 } }, false, 404) // meta 404 -> backup throws
+      if (method === 'PATCH') { patched = true; return jsonRes({ id: 'Z1' }) }
+      throw new Error('unexpected ' + method)
+    }) as unknown as FetchLike
+    const def = buildToolDefs(driveDeps(fetchFn)).find((d) => d.name === 'drive_upload_file')!
+    const out = await def.handler({ srcPath: writeSrc('x.txt', 'x'), fileId: 'Z1' })
+    expect(patched).toBe(false)
+    expect(out.content[0].text.toLowerCase()).toContain('upload aborted')
+    // no backup, no audit line
+    expect(readdirSync(bak)).toHaveLength(0)
+    expect(existsSync(join(dir, 'mcp-audit.log'))).toBe(false)
+  })
+
+  it('unreadable local source fails loud before any Drive/backup call', async () => {
+    const fetchFn = (async () => { throw new Error('no network on a bad src') }) as unknown as FetchLike
+    const def = buildToolDefs(driveDeps(fetchFn)).find((d) => d.name === 'drive_upload_file')!
+    const out = await def.handler({ srcPath: join(src, 'does-not-exist.txt'), fileId: 'Q1' })
+    expect(out.content[0].text.toLowerCase()).toContain('cannot read source file')
+    expect(readdirSync(bak)).toHaveLength(0)
   })
 })

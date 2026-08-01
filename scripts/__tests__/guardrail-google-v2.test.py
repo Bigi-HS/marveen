@@ -26,6 +26,8 @@ GUARDED_V2 = [
     ("TOOL_GMAIL_UPDATE_VACATION", "gmail_update_vacation"),
     ("TOOL_CALENDAR_DELETE_EVENT", "calendar_delete_event"),
     ("TOOL_CALENDAR_UPDATE_EVENT_ALL", "calendar_update_event_all"),
+    # ENG-048: Drive overwrite is an irreversible external write -> ask-first.
+    ("TOOL_DRIVE_UPLOAD_FILE", "drive_upload_file"),
 ]
 
 # New v2 tools that MUST NOT be ask-first gated (reads + reversible writes).
@@ -41,6 +43,9 @@ UNGUARDED_V2 = [
     "calendar_list_events",
     "calendar_create_event",
     "calendar_update_event",
+    # ENG-048: Drive reads are NOT guarded (only the overwrite/upload is).
+    "drive_list_files",
+    "drive_download_file",
 ]
 
 
@@ -102,9 +107,10 @@ class TestV2Registration(unittest.TestCase):
                 "%s must NOT be ask-first gated" % tool,
             )
 
-    def test_guarded_set_size_is_exactly_eight(self):
-        # 1 v1 (gmail_send) + 7 v2 = 8. Catches an accidental extra/missing entry.
-        self.assertEqual(len(hook.GUARDED_TOOLS), 8)
+    def test_guarded_set_size_is_exactly_nine(self):
+        # 1 v1 (gmail_send) + 7 v2 + 1 ENG-048 (drive_upload_file) = 9.
+        # Catches an accidental extra/missing entry.
+        self.assertEqual(len(hook.GUARDED_TOOLS), 9)
 
 
 class TestV2ClassifyBlocks(unittest.TestCase):

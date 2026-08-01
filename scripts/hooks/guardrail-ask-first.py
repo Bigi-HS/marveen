@@ -76,6 +76,14 @@ import hashlib
 #     src/__tests__/google-mcp-tool-names-v2.test.ts (TS) +
 #     scripts/__tests__/guardrail-google-v2.test.py (python). The v2 read tools
 #     and reversible writes (archive, mark-read, label, move) are NOT guarded.
+#   - Claudia Google MCP Drive (ENG-048): the same server gains a Drive
+#     drive_upload_file tool. It is ask-first GUARDED because an OVERWRITE is an
+#     irreversible external write to the Boss's Drive; a pre-write local backup
+#     runs AFTER this guard, BEFORE the actual Drive write. drive_list_files and
+#     drive_download_file are read-only and NOT guarded. The name is defined once
+#     in src/mcp/tool-names.ts (GUARDED_DRIVE_UPLOAD) and cross-pinned by
+#     src/__tests__/google-mcp-tool-names-v2.test.ts (TS) +
+#     scripts/__tests__/guardrail-google-v2.test.py (python).
 #   - YouTube/Twitch publish: bigben has no MCP server configured; that guard
 #     should be added in the same change that introduces the publish tool, so
 #     the exact tool name is known and cannot drift.
@@ -90,6 +98,9 @@ GUARDED_TOOLS = frozenset(
         "mcp__claudia_google__gmail_update_vacation",
         "mcp__claudia_google__calendar_delete_event",
         "mcp__claudia_google__calendar_update_event_all",
+        # ENG-048 -- Drive overwrite is an irreversible external write (guarded);
+        # list/download are read-only and intentionally NOT guarded.
+        "mcp__claudia_google__drive_upload_file",
     }
 )
 
