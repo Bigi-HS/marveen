@@ -77,7 +77,7 @@ export const SLACK_APP_TOKEN = env['SLACK_APP_TOKEN'] ?? ''
 export const SLACK_CHANNEL_ID = env['SLACK_CHANNEL_ID'] ?? ''
 
 export const OWNER_NAME = env['OWNER_NAME'] ?? 'Szabolcs'
-export const BOT_NAME = env['BOT_NAME'] ?? 'Marveen'
+export const BOT_NAME = env['BOT_NAME'] ?? 'NoA'
 
 // Canonical identifier for the main agent in the DB, tmux sessions, plist
 // labels, API routing, etc. The installer derives this from BOT_NAME
