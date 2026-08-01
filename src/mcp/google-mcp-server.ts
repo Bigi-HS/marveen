@@ -25,10 +25,20 @@
 //   - SEC-AC6: bulk message ops reject >10 ids before any API call.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { join } from 'node:path'
+import { readFileSync, realpathSync } from 'node:fs'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { AccessTokenProvider, loadGoogleCreds, type FetchLike } from './google-oauth.js'
 import { listTodayEvents, type CalendarEvent } from './google-calendar.js'
+import {
+  driveListFiles,
+  driveDownloadFile,
+  driveUploadFile,
+  driveGetMeta,
+  backupDriveFileVersion,
+  type DriveFetch,
+  type DriveFileMeta,
+} from './google-drive.js'
 import { buildRawMessage, sendEmail } from './gmail-send.js'
 import { listMessages, getMessage, getThread, listThreads } from './gmail-messages.js'
 import {
@@ -88,11 +98,21 @@ import {
   TOOL_CALENDAR_UPDATE_EVENT,
   TOOL_CALENDAR_UPDATE_EVENT_ALL,
   TOOL_CALENDAR_DELETE_EVENT,
+  TOOL_DRIVE_LIST_FILES,
+  TOOL_DRIVE_DOWNLOAD_FILE,
+  TOOL_DRIVE_UPLOAD_FILE,
 } from './tool-names.js'
 
 // Where the OAuth creds + refresh token live. Passed explicitly via the .mcp.json
 // `env` so the server binary stays path-agnostic.
 const CHANNEL_DIR = process.env.GOOGLE_CHANNEL_DIR ?? ''
+
+// ENG-048: local pre-write Drive-backup dir (NOT on the Boss's Drive quota).
+// Default is the repo `store/claudia-drive-backups`; overridable via env so the
+// c12 sandbox / tests can point it elsewhere. The 6-month purge script cleans it.
+const DRIVE_BACKUP_DIR =
+  process.env.CLAUDIA_DRIVE_BACKUP_DIR ??
+  join(process.cwd(), 'store', 'claudia-drive-backups')
 
 // Lazily build the token provider on first tool use, so the server can start
 // (and advertise its tools) even before the token file exists; only the actual
@@ -172,12 +192,81 @@ function fmtEvents(events: CalendarEventFull[]): string {
   return events.map((e) => fmtEvent(wrapEvent(e))).join('\n')
 }
 
+// ENG-048: Drive file names are sharer-controllable -> untrusted-wrapped, like
+// gmail/calendar free-text. Rendered as TEXT (not JSON) so the wrapper reaches
+// Claudia's context literally.
+function fmtDriveList(files: DriveFileMeta[]): string {
+  if (files.length === 0) return 'No files.'
+  return (
+    `${files.length} file(s):\n` +
+    files
+      .map(
+        (fl) =>
+          `• [${fl.id}] ${wrapUntrusted(fl.name ?? '', 'drive')}` +
+          `  (${fl.mimeType ?? '?'}${fl.size ? `, ${fl.size}B` : ''}${fl.modifiedTime ? `, ${fl.modifiedTime}` : ''})`,
+      )
+      .join('\n')
+  )
+}
+
+// SEC (Chad PR#453 FLAG): confine a caller-supplied local path to a sandbox
+// root, blocking path-traversal (absolute paths, `../` escapes). The Drive
+// download/upload tools are NOT ask-first for the read side and Claudia's input
+// can be prompt-injected, so an unconfined destPath could clobber arbitrary
+// local files (e.g. ~/.claude/settings.json) and an unconfined srcPath could
+// exfiltrate secrets (e.g. the channel's own oauth-tokens.json) to Drive.
+// Roots are dedicated SUBDIRS of the channel dir (never the channel dir itself,
+// which holds oauth-tokens.json + the audit log).
+export function confineToRoot(root: string, candidate: string): string {
+  const base = resolve(root)
+  const p = resolve(base, candidate)
+  // 1) Lexical containment. `base + sep` (not bare `base`) blocks the sibling
+  //    prefix escape, e.g. `<base>-evil` must NOT count as inside `<base>`.
+  if (p !== base && !p.startsWith(base + sep)) {
+    throw new Error(`path escapes sandbox: "${candidate}" is outside ${root}`)
+  }
+  // 2) Symlink-escape guard (DA PR#453 BLOCK): resolve() is purely lexical, so a
+  //    symlink placed INSIDE the sandbox (e.g. uploads/x -> /etc/passwd, which
+  //    Claudia could create via Bash) would pass the textual check yet read/write
+  //    outside. Canonicalize BOTH base and candidate (realpath follows symlinks)
+  //    and re-check. The candidate may not exist yet (a download dest), so
+  //    canonicalize its nearest existing ancestor and re-append the missing tail.
+  const canonBase = realpathNearest(base)
+  const canonP = realpathNearest(p)
+  if (canonP !== canonBase && !canonP.startsWith(canonBase + sep)) {
+    throw new Error(`path escapes sandbox (symlink): "${candidate}" resolves outside ${root}`)
+  }
+  return p
+}
+
+// realpath the nearest existing ancestor of `p`, then re-append the not-yet-
+// existing tail. Used by confineToRoot so a leaf that will be created (download
+// dest) is still checked against symlinks in its existing parent chain.
+function realpathNearest(p: string): string {
+  const tail: string[] = []
+  let cur = p
+  for (;;) {
+    try {
+      const real = realpathSync(cur)
+      return tail.length ? join(real, ...tail.reverse()) : real
+    } catch {
+      const parent = dirname(cur)
+      if (parent === cur) return p // reached fs root, nothing on the path exists
+      tail.push(basename(cur))
+      cur = parent
+    }
+  }
+}
+
 export interface ToolDeps {
   getToken: () => Promise<string>
   channelDir: string
   now: () => number
   // Injectable for tests; undefined -> the handler modules use the real fetch.
   fetchFn?: FetchLike
+  // ENG-048: local pre-write Drive-backup dir (host disk, off-quota). Optional
+  // at the deps boundary; buildToolDefs falls back to DRIVE_BACKUP_DIR.
+  driveBackupDir?: string
 }
 
 export interface ToolDef {
@@ -206,6 +295,11 @@ const eventInputShape = {
 // Build the full tool registry. Pure given its deps -- unit-tested directly.
 export function buildToolDefs(deps: ToolDeps): ToolDef[] {
   const f = deps.fetchFn
+  // Drive needs a richer fetch (binary arrayBuffer response). The real global
+  // fetch and the test stubs both satisfy DriveFetch; undefined -> the drive
+  // module falls back to the real global fetch.
+  const df = deps.fetchFn as unknown as DriveFetch | undefined
+  const driveBackupDir = deps.driveBackupDir ?? DRIVE_BACKUP_DIR
   const audit = (tool: string, summary: string) =>
     appendAudit(deps.channelDir, deps.now(), tool, summary)
   const tok = deps.getToken
@@ -545,7 +639,113 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
         return jsonResult(out)
       },
     },
+
+    // --- ENG-048 Drive (scope drive -- full read+write, Boss TG4809) ---
+    // The drive fetch shape needs arrayBuffer() (binary download); the injected
+    // FetchLike (or the real global fetch) satisfies it -- cast once here.
+    {
+      name: TOOL_DRIVE_LIST_FILES,
+      description:
+        'List/search Google Drive files (optional Drive query q, e.g. "name contains \'x\'" or "\'<folderId>\' in parents"). Read-only. Names are untrusted-wrapped.',
+      inputSchema: { q: z.string().optional(), pageSize: z.number().optional() },
+      guarded: false,
+      write: false,
+      handler: async ({ q, pageSize }) => {
+        const out = await driveListFiles(await tok(), { q, pageSize }, df)
+        return textResult(fmtDriveList(out.files))
+      },
+    },
+    {
+      name: TOOL_DRIVE_DOWNLOAD_FILE,
+      description:
+        'Download a Drive file by fileId to a local path under the channel downloads/ dir (0600). Read-only. destPath is confined to downloads/ (path-traversal rejected); defaults to downloads/<name> when omitted.',
+      inputSchema: { fileId: z.string(), destPath: z.string().optional() },
+      guarded: false,
+      write: false,
+      handler: async ({ fileId, destPath }) => {
+        // SEC: dest is confined to the downloads/ subdir -- a prompt-injected
+        // destPath cannot escape to clobber arbitrary local files.
+        const downloadsRoot = join(deps.channelDir, 'downloads')
+        let dest: string
+        try {
+          // Both branches go through confineToRoot: even the server-derived
+          // default name (safeDownloadName already strips path separators) is
+          // re-checked, so a hostile Drive filename can never build a gadget path.
+          dest = confineToRoot(downloadsRoot, destPath ?? (await safeDownloadName(fileId)))
+        } catch (err) {
+          return textResult(`Error: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        const out = await driveDownloadFile(await tok(), fileId, dest, df)
+        return jsonResult(out)
+      },
+    },
+    {
+      name: TOOL_DRIVE_UPLOAD_FILE,
+      description:
+        'Upload a local file to Drive (scope drive). srcPath MUST be staged under the channel uploads/ dir (copy the file there first if needed) -- paths outside uploads/ are rejected so secrets cannot be exfiltrated. If fileId is given the target file is OVERWRITTEN (its current version is backed up locally FIRST); otherwise a NEW file is created. ASK-FIRST GUARDED: irreversible external write to the Boss Drive.',
+      inputSchema: {
+        srcPath: z.string().describe('local path of the file to upload'),
+        name: z.string().optional().describe('Drive filename (defaults to the source basename)'),
+        fileId: z.string().optional().describe('existing Drive fileId to OVERWRITE (omit to create new)'),
+        parents: z.array(z.string()).optional().describe('parent folder id(s) for a NEW file'),
+        mimeType: z.string().optional(),
+      },
+      guarded: true,
+      write: true,
+      handler: async ({ srcPath, name, fileId, parents, mimeType }) => {
+        // SEC: srcPath is confined to the uploads/ subdir -- a prompt-injected
+        // srcPath cannot exfiltrate secrets (oauth-tokens.json lives directly in
+        // channelDir, NOT under uploads/) or any other local file to Drive.
+        let safeSrc: string
+        try {
+          safeSrc = confineToRoot(join(deps.channelDir, 'uploads'), srcPath)
+        } catch (err) {
+          return textResult(`Error: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        // Read the local source bytes first -- a bad path fails loud before any
+        // Drive call (and before any backup).
+        let media: Uint8Array
+        try {
+          media = new Uint8Array(readFileSync(safeSrc))
+        } catch (err) {
+          return textResult(`Error: cannot read source file ${safeSrc}: ${err instanceof Error ? err.message : String(err)}`)
+        }
+
+        // PRE-WRITE BACKUP (Boss requirement): on OVERWRITE, snapshot the current
+        // Drive version locally BEFORE writing. Order is load-bearing:
+        // guard (already passed) -> backup -> write. If the backup throws, we do
+        // NOT write (fail-safe -- never overwrite what we could not back up).
+        let backupPath: string | null = null
+        if (fileId) {
+          try {
+            backupPath = await backupDriveFileVersion(await tok(), fileId, driveBackupDir, deps.now(), df)
+          } catch (err) {
+            return textResult(`Error: pre-write backup failed, upload ABORTED (no Drive write performed): ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+
+        const uploadName = name ?? basename(safeSrc)
+        const out = await driveUploadFile(await tok(), media, { name: uploadName, fileId, parents, mimeType }, df)
+        // NEW file (no backup) -> audit line only, per Boss decision.
+        audit(TOOL_DRIVE_UPLOAD_FILE, `id=${out.id ?? ''} mode=${fileId ? 'overwrite' : 'new'} backup=${backupPath ?? 'none'}`)
+        return jsonResult({ ...out, backup: backupPath })
+      },
+    },
   ]
+
+  // Look up a Drive file's real name for the default download filename; fall
+  // back to the id if the metadata fetch fails.
+  async function safeDownloadName(fileId: string): Promise<string> {
+    try {
+      const meta = await driveGetMeta(await tok(), fileId, df)
+      if (!('error' in meta) && meta.name) {
+        return meta.name.replace(/[\r\n]+/g, ' ').replace(/[/\\\0]/g, '_').slice(0, 200)
+      }
+    } catch {
+      /* fall through */
+    }
+    return fileId
+  }
 
   // Shared executor for the bulk-capable message ops: enforces the bulk
   // threshold (handled in applyToMessages, pre-fetch) and surfaces the reject as
@@ -569,6 +769,7 @@ export function buildServer(deps?: Partial<ToolDeps>): McpServer {
     channelDir: deps?.channelDir ?? CHANNEL_DIR,
     now: deps?.now ?? (() => Date.now()),
     fetchFn: deps?.fetchFn,
+    driveBackupDir: deps?.driveBackupDir ?? DRIVE_BACKUP_DIR,
   }
   for (const def of buildToolDefs(resolved)) {
     server.registerTool(def.name, { description: def.description, inputSchema: def.inputSchema }, def.handler)

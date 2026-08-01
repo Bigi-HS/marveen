@@ -15,6 +15,10 @@ import {
   TOOL_GMAIL_UPDATE_VACATION,
   TOOL_CALENDAR_DELETE_EVENT,
   TOOL_CALENDAR_UPDATE_EVENT_ALL,
+  // ENG-048 Drive tool-name constants
+  TOOL_DRIVE_LIST_FILES,
+  TOOL_DRIVE_DOWNLOAD_FILE,
+  TOOL_DRIVE_UPLOAD_FILE,
   // the 7 v2 GUARDED namespaced strings (must equal GUARDED_TOOLS in the hook)
   GUARDED_GMAIL_TRASH,
   GUARDED_GMAIL_DELETE_LABEL,
@@ -23,6 +27,8 @@ import {
   GUARDED_GMAIL_UPDATE_VACATION,
   GUARDED_CALENDAR_DELETE_EVENT,
   GUARDED_CALENDAR_UPDATE_EVENT_ALL,
+  // ENG-048: the one guarded Drive write (overwrite is irreversible)
+  GUARDED_DRIVE_UPLOAD,
 } from '../mcp/tool-names.js'
 
 // SEC-AC5: every ask-first=YES tool MUST be cross-pinned. The guarded string the
@@ -57,5 +63,21 @@ describe('Claudia Google MCP v2 tool names', () => {
     expect(GUARDED_GMAIL_UPDATE_VACATION).toBe(namespacedToolName(TOOL_GMAIL_UPDATE_VACATION))
     expect(GUARDED_CALENDAR_DELETE_EVENT).toBe(namespacedToolName(TOOL_CALENDAR_DELETE_EVENT))
     expect(GUARDED_CALENDAR_UPDATE_EVENT_ALL).toBe(namespacedToolName(TOOL_CALENDAR_UPDATE_EVENT_ALL))
+  })
+})
+
+// ENG-048: the 3 Drive tools -- transform-free namespacing + the single guarded
+// upload cross-pin (overwrite = irreversible external write). list/download are
+// read-only and NOT guarded.
+describe('Claudia Google MCP Drive tool names (ENG-048)', () => {
+  it('namespaces the 3 Drive tools transform-free', () => {
+    expect(namespacedToolName(TOOL_DRIVE_LIST_FILES)).toBe('mcp__claudia_google__drive_list_files')
+    expect(namespacedToolName(TOOL_DRIVE_DOWNLOAD_FILE)).toBe('mcp__claudia_google__drive_download_file')
+    expect(namespacedToolName(TOOL_DRIVE_UPLOAD_FILE)).toBe('mcp__claudia_google__drive_upload_file')
+  })
+
+  it('pins the guarded drive_upload_file string and derives it without drift', () => {
+    expect(GUARDED_DRIVE_UPLOAD).toBe('mcp__claudia_google__drive_upload_file')
+    expect(GUARDED_DRIVE_UPLOAD).toBe(namespacedToolName(TOOL_DRIVE_UPLOAD_FILE))
   })
 })

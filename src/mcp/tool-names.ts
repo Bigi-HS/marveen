@@ -52,6 +52,11 @@ export const TOOL_CALENDAR_UPDATE_EVENT = 'calendar_update_event'
 export const TOOL_CALENDAR_UPDATE_EVENT_ALL = 'calendar_update_event_all'
 export const TOOL_CALENDAR_DELETE_EVENT = 'calendar_delete_event'
 
+// --- ENG-048 Drive (scope drive -- full read+write, Boss decision TG4809) ---
+export const TOOL_DRIVE_LIST_FILES = 'drive_list_files'
+export const TOOL_DRIVE_DOWNLOAD_FILE = 'drive_download_file'
+export const TOOL_DRIVE_UPLOAD_FILE = 'drive_upload_file'
+
 // How Claude Code namespaces an MCP tool: mcp__<server>__<tool>.
 export function namespacedToolName(tool: string): string {
   return `mcp__${SERVER_KEY}__${tool}`
@@ -70,3 +75,7 @@ export const GUARDED_GMAIL_DELETE_FILTER = namespacedToolName(TOOL_GMAIL_DELETE_
 export const GUARDED_GMAIL_UPDATE_VACATION = namespacedToolName(TOOL_GMAIL_UPDATE_VACATION)
 export const GUARDED_CALENDAR_DELETE_EVENT = namespacedToolName(TOOL_CALENDAR_DELETE_EVENT)
 export const GUARDED_CALENDAR_UPDATE_EVENT_ALL = namespacedToolName(TOOL_CALENDAR_UPDATE_EVENT_ALL)
+// ENG-048 -- drive_upload_file is ask-first GUARDED: an overwrite is an
+// irreversible external write to the Boss's Drive (Boss decision -- backup runs
+// AFTER this guard, BEFORE the actual write). list/download are read-only, NOT guarded.
+export const GUARDED_DRIVE_UPLOAD = namespacedToolName(TOOL_DRIVE_UPLOAD_FILE)

@@ -17,12 +17,18 @@ export const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth'
 // the Gmail sharing-settings scope (forwarding/delegation) and the legacy
 // full-mail scope (permanent purge). This array is the single hardcoded source;
 // no runtime configuration can widen it.
+//
+// ENG-048: the FULL Drive scope is added (Boss decision 2026-08-01 TG4809 --
+// "mindenhez ertsen": Claudia lists/downloads/uploads the WHOLE Drive, not just
+// drive.file). Every mutating Drive op is pre-write-backed-up locally + ask-first
+// guarded (drive_upload_file). Re-consent re-issues a refresh token carrying this.
 export const SCOPES = [
   'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/gmail.send',
   'https://www.googleapis.com/auth/gmail.labels',
   'https://www.googleapis.com/auth/gmail.settings.basic',
   'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/drive',
 ]
 
 const realFetch = fetch as unknown as FetchLike
