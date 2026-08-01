@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, basename } from 'node:path'
 import type { FetchLike } from '../mcp/google-oauth.js'
-import { buildToolDefs, type ToolDeps } from '../mcp/google-mcp-server.js'
+import { buildToolDefs, confineToRoot, type ToolDeps } from '../mcp/google-mcp-server.js'
 import {
   TOOL_CALENDAR_TODAY,
   TOOL_GMAIL_SEND,
@@ -302,6 +302,31 @@ describe('drive_upload_file handler: pre-write backup (Boss requirement)', () =>
     expect(out.content[0].text.toLowerCase()).toContain('escapes sandbox')
   })
 
+  it('SEC upload: rejects a symlink INSIDE uploads/ that points outside (DA symlink-escape)', async () => {
+    // Secret lives outside the sandbox; a symlink under uploads/ points at it.
+    const secret = join(bak, 'secret.txt')
+    writeFileSync(secret, 'REFRESH-TOKEN')
+    mkdirSync(join(dir, 'uploads'), { recursive: true })
+    symlinkSync(secret, join(dir, 'uploads', 'link.txt'))
+    const fetchFn = (async () => { throw new Error('must reject before reading the symlink target') }) as unknown as FetchLike
+    const def = buildToolDefs(driveDeps(fetchFn)).find((d) => d.name === 'drive_upload_file')!
+    const out = await def.handler({ srcPath: join(dir, 'uploads', 'link.txt') })
+    expect(out.content[0].text.toLowerCase()).toContain('symlink')
+    expect(readdirSync(bak).filter((f) => f !== 'secret.txt')).toHaveLength(0)
+  })
+
+  it('SEC download: rejects a destPath whose parent is a symlink out of downloads/ (DA symlink-escape)', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'srv-outside-'))
+    mkdirSync(join(dir, 'downloads'), { recursive: true })
+    symlinkSync(outside, join(dir, 'downloads', 'out')) // downloads/out -> outside dir
+    const fetchFn = (async () => { throw new Error('must reject before any fetch/write') }) as unknown as FetchLike
+    const def = buildToolDefs(driveDeps(fetchFn)).find((d) => d.name === 'drive_download_file')!
+    const out = await def.handler({ fileId: 'D1', destPath: join(dir, 'downloads', 'out', 'x.txt') })
+    expect(out.content[0].text.toLowerCase()).toContain('symlink')
+    expect(existsSync(join(outside, 'x.txt'))).toBe(false)
+    rmSync(outside, { recursive: true, force: true })
+  })
+
   it('SEC download: a relative destPath under downloads/ is accepted and written there', async () => {
     const fetchFn = (async (url: string, init: any) => {
       const method = init?.method ?? 'GET'
@@ -313,5 +338,31 @@ describe('drive_upload_file handler: pre-write backup (Boss requirement)', () =>
     const def = buildToolDefs(driveDeps(fetchFn)).find((d) => d.name === 'drive_download_file')!
     await def.handler({ fileId: 'D1', destPath: 'sub/ok.txt' })
     expect(readFileSync(join(dir, 'downloads', 'sub', 'ok.txt'), 'utf-8')).toBe('DRIVE-BYTES')
+  })
+})
+
+// SEC unit: the sandbox primitive itself (Chad + DA hardening).
+describe('confineToRoot', () => {
+  let root: string
+  beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'confine-')) })
+  afterEach(() => { rmSync(root, { recursive: true, force: true }) })
+
+  it('accepts a relative path inside the root', () => {
+    expect(confineToRoot(root, 'a/b.txt')).toBe(join(root, 'a', 'b.txt'))
+  })
+  it('rejects an absolute path outside the root', () => {
+    expect(() => confineToRoot(root, '/etc/passwd')).toThrow(/escapes sandbox/)
+  })
+  it('rejects a ../ traversal', () => {
+    expect(() => confineToRoot(root, '../evil')).toThrow(/escapes sandbox/)
+  })
+  it('rejects the sibling-prefix escape (<root>-evil)', () => {
+    expect(() => confineToRoot(root, join('..', basename(root) + '-evil', 'x'))).toThrow(/escapes sandbox/)
+  })
+  it('rejects a symlink inside the root that points outside', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'confine-out-'))
+    symlinkSync(outside, join(root, 'link'))
+    expect(() => confineToRoot(root, 'link/x.txt')).toThrow(/symlink/)
+    rmSync(outside, { recursive: true, force: true })
   })
 })

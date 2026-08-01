@@ -25,8 +25,8 @@
 //   - SEC-AC6: bulk message ops reject >10 ids before any API call.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { readFileSync } from 'node:fs'
-import { basename, join, resolve, sep } from 'node:path'
+import { readFileSync, realpathSync } from 'node:fs'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { AccessTokenProvider, loadGoogleCreds, type FetchLike } from './google-oauth.js'
 import { listTodayEvents, type CalendarEvent } from './google-calendar.js'
@@ -220,10 +220,42 @@ function fmtDriveList(files: DriveFileMeta[]): string {
 export function confineToRoot(root: string, candidate: string): string {
   const base = resolve(root)
   const p = resolve(base, candidate)
+  // 1) Lexical containment. `base + sep` (not bare `base`) blocks the sibling
+  //    prefix escape, e.g. `<base>-evil` must NOT count as inside `<base>`.
   if (p !== base && !p.startsWith(base + sep)) {
     throw new Error(`path escapes sandbox: "${candidate}" is outside ${root}`)
   }
+  // 2) Symlink-escape guard (DA PR#453 BLOCK): resolve() is purely lexical, so a
+  //    symlink placed INSIDE the sandbox (e.g. uploads/x -> /etc/passwd, which
+  //    Claudia could create via Bash) would pass the textual check yet read/write
+  //    outside. Canonicalize BOTH base and candidate (realpath follows symlinks)
+  //    and re-check. The candidate may not exist yet (a download dest), so
+  //    canonicalize its nearest existing ancestor and re-append the missing tail.
+  const canonBase = realpathNearest(base)
+  const canonP = realpathNearest(p)
+  if (canonP !== canonBase && !canonP.startsWith(canonBase + sep)) {
+    throw new Error(`path escapes sandbox (symlink): "${candidate}" resolves outside ${root}`)
+  }
   return p
+}
+
+// realpath the nearest existing ancestor of `p`, then re-append the not-yet-
+// existing tail. Used by confineToRoot so a leaf that will be created (download
+// dest) is still checked against symlinks in its existing parent chain.
+function realpathNearest(p: string): string {
+  const tail: string[] = []
+  let cur = p
+  for (;;) {
+    try {
+      const real = realpathSync(cur)
+      return tail.length ? join(real, ...tail.reverse()) : real
+    } catch {
+      const parent = dirname(cur)
+      if (parent === cur) return p // reached fs root, nothing on the path exists
+      tail.push(basename(cur))
+      cur = parent
+    }
+  }
 }
 
 export interface ToolDeps {
@@ -636,9 +668,10 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
         const downloadsRoot = join(deps.channelDir, 'downloads')
         let dest: string
         try {
-          dest = destPath
-            ? confineToRoot(downloadsRoot, destPath)
-            : join(downloadsRoot, await safeDownloadName(fileId))
+          // Both branches go through confineToRoot: even the server-derived
+          // default name (safeDownloadName already strips path separators) is
+          // re-checked, so a hostile Drive filename can never build a gadget path.
+          dest = confineToRoot(downloadsRoot, destPath ?? (await safeDownloadName(fileId)))
         } catch (err) {
           return textResult(`Error: ${err instanceof Error ? err.message : String(err)}`)
         }
@@ -649,7 +682,7 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
     {
       name: TOOL_DRIVE_UPLOAD_FILE,
       description:
-        'Upload a local file to Drive (scope drive). If fileId is given the target file is OVERWRITTEN (its current version is backed up locally FIRST); otherwise a NEW file is created. ASK-FIRST GUARDED: irreversible external write to the Boss Drive.',
+        'Upload a local file to Drive (scope drive). srcPath MUST be staged under the channel uploads/ dir (copy the file there first if needed) -- paths outside uploads/ are rejected so secrets cannot be exfiltrated. If fileId is given the target file is OVERWRITTEN (its current version is backed up locally FIRST); otherwise a NEW file is created. ASK-FIRST GUARDED: irreversible external write to the Boss Drive.',
       inputSchema: {
         srcPath: z.string().describe('local path of the file to upload'),
         name: z.string().optional().describe('Drive filename (defaults to the source basename)'),
