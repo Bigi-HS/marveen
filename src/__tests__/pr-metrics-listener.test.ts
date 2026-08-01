@@ -93,7 +93,7 @@ describe('PR-trigger listener — deployment readiness', () => {
   })
 
   it('should require GENESIS_AGENT_TOKEN env var', () => {
-    const env = {}  // empty
+    const env: Record<string, string> = {}
     const hasToken = !!env['GENESIS_AGENT_TOKEN']
     expect(hasToken).toBe(false)
 
