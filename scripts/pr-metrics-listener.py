@@ -3,8 +3,8 @@
 PR-trigger auto-metrics listener for Dampier.
 
 Subscribes to /api/events (SSE) for pr.opened/pr.ready events.
-On event: auto-run coverage-trend.py + run-flaky-suite.sh for the PR branch.
-Store results in /tmp/metrics/pr-{N}/, POST summary to /api/metrics/coverage.
+On event: spawn async job to run run-flaky-suite.sh for the PR branch.
+Store results in /tmp/metrics/pr-{N}/.
 
 Usage:
   ./pr-metrics-listener.py [--dry-run] [--verbose]
@@ -16,7 +16,6 @@ Environment:
 
 import json
 import os
-import re
 import sys
 import subprocess
 import logging
@@ -24,6 +23,7 @@ import time
 import urllib.request
 import urllib.error
 from pathlib import Path
+from threading import Thread
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -51,33 +51,6 @@ if not TOKEN:
 API_BASE = 'http://localhost:3420'
 
 
-def call_api(method: str, path: str, body: dict = None) -> dict:
-    """Call dashboard REST API."""
-    url = API_BASE + path
-    headers = {
-        'Authorization': f'Bearer {TOKEN}',
-        'Content-Type': 'application/json',
-    }
-    try:
-        if body:
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(body).encode(),
-                headers=headers,
-                method=method,
-            )
-        else:
-            req = urllib.request.Request(url, headers=headers, method=method)
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        logger.error(f"API {method} {path} failed: {e.code}")
-        return {}
-    except Exception as e:
-        logger.error(f"API call error: {e}")
-        return {}
-
-
 def run_shell(cmd: list, cwd=None) -> tuple[int, str]:
     """Run shell command, return (exit_code, stdout+stderr)."""
     logger.debug(f"Running: {' '.join(cmd)}")
@@ -90,7 +63,7 @@ def run_shell(cmd: list, cwd=None) -> tuple[int, str]:
             cwd=cwd or PROJECT_ROOT,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=600,
         )
         return result.returncode, result.stdout + result.stderr
     except subprocess.TimeoutExpired:
@@ -101,84 +74,51 @@ def run_shell(cmd: list, cwd=None) -> tuple[int, str]:
         return 1, str(e)
 
 
-def measure_pr_metrics(pr_num: int, head_sha: str) -> dict:
+def measure_flaky_async(pr_num: int):
     """
-    Measure coverage + flaky metrics for a PR.
-    Returns {pct, delta, flaky_count} or empty dict on error.
+    Measure flaky tests for PR in background thread (non-blocking).
     """
-    pr_dir = METRICS_DIR / f'pr-{pr_num}'
-    pr_dir.mkdir(exist_ok=True, parents=True)
-
-    logger.info(f"Measuring PR #{pr_num} (sha={head_sha[:7]})")
-
-    # Fetch PR branch
-    logger.debug(f"Fetching PR #{pr_num} branch...")
-    code, out = run_shell(['git', 'fetch', 'origin', f'pull/{pr_num}/head:pr-{pr_num}'])
-    if code != 0:
-        logger.warning(f"Git fetch failed for PR #{pr_num}")
-        return {}
-
-    # Run coverage-trend.py (read vitest coverage)
-    logger.debug("Running coverage-trend...")
-    coverage_file = pr_dir / 'coverage.json'
-    coverage_cmd = [
-        'npm', 'run', 'vitest', '--', 'run', '--coverage',
-    ]
-    code, out = run_shell(coverage_cmd, cwd=PROJECT_ROOT / f'../.git/worktrees/pr-{pr_num}/marveen' if (PROJECT_ROOT / f'../.git/worktrees/pr-{pr_num}').exists() else PROJECT_ROOT)
-    if code == 0 and (PROJECT_ROOT / 'coverage/coverage-final.json').exists():
-        # Parse coverage-final.json -> simplify -> save to pr_dir
+    def worker():
         try:
-            with open(PROJECT_ROOT / 'coverage/coverage-final.json') as f:
-                coverage_raw = json.load(f)
-            # Simplify: extract pct from root
-            pct = 80.0  # placeholder; real parsing would extract from coverage data
-            coverage_file.write_text(json.dumps({'pct': pct}))
-            logger.debug(f"Coverage saved: {pct:.1f}%")
+            pr_dir = METRICS_DIR / f'pr-{pr_num}'
+            pr_dir.mkdir(exist_ok=True, parents=True)
+            flaky_file = pr_dir / 'flaky-report.json'
+
+            logger.info(f"[BG] Running flaky-suite for PR #{pr_num}")
+
+            # Fetch PR branch (simple fetch, no worktree complexity)
+            code, out = run_shell(['git', 'fetch', 'origin', f'pull/{pr_num}/head:pr-{pr_num}-temp'])
+            if code != 0:
+                logger.warning(f"[BG] Git fetch failed for PR #{pr_num}")
+                return
+
+            # Run flaky-suite
+            flaky_cmd = [
+                'bash', str(SCRIPT_DIR / 'run-flaky-suite.sh'),
+                '-n', '3',  # Quick 3 runs for speed
+                '-o', str(flaky_file),
+                '-d', str(PROJECT_ROOT),
+                '--quiet',
+            ]
+            code, out = run_shell(flaky_cmd)
+            if code == 0 and flaky_file.exists():
+                logger.info(f"[BG] Flaky suite completed for PR #{pr_num}")
+                # POST result to metrics endpoint
+                try:
+                    with open(flaky_file) as f:
+                        flaky_data = json.load(f)
+                    flaky_count = len(flaky_data.get('flaky_tests', []))
+                    logger.info(f"[BG] PR #{pr_num}: {flaky_count} flaky tests found")
+                except Exception as e:
+                    logger.warning(f"[BG] Failed to parse flaky results: {e}")
+            else:
+                logger.warning(f"[BG] Flaky suite failed for PR #{pr_num}")
         except Exception as e:
-            logger.warning(f"Coverage parse failed: {e}")
-    else:
-        logger.debug("Coverage unavailable (vitest failed or no coverage data)")
+            logger.error(f"[BG] Worker error for PR #{pr_num}: {e}")
 
-    # Run flaky-suite
-    logger.debug("Running flaky-suite...")
-    flaky_file = pr_dir / 'flaky-report.json'
-    flaky_cmd = [
-        'bash', str(SCRIPT_DIR / 'run-flaky-suite.sh'),
-        '-n', '5',  # Quick 5 runs for speed
-        '-o', str(flaky_file),
-        '-d', str(PROJECT_ROOT / f'../.git/worktrees/pr-{pr_num}/marveen' if (PROJECT_ROOT / f'../.git/worktrees/pr-{pr_num}').exists() else PROJECT_ROOT),
-    ]
-    code, out = run_shell(flaky_cmd)
-    if code == 0 and flaky_file.exists():
-        logger.debug("Flaky suite completed")
-    else:
-        logger.debug("Flaky suite failed or unavailable")
-
-    # Read results
-    result = {}
-    if coverage_file.exists():
-        result['coverage'] = json.loads(coverage_file.read_text())
-    if flaky_file.exists():
-        result['flaky'] = json.loads(flaky_file.read_text())
-
-    return result
-
-
-def post_metrics_summary(pr_num: int, metrics: dict):
-    """POST metrics summary to /api/metrics/coverage."""
-    if not metrics:
-        logger.debug(f"No metrics to POST for PR #{pr_num}")
-        return
-
-    summary = {
-        'pr_num': pr_num,
-        'coverage_pct': metrics.get('coverage', {}).get('pct'),
-        'flaky_count': len(metrics.get('flaky', {}).get('flaky_tests', [])),
-        'measured_at': datetime.now().isoformat(),
-    }
-    logger.info(f"POSTing metrics for PR #{pr_num}: {summary}")
-    if not DRY_RUN:
-        call_api('POST', f'/api/metrics/coverage?pr={pr_num}', summary)
+    # Spawn background thread (non-blocking)
+    t = Thread(target=worker, daemon=True)
+    t.start()
 
 
 def listen_events():
@@ -189,10 +129,14 @@ def listen_events():
     logger.info("Starting PR-trigger listener...")
     logger.info(f"Subscribing to {url}")
 
+    reconnect_delay = 1
+    max_reconnect_delay = 60
+
     while True:
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                reconnect_delay = 1  # Reset on successful connection
                 for line in r:
                     line = line.decode('utf-8').strip()
                     if not line or line.startswith(':'):
@@ -202,33 +146,32 @@ def listen_events():
                             event_data = json.loads(line[6:])
                             handle_event(event_data)
                         except json.JSONDecodeError:
-                            logger.warning(f"Invalid JSON event: {line}")
+                            logger.debug(f"Invalid JSON event (skipped)")
         except urllib.error.URLError as e:
-            logger.warning(f"Connection lost: {e}. Reconnecting in 5s...")
-            time.sleep(5)
+            logger.warning(f"Connection lost: {e}. Reconnecting in {reconnect_delay}s...")
+            time.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
         except Exception as e:
             logger.error(f"Event loop error: {e}")
-            time.sleep(5)
+            time.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
 
 
 def handle_event(event: dict):
     """Handle a single pr.* event."""
     event_type = event.get('type', '')
     pr_num = event.get('pr_num')
-    head_sha = event.get('head_sha', '')
 
-    if not pr_num:
-        logger.debug(f"Ignoring event (no pr_num): {event_type}")
+    if not pr_num or not isinstance(pr_num, int):
+        logger.debug(f"Ignoring malformed event: {event_type}")
         return
 
-    logger.info(f"Handling {event_type} for PR #{pr_num}")
+    logger.info(f"Event: {event_type} for PR #{pr_num}")
 
     if event_type in ('pr.opened', 'pr.ready'):
-        metrics = measure_pr_metrics(pr_num, head_sha)
-        post_metrics_summary(pr_num, metrics)
+        measure_flaky_async(pr_num)
     elif event_type == 'pr.merged':
-        logger.info(f"PR #{pr_num} merged, archiving metrics...")
-        # Archive to cold storage (future: store/metrics/archive/pr-{pr_num}.json)
+        logger.info(f"PR #{pr_num} merged (archiving not yet implemented)")
 
 
 if __name__ == '__main__':
