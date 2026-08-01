@@ -774,7 +774,7 @@ function handleMarveenDown(): void {
   }
   if (now - marveenDownState.lastAlertAt > PLUGIN_ALERT_DEDUP_MS) {
     marveenDownState.lastAlertAt = now
-    sendAlert(`🚨 Marveen ${providerLabel} plugin meg mindig halott. Nezd meg kezzel.`)
+    sendAlert(`🚨 NoA ${providerLabel} plugin meg mindig halott. Nezd meg kezzel.`)
   }
 }
 
@@ -786,7 +786,7 @@ function handleMarveenUp(): void {
     const providerLabel = getMainAgentProvider()
     logger.info({ stage, downedFor, provider: providerLabel }, 'Marveen channel plugin recovered')
     if (stage !== 'soft' && stage !== 'save' && stage !== 'resume') {
-      sendAlert(`✅ Marveen ${providerLabel} plugin helyrealt (${stage} utan, ${downedFor}s kieses).`)
+      sendAlert(`✅ NoA ${providerLabel} plugin helyrealt (${stage} utan, ${downedFor}s kieses).`)
     }
     marveenDownState = null
   }
