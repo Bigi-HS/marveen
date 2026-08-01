@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { FetchLike } from '../mcp/google-oauth.js'
@@ -187,8 +187,11 @@ describe('drive_upload_file handler: pre-write backup (Boss requirement)', () =>
   function driveDeps(fetchFn: FetchLike): ToolDeps {
     return { getToken: async () => 'tok', channelDir: dir, now: () => Date.UTC(2026, 0, 1, 0, 0, 0), fetchFn, driveBackupDir: bak }
   }
+  // SEC: srcPath is sandboxed to <channelDir>/uploads -- stage the source there.
   function writeSrc(name: string, content: string): string {
-    const p = join(src, name)
+    const up = join(dir, 'uploads')
+    mkdirSync(up, { recursive: true })
+    const p = join(up, name)
     writeFileSync(p, content)
     return p
   }
@@ -253,8 +256,62 @@ describe('drive_upload_file handler: pre-write backup (Boss requirement)', () =>
   it('unreadable local source fails loud before any Drive/backup call', async () => {
     const fetchFn = (async () => { throw new Error('no network on a bad src') }) as unknown as FetchLike
     const def = buildToolDefs(driveDeps(fetchFn)).find((d) => d.name === 'drive_upload_file')!
-    const out = await def.handler({ srcPath: join(src, 'does-not-exist.txt'), fileId: 'Q1' })
+    const out = await def.handler({ srcPath: join(dir, 'uploads', 'does-not-exist.txt'), fileId: 'Q1' })
     expect(out.content[0].text.toLowerCase()).toContain('cannot read source file')
     expect(readdirSync(bak)).toHaveLength(0)
+  })
+
+  // --- SEC (Chad PR#453 FLAG): path-traversal sandbox ---------------------
+  it('SEC upload: rejects an absolute srcPath outside uploads/ -- no read, no backup, no audit', async () => {
+    const fetchFn = (async () => { throw new Error('must reject before any network/fs read') }) as unknown as FetchLike
+    const def = buildToolDefs(driveDeps(fetchFn)).find((d) => d.name === 'drive_upload_file')!
+    const out = await def.handler({ srcPath: '/etc/passwd', fileId: 'Z1' })
+    expect(out.content[0].text.toLowerCase()).toContain('escapes sandbox')
+    expect(readdirSync(bak)).toHaveLength(0)
+    expect(existsSync(join(dir, 'mcp-audit.log'))).toBe(false)
+  })
+
+  it('SEC upload: rejects the channel oauth-tokens.json (secret-exfil vector blocked)', async () => {
+    // The refresh token lives directly in channelDir, NOT under uploads/ -> outside sandbox.
+    writeFileSync(join(dir, 'oauth-tokens.json'), 'SECRET-REFRESH-TOKEN')
+    const fetchFn = (async () => { throw new Error('must not upload the token') }) as unknown as FetchLike
+    const def = buildToolDefs(driveDeps(fetchFn)).find((d) => d.name === 'drive_upload_file')!
+    const out = await def.handler({ srcPath: join(dir, 'oauth-tokens.json') })
+    expect(out.content[0].text.toLowerCase()).toContain('escapes sandbox')
+    expect(readdirSync(bak)).toHaveLength(0)
+  })
+
+  it('SEC upload: rejects a ../ traversal escaping uploads/', async () => {
+    const fetchFn = (async () => { throw new Error('must reject') }) as unknown as FetchLike
+    const def = buildToolDefs(driveDeps(fetchFn)).find((d) => d.name === 'drive_upload_file')!
+    const out = await def.handler({ srcPath: join(dir, 'uploads', '..', 'oauth-tokens.json') })
+    expect(out.content[0].text.toLowerCase()).toContain('escapes sandbox')
+  })
+
+  it('SEC download: rejects an absolute destPath outside downloads/ (no clobber)', async () => {
+    const fetchFn = (async () => { throw new Error('must reject before any fetch/write') }) as unknown as FetchLike
+    const def = buildToolDefs(driveDeps(fetchFn)).find((d) => d.name === 'drive_download_file')!
+    const out = await def.handler({ fileId: 'D1', destPath: '/home/domin/.claude/settings.json' })
+    expect(out.content[0].text.toLowerCase()).toContain('escapes sandbox')
+  })
+
+  it('SEC download: rejects a ../ traversal escaping downloads/', async () => {
+    const fetchFn = (async () => { throw new Error('must reject') }) as unknown as FetchLike
+    const def = buildToolDefs(driveDeps(fetchFn)).find((d) => d.name === 'drive_download_file')!
+    const out = await def.handler({ fileId: 'D1', destPath: join(dir, 'downloads', '..', '..', 'evil.txt') })
+    expect(out.content[0].text.toLowerCase()).toContain('escapes sandbox')
+  })
+
+  it('SEC download: a relative destPath under downloads/ is accepted and written there', async () => {
+    const fetchFn = (async (url: string, init: any) => {
+      const method = init?.method ?? 'GET'
+      if (method === 'GET' && url.includes('alt=media')) {
+        return { ok: true, status: 200, json: async () => ({}), text: async () => '', arrayBuffer: async () => new TextEncoder().encode('DRIVE-BYTES').buffer }
+      }
+      throw new Error('unexpected ' + method + ' ' + url)
+    }) as unknown as FetchLike
+    const def = buildToolDefs(driveDeps(fetchFn)).find((d) => d.name === 'drive_download_file')!
+    await def.handler({ fileId: 'D1', destPath: 'sub/ok.txt' })
+    expect(readFileSync(join(dir, 'downloads', 'sub', 'ok.txt'), 'utf-8')).toBe('DRIVE-BYTES')
   })
 })

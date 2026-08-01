@@ -26,7 +26,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { readFileSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, join, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { AccessTokenProvider, loadGoogleCreds, type FetchLike } from './google-oauth.js'
 import { listTodayEvents, type CalendarEvent } from './google-calendar.js'
@@ -207,6 +207,23 @@ function fmtDriveList(files: DriveFileMeta[]): string {
       )
       .join('\n')
   )
+}
+
+// SEC (Chad PR#453 FLAG): confine a caller-supplied local path to a sandbox
+// root, blocking path-traversal (absolute paths, `../` escapes). The Drive
+// download/upload tools are NOT ask-first for the read side and Claudia's input
+// can be prompt-injected, so an unconfined destPath could clobber arbitrary
+// local files (e.g. ~/.claude/settings.json) and an unconfined srcPath could
+// exfiltrate secrets (e.g. the channel's own oauth-tokens.json) to Drive.
+// Roots are dedicated SUBDIRS of the channel dir (never the channel dir itself,
+// which holds oauth-tokens.json + the audit log).
+export function confineToRoot(root: string, candidate: string): string {
+  const base = resolve(root)
+  const p = resolve(base, candidate)
+  if (p !== base && !p.startsWith(base + sep)) {
+    throw new Error(`path escapes sandbox: "${candidate}" is outside ${root}`)
+  }
+  return p
 }
 
 export interface ToolDeps {
@@ -609,12 +626,22 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
     {
       name: TOOL_DRIVE_DOWNLOAD_FILE,
       description:
-        'Download a Drive file by fileId to a local path (0600). Read-only. Defaults to the channel downloads/ dir when destPath is omitted.',
+        'Download a Drive file by fileId to a local path under the channel downloads/ dir (0600). Read-only. destPath is confined to downloads/ (path-traversal rejected); defaults to downloads/<name> when omitted.',
       inputSchema: { fileId: z.string(), destPath: z.string().optional() },
       guarded: false,
       write: false,
       handler: async ({ fileId, destPath }) => {
-        const dest = destPath ?? join(deps.channelDir, 'downloads', await safeDownloadName(fileId))
+        // SEC: dest is confined to the downloads/ subdir -- a prompt-injected
+        // destPath cannot escape to clobber arbitrary local files.
+        const downloadsRoot = join(deps.channelDir, 'downloads')
+        let dest: string
+        try {
+          dest = destPath
+            ? confineToRoot(downloadsRoot, destPath)
+            : join(downloadsRoot, await safeDownloadName(fileId))
+        } catch (err) {
+          return textResult(`Error: ${err instanceof Error ? err.message : String(err)}`)
+        }
         const out = await driveDownloadFile(await tok(), fileId, dest, df)
         return jsonResult(out)
       },
@@ -633,13 +660,22 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
       guarded: true,
       write: true,
       handler: async ({ srcPath, name, fileId, parents, mimeType }) => {
+        // SEC: srcPath is confined to the uploads/ subdir -- a prompt-injected
+        // srcPath cannot exfiltrate secrets (oauth-tokens.json lives directly in
+        // channelDir, NOT under uploads/) or any other local file to Drive.
+        let safeSrc: string
+        try {
+          safeSrc = confineToRoot(join(deps.channelDir, 'uploads'), srcPath)
+        } catch (err) {
+          return textResult(`Error: ${err instanceof Error ? err.message : String(err)}`)
+        }
         // Read the local source bytes first -- a bad path fails loud before any
         // Drive call (and before any backup).
         let media: Uint8Array
         try {
-          media = new Uint8Array(readFileSync(srcPath))
+          media = new Uint8Array(readFileSync(safeSrc))
         } catch (err) {
-          return textResult(`Error: cannot read source file ${srcPath}: ${err instanceof Error ? err.message : String(err)}`)
+          return textResult(`Error: cannot read source file ${safeSrc}: ${err instanceof Error ? err.message : String(err)}`)
         }
 
         // PRE-WRITE BACKUP (Boss requirement): on OVERWRITE, snapshot the current
@@ -655,7 +691,7 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
           }
         }
 
-        const uploadName = name ?? basename(srcPath)
+        const uploadName = name ?? basename(safeSrc)
         const out = await driveUploadFile(await tok(), media, { name: uploadName, fileId, parents, mimeType }, df)
         // NEW file (no backup) -> audit line only, per Boss decision.
         audit(TOOL_DRIVE_UPLOAD_FILE, `id=${out.id ?? ''} mode=${fileId ? 'overwrite' : 'new'} backup=${backupPath ?? 'none'}`)
