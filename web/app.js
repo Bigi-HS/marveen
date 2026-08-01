@@ -1568,7 +1568,7 @@ async function openMarveenDetail() {
   currentAgent = { ...m, name: 'marveen', claudeMd: '', soulMd: '', mcpJson: '', skills: [] }
   setupAutoRestartUI(currentAgent)
 
-  const displayName = m.name || 'Marveen'
+  const displayName = m.name || 'NoA'
   document.getElementById('agentDetailTitle').textContent = displayName
   const avatar = document.getElementById('agentDetailAvatar')
   avatar.className = 'detail-avatar gradient-1'
@@ -1693,7 +1693,7 @@ function renderAgents() {
   })
   if (marveenMatches) {
     const m = window._marveen
-    const displayName = m.name || 'Marveen'
+    const displayName = m.name || 'NoA'
     const mCard = document.createElement('div')
     mCard.className = 'agent-card marveen-card'
     mCard.innerHTML = `
@@ -2060,7 +2060,7 @@ function updateProcessControl(agent) {
 }
 
 document.getElementById('marveenRestartBtn').addEventListener('click', async () => {
-  if (!confirm('Hard restart a marveen-channels session-ön. A folyamatban lévő Marveen beszélgetés elveszik (memória megmarad). Folytatod?')) return
+  if (!confirm('Hard restart a marveen-channels session-ön. A folyamatban lévő NoA beszélgetés elveszik (memória megmarad). Folytatod?')) return
   const btn = document.getElementById('marveenRestartBtn')
   btn.disabled = true
   try {
@@ -2069,7 +2069,7 @@ document.getElementById('marveenRestartBtn').addEventListener('click', async () 
       const err = await res.json().catch(() => ({}))
       throw new Error(err.error || 'Restart sikertelen')
     }
-    showToast('Marveen channels újraindítva')
+    showToast('NoA channels újraindítva')
   } catch (err) {
     showToast(`Hiba: ${err.message}`)
   } finally {
@@ -5698,7 +5698,7 @@ const BUILTIN_MCPS = [
     label: 'Computer Use',
     desc: 'Képernyő vezérlés, kattintás, gépelés',
     detailHtml: `
-      <p>A Computer Use egy natív Claude képesség, amit nem a Marveen kezel, hanem maga a Claude Code CLI / Claude alkalmazás.
+      <p>A Computer Use egy natív Claude képesség, amit nem a NoA kezel, hanem maga a Claude Code CLI / Claude alkalmazás.
       Nem jelenik meg a <code>claude mcp list</code> kimenetében, ezért a dashboard sem tudja automatikusan detektálni.</p>
       <p><strong>Bekapcsolás:</strong> a pontos folyamat a Claude verziójától függ és változhat verziók között.
       Kövesd az Anthropic hivatalos dokumentációját és a Claude Code changelogot.
@@ -5715,7 +5715,7 @@ const BUILTIN_MCPS = [
       Ezért nem jelenik meg a <code>claude mcp list</code> kimenetében, és a dashboard sem tudja automatikusan detektálni.</p>
       <p><strong>Bekapcsolás:</strong> indítsd a Claude-ot a <code>--chrome</code> flaggel:</p>
       <pre style="background:var(--bg-input);padding:8px 12px;border-radius:4px;font-size:12px;overflow-x:auto">claude --chrome</pre>
-      <p style="color:var(--text-muted)">A Chrome integráció lehetővé teszi a böngészőautomatizálást. A Marveen sub-agentek indítása jelenleg nem adja át ezt a flaget, így csak a manuálisan indított fő session használhatja.</p>
+      <p style="color:var(--text-muted)">A Chrome integráció lehetővé teszi a böngészőautomatizálást. A NoA sub-agentek indítása jelenleg nem adja át ezt a flaget, így csak a manuálisan indított fő session használhatja.</p>
     `,
   },
 ]
@@ -10537,7 +10537,7 @@ function renderAgentsTree() {
   // Combined dataset: the main agent (marveen) as a pseudo-agent + sub-agents.
   const all = []
   if (window._marveen && agentMatchesSearch({ name: 'marveen', displayName: window._marveen.name, description: window._marveen.description, running: true })) {
-    all.push({ name: 'marveen', displayName: window._marveen.name || 'Marveen', running: true, team: { reportsTo: null }, _main: true })
+    all.push({ name: 'marveen', displayName: window._marveen.name || 'NoA', running: true, team: { reportsTo: null }, _main: true })
   }
   for (const a of agents) if (agentMatchesSearch(a)) all.push(a)
   const byName = new Map(all.map(a => [a.name, a]))
