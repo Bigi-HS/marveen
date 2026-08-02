@@ -14,7 +14,7 @@ import {
 // requires -- an over-eager detector would restart healthy agents mid-turn.
 
 const T: WedgeThresholds = DEFAULT_WEDGE_THRESHOLDS
-const FRESH: WedgeRecoveryState = { lastActionAtMs: null, recoveryCount: 0 }
+const FRESH: WedgeRecoveryState = { lastActionAtMs: null, recoveryCount: 0, escalationCount: 0 }
 const NOW = 1_000_000_000_000
 
 // A canonical wedged agent: 45-min-old pending inbox, outbound 10 min ago.
@@ -81,7 +81,7 @@ describe('decideWedgeRecovery -- false-positive guards (must NOT restart a healt
       prev, NOW, T,
     )
     expect(d.action).toBe('none')
-    expect(d.next).toEqual({ lastActionAtMs: null, recoveryCount: 0 })
+    expect(d.next).toEqual({ lastActionAtMs: null, recoveryCount: 0, escalationCount: 0 })
   })
 
   it('does NOT restart-thrash: waits while inside the cooldown after a recovery', () => {
@@ -106,12 +106,45 @@ describe('decideWedgeRecovery -- escalation when restart is not fixing it', () =
     expect(d.action).toBe('escalate')
     expect(d.next.recoveryCount).toBe(T.maxRecoveries) // count held, not bumped
     expect(d.next.lastActionAtMs).toBe(NOW) // timestamp bumped so escalation is throttled too
+    expect(d.next.escalationCount).toBe(1) // first escalation for this incident
   })
 
   it('throttles escalation by the same cooldown (no operator spam)', () => {
     const prev: WedgeRecoveryState = { lastActionAtMs: NOW - 1, recoveryCount: T.maxRecoveries }
     const d = decideWedgeRecovery(wedged(), prev, NOW, T)
     expect(d.action).toBe('wait')
+  })
+
+  // DA flag (card c88bc682): without a cap the state machine re-escalated every
+  // cooldown forever. Escalation must be BOUNDED per incident, then fall silent.
+  it('falls silent once the escalation cap is reached (no infinite alert loop)', () => {
+    const prev: WedgeRecoveryState = {
+      lastActionAtMs: NOW - T.cooldownMs, recoveryCount: T.maxRecoveries, escalationCount: T.maxEscalations,
+    }
+    const d = decideWedgeRecovery(wedged(), prev, NOW, T)
+    expect(d.action).toBe('none')
+    expect(d.reason).toMatch(/escalation cap/i)
+    expect(d.next).toEqual(prev) // no further side effects while silent
+  })
+
+  it('bounds escalations across a long stuck incident: recover*max -> escalate*maxEsc -> silent', () => {
+    // Simulate an agent that stays wedged forever, each cycle a full cooldown apart.
+    // Alerts (recover + escalate) must be finite; after that the machine is silent.
+    let state: WedgeRecoveryState = { ...FRESH }
+    let t = NOW
+    const actions: string[] = []
+    for (let i = 0; i < 12; i++) {
+      const d = decideWedgeRecovery(wedged(), state, t, T)
+      actions.push(d.action)
+      state = d.next
+      t += T.cooldownMs // advance past cooldown each cycle
+    }
+    const recovers = actions.filter(a => a === 'recover').length
+    const escalates = actions.filter(a => a === 'escalate').length
+    expect(recovers).toBe(T.maxRecoveries)
+    expect(escalates).toBe(T.maxEscalations)
+    // every remaining cycle is silent -- the alert stream is bounded, not infinite
+    expect(actions.slice(T.maxRecoveries + T.maxEscalations).every(a => a === 'none')).toBe(true)
   })
 })
 

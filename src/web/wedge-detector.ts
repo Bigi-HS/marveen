@@ -51,6 +51,13 @@ export interface WedgeRecoveryState {
   lastActionAtMs: number | null
   /** How many consecutive recoveries have fired without the inbox recovering. */
   recoveryCount: number
+  /**
+   * How many operator escalations have already fired for the CURRENT incident.
+   * Bounds long-run alert spam: once the recovery cap is hit, escalation repeats
+   * only up to maxEscalations, then falls silent until the incident clears
+   * (guard 1 reset). Absent on legacy state -> treated as 0.
+   */
+  escalationCount?: number
 }
 
 export interface WedgeThresholds {
@@ -62,6 +69,8 @@ export interface WedgeThresholds {
   cooldownMs: number
   /** After this many consecutive recoveries that did NOT fix it, escalate to the operator instead. */
   maxRecoveries: number
+  /** Max operator escalations per incident before falling silent (bounds alert spam). */
+  maxEscalations: number
 }
 
 /** 'recover' = context-preserving restart; 'escalate' = operator alert (restart not fixing it); 'wait' = cooldown; 'none' = no wedge. */
@@ -85,15 +94,19 @@ export interface WedgeDecision {
  *   fair chance to drain the inbox before another fires.
  * - maxRecoveries 3: if three context-preserving restarts do not clear it, the
  *   problem is not a transient stdio wedge -> hand it to a human.
+ * - maxEscalations 2: after the recovery cap, alert the operator at most twice
+ *   (spaced by the cooldown) then fall silent -- a wedge a human has not yet
+ *   cleared must not re-alert every cooldown forever (DA flag, card c88bc682).
  */
 export const DEFAULT_WEDGE_THRESHOLDS: WedgeThresholds = {
   overdueMins: 40,
   outboundRecentMins: 60,
   cooldownMs: 45 * 60 * 1000,
   maxRecoveries: 3,
+  maxEscalations: 2,
 }
 
-const CLEAN_STATE: WedgeRecoveryState = { lastActionAtMs: null, recoveryCount: 0 }
+const CLEAN_STATE: WedgeRecoveryState = { lastActionAtMs: null, recoveryCount: 0, escalationCount: 0 }
 
 /**
  * Decide whether to fire a context-preserving restart for a wedged agent.
@@ -104,7 +117,8 @@ const CLEAN_STATE: WedgeRecoveryState = { lastActionAtMs: null, recoveryCount: 0
  *  3. Wedge symptom present BUT no recent outbound -> 'none' (dead/idle agent =
  *     watchdog territory, NOT this wedge). This is the key false-positive guard.
  *  4. Within cooldown of the last action -> 'wait' (throttles both recover and escalate).
- *  5. Recovery cap already reached -> 'escalate' (restart is not fixing it).
+ *  5. Recovery cap already reached -> 'escalate' (restart is not fixing it),
+ *     but only up to maxEscalations times per incident, then 'none' (silent).
  *  6. Otherwise -> 'recover'.
  */
 export function decideWedgeRecovery(
@@ -147,18 +161,30 @@ export function decideWedgeRecovery(
   }
 
   // 5. Recovery cap: repeated restarts that did not clear it -> a human, not a loop.
+  //    Escalate a BOUNDED number of times (maxEscalations), spaced by the cooldown,
+  //    then fall silent -- a wedge the operator has not yet cleared must NOT re-alert
+  //    every cooldown forever (DA flag, card c88bc682). The next inbox drain (guard 1)
+  //    resets the spell and re-arms alerting for a fresh incident.
   if (prev.recoveryCount >= t.maxRecoveries) {
+    const escalationCount = prev.escalationCount ?? 0
+    if (escalationCount >= t.maxEscalations) {
+      return {
+        action: 'none',
+        next: prev,
+        reason: `escalation cap reached (${escalationCount}/${t.maxEscalations}) -- silent until the incident clears (operator already notified)`,
+      }
+    }
     return {
       action: 'escalate',
-      next: { lastActionAtMs: nowMs, recoveryCount: prev.recoveryCount },
-      reason: `restart did not clear the wedge after ${prev.recoveryCount} attempts -- operator needed`,
+      next: { lastActionAtMs: nowMs, recoveryCount: prev.recoveryCount, escalationCount: escalationCount + 1 },
+      reason: `restart did not clear the wedge after ${prev.recoveryCount} attempts -- operator needed (escalation ${escalationCount + 1}/${t.maxEscalations})`,
     }
   }
 
   // 6. Fire the context-preserving restart.
   return {
     action: 'recover',
-    next: { lastActionAtMs: nowMs, recoveryCount: prev.recoveryCount + 1 },
+    next: { lastActionAtMs: nowMs, recoveryCount: prev.recoveryCount + 1, escalationCount: prev.escalationCount ?? 0 },
     reason: 'staged-input wedge: overdue pending inbox + recent outbound (alive-but-stuck)',
   }
 }
