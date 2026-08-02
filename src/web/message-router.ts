@@ -5,6 +5,7 @@ import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import { shouldHoldProactiveWork } from './fleet-pause-enforcer.js'
+import { readAgentDisplayName } from './agent-config.js'
 import {
   createAgentMessage,
   getPendingMessages,
@@ -160,7 +161,7 @@ export function startMessageRouter(): NodeJS.Timeout {
         // alert must not spawn another).
         if (alertInBand('dropped', msg.from_agent)) {
           try {
-            createAgentMessage(DELIVERY_MONITOR_AGENT_ID, MAIN_AGENT_ID, abandonAlertContent(msg, ageMs))
+            createAgentMessage(DELIVERY_MONITOR_AGENT_ID, MAIN_AGENT_ID, abandonAlertContent(msg, ageMs, readAgentDisplayName))
           } catch (err) {
             logger.warn({ err, id: msg.id }, 'Failed to enqueue delivery-dropped alert')
           }

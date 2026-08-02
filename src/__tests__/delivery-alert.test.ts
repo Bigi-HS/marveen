@@ -46,6 +46,30 @@ describe('delivery-dropped alert (d3339db9 defense-in-depth)', () => {
     )
     expect(content).toContain('2 min')
   })
+
+  it('defaults to raw ids when no resolver is given (backward compatible)', () => {
+    const content = abandonAlertContent(
+      { id: 5, from_agent: 'marveen', to_agent: 'scout' },
+      60 * 60 * 1000,
+    )
+    expect(content).toContain('"marveen"')
+    expect(content).toContain('"scout"')
+  })
+
+  it('resolves party ids to Boss-facing display names via the injected resolver (b79a5d3a)', () => {
+    const resolve = (id: string): string =>
+      ({ marveen: 'NoA', scout: 'Dr. Stone' } as Record<string, string>)[id] ?? id
+    const content = abandonAlertContent(
+      { id: 7, from_agent: 'marveen', to_agent: 'scout' },
+      60 * 60 * 1000,
+      resolve,
+    )
+    expect(content).toContain('"NoA"')
+    expect(content).toContain('"Dr. Stone"')
+    // the recipient appears twice (parties + "session health"): both resolved
+    expect(content).not.toContain('"scout"')
+    expect(content).not.toContain('"marveen"')
+  })
 })
 
 // Card f1ea52c0 / Boss 2026-06-22: alert noise. Only a permanent 'dropped'

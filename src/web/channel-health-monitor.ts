@@ -1,7 +1,7 @@
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import { createAgentMessage } from '../db.js'
-import { listAgentNames, agentDir } from './agent-config.js'
+import { listAgentNames, agentDir, readAgentDisplayName } from './agent-config.js'
 import { isAgentRunning, capturePane, isAgentChannelIntentionallyEnabled, agentHasChannel } from './agent-process.js'
 import {
   attemptChannelMcpReconnect,
@@ -89,16 +89,24 @@ function getBackoffMs(attempt: number): number {
   return BACKOFF_BASE_MS * Math.pow(BACKOFF_MULTIPLIER, attempt)
 }
 
+// Pure Boss-facing body for a stuck-busy escalation. Takes the resolved
+// DISPLAY name (card b79a5d3a display-name sweep) so the operator reads
+// "Dampier"/"Grace", not the raw routing id. Exported for unit testing.
+export function stuckBusyAlertContent(displayName: string, consecutiveDeferrals: number): string {
+  return (
+    `⚠️ Csatorna-recovery: a(z) ${displayName} Telegram MCP-pipe-ja ${consecutiveDeferrals} egymas utani cikluson at ` +
+    `(~${consecutiveDeferrals} perc) halott, de a pane vegig busy volt -> az idle-catch nem talalt ablakot a ` +
+    `/mcp-hez, magatol nem gyogyul. Nezd meg a sessiont (input-buffer tiszta-e), es kezi /mcp reconnect kell. ` +
+    `A szerver-oldali POST /api/notify/telegram fallback addig is kezbesit a valaszaihoz.`
+  )
+}
+
 // Operator alert for a stuck-busy agent: routed to the orchestrator (marveen)
 // as an inter-agent message, NOT a direct Boss DM -- marveen decides whether/how
 // to relay (card fa3f5012 slice-2 decision). Best-effort: a DB hiccup must never
 // throw out of the monitor sweep.
 function escalateStuckBusy(agentName: string, consecutiveDeferrals: number): void {
-  const content =
-    `⚠️ Csatorna-recovery: a(z) ${agentName} Telegram MCP-pipe-ja ${consecutiveDeferrals} egymas utani cikluson at ` +
-    `(~${consecutiveDeferrals} perc) halott, de a pane vegig busy volt -> az idle-catch nem talalt ablakot a ` +
-    `/mcp-hez, magatol nem gyogyul. Nezd meg a sessiont (input-buffer tiszta-e), es kezi /mcp reconnect kell. ` +
-    `A szerver-oldali POST /api/notify/telegram fallback addig is kezbesit a valaszaihoz.`
+  const content = stuckBusyAlertContent(readAgentDisplayName(agentName), consecutiveDeferrals)
   try {
     createAgentMessage('channel-health-monitor', MAIN_AGENT_ID, content, false, 'high')
     logger.error(
