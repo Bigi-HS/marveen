@@ -11,7 +11,7 @@ import { atomicWriteFileSync } from '../atomic-write.js'
 import { isValidCronShape } from '../cron.js'
 import { readBody, json, RequestBodyTooLargeError } from '../http-helpers.js'
 import { sanitizeScheduleName, safeScheduleName } from '../sanitize.js'
-import { listAgentNames } from '../agent-config.js'
+import { listAgentNames, readAgentDisplayName } from '../agent-config.js'
 import { readFileOr } from '../agent-config.js'
 import {
   SCHEDULED_TASKS_DIR, MAX_SCHEDULED_TASK_PROMPT_LEN,
@@ -42,7 +42,7 @@ export async function tryHandleSchedules(ctx: RouteContext): Promise<boolean> {
     const agentNames = listAgentNames()
     const agents = [
       { name: MAIN_AGENT_ID, label: BOT_NAME, avatar: '/api/marveen/avatar' },
-      ...agentNames.map(n => ({ name: n, label: n, avatar: `/api/agents/${encodeURIComponent(n)}/avatar` }))
+      ...agentNames.map(n => ({ name: n, label: readAgentDisplayName(n), avatar: `/api/agents/${encodeURIComponent(n)}/avatar` }))
     ]
     json(res, agents)
     return true

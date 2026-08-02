@@ -28,6 +28,9 @@ vi.mock('../web/agent-config.js', () => ({
   listAgentNames: () => ['samu'],
   readAgentChannelProviderSafe: () => ({ provider: 'telegram', misconfigured: false }),
   AGENTS_BASE_DIR: '/tmp/test-claudeclaw/agents',
+  // Boss-facing display resolution (card b79a5d3a). Prefix so a test can prove
+  // the escalation body carries the RESOLVED name, not the raw routing id.
+  readAgentDisplayName: (n: string) => `DISPLAY:${n}`,
 }))
 
 const mockCapturePane = vi.fn<(session: string) => string | null>()
@@ -65,6 +68,7 @@ import {
   startChannelHealthMonitor,
   recoverPipeFromPane,
   decideDeferralEscalation,
+  stuckBusyAlertContent,
 } from '../web/channel-health-monitor.js'
 import type { ProcEnvScan } from '../web/channel-poller-reap.js'
 
@@ -174,6 +178,23 @@ describe('decideDeferralEscalation (stuck-busy operator alert)', () => {
   })
 })
 
+describe('stuckBusyAlertContent (b79a5d3a Boss-facing display name)', () => {
+  it('renders the given display name and the deferral count', () => {
+    const content = stuckBusyAlertContent('Dampier', 5)
+    expect(content).toContain('Dampier')
+    expect(content).toContain('5 egymas utani')
+    expect(content).toContain('/mcp')
+  })
+
+  it('uses the resolved display name verbatim (caller resolves the id)', () => {
+    // The helper is pure -- it never sees the routing id; the caller
+    // (escalateStuckBusy) passes readAgentDisplayName(id).
+    const content = stuckBusyAlertContent('Ördög Ügyvédje', 7)
+    expect(content).toContain('Ördög Ügyvédje')
+    expect(content).not.toContain('devil-advocate')
+  })
+})
+
 describe('recoverPipeFromPane: stuck-busy deferral wiring', () => {
   beforeEach(() => vi.clearAllMocks())
 
@@ -194,7 +215,8 @@ describe('recoverPipeFromPane: stuck-busy deferral wiring', () => {
     expect(from).toBe('channel-health-monitor')
     expect(to).toBe('marveen') // operator channel, not a direct Boss DM
     expect(priority).toBe('high')
-    expect(String(content)).toContain(agent)
+    // Boss-facing body carries the RESOLVED display name, not the raw id (b79a5d3a).
+    expect(String(content)).toContain(`DISPLAY:${agent}`)
   })
 
   it('does not escalate while the pane keeps deferring below threshold', () => {

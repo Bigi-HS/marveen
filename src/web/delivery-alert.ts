@@ -49,17 +49,26 @@ export function alertInBand(phase: AbandonmentPhase, fromAgent: string): boolean
  * delivered (the d3339db9 pain was that the drop was invisible). Only the
  * 'dropped' phase is alerted in-band (see alertInBand), so this no longer
  * branches on phase.
+ *
+ * Boss-facing party names go through `resolveName` (card b79a5d3a display-name
+ * sweep): the router injects readAgentDisplayName so the operator reads "NoA"
+ * / "Dr. Stone", not the raw routing ids. Kept pure -- the resolver is
+ * injected and defaults to identity, so this stays unit-testable without
+ * agent-config.
  */
 export function abandonAlertContent(
   msg: { id: number; from_agent: string; to_agent: string },
   ageMs: number,
+  resolveName: (id: string) => string = (id) => id,
 ): string {
   const mins = Math.round(ageMs / 60000)
+  const from = resolveName(msg.from_agent)
+  const to = resolveName(msg.to_agent)
   return (
-    `DELIVERY DROPPED: inter-agent message #${msg.id} from "${msg.from_agent}" ` +
-    `to "${msg.to_agent}" was abandoned after ${mins} min (target session never ` +
+    `DELIVERY DROPPED: inter-agent message #${msg.id} from "${from}" ` +
+    `to "${to}" was abandoned after ${mins} min (target session never ` +
     `became ready for a prompt). The message was NOT delivered. Check ` +
-    `"${msg.to_agent}"'s session health and re-send if it still matters.`
+    `"${to}"'s session health and re-send if it still matters.`
   )
 }
 
