@@ -600,6 +600,26 @@ ensure_n8n() {
   log "n8n: launched (tmux $N8N_SESSION -> n8n start, 127.0.0.1:$N8N_PORT)"
 }
 
+# n8n ghost-trigger monitor (card a9e4e35e, fleet-supervisor §6.9).
+# Detects active=0 workflows that fired trigger-mode execs since boot (ghost state).
+# Throttled: runs Python detector at most every 30 min via STATE_DIR timestamp.
+# Only runs when n8n is alive and n8n.enabled gate is set.
+check_n8n_ghosts() {
+  [ -f "$STORE/n8n.enabled" ] || return 0
+  n8n_alive || return 0
+  local flush_script="$INSTALL_DIR/scripts/n8n-ghost-flush.py"
+  [ -f "$flush_script" ] || return 0
+  local state_file="$STATE_DIR/n8n-ghost-check.ts"
+  if [ -f "$state_file" ]; then
+    local last_run age
+    last_run=$(cat "$state_file" 2>/dev/null || echo 0)
+    age=$(( $(date +%s) - last_run ))
+    [ "$age" -lt 1800 ] && return 0   # throttle: 30 min
+  fi
+  date +%s > "$state_file"
+  python3 "$flush_script" >> "$STORE/n8n-ghost-flush.log" 2>&1 || true
+}
+
 # n8n -> WSL2 dashboard bridge (card e4d64187). Windows-side n8n cannot reach
 # 127.0.0.1:3420 (WSL2 loopback, PR#325 boot-hardening). Forwarder binds 0.0.0.0:3422
 # inside WSL2. Pure Python3 stdlib, no socat needed. URL written to store/n8n-kanban-url.txt.
@@ -1047,6 +1067,8 @@ tick() {
   ensure_hot_cache_refresh
   # 16) N8N INSTANCE (Tier 1 token-offload -- gated by store/n8n.enabled, card 36a4bd06)
   ensure_n8n
+  # 16b) N8N GHOST MONITOR (auto-flush active=0 ghost triggers -- card a9e4e35e)
+  check_n8n_ghosts
   # 17) N8N KANBAN BRIDGE (Windows-side n8n -> WSL2 dashboard API forwarder -- card e4d64187)
   ensure_n8n_kanban_bridge
 }
