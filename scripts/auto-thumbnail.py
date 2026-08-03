@@ -22,6 +22,7 @@ import sys
 import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from os import cpu_count
 
 FFMPEG = "/home/domin/marveen/store/whisper-env/env/bin/ffmpeg"
 
@@ -71,16 +72,18 @@ def process_single(video_path: str, out_path: str, title: str, subtitle: str,
                    seek: str, scan_frames: int) -> tuple[str, bool, str]:
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     if title:
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            raw_path = tmp.name
+        raw_path = None
         try:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                raw_path = tmp.name
             if not extract_frame(video_path, raw_path, seek or None, scan_frames):
                 return video_path, False, "ffmpeg failed"
             if not add_text_overlay(raw_path, out_path, title, subtitle or None):
                 os.rename(raw_path, out_path)
+                raw_path = None
                 return video_path, True, f"{out_path} (no overlay, ImageMagick failed)"
         finally:
-            if os.path.exists(raw_path):
+            if raw_path and os.path.exists(raw_path):
                 os.unlink(raw_path)
     else:
         if not extract_frame(video_path, out_path, seek or None, scan_frames):
@@ -114,7 +117,11 @@ def run_batch(batch_dir: str, out_dir: str, title_from_filename: bool,
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(process_single, *t): t[0] for t in tasks}
         for fut in as_completed(futures):
-            vp, ok, msg = fut.result()
+            try:
+                vp, ok, msg = fut.result()
+            except Exception as exc:
+                vp = futures[fut]
+                ok, msg = False, str(exc)
             name = os.path.basename(vp)
             if ok:
                 ok_count += 1
@@ -133,8 +140,8 @@ def main() -> int:
     ap.add_argument("--out", default="", help="Output JPEG path (single mode)")
     ap.add_argument("--batch-dir", default="", help="Directory of videos to process (batch mode)")
     ap.add_argument("--out-dir", default="", help="Output directory for batch (default: batch-dir)")
-    ap.add_argument("--workers", type=int, default=4,
-                    help="Parallel workers for batch mode (default: 4)")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="Parallel workers for batch mode (default: cpu_count//2, min 1)")
     ap.add_argument("--title-from-filename", action="store_true",
                     help="Batch: derive title text overlay from video filename")
     ap.add_argument("--title", default="", help="Title text overlay (optional)")
@@ -149,8 +156,9 @@ def main() -> int:
             print(f"[auto-thumbnail] batch-dir not found: {args.batch_dir}", file=sys.stderr)
             return 1
         out_dir = args.out_dir or args.batch_dir
+        workers = args.workers if args.workers > 0 else max(1, (cpu_count() or 4) // 2)
         return run_batch(args.batch_dir, out_dir, args.title_from_filename,
-                         args.workers, args.seek, args.scan_frames, args.subtitle)
+                         workers, args.seek, args.scan_frames, args.subtitle)
 
     if not args.video or not args.out:
         print("[auto-thumbnail] Either --batch-dir or both --video and --out are required",
