@@ -224,10 +224,7 @@ if [ -d "$SEED_SKILLS_DIR" ]; then
       continue
     fi
     mkdir -p "$target"
-    for f in "$skill_dir"*; do
-      [ -f "$f" ] || continue
-      cp "$f" "$target/$(basename "$f")"
-    done
+    cp -r "$skill_dir/." "$target/"
     SEED_NEW=$((SEED_NEW + 1))
   done
   if [ "$SEED_NEW" -gt 0 ] || [ "$SEED_SKIP" -gt 0 ]; then
