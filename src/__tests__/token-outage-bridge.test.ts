@@ -105,12 +105,41 @@ describe('runCycle transitions', () => {
   })
 
   it('STAY limited: does not re-ack or re-capture on the next cycle', async () => {
-    const deps = makeDeps({ limited: true })
+    // Non-empty queue so the enter-edge creates exactly one card; the point of
+    // this test is that a subsequent still-limited cycle does NOT create another.
+    const deps = makeDeps({ limited: true, getQueue: () => [msg('pending work')] })
     await runCycle(NOW, deps)
     const r2 = await runCycle(NOW + 30_000, deps)
     expect(r2.transition).toBe('none')
     expect(deps.sendTelegram).toHaveBeenCalledTimes(1)
     expect(deps.createCard).toHaveBeenCalledTimes(1)
+  })
+
+  it('ENTER with an empty queue: acks the operator but skips the noise card (9c067880)', async () => {
+    // Boss TG4726 / card 9c067880: a usage-limit window with 0 queued inbound is
+    // benign -- it must NOT spawn a [Token-outage] card (that was the recurring
+    // board noise, 5 such cards in 24h on 07-26). The operator is still ACKed.
+    const deps = makeDeps({ limited: true }) // default getQueue -> []
+    const r = await runCycle(NOW, deps)
+    expect(r.transition).toBe('entered')
+    expect(deps.sendTelegram).toHaveBeenCalledTimes(1) // operator still notified
+    expect(deps.createCard).not.toHaveBeenCalled() // no benign 0-queued card
+    expect(r.captured).toBe(false)
+    expect(deps._state().limited).toBe(true) // window is still tracked
+    expect(deps._state().capturedCardId).toBeNull()
+  })
+
+  it('ENTER then EXIT with an empty queue: still re-dispatches on reset (no card, no loss)', async () => {
+    // Skipping the card must not skip the reset re-dispatch -- an empty-queue
+    // window still respawns the main session so it resumes cleanly.
+    let limited = true
+    const deps = makeDeps({ detectLimit: () => ({ limited, resetAtText: null }) })
+    await runCycle(NOW, deps) // enter (empty queue -> no card)
+    expect(deps.createCard).not.toHaveBeenCalled()
+    limited = false
+    const r = await runCycle(NOW + 30_000, deps) // exit
+    expect(r.transition).toBe('exited')
+    expect(deps.redispatch).toHaveBeenCalledTimes(1)
   })
 
   it('EXIT: sends back-online + re-dispatches the queue on reset', async () => {
@@ -164,7 +193,9 @@ describe('runCycle transitions', () => {
 describe('W4: token-outage-bridge createCard routed through noa-kanban interface', () => {
   it('runCycle creates a card via the injected createCard dep on first limit detection', async () => {
     const createCard = vi.fn(() => 'card-xyz')
-    const deps = makeDeps({ limited: true, createCard })
+    // Non-empty queue: card creation is now guarded on queued>0 (card 9c067880),
+    // so a window with something to preserve is what exercises the wiring.
+    const deps = makeDeps({ limited: true, createCard, getQueue: () => [msg('queued work')] })
     const r = await runCycle(NOW, deps)
     expect(createCard).toHaveBeenCalledTimes(1)
     expect(r.state.capturedCardId).toBe('card-xyz')
