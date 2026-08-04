@@ -1544,22 +1544,15 @@ export interface GuardEventSummary {
   count: number
 }
 
-export interface GuardEventPeerSummary {
+export interface GuardEventSenderSummary {
   from_agent: string | null
-  to_agent: string | null
-  count: number
-}
-
-export interface GuardEventHashSummary {
-  content_hash: string
   count: number
 }
 
 export function getGuardEventSummary(days = 14): {
   byMechanismVerdict: GuardEventSummary[]
   byPattern: GuardEventSummary[]
-  byPeer: GuardEventPeerSummary[]
-  retryPressure: GuardEventHashSummary[]
+  bySender: GuardEventSenderSummary[]
 } {
   const since = Math.floor(Date.now() / 1000) - days * 86400
   const byMechanismVerdict = db.prepare(
@@ -1572,16 +1565,13 @@ export function getGuardEventSummary(days = 14): {
        WHERE verdict <> 'PASS' AND pattern_ids IS NOT NULL AND created_at >= ?
        GROUP BY mechanism, pattern_ids ORDER BY count DESC`
   ).all(since) as GuardEventSummary[]
-  const byPeer = db.prepare(
-    `SELECT from_agent, to_agent, COUNT(*) as count
+  // Spec section 8: per-sender block counts. from_agent only -- no to_agent pair
+  // (peer pairs are a fingerprintable side channel, per DA-30).
+  const bySender = db.prepare(
+    `SELECT from_agent, COUNT(*) as count
        FROM guard_events WHERE verdict = 'BLOCK' AND created_at >= ?
-       GROUP BY from_agent, to_agent ORDER BY count DESC`
-  ).all(since) as GuardEventPeerSummary[]
-  const retryPressure = db.prepare(
-    `SELECT content_hash, COUNT(*) as count FROM guard_events
-       WHERE verdict = 'BLOCK' AND created_at >= ?
-       GROUP BY content_hash HAVING count > 1 ORDER BY count DESC`
-  ).all(since) as GuardEventHashSummary[]
-  return { byMechanismVerdict, byPattern, byPeer, retryPressure }
+       GROUP BY from_agent ORDER BY count DESC`
+  ).all(since) as GuardEventSenderSummary[]
+  return { byMechanismVerdict, byPattern, bySender }
 }
 

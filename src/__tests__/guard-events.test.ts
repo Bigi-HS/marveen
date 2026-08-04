@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { Readable } from 'node:stream'
 import { rmSync } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { createHmac, randomBytes } from 'node:crypto'
 import {
   initDatabase,
   insertGuardEvent,
@@ -20,7 +20,7 @@ import { _setGuardKeyForTest, recordGuardEvent } from '../web/guard-event-record
 
 const TEST_DB = '/tmp/test-guard-events.db'
 
-function fakeRouteCtx(method: string, fullPath: string, scopes?: string[]) {
+function fakeRouteCtx(method: string, fullPath: string, scopes?: string[] | null) {
   const url = new URL('http://x' + fullPath)
   const captured: { status: number; body: any } = { status: 200, body: undefined }
   const res = {
@@ -28,7 +28,7 @@ function fakeRouteCtx(method: string, fullPath: string, scopes?: string[]) {
     end(b?: string) { captured.body = b ? JSON.parse(b) : undefined },
   } as any
   const req = Readable.from([]) as any
-  const identity = { agentId: 'marveen', scopes: scopes ?? ['admin:*'] }
+  const identity = scopes === null ? undefined : { agentId: 'marveen', scopes: scopes ?? ['admin:*'] }
   const ctx = { req, res, method, path: url.pathname, url, identity } as any
   return { ctx, captured }
 }
@@ -231,5 +231,54 @@ describe('GET /api/guard-events -- access control', () => {
     const handled = await tryHandleGuardEvents(ctx)
     expect(handled).toBe(true)
     expect(captured.status).toBe(200)
+  })
+
+  // DA-32: identity=undefined (no auth header) must be denied, not passed through
+  it('403 when identity is absent (unauthenticated request)', async () => {
+    const { ctx, captured } = fakeRouteCtx('GET', '/api/guard-events', null)
+    const handled = await tryHandleGuardEvents(ctx)
+    expect(handled).toBe(true)
+    expect(captured.status).toBe(403)
+  })
+})
+
+// ── DA-30/DA-36: summary shape -- no peer pairs or hashes, but bySender present ─
+
+describe('GET /api/guard-events/summary -- shape (DA-30, DA-36)', () => {
+  it('summary does not expose byPeer or retryPressure', async () => {
+    const { ctx, captured } = fakeRouteCtx('GET', '/api/guard-events/summary')
+    await tryHandleGuardEvents(ctx)
+    expect(captured.body).not.toHaveProperty('byPeer')
+    expect(captured.body).not.toHaveProperty('retryPressure')
+  })
+
+  it('summary includes bySender (spec section 8)', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    insertGuardEvent({ created_at: now, mechanism: 'messages-guard', route: '/api/messages', verdict: 'BLOCK', from_agent: 'chad', to_agent: 'marveen', pattern_ids: 'email', max_severity: 'medium', finding_count: 1, content_hash: 'h3', content_len: 5 })
+    const { ctx, captured } = fakeRouteCtx('GET', '/api/guard-events/summary')
+    await tryHandleGuardEvents(ctx)
+    expect(captured.body).toHaveProperty('bySender')
+    expect(Array.isArray(captured.body.bySender)).toBe(true)
+  })
+})
+
+// ── DA-35: non-hex char in key file must not silently produce a zero-length key ─
+// Buffer.from(badHex, 'hex') silently emits a zero-length Buffer for non-hex input.
+// A zero-length HMAC key is a publicly-known constant for any content string.
+// The fix: /^[0-9a-fA-F]{64}$/ + buf.length === 32 guard before accepting the key.
+
+describe('DA-35 -- hex key validation', () => {
+  it('Buffer.from non-hex silently gives zero-length key -- documents the bug', () => {
+    const badHex = 'z'.repeat(64) // 64 chars, all non-hex
+    expect(Buffer.from(badHex, 'hex').length).toBe(0) // the silent failure
+    expect(/^[0-9a-fA-F]{64}$/.test(badHex)).toBe(false) // the guard catches it
+  })
+
+  it('valid HMAC key produces a hash distinct from zero-key HMAC', () => {
+    const zeroKeyHmac = createHmac('sha256', Buffer.alloc(0)).update('test').digest('hex')
+    _setGuardKeyForTest(randomBytes(32))
+    recordGuardEvent({ mechanism: 'messages-guard', route: '/api/messages', verdict: 'PASS', fromAgent: null, toAgent: null, patternIds: null, maxSeverity: null, findingCount: 0, content: 'test' })
+    const [row] = getGuardEvents(1)
+    expect(row.content_hash).not.toBe(zeroKeyHmac)
   })
 })

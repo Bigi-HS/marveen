@@ -25,7 +25,9 @@ export async function tryHandleGuardEvents(ctx: RouteContext): Promise<boolean> 
   // GET /api/guard-events -- raw rows; admin-scoped (operator token only).
   // Returns peer pairs and content hashes -- fingerprintable side channel, hence restricted.
   if (path === '/api/guard-events') {
-    if (identity && !hasScope(identity.scopes, ADMIN_SCOPE)) {
+    // identity && !hasScope would pass unauthenticated requests (identity=undefined);
+    // hasScope(identity?.scopes, ...) is false for undefined -- correct fail-closed.
+    if (!hasScope(identity?.scopes, ADMIN_SCOPE)) {
       json(res, { error: 'Forbidden: admin scope required' }, 403)
       return true
     }

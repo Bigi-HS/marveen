@@ -21,9 +21,15 @@ function loadOrCreateGuardKey(): Buffer {
   try {
     if (existsSync(GUARD_KEY_PATH)) {
       const hex = readFileSync(GUARD_KEY_PATH, 'utf-8').trim()
-      if (hex.length === 64) {
-        guardKey = Buffer.from(hex, 'hex')
-        return guardKey
+      // Buffer.from(hex, 'hex') silently produces a zero-length Buffer for
+      // non-hex characters, turning the key into a public constant.
+      // Validate the hex string and the resulting key length explicitly.
+      if (/^[0-9a-fA-F]{64}$/.test(hex)) {
+        const buf = Buffer.from(hex, 'hex')
+        if (buf.length === 32) {
+          guardKey = buf
+          return guardKey
+        }
       }
     }
   } catch { /* fall through and regenerate */ }
