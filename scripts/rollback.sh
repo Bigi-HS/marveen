@@ -27,12 +27,22 @@
 #                  dist/ and dashboard-new-dist/, and -- worst -- one that is
 #                  EMPTY (20260611-102113)
 #
-# The empty one matters most and was not in the original report: it is a plain
-# timestamped directory, so the auto-pick glob is willing to choose it, and
-# restoring from it deletes every file in dist/ and puts nothing back. It fails
-# in complete silence. A break-glass tool that can destroy the running build at
-# the exact moment it is reached for is worse than no tool, because it is reached
-# for under pressure and trusted by default.
+# The empty one was not in the original report and is the sharpest of them:
+# restoring from it deletes every file in dist/, puts nothing back, and fails in
+# complete silence.
+#
+# Precisely on its reachability, because the first write-up of this overstated it:
+# auto-pick takes the NEWEST canonical dir, and 20260611-102113 is 8th of 45, so a
+# no-argument rollback does NOT select it today. It is reachable two ways -- by
+# hand (`rollback.sh <dir>`, which is what gets typed when rolling back more than
+# one deploy), and by auto-pick if it ever becomes the newest, which is exactly
+# what a prune of the newer nested dirs would arrange. Item 3 on card OPS-098 is
+# such a prune, so the two interact: cleaning up without this gate in place arms
+# the empty dir instead of defusing it.
+#
+# A break-glass tool that can destroy the running build at the moment it is
+# reached for is worse than no tool, because it is reached for under pressure and
+# trusted by default.
 #
 # So: classify BEFORE anything touches dist, refuse anything that is not flat,
 # and name the exact command that would work instead. Nested dirs are neither
@@ -110,6 +120,18 @@ if [[ "$AUDIT" -eq 1 ]]; then
       *)      n_bad=$((n_bad + 1)); printf '  NOT USABLE %s  unrecognised layout: %s\n' "$(basename "$d")" "$detail" ;;
     esac
   done <<< "$(all_backups)"
+  # An audit that reports "0 usable, 0 not usable" over a missing or empty root
+  # reads like a clean bill of health for a directory that has no rollback point
+  # at all. Same failure as the silent auto-pick death below, one register quieter.
+  if [[ $((n_ok + n_bad)) -eq 0 ]]; then
+    if [[ ! -d "$BACKUP_ROOT" ]]; then
+      echo "  -- no backup root: $BACKUP_ROOT does not exist. There is NO rollback point."
+    else
+      echo "  -- no backups found in $BACKUP_ROOT. There is NO rollback point."
+    fi
+    echo "     Create one with: bash scripts/deploy-backup.sh"
+    exit 0
+  fi
   echo "  -- $n_ok usable, $n_bad not usable as-is"
   # Inventory completeness: all_backups only walks the canonical YYYYMMDD-HHMMSS
   # glob, which is the right denominator for auto-pick but not for "what is on

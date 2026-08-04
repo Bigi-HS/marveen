@@ -192,6 +192,22 @@ else
   fail "--audit should parse in any flag position (rc=$rc): $out"
 fi
 
+# --- 13. the audit must not be quieter than the gate. "0 usable, 0 not usable"
+#         over a root with nothing in it reads as a clean bill of health for a
+#         host that has no rollback point at all. (Thor, PR#464 review item 3.)
+out=$(ROLLBACK_REPO="$REPO" ROLLBACK_BACKUP_ROOT="$EMPTY_ROOT" bash "$RB" --audit 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && echo "$out" | grep -q "NO rollback point"; then
+  pass "--audit on an empty root says there is no rollback point"
+else
+  fail "--audit must not report an empty root as a clean result (rc=$rc): $out"
+fi
+out=$(ROLLBACK_REPO="$REPO" ROLLBACK_BACKUP_ROOT="$WORK/does-not-exist" bash "$RB" --audit 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && echo "$out" | grep -q "does not exist"; then
+  pass "--audit on a missing root names the missing directory"
+else
+  fail "--audit on a missing root must say so (rc=$rc): $out"
+fi
+
 echo
 if [[ "$FAIL" -gt 0 ]]; then echo "FAILED ($FAIL)"; exit 1; fi
 echo "OK"
