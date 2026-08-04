@@ -16,20 +16,23 @@ export async function tryHandleGuardEvents(ctx: RouteContext): Promise<boolean> 
 
   // GET /api/guard-events/summary -- aggregate counts, no raw content, open to any authed token
   if (path === '/api/guard-events/summary') {
-    const days = Math.min(Math.max(1, parseInt(url.searchParams.get('days') ?? '14')), 90)
+    const daysRaw = parseInt(url.searchParams.get('days') ?? '14')
+    const days = Math.min(Math.max(1, isNaN(daysRaw) ? 14 : daysRaw), 90)
     json(res, getGuardEventSummary(days))
     return true
   }
 
-  // GET /api/guard-events -- raw rows; admin-scoped (operator token only)
+  // GET /api/guard-events -- raw rows; admin-scoped (operator token only).
+  // Returns peer pairs and content hashes -- fingerprintable side channel, hence restricted.
   if (path === '/api/guard-events') {
     if (identity && !hasScope(identity.scopes, ADMIN_SCOPE)) {
       json(res, { error: 'Forbidden: admin scope required' }, 403)
       return true
     }
-    const limit = Math.min(Math.max(1, parseInt(url.searchParams.get('limit') ?? '100')), 1000)
-    const sinceParam = url.searchParams.get('since')
-    const since = sinceParam ? parseInt(sinceParam) : undefined
+    const limitRaw = parseInt(url.searchParams.get('limit') ?? '100')
+    const limit = Math.min(Math.max(1, isNaN(limitRaw) ? 100 : limitRaw), 1000)
+    const sinceRaw = url.searchParams.get('since')
+    const since = sinceRaw ? (isNaN(parseInt(sinceRaw)) ? undefined : parseInt(sinceRaw)) : undefined
     json(res, getGuardEvents(limit, since))
     return true
   }
