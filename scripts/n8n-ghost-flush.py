@@ -32,6 +32,7 @@ STATE_FILE = STORE / ".n8n-ghost-flush.state"
 DASHBOARD_TOKEN_FILE = STORE / ".dashboard-token"
 MESSAGES_URL = "http://localhost:3420/api/messages"
 N8N_BASE = "http://127.0.0.1:5678/api/v1"
+LOG_MAX_LINES = 500
 
 
 def _n8n_boot_epoch() -> float | None:
@@ -171,6 +172,18 @@ def _save_state(state: dict) -> None:
         print(f"[ghost-flush] state write failed: {e}", file=sys.stderr)
 
 
+def _rotate_log(log_path: Path, max_lines: int = LOG_MAX_LINES) -> None:
+    """Trim log to last max_lines lines to prevent unbounded growth (OPS-092)."""
+    try:
+        if not log_path.exists():
+            return
+        lines = log_path.read_text(errors="replace").splitlines(keepends=True)
+        if len(lines) > max_lines:
+            log_path.write_text("".join(lines[-max_lines:]))
+    except OSError:
+        pass
+
+
 def main() -> int:
     now = time.time()
     boot = _n8n_boot_epoch()
@@ -225,6 +238,7 @@ def main() -> int:
         state["last_flush_epoch"] = now
         _save_state(state)
 
+    _rotate_log(STORE / "n8n-ghost-flush.log")
     return 0
 
 
