@@ -8,9 +8,9 @@
 # passing while the ground moved underneath it.
 #
 # What happened: `marveen` is a prefix of `marveen-channels`. When `marveen` went
-# away, `has-session -t marveen` answered 0 about the ORCHESTRATOR's session, so
-# fleet-supervisor logged "session up but :3420 not responding"; then
-# `kill-session -t marveen` killed `marveen-channels`, rc=0, no message. Because
+# away, the unanchored liveness check answered 0 about the ORCHESTRATOR session,
+# so fleet-supervisor logged "session up but :3420 not responding"; then the
+# unanchored kill took `marveen-channels`, rc=0 and no message. Because
 # channels.sh starts without --continue, each of those 47 events dropped
 # Genesis's entire conversation. It was never just downtime.
 #
@@ -72,7 +72,7 @@ if ! mk "${BASE}-channels"; then
   fail "could not create fixture session ${BASE}-channels -- the cases below would be vacuous"
 else
   before=$(stamp "${BASE}-channels")
-  env -u TMUX "$TMUX_BIN" kill-session -t "$BASE" 2>/dev/null; rc=$?
+  env -u TMUX "$TMUX_BIN" kill-session -t "$BASE" 2>/dev/null; rc=$?  # tmux-anchor-lint: ignore
   after=$(stamp "${BASE}-channels")
   if [[ "$before" != "absent" && "$after" == "absent" ]]; then
     pass "unanchored kill of an absent '<name>' destroys '<name>-channels' (rc=$rc, silently)"
@@ -102,7 +102,7 @@ fi
 if ! mk "${BASE}3-channels"; then
   fail "could not create fixture session ${BASE}3-channels"
 else
-  env -u TMUX "$TMUX_BIN" has-session -t "${BASE}3" 2>/dev/null; unanchored=$?
+  env -u TMUX "$TMUX_BIN" has-session -t "${BASE}3" 2>/dev/null; unanchored=$?  # tmux-anchor-lint: ignore
   env -u TMUX "$TMUX_BIN" has-session -t "=${BASE}3" 2>/dev/null; anchored=$?
   if [[ "$unanchored" -eq 0 && "$anchored" -ne 0 ]]; then
     pass "unanchored has-session reports a MISSING session as alive (rc=0); anchored does not (rc=$anchored)"
@@ -121,7 +121,7 @@ if ! mk "${BASE}4"; then
   fail "could not create fixture session ${BASE}4"
 else
   plain=$(env -u TMUX "$TMUX_BIN" display-message -t "${BASE}4" -p '#{session_created}' 2>/dev/null)
-  anchored_out=$(env -u TMUX "$TMUX_BIN" display-message -t "=${BASE}4" -p '#{session_created}' 2>/dev/null); arc=$?
+  anchored_out=$(env -u TMUX "$TMUX_BIN" display-message -t "=${BASE}4" -p '#{session_created}' 2>/dev/null); arc=$?  # tmux-anchor-lint: ignore
   listed=$(stamp "${BASE}4")
   if [[ -n "$plain" && -z "$anchored_out" && "$arc" -eq 0 && "$listed" == "$plain" ]]; then
     pass "display-message with '=' yields EMPTY at rc=0 on a live session; list-sessions -F is the correct probe"
@@ -130,24 +130,51 @@ else
   fi
 fi
 
-# --- 5. THE SHIPPED PREDICATE, not a copy of it. session_alive() is lifted
-#        verbatim out of fleet-supervisor.sh and exercised here, so the test
-#        fails if someone edits that line back. Testing a re-typed equivalent
-#        would prove only that the test agrees with itself.
+# --- 5. THE SHIPPED PREDICATE, not a copy of it. session_alive() is lifted out of
+#        fleet-supervisor.sh and exercised here, so the test fails if someone
+#        edits that line back. Testing a re-typed equivalent would prove only
+#        that the test agrees with itself.
+#
+#        THE POSITIVE CONTROL IS NOT OPTIONAL, and Thor is the reason it is here.
+#        The first version asserted only the NEGATIVE ("must not say alive") and
+#        extracted a single line with grep. So every way of NOT RUNNING collapsed
+#        into a pass: reformat the function across several lines with the anchor
+#        REMOVED -- the real regression -- and the extraction produces a syntax
+#        error, the function stays undefined, the call exits 127, and 127 reads as
+#        "not alive". Measured: that mutation passed. My own mutation check missed
+#        it because I tried ONE mutation and happened to pick the only shape that
+#        keeps the extraction valid.
+#
+#        So: prove the function EXISTS, prove it says ALIVE for a session that is
+#        really there, and only then that it says NOT ALIVE for the missing one.
 if [[ ! -r "$SUPERVISOR" ]]; then
   fail "cannot read $SUPERVISOR to extract session_alive()"
 else
-  fn=$(grep -m1 '^session_alive()' "$SUPERVISOR")
+  # Whole block, not one line: from the definition to the first line that is just
+  # a closing brace, so a multi-line reformat is still extracted.
+  fn=$(awk '/^session_alive\(\)/ {f=1} f {print} f && /^}/ {exit} f && /;[[:space:]]*}[[:space:]]*$/ {exit}' "$SUPERVISOR")
   if [[ -z "$fn" ]]; then
     fail "session_alive() not found in fleet-supervisor.sh -- update this test to match"
   else
-    eval "$fn"
-    if ! mk "${BASE}5-channels"; then
+    eval "$fn" 2>/dev/null
+    if ! declare -F session_alive >/dev/null; then
+      fail "could not define session_alive() from the source -- the extraction is broken, so the assertions below would measure nothing: $fn"
+    elif ! mk "${BASE}5"; then
+      fail "could not create fixture session ${BASE}5"
+    elif ! mk "${BASE}5-channels"; then
       fail "could not create fixture session ${BASE}5-channels"
-    elif session_alive "${BASE}5"; then
-      fail "the shipped session_alive() reports a MISSING session as alive: $fn"
     else
-      pass "the shipped session_alive() does not mistake '<name>-channels' for '<name>'"
+      TMUX_BIN="$TMUX_BIN"
+      if ! session_alive "${BASE}5"; then
+        fail "POSITIVE CONTROL: the shipped session_alive() says a session that EXISTS is not alive -- it is not running at all: $fn"
+      else
+        env -u TMUX "$TMUX_BIN" kill-session -t "=${BASE}5" 2>/dev/null || true
+        if session_alive "${BASE}5"; then
+          fail "the shipped session_alive() reports a MISSING session as alive: $fn"
+        else
+          pass "the shipped session_alive() answers alive for a real session and NOT alive once it is gone (sibling present throughout)"
+        fi
+      fi
     fi
   fi
 fi
