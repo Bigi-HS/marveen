@@ -43,8 +43,12 @@ set -uo pipefail
 # Before the cd: a relative $0 stops resolving once the working directory moves.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-REPO="/home/domin/marveen"
-BACKUP_ROOT="/tmp/marveen-deploy-backups"
+# Overridable only so the regression test can point the script at a fixture tree;
+# both default to the live paths and nothing in the deploy procedure sets them.
+# Every run prints the destination it actually used, so a misdirected run is
+# visible in its own output rather than silent.
+REPO="${DEPLOY_BACKUP_REPO:-/home/domin/marveen}"
+BACKUP_ROOT="${DEPLOY_BACKUP_ROOT:-/tmp/marveen-deploy-backups}"
 RUN_GATE=1
 GATE_ARGS=()
 
@@ -78,15 +82,43 @@ git cat-file -e "${TIP}^{commit}" 2>/dev/null || {
 # reassuring message (devil-advocate DA-23). The author made exactly that
 # ordering mistake earlier on 2026-08-04.
 #
-# HEAD == deployed tip is the cheap proxy: at a genuine pre-GO the live tree is
-# still on the deployed code. It does NOT cover an isolated-worktree build, where
-# the main tree never moves -- only a build stamp closes that, tracked separately.
-HEAD_SHA=$(git rev-parse HEAD 2>/dev/null)
-if [ "$HEAD_SHA" != "$TIP" ]; then
-  echo "BACKUP ERROR: working tree is at ${HEAD_SHA:0:8} but store/.deployed-tip says ${TIP:0:8}." >&2
-  echo "  The tree has moved past the deployed build, so dist/ may already be the NEW build and" >&2
-  echo "  labelling it ${TIP:0:8} would create a rollback point to the build you are replacing." >&2
-  echo "  Take the backup BEFORE checking out and building (skill step 0, then step 1)." >&2
+# Measured on dist/ itself, not on HEAD. The first version compared HEAD to the
+# deployed tip, which is a correlate rather than the object: the documented build
+# path is an ISOLATED WORKTREE precisely so the main tree's HEAD does NOT move
+# (fleet-deploy-verify SKILL.md, "do NOT checkout develop / reset --hard in the
+# main tree"). Under that procedure HEAD says nothing about dist/, and a main tree
+# legitimately parked on another agent's feature branch would have deadlocked this
+# script -- the same unsatisfiable-condition shape this change set exists to
+# remove (thor N11).
+#
+# The ordering invariant that does hold: update-deployed-tip.sh runs at the END of
+# a deploy (skill step 6b), after dist/ is in place, so on a settled system the
+# marker is newer than every file in dist/. A build -- in the main tree or rsynced
+# in from a worktree, which preserves the build's mtimes -- makes dist/ newer than
+# the marker. That is exactly the "you already built" state this must refuse.
+#
+# Residual, stated rather than papered over: copying in a build whose files are
+# OLDER than the marker would still pass. A build stamp inside dist/ is the only
+# thing that closes it for real (card 90406db5).
+TIP_MTIME=$(stat -c %Y "$TIP_FILE" 2>/dev/null || echo "")
+DIST_NEWEST=$(find dist -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)
+if [ -z "$TIP_MTIME" ] || [ -z "$DIST_NEWEST" ]; then
+  echo "BACKUP ERROR: cannot read the mtime of $TIP_FILE or of dist/ -- cannot establish that" >&2
+  echo "  dist/ is still the ${TIP:0:8} build, and an unverified label is worse than none." >&2
+  exit 2
+fi
+if [ "$DIST_NEWEST" -gt "$TIP_MTIME" ]; then
+  echo "BACKUP ERROR: dist/ was written $(( (DIST_NEWEST - TIP_MTIME) / 60 )) minute(s) AFTER store/.deployed-tip was last updated." >&2
+  echo "  dist/ is therefore not provably the ${TIP:0:8} build any more, and labelling it ${TIP:0:8}" >&2
+  echo "  would create a rollback point to the build you are replacing." >&2
+  echo "  Take the backup BEFORE building (skill step 0, then step 1)." >&2
+  # If the previous deploy left a labelled rollback point, the bytes are not lost
+  # -- say so, because "you already built" otherwise reads as an unrecoverable dead end.
+  prev=$(ls -1d "$BACKUP_ROOT"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9] 2>/dev/null | tail -1)
+  if [ -n "$prev" ] && [ -r "$prev/deployed-sha.txt" ] \
+     && [ "$(tr -d '[:space:]' < "$prev/deployed-sha.txt")" = "$TIP" ]; then
+    echo "  The previous rollback point $prev already holds ${TIP:0:8} -- verify it and use it." >&2
+  fi
   exit 2
 fi
 

@@ -338,7 +338,7 @@ else
   grace_active=1
   [ "$(date +%Y-%m-%d)" \< "$GRACE_EXPIRES" ] || grace_active=0
 
-  n_new_stale=0; n_old_stale=0; sup_stale=0; sup_suspect=0
+  n_new_stale=0; n_old_stale=0; sup_stale=0; sup_suspect=0; n_other_suspect=0
   suspect_lines=""
   # Tab is an IFS-WHITESPACE character, so `IFS=$'\t' read` collapses runs of
   # tabs and an empty field silently shifts every field after it -- an empty
@@ -352,8 +352,17 @@ else
       # DURING a deploy -- a branch switch rewrites the file while it runs -- so
       # burying it in a bulk count waived the one process the comment above says
       # is never waived (thor N8, devil-advocate DA-21).
-      suspect_lines="${suspect_lines}      - pid $pid $script"$'\n'
-      [ "$script" = "fleet-supervisor.sh" ] && sup_suspect=$((sup_suspect + 1))
+      #
+      # It gets its own named C5c FAIL below and is left out of this list, so a
+      # single finding is reported once. Reporting it twice reads as two
+      # problems, and the operator who fixes "the FAIL" then sees a leftover
+      # WARN naming the same pid.
+      if [ "$script" = "fleet-supervisor.sh" ]; then
+        sup_suspect=$((sup_suspect + 1))
+      else
+        suspect_lines="${suspect_lines}      - pid $pid $script"$'\n'
+        n_other_suspect=$((n_other_suspect + 1))
+      fi
       continue
     fi
     [ "$label" = "STALE" ] || continue
@@ -398,8 +407,8 @@ else
     # running version on information the sweep has just declared unobtainable.
     fail "C5c supervisor: the running fleet-supervisor matches disk NOW, but its script changed after the process started, so the version bash actually parsed cannot be established. Restart it rather than guess -- this is not waived either."
   fi
-  if [ "${n_suspect:-0}" -gt 0 ]; then
-    warn "C5c process-freshness: $n_suspect process(es) match on disk but their file changed after they started -- the parsed version is unverifiable from outside, so restart them if the deploy touched their script:
+  if [ "$n_other_suspect" -gt 0 ]; then
+    warn "C5c process-freshness: $n_other_suspect process(es) match on disk but their file changed after they started -- the parsed version is unverifiable from outside, so restart them if the deploy touched their script:
 ${suspect_lines%$'\n'}"
   fi
   # A supervisor that is not running at all is a worse state than a stale one.
