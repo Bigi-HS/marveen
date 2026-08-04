@@ -53,10 +53,22 @@
 
 set -euo pipefail
 
-# Overridable only so the regression test can point at fixture trees; both
-# default to the live paths and nothing in the deploy procedure sets them.
+# Overridable so the regression test can run fully enclosed. All four default to
+# the live targets and nothing in the deploy procedure sets them.
+#
+# SESSION and DASHBOARD are here because the first version of this only overrode
+# the PATHS, while the restart block still hardcoded `marveen` and
+# http://localhost:3420 -- so a fixture-directed run killed the REAL dashboard.
+# Dave demonstrated exactly that on 2026-08-04 04:56:52 during the PR#464 review.
+# The comment that used to sit here advertised an isolation that did not exist,
+# which is worse than no comment: the suite was safe only because every case
+# happened to exit before the restore, and the header told the next author that
+# the happy path was the uncovered part. It was an invitation to write the test
+# that takes production down.
 REPO="${ROLLBACK_REPO:-/home/domin/marveen}"
 BACKUP_ROOT="${ROLLBACK_BACKUP_ROOT:-/tmp/marveen-deploy-backups}"
+SESSION="${ROLLBACK_SESSION:-marveen}"
+DASHBOARD="${ROLLBACK_DASHBOARD:-http://localhost:3420}"
 
 # classify <dir> -> "<class>\t<detail>"
 #   flat        usable as-is
@@ -242,16 +254,16 @@ PATH_CURATED="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$H
 NODE="$(command -v node)"
 TMUXB="$(command -v tmux)"
 
-env -u TMUX "$TMUXB" kill-session -t marveen 2>/dev/null || true
+env -u TMUX "$TMUXB" kill-session -t "$SESSION" 2>/dev/null || true
 sleep 2
-env -u TMUX "$TMUXB" new-session -d -s marveen -c "$REPO" \
+env -u TMUX "$TMUXB" new-session -d -s "$SESSION" -c "$REPO" \
   "export PATH=\"$PATH_CURATED\" && exec $NODE dist/index.js"
 echo "server session restarted"
 
 # --- wait for server up (up to 40s) ---
 UP=0
 for i in $(seq 1 20); do
-  STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://localhost:3420/api/health 2>/dev/null || echo "000")
+  STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$DASHBOARD/api/health" 2>/dev/null || echo "000")
   if [[ "$STATUS" == "200" || "$STATUS" == "401" ]]; then
     echo "server up (HTTP $STATUS) after ~$((i * 2))s"
     UP=1
@@ -268,7 +280,7 @@ fi
 
 # --- 4-point verify via gate/verify ---
 TOKEN=$(cat "$REPO/store/.dashboard-token")
-VERIFY_JSON=$(curl -s -H "Authorization: Bearer $TOKEN" http://localhost:3420/api/gate/verify 2>/dev/null)
+VERIFY_JSON=$(curl -s -H "Authorization: Bearer $TOKEN" "$DASHBOARD/api/gate/verify" 2>/dev/null)
 PASS=$(echo "$VERIFY_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(str(d.get('pass',False)).lower())" 2>/dev/null || echo "error")
 
 echo ""
