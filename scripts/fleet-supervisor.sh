@@ -265,7 +265,7 @@ dash_alive() {
   code=$("$CURL" -s -m 8 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$DASH_PORT/api/health" 2>/dev/null)
   [ -n "$code" ] && [ "$code" != "000" ]
 }
-session_alive() { [ -n "$TMUX_BIN" ] && "$TMUX_BIN" has-session -t "$1" 2>/dev/null; }
+session_alive() { [ -n "$TMUX_BIN" ] && "$TMUX_BIN" has-session -t "=$1" 2>/dev/null; }
 
 # --- launchers -------------------------------------------------------------
 launch_dashboard() {
@@ -276,7 +276,7 @@ launch_dashboard() {
     log "dashboard: dist/index.js missing -- run 'npm run build' first; skipping launch"
     return 1
   fi
-  "$TMUX_BIN" kill-session -t "$DASH_SESSION" 2>/dev/null || true
+  "$TMUX_BIN" kill-session -t "=$DASH_SESSION" 2>/dev/null || true
   # 9>&- closes the single-instance flock fd so it never leaks into the tmux
   # server (and thus the long-lived node dashboard). Without it, a tmux server
   # first started by this launch inherits fd 9 and every pane keeps the lock
@@ -593,7 +593,7 @@ ensure_n8n() {
   fi
   backoff_blocked n8n || return 0
   if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start n8n session $N8N_SESSION on 127.0.0.1:$N8N_PORT"; return 0; fi
-  "$TMUX_BIN" kill-session -t "$N8N_SESSION" 2>/dev/null || true
+  "$TMUX_BIN" kill-session -t "=$N8N_SESSION" 2>/dev/null || true
   run "$TMUX_BIN" new-session -d -s "$N8N_SESSION" -c "$HOME" \
     "export N8N_HOST=127.0.0.1 N8N_LISTEN_ADDRESS=127.0.0.1 N8N_PORT=$N8N_PORT N8N_USER_FOLDER=$HOME/.n8n N8N_LOG_LEVEL=warn GENERIC_TIMEZONE=Europe/Budapest N8N_LOG_OUTPUT=console,file N8N_BLOCK_ENV_ACCESS_IN_NODE=true N8N_RESTRICT_FILE_ACCESS_TO=$HOME/.n8n && exec n8n start" 9>&-
   backoff_note_launch n8n

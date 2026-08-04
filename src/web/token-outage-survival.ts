@@ -89,7 +89,7 @@ function defaultIsLimited(): boolean {
 }
 
 function checkTmuxSession(name: string): boolean {
-  const r = spawnSync('tmux', ['has-session', '-t', name], {
+  const r = spawnSync('tmux', ['has-session', '-t', `=${name}`], {
     timeout: 3000,
     env: { ...process.env, TMUX: undefined } as NodeJS.ProcessEnv,
   })

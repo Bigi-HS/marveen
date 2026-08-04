@@ -117,7 +117,7 @@ export function isAgentRunning(name: string): boolean {
 // (template-only) cannot be used to gate work on the main agent.
 export function isTmuxSessionAlive(session: string): boolean {
   try {
-    execFileSync(TMUX, ['has-session', '-t', session], { timeout: 3000, stdio: 'ignore' })
+    execFileSync(TMUX, ['has-session', '-t', `=${session}`], { timeout: 3000, stdio: 'ignore' })
     return true
   } catch {
     return false
@@ -232,7 +232,7 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
 
   try {
     try {
-      execSync(`${TMUX} kill-session -t ${session} 2>/dev/null`, { timeout: 3000 })
+      execSync(`${TMUX} kill-session -t "=${session}" 2>/dev/null`, { timeout: 3000 })
       execSync('sleep 3', { timeout: 5000 })
     } catch { /* ok */ }
 
@@ -428,7 +428,7 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
         { name, session, attempt, usedContinue: useContinue, nextIsFreshSession: useContinue },
         'Agent session died within liveness window, retrying launch (fresh session if --continue was used)',
       )
-      try { execSync(`${TMUX} kill-session -t ${session} 2>/dev/null`, { timeout: 3000 }) } catch { /* ok */ }
+      try { execSync(`${TMUX} kill-session -t "=${session}" 2>/dev/null`, { timeout: 3000 }) } catch { /* ok */ }
       // Let the dead process release the config-dir lock before relaunching, so
       // the fallback launch does not lose the same lock race and silently die.
       try { execSync(`sleep ${LAUNCH_RETRY_SETTLE_S}`, { timeout: 5000 }) } catch { /* best effort */ }
@@ -465,7 +465,7 @@ export function stopAgentProcess(name: string): { ok: boolean; error?: string } 
   if (!isAgentRunning(name)) return { ok: false, error: 'Agent is not running' }
 
   try {
-    execSync(`${TMUX} kill-session -t ${session}`, { timeout: 5000 })
+    execSync(`${TMUX} kill-session -t "=${session}"`, { timeout: 5000 })
     execSync('sleep 2', { timeout: 4000 })
     // Reap any orphaned plugin grandchild that tmux did not tear down.
     // See channel-poller-reap.ts - the old pkill-by-env-var-on-cmdline did

@@ -80,7 +80,7 @@ buster_telegram_children() {
 [ -n "$TMUXB" ] || fail "tmux not on PATH"
 [ -f "$CLI_DIST" ] || fail "dist not built ($CLI_DIST missing) -- run npm run build"
 [ -f "$DRIVER" ]   || fail "sim driver missing ($DRIVER)"
-env -u TMUX "$TMUXB" has-session -t "$BUSTER_SESSION" 2>/dev/null \
+env -u TMUX "$TMUXB" has-session -t "=$BUSTER_SESSION" 2>/dev/null \
   || fail "$BUSTER_SESSION not running -- provision Buster with its test channel first (operator/Armorer)"
 [ -f "$BUSTER_TOKEN" ] \
   || fail "Buster telegram token absent ($BUSTER_TOKEN) -- Buster has no channel; provision its test bot first"

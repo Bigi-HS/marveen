@@ -18,9 +18,12 @@ How "restart" works here (and why it is safe):
   battle-tested relaunch path is triggered by tearing down the session -- nothing
   else -- and letting the supervisor bring it back.
 
-  We tear down a session with `tmux kill-session -t <session>`, which is strictly
-  SESSION-scoped (it kills exactly the named tmux session, no broad process
-  matching). This is the deliberate opposite of `pkill -f`, which could match and
+  We tear down a session with `tmux kill-session -t "=<session>"`. The `=` anchor
+  is load-bearing: without it tmux resolves the target by exact name, then by
+  PREFIX, so `-t marveen` kills `marveen-channels` whenever `marveen` is absent --
+  which is the normal state around a restart (card OPS-106). Anchored, it is
+  strictly SESSION-scoped: exactly the named session, no prefix and no broad
+  process matching. This is the deliberate opposite of `pkill -f`, which could match and
   kill unrelated processes. We never spawn an agent ourselves either, so a Medic
   bug can never launch with the wrong model/creds -- the supervisor owns launch.
 
@@ -94,14 +97,14 @@ def _sessions_for(target: str) -> List[str]:
 def _session_alive(ctx: HandlerContext, session: str) -> bool:
     """True iff the tmux session exists. Read-only; tolerates a missing tmux
     (then nothing is reported alive and nothing is killed)."""
-    res = ctx.ex.run(["tmux", "has-session", "-t", session])
+    res = ctx.ex.run(["tmux", "has-session", "-t", f"={session}"])
     return res.code == 0
 
 
 def _kill_session(ctx: HandlerContext, session: str) -> bool:
     """Tear down exactly one tmux session so the supervisor's existing relaunch
     path revives it. SESSION-scoped only -- never `pkill -f`. True on success."""
-    res = ctx.ex.run(["tmux", "kill-session", "-t", session])
+    res = ctx.ex.run(["tmux", "kill-session", "-t", f"={session}"])
     return res.code == 0
 
 

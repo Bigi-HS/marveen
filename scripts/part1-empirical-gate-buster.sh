@@ -111,7 +111,7 @@ case "${1:-}" in
 
   run)
     [ -n "$NODE" ] || fail "node not on PATH"
-    env -u TMUX "$TMUXB" has-session -t "$BUSTER_SESSION" 2>/dev/null || fail "$BUSTER_SESSION not running"
+    env -u TMUX "$TMUXB" has-session -t "=$BUSTER_SESSION" 2>/dev/null || fail "$BUSTER_SESSION not running"
     grep -q "_part1-gate-probe.py" "$SETTINGS" 2>/dev/null || fail "hook not in settings.json -- run '$0 setup' + relaunch Buster first"
     OBSERVE="$ROOT/scripts/_part1-gate-observe.py"
     [ -f "$OBSERVE" ] || fail "observe helper missing ($OBSERVE)"

@@ -36,7 +36,7 @@ launch() {
   if [ -z "$PY" ];        then log "ERROR: python3 not on PATH -- cannot launch";   return 1; fi
   if [ ! -f "$BOT" ];     then log "ERROR: $BOT missing -- not installed";          return 1; fi
   if [ ! -f "$ENV_FILE" ];then log "ERROR: $ENV_FILE missing -- no bot token";      return 1; fi
-  tmux kill-session -t "$SESSION" 2>/dev/null || true
+  tmux kill-session -t "=$SESSION" 2>/dev/null || true
   tmux new-session -d -s "$SESSION" \
     "cd '$ROOT' && exec '$PY' scripts/medic/bot.py 2>>'$BOT_LOG'"
   sleep 2

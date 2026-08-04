@@ -130,7 +130,7 @@ under_cap() {
 }
 
 while true; do
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
     if under_cap; then
       log "$SESSION DOWN -- cooldown ${COOLDOWN}s then relaunch"
       sleep "$COOLDOWN"
@@ -145,7 +145,7 @@ while true; do
     pct="$(read_context_pct)"
     if olg_should_restart "$pct" "$STARTED_AT" "$(date +%s)"; then
       log "$SESSION context-saturation restart (ctx=${pct}%, started ${STARTED_AT}) -- killing for fresh relaunch"
-      tmux kill-session -t "$SESSION" 2>/dev/null || true
+      tmux kill-session -t "=$SESSION" 2>/dev/null || true
     fi
   fi
   sleep "$CTX_POLL_SEC"
