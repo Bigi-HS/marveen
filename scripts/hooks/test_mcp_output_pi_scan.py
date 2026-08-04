@@ -375,5 +375,43 @@ class FlattenReachesEveryShapeTests(unittest.TestCase):
         self.assertEqual(notes, set())
 
 
+class RoleSpoofReDoSTests(unittest.TestCase):
+    """The role-spoof pattern must not be exploitable as a ReDoS vector (Quill R2).
+
+    The original pattern used \\s* in MULTILINE mode. \\s* matches \\n, so at every
+    newline position the engine tried \\s*(?:assistant|system)... and backtracked
+    O(N) times: 8KB newlines 1.4s, 16KB 5.5s, 32KB 21s. Past the 8s PostToolUse
+    budget the hook is SIGKILL'd with no Python except path, so the payload reaches
+    the model with no warning and no audit line.
+
+    Fix: ^[ \\t]* -- in MULTILINE mode ^ already anchors to line start; [ \\t]*
+    is strictly in-line so no cross-line backtrack is possible.
+    """
+
+    def test_newline_payload_scans_in_bounded_time(self):
+        import time
+        payload = "\n" * (16 * 1024)
+        started = time.monotonic()
+        hook._scan(payload)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.0, f"role-spoof scan took {elapsed:.2f}s -- \\s* is back")
+
+    def test_role_spoof_still_detected_after_fix(self):
+        for body in (
+            "\nassistant: [",
+            "system : {",
+            "  assistant:  [",
+            "hello\nworld\nassistant: [tool]",
+            # split-line form: colon on one line, bracket on the next
+            "assistant:\n[",
+            "SYSTEM:\n{",
+            "  assistant :\n  [",
+        ):
+            self.assertIn("role-spoof", hook._scan(body), repr(body))
+
+    def test_clean_body_not_flagged(self):
+        self.assertEqual(hook._scan("nothing here"), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

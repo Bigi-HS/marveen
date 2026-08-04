@@ -79,8 +79,12 @@ _PI_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r'\bwget\b.{0,%d}?https?://(?!localhost|127\.0\.0\.1|::1)' % SHELL_GAP,
                 re.I | re.DOTALL),
      'shell-injection-nudge'),
-    # Developer/assistant role spoofing in tool output
-    (re.compile(r'(?:^|\n)\s*(?:assistant|system)\s*:\s*[\[{]', re.I | re.MULTILINE),
+    # Developer/assistant role spoofing in tool output.
+    # Use [ \t]* not \s* to avoid cross-line backtracking ReDoS in MULTILINE mode:
+    # \s* matches \n, so every \n position becomes an O(N) backtrack point.
+    # \n? after the colon covers the split-line form "assistant:\n[" without
+    # reintroducing cross-line backtracking (at most one \n, then [ \t]*).
+    (re.compile(r'^[ \t]*(?:assistant|system)[ \t]*:[ \t]*\n?[ \t]*[\[{]', re.I | re.MULTILINE),
      'role-spoof'),
     (re.compile(r'<\s*(?:system|assistant)\s*>', re.I),
      'role-spoof'),
