@@ -13,7 +13,8 @@
     "schedule": "tsx src/schedule-cli.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "design:lint": "node scripts/design-wcag-lint.mjs"
+    "design:lint": "node scripts/design-wcag-lint.mjs",
+    "lint:tmux": "python3 scripts/lint-tmux-session-targets.py"
   },
   "engines": {
     "node": ">=20 <24"

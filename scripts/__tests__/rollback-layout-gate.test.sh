@@ -418,7 +418,7 @@ fi
 #         -- the identical literal command matches "NAME-channels" by prefix and
 #         kills the orchestrator, silently, rc=0. Reproduced by Genesis and
 #         confirmed independently here: create X and X-channels, run
-#         `kill-session -t X` twice, and the second call takes X-channels.
+#         `kill-session -t X` twice, and the second call takes X-channels.  # tmux-anchor-lint: ignore
 #
 #         So "this script targets one session by exact name" was wrong. It is
 #         exact only in the state where the check is redundant. For a break-glass

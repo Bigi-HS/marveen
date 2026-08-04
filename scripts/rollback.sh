@@ -258,7 +258,7 @@ TMUXB="$(command -v tmux)"
 # match, then PREFIX, then fnmatch -- so once "marveen" is gone, this same literal
 # command matches "marveen-channels" and kills the orchestrator instead. The
 # `2>/dev/null || true` makes that silent. Genesis reproduced it on 2026-08-04:
-# two sessions X and X-channels, `kill-session -t X` twice, and the second call
+# two sessions X and X-channels, `kill-session -t X` twice, and the second call  # tmux-anchor-lint: ignore
 # takes the -channels one. That is the missing half of Dave's 04:56:52 incident.
 env -u TMUX "$TMUXB" kill-session -t "=$SESSION" 2>/dev/null || true
 sleep 2
