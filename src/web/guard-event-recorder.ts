@@ -32,7 +32,11 @@ function loadOrCreateGuardKey(): Buffer {
         }
       }
     }
-  } catch { /* fall through and regenerate */ }
+  } catch (err) {
+    // Log the rotation so the operator knows historical HMACs are no longer
+    // comparable to rows written after this point.
+    logger.warn({ err }, 'guard-event-recorder: key file invalid or unreadable, rotating to a fresh key -- prior content_hash values are no longer comparable')
+  }
   const fresh = randomBytes(32)
   mkdirSync(join(PROJECT_ROOT, 'store'), { recursive: true })
   atomicWriteFileSync(GUARD_KEY_PATH, fresh.toString('hex'), { mode: 0o600 })
