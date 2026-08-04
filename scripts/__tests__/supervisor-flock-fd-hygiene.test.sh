@@ -15,6 +15,13 @@
 # in the script and asserts the redirect is present on each -- it fails for the
 # next launcher added without it, not just for the one already fixed.
 #
+# "Backgrounded launch" is decided by the shell construct, not by the command
+# name: a logical line ending in a single `&`, or one using nohup / setsid /
+# tmux new-session. An earlier version keyed only on `nohup`/`new-session` and
+# so waved through `setsid bash ... &` -- the same omission class the test is
+# written for, and `( nohup ... ) >/dev/null 2>&1 &` already exists in
+# fleet-boot.sh, so the form is not hypothetical (thor, PR#463 mutation C).
+#
 # Run: bash scripts/__tests__/supervisor-flock-fd-hygiene.test.sh
 set -u
 
@@ -32,15 +39,11 @@ echo "flock fd hygiene: $SUP"
 # The lock fd number the supervisor uses for its flock (see the `exec 9>` setup).
 LOCK_FD=9
 
-# Candidate lines: a background launch that starts a long-running child. `nohup
-# ...&` and `tmux new-session` both detach children that can outlive the
-# supervisor.
-#
 # Backslash continuations must be joined FIRST. Several launchers put the command
 # on one line and the `9>&-` redirect on the next, so scanning raw lines reports
 # them as leaking when they do not. Each logical line keeps the line number it
 # started on, so failures still point at the right place.
-mapfile -t CANDIDATES < <(
+mapfile -t LOGICAL_LINES < <(
   awk '
     { line = $0 }
     buf == "" { start = NR }
@@ -48,10 +51,31 @@ mapfile -t CANDIDATES < <(
     /\\[ \t]*$/ { next }
     { print start ":" buf; buf = "" }
     END { if (buf != "") print start ":" buf }
-  ' "$SUP" \
-    | grep -E '^[0-9]+:[^#]*(nohup |new-session)' \
-    | grep -vE '^[0-9]+:[[:space:]]*#'
+  ' "$SUP"
 )
+
+# Candidacy is decided per logical line below rather than by a grep pattern, so
+# that the rule is the shell CONSTRUCT (does this detach a child?) and not a
+# list of command names that the next launcher may not use.
+is_background_launch() {
+  local body="$1"
+  # `foo &&` continues a compound command; only a lone trailing `&` backgrounds.
+  if [[ "$body" =~ \&[[:space:]]*$ ]] && [[ ! "$body" =~ \&\&[[:space:]]*$ ]]; then
+    return 0
+  fi
+  case "$body" in
+    *"nohup "*|*"setsid "*|*"new-session"*) return 0 ;;
+  esac
+  return 1
+}
+
+CANDIDATES=()
+for entry in "${LOGICAL_LINES[@]}"; do
+  body="${entry#*:}"
+  [[ "$body" =~ ^[[:space:]]*# ]] && continue          # whole-line comment
+  case "$body" in *"DRY-RUN"*) continue ;; esac         # log line, launches nothing
+  is_background_launch "$body" && CANDIDATES+=("$entry")
+done
 
 if [ "${#CANDIDATES[@]}" -eq 0 ]; then
   fail "no backgrounded launchers found -- the scan pattern is stale, fix this test"
@@ -62,15 +86,6 @@ echo "  scanning ${#CANDIDATES[@]} launcher line(s)"
 for entry in "${CANDIDATES[@]}"; do
   lineno="${entry%%:*}"
   body="${entry#*:}"
-
-  # A launcher only leaks the lock if it actually backgrounds or detaches a child.
-  # `run ...` wrappers and DRY-RUN log lines do not.
-  case "$body" in
-    *"DRY-RUN"*) continue ;;
-  esac
-  if [[ "$body" != *"&"* ]] && [[ "$body" != *"new-session"* ]]; then
-    continue
-  fi
 
   if [[ "$body" == *"${LOCK_FD}>&-"* ]]; then
     pass "line $lineno closes fd $LOCK_FD"
