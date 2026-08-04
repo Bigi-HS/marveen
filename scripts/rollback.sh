@@ -254,7 +254,13 @@ PATH_CURATED="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$H
 NODE="$(command -v node)"
 TMUXB="$(command -v tmux)"
 
-env -u TMUX "$TMUXB" kill-session -t "$SESSION" 2>/dev/null || true
+# '=' anchors the target to an EXACT name. Without it tmux resolves -t by exact
+# match, then PREFIX, then fnmatch -- so once "marveen" is gone, this same literal
+# command matches "marveen-channels" and kills the orchestrator instead. The
+# `2>/dev/null || true` makes that silent. Genesis reproduced it on 2026-08-04:
+# two sessions X and X-channels, `kill-session -t X` twice, and the second call
+# takes the -channels one. That is the missing half of Dave's 04:56:52 incident.
+env -u TMUX "$TMUXB" kill-session -t "=$SESSION" 2>/dev/null || true
 sleep 2
 env -u TMUX "$TMUXB" new-session -d -s "$SESSION" -c "$REPO" \
   "export PATH=\"$PATH_CURATED\" && exec $NODE dist/index.js"

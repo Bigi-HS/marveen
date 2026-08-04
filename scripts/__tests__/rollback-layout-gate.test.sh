@@ -45,7 +45,16 @@ set -u
 INSTALL_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 RB="$INSTALL_DIR/scripts/rollback.sh"
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# Sessions this suite creates, so an abort between new-session and kill-session
+# does not strand a `rollback-selftest-<pid>` on the live tmux server. The old
+# trap only removed $WORK. (Thor, R3.)
+TEST_SESSIONS=""
+cleanup() {
+  local s
+  for s in $TEST_SESSIONS; do env -u TMUX tmux kill-session -t "=$s" 2>/dev/null || true; done
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 
 FAIL=0
 pass() { echo "  PASS: $1"; }
@@ -216,47 +225,77 @@ else
   fail "--audit on a missing root must say so (rc=$rc): $out"
 fi
 
-# --- 15. THE HAPPY PATH, fully enclosed. Until now this was the only part of the
-#         break-glass tool nothing covered, and the reason was that the restart
-#         block hardcoded `marveen` and http://localhost:3420 -- so a fixture-
-#         directed run killed the real dashboard. Dave demonstrated exactly that
-#         live on 2026-08-04 04:56:52. With ROLLBACK_SESSION/ROLLBACK_DASHBOARD the
-#         run is enclosed and the restore+restart+verify path is finally testable.
-#
-#         The last assertion is the one that would have caught the incident: the
-#         live marveen session must be exactly as it was, same creation timestamp.
-#         SELF-GUARD, and it is not optional. This case is the one part of the
-#         suite that is destructive when pointed at a revision WITHOUT the
-#         ROLLBACK_SESSION/ROLLBACK_DASHBOARD support -- against such a script it
-#         does exactly what it is testing against: kills the live dashboard. That
-#         matters because running this suite against the OLD script is our standard
-#         counter-test, the thing Thor and I both do to prove the cases
-#         discriminate. So detect the capability instead of assuming it, and skip
-#         loudly. Never make the counter-test the dangerous operation.
-if ! grep -q 'ROLLBACK_SESSION' "$RB"; then
-  echo "  SKIP: happy path -- $RB has no ROLLBACK_SESSION support, so running it"
-  echo "        would target the LIVE session. This is the expected result when"
-  echo "        counter-testing against a pre-fix revision; it is not a pass."
-else
-LIVE_BEFORE=$(tmux display-message -t marveen -p '#{session_created}' 2>/dev/null || echo "absent")
+# ---------------------------------------------------------------------------
+# Machinery for the three live-session cases. All of it exists because of one
+# night, so the reasons are written down rather than assumed.
+# ---------------------------------------------------------------------------
 
-HREPO="$WORK/hrepo"; mkdir -p "$HREPO/dist" "$HREPO/store" "$HREPO/scripts"
-echo "LIVE BUILD"  > "$HREPO/dist/index.js"
-echo "stale asset" > "$HREPO/dist/gone.js"      # must be removed by --delete
-echo "tok"         > "$HREPO/store/.dashboard-token"
-echo "OLDTIP"      > "$HREPO/store/.deployed-tip"
-cat > "$HREPO/scripts/update-deployed-tip.sh" <<'STUB'
+# Read a session's creation timestamp BY EXACT NAME.
+#
+# Two traps here, and each one made an assertion silently vacuous:
+#
+#   1. `display-message -t X` resolves X by exact match, then PREFIX, then
+#      fnmatch. Once "marveen" is gone it reports on "marveen-channels" instead
+#      -- the probe drifts to the sibling in precisely the state the incident
+#      creates, so the watchdog is blind exactly when it matters.
+#
+#   2. Anchoring it as `display-message -t '=marveen'` does NOT fix that, and is
+#      worse. In tmux 3.6 `-t` on display-message is a PANE target; the '='
+#      anchor leaves it unresolvable, so it prints NOTHING and EXITS 0.
+#      Measured against the live session on 2026-08-04: the unanchored form
+#      returns 1785812212, the anchored form returns ''. And `$(probe || echo
+#      absent)` only substitutes on a NON-ZERO exit, so an empty-but-successful
+#      probe leaves both sides of a before/after comparison as '' -- which
+#      compare EQUAL, and the suite prints "the live session was NOT touched"
+#      having measured nothing at all. Thor demonstrated that same vacuous PASS
+#      independently, including on the pre-fix script.
+#
+# list-sessions with an explicit format and an exact awk match has neither
+# problem: no prefix resolution, and a missing session produces no line.
+sess_stamp() {
+  local out
+  out=$(env -u TMUX tmux list-sessions -F '#{session_name}|#{session_created}' 2>/dev/null \
+        | awk -F'|' -v n="$1" '$1 == n { print $2 }')
+  if [[ -n "$out" ]]; then printf '%s\n' "$out"; else printf 'absent\n'; fi
+}
+
+# Create a fixture session and PROVE it came up. Under some tmux server states
+# the spawned shell dies immediately (an inherited SHELLOPTS=nounset makes the
+# rc file fail), and new-session still exits 0 -- so a case that assumes the
+# fixture exists silently tests nothing. Callers must skip loudly on failure.
+mk_session() {
+  env -u TMUX tmux kill-session -t "=$1" 2>/dev/null || true
+  TEST_SESSIONS="$TEST_SESSIONS $1"
+  env -u TMUX tmux new-session -d -s "$1" 'sleep 300' 2>/dev/null || true
+  local i
+  for i in $(seq 1 20); do
+    [[ "$(sess_stamp "$1")" != "absent" ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+mk_fixture() {   # $1 = base dir; sets FX_REPO, FX_BR
+  FX_REPO="$1/repo"; FX_BR="$1/backups"
+  mkdir -p "$FX_REPO/dist" "$FX_REPO/store" "$FX_REPO/scripts" "$FX_BR/20260701-000000"
+  echo "LIVE BUILD"    > "$FX_REPO/dist/index.js"
+  echo "stale asset"   > "$FX_REPO/dist/gone.js"      # must be removed by --delete
+  echo "tok"           > "$FX_REPO/store/.dashboard-token"
+  echo "OLDTIP"        > "$FX_REPO/store/.deployed-tip"
+  cat > "$FX_REPO/scripts/update-deployed-tip.sh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$1" > "$(cd "$(dirname "$0")/.." && pwd)/store/.deployed-tip"
 STUB
+  echo "RESTORED BUILD" > "$FX_BR/20260701-000000/index.js"
+  echo "$SHA"           > "$FX_BR/20260701-000000/deployed-sha.txt"
+}
 
-HBR="$WORK/hbackups"; mkdir -p "$HBR/20260701-000000"
-echo "RESTORED BUILD" > "$HBR/20260701-000000/index.js"
-echo "$SHA"           > "$HBR/20260701-000000/deployed-sha.txt"
-
-# Stub dashboard: health 200, and a passing gate/verify.
-PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")
-python3 - "$PORT" <<'PY' &
+# The stub binds port 0 and PUBLISHES the port it got. Picking a free port in
+# the test and handing it over is TOCTOU -- another process can take it in the
+# gap, and the case flakes under load. (Thor, R3.)
+start_stub() {   # $1 = base dir; sets STUB_PID, STUB_PORT
+  local pf="$1/port"
+  python3 - "$pf" <<'PY' &
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 class H(BaseHTTPRequestHandler):
@@ -266,39 +305,207 @@ class H(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body))); self.end_headers()
         self.wfile.write(body)
     def log_message(self, *a): pass
-HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
+srv = HTTPServer(('127.0.0.1', 0), H)
+with open(sys.argv[1], 'w') as f:
+    f.write(str(srv.server_address[1]))
+srv.serve_forever()
 PY
-STUB_PID=$!
-TEST_SESSION="rollback-selftest-$$"
-for _ in $(seq 1 25); do
-  curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/api/health" && break
-  sleep 0.2
-done
+  STUB_PID=$!
+  local i
+  for i in $(seq 1 50); do [[ -s "$pf" ]] && break; sleep 0.1; done
+  STUB_PORT=$(cat "$pf" 2>/dev/null || echo "")
+}
 
-out=$(ROLLBACK_REPO="$HREPO" ROLLBACK_BACKUP_ROOT="$HBR" \
-      ROLLBACK_SESSION="$TEST_SESSION" ROLLBACK_DASHBOARD="http://127.0.0.1:$PORT" \
+# Fail-closed PATH shield: log every tmux/curl call the script makes, and REFUSE
+# any call naming a live target. Thor's T11, adopted wholesale because it is a
+# better instrument than mine was: comparing the live timestamp detects that an
+# accident HAPPENED, the shield detects that the script is CAPABLE of one. The
+# first is one accident too late.
+mk_shield() {    # $1 = dir, $2 = logfile
+  local dir="$1" log="$2" b real
+  mkdir -p "$dir"; : > "$log"
+  for b in tmux curl; do
+    real=$(command -v "$b")
+    cat > "$dir/$b" <<SHIELD
+#!/usr/bin/env bash
+printf '%s %s\n' "$b" "\$*" >> "$log"
+for a in "\$@"; do
+  case "\$a" in
+    *marveen*|*3420*)
+      printf 'REFUSED %s %s\n' "$b" "\$*" >> "$log"
+      exit 90 ;;
+  esac
+done
+exec "$real" "\$@"
+SHIELD
+    chmod +x "$dir/$b"
+  done
+}
+
+# The capability probe the two destructive cases gate on. Dave's R3 point: a
+# grep for the NAME `ROLLBACK_SESSION` also matches a half-fixed revision that
+# declares the variable and still hardcodes the target at the call site. Match
+# the call site itself.
+supports_session_override() {
+  grep -qE 'kill-session[^\n]*\$\{?SESSION' "$1" && grep -q 'ROLLBACK_SESSION' "$1"
+}
+
+# --- 15. THE HAPPY PATH, fully enclosed. Until now this was the only part of the
+#         break-glass tool nothing covered, and the reason was that the restart
+#         block hardcoded `marveen` and http://localhost:3420 -- so a fixture-
+#         directed run killed the real dashboard. Dave demonstrated exactly that
+#         live on 2026-08-04 04:56:52. With ROLLBACK_SESSION/ROLLBACK_DASHBOARD the
+#         run is enclosed and the restore+restart+verify path is finally testable.
+#
+#         SELF-GUARD, not optional: this case is destructive against a revision
+#         WITHOUT the overrides -- and that revision is exactly what we point the
+#         suite at when counter-testing. Detect the capability, skip loudly.
+#         Never make the counter-test the dangerous operation.
+if ! supports_session_override "$RB"; then
+  echo "  SKIP: happy path -- $RB does not honour ROLLBACK_SESSION at its kill-session"
+  echo "        call site, so running it would target the LIVE session. Expected when"
+  echo "        counter-testing a pre-fix revision; it is not a pass."
+else
+LIVE_BEFORE=$(sess_stamp marveen)
+if [[ "$LIVE_BEFORE" == "absent" ]]; then
+  echo "  SKIP: happy path -- no live 'marveen' session to guard, so the"
+  echo "        non-interference assertion would measure nothing. Refusing to"
+  echo "        print a PASS for an unperformed measurement."
+else
+mk_fixture "$WORK/h"
+start_stub  "$WORK/h"
+TEST_SESSION="rollback-selftest-$$"
+TEST_SESSIONS="$TEST_SESSIONS $TEST_SESSION"
+
+if [[ -z "$STUB_PORT" ]]; then
+  fail "happy path: stub dashboard never published a port"
+else
+out=$(ROLLBACK_REPO="$FX_REPO" ROLLBACK_BACKUP_ROOT="$FX_BR" \
+      ROLLBACK_SESSION="$TEST_SESSION" ROLLBACK_DASHBOARD="http://127.0.0.1:$STUB_PORT" \
       bash "$RB" 2>&1); rc=$?
 
 kill "$STUB_PID" 2>/dev/null
-tmux kill-session -t "$TEST_SESSION" 2>/dev/null
+env -u TMUX tmux kill-session -t "=$TEST_SESSION" 2>/dev/null || true
 
-LIVE_AFTER=$(tmux display-message -t marveen -p '#{session_created}' 2>/dev/null || echo "absent")
+LIVE_AFTER=$(sess_stamp marveen)
 
 if [[ $rc -eq 0 ]] \
-   && [[ "$(cat "$HREPO/dist/index.js")" == "RESTORED BUILD" ]] \
-   && [[ ! -f "$HREPO/dist/gone.js" ]] \
-   && [[ "$(cat "$HREPO/store/.deployed-tip")" == "$SHA" ]] \
-   && [[ ! -f "$HREPO/store/planned-restart.marker" ]]; then
+   && [[ "$(cat "$FX_REPO/dist/index.js")" == "RESTORED BUILD" ]] \
+   && [[ ! -f "$FX_REPO/dist/gone.js" ]] \
+   && [[ "$(cat "$FX_REPO/store/.deployed-tip")" == "$SHA" ]] \
+   && [[ ! -f "$FX_REPO/store/planned-restart.marker" ]]; then
   pass "happy path: restore + restart + verify completes and relabels deployed-tip"
 else
-  fail "happy path (rc=$rc, index=$(cat "$HREPO/dist/index.js" 2>/dev/null), tip=$(cat "$HREPO/store/.deployed-tip" 2>/dev/null)): $out"
+  fail "happy path (rc=$rc, index=$(cat "$FX_REPO/dist/index.js" 2>/dev/null), tip=$(cat "$FX_REPO/store/.deployed-tip" 2>/dev/null)): $out"
 fi
 
+# LIVE_BEFORE is known non-'absent' by the guard above, so this comparison is
+# never the empty-equals-empty tautology it used to be.
 if [[ "$LIVE_BEFORE" == "$LIVE_AFTER" ]]; then
   pass "the live marveen session was NOT touched by a fixture-directed run"
 else
   fail "A FIXTURE RUN DISTURBED THE LIVE SESSION: before=$LIVE_BEFORE after=$LIVE_AFTER"
 fi
+fi
+fi
+fi
+
+# --- 16. THE SIBLING-SESSION KILL: the missing half of the 04:56:52 incident,
+#         and until now not one line covered it.
+#
+#         `tmux -t NAME` is bound to the session we mean only while that session
+#         EXISTS. Once it is gone -- previous kill, crash, supervisor mid-restart
+#         -- the identical literal command matches "NAME-channels" by prefix and
+#         kills the orchestrator, silently, rc=0. Reproduced by Genesis and
+#         confirmed independently here: create X and X-channels, run
+#         `kill-session -t X` twice, and the second call takes X-channels.
+#
+#         So "this script targets one session by exact name" was wrong. It is
+#         exact only in the state where the check is redundant. For a break-glass
+#         tool the target session is missing precisely WHEN THE TOOL IS NEEDED,
+#         which makes the prefix fallback the expected case, not the edge case.
+#         The fix is the '=' anchor, which disables both fallbacks.
+if ! supports_session_override "$RB"; then
+  echo "  SKIP: sibling-session kill -- $RB does not honour ROLLBACK_SESSION at its"
+  echo "        kill-session call site, so this case would aim at the live 'marveen'"
+  echo "        prefix. Expected when counter-testing a pre-fix revision."
+else
+SIB_BASE="rollback-sibtest-$$"
+TEST_SESSIONS="$TEST_SESSIONS $SIB_BASE"
+if ! mk_session "${SIB_BASE}-channels"; then
+  echo "  SKIP: sibling-session kill -- could not bring up a fixture session on this"
+  echo "        tmux server, so the assertion would compare two absences and pass."
+else
+mk_fixture "$WORK/s"
+start_stub  "$WORK/s"
+SIB_BEFORE=$(sess_stamp "${SIB_BASE}-channels")
+
+# The target is deliberately ABSENT and only the sibling exists -- the exact
+# state the fleet is in whenever a dashboard session is down and the
+# orchestrator is up.
+ROLLBACK_REPO="$FX_REPO" ROLLBACK_BACKUP_ROOT="$FX_BR" \
+  ROLLBACK_SESSION="$SIB_BASE" ROLLBACK_DASHBOARD="http://127.0.0.1:$STUB_PORT" \
+  bash "$RB" >/dev/null 2>&1 || true
+
+SIB_AFTER=$(sess_stamp "${SIB_BASE}-channels")
+kill "$STUB_PID" 2>/dev/null
+env -u TMUX tmux kill-session -t "=$SIB_BASE" 2>/dev/null || true
+env -u TMUX tmux kill-session -t "=${SIB_BASE}-channels" 2>/dev/null || true
+
+if [[ "$SIB_BEFORE" != "absent" && "$SIB_BEFORE" == "$SIB_AFTER" ]]; then
+  pass "a sibling '<name>-channels' session survives a rollback aimed at the absent '<name>'"
+else
+  fail "PREFIX-MATCH KILL: rollback aimed at absent '$SIB_BASE' took '${SIB_BASE}-channels' (before=$SIB_BEFORE after=$SIB_AFTER)"
+fi
+fi
+fi
+
+# --- 17. CAPABILITY, NOT OCCURRENCE (Thor's T11).
+#
+#         Cases 15 and 16 detect that an accident HAPPENED. This one detects that
+#         the script is ABLE to cause one, which is a strictly earlier signal --
+#         and because the shield refuses live targets rather than relying on the
+#         script to be well-behaved, it is the one case that is SAFE to run
+#         against any revision. That matters: 15 and 16 skip on a pre-fix script,
+#         so without this the counter-test proves nothing about the live-target
+#         behaviour it is supposed to be checking.
+#
+#         The second assertion is the one that keeps it honest: a script that
+#         dies before the restart block makes no calls at all, and "named no live
+#         target" would otherwise be a free pass for doing nothing.
+SHIELD_DIR="$WORK/shield"; SHIELD_LOG="$WORK/shield-calls.log"
+mk_shield "$SHIELD_DIR" "$SHIELD_LOG"
+mk_fixture "$WORK/c"
+start_stub  "$WORK/c"
+CAP_SESSION="rollback-captest-$$"
+TEST_SESSIONS="$TEST_SESSIONS $CAP_SESSION"
+
+PATH="$SHIELD_DIR:$PATH" \
+  ROLLBACK_REPO="$FX_REPO" ROLLBACK_BACKUP_ROOT="$FX_BR" \
+  ROLLBACK_SESSION="$CAP_SESSION" ROLLBACK_DASHBOARD="http://127.0.0.1:$STUB_PORT" \
+  bash "$RB" >/dev/null 2>&1 || true
+
+kill "$STUB_PID" 2>/dev/null
+env -u TMUX tmux kill-session -t "=$CAP_SESSION" 2>/dev/null || true
+
+# `|| true`, NOT `|| echo 0`: grep -c already PRINTS 0 when it matches nothing and
+# then exits 1, so the fallback appends a second zero and the value becomes the
+# two-line string "0\n0" -- which blows up [[ -eq ]] with an arithmetic syntax
+# error and reports a failure that is really a bug in the harness.
+REFUSED=$(grep -c '^REFUSED' "$SHIELD_LOG" 2>/dev/null || true)
+SESSCALLS=$(grep -cE '^tmux (kill-session|new-session)' "$SHIELD_LOG" 2>/dev/null || true)
+
+if [[ "$REFUSED" -eq 0 ]]; then
+  pass "a fixture-directed run names no live target (no tmux/curl call mentioned marveen or 3420)"
+else
+  fail "THE SCRIPT CAN STILL REACH LIVE TARGETS -- $REFUSED refused call(s):
+$(grep '^REFUSED' "$SHIELD_LOG" | sed 's/^/      /')"
+fi
+
+if [[ "$SESSCALLS" -ge 2 ]]; then
+  pass "the restart block actually ran ($SESSCALLS session calls observed, so the check above is not vacuous)"
+else
+  fail "no restart activity observed ($SESSCALLS session calls) -- the 'no live target' result above proves nothing"
 fi
 
 echo
