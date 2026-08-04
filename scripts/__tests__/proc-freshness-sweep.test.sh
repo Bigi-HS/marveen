@@ -21,7 +21,18 @@ ROOT="$(mktemp -d)"
 PIDS=()
 
 cleanup() {
-  for p in "${PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done
+  # Kill the fixture's own `sleep` child as well as the fixture shell. `kill $p`
+  # alone leaves the sleep it is blocked in running as an orphan.
+  #
+  # Deliberately NOT a process-group kill: a non-interactive shell runs without
+  # job control, so the fixtures share this test's process group and
+  # `kill -- -PGID` would take the test runner -- and its caller -- down with
+  # them. Explicit pids only.
+  for p in "${PIDS[@]:-}"; do
+    [ -n "$p" ] || continue
+    for c in $(ps --ppid "$p" -o pid= 2>/dev/null); do kill "$c" 2>/dev/null; done
+    kill "$p" 2>/dev/null
+  done
   rm -rf "$ROOT"
 }
 trap cleanup EXIT
@@ -31,9 +42,19 @@ pass() { echo "  PASS: $1"; }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
 spawn() {                       # spawn <path> -> echoes pid
-  # stdout/stderr must be redirected away from the command substitution that
-  # calls this: $( ) waits for the pipe to close, and a backgrounded child
-  # inheriting stdout keeps it open, so the substitution would hang forever.
+  # Both redirections matter, for the same reason: $( ) reads until the pipe
+  # closes, and a backgrounded child that inherits stdout or stderr holds it
+  # open, so the substitution never returns. That is not theoretical -- an
+  # earlier iteration of this test wedged for 19 minutes on this host, its
+  # fixtures were reparented past the EXIT trap, and the immortal loops then
+  # appeared in the LIVE sweep as STALE findings. The test was polluting the
+  # /proc space it inspects (thor N6, devil-advocate DA-14).
+  #
+  # No `timeout` or `setsid` wrapper: $! must be the pid of the bash executing
+  # the script, because that is the process holding fd 255 and the one the sweep
+  # reports. A wrapper would make $! the wrapper's pid and every assertion would
+  # look up the wrong process. The lifetime bound lives in the fixture body
+  # instead -- see LOOP.
   bash "$1" >/dev/null 2>&1 &
   echo $!
 }
@@ -43,7 +64,13 @@ label_of()  { run_sweep | awk -F'\t' -v p="$1" '$2 == p { print $1 }'; }
 count_field() { run_sweep | awk -F'\t' '$1 == "COUNT" { print $'"$1"' }'; }
 
 mkdir -p "$ROOT/scripts"
-LOOP='while :; do sleep 300; done'
+# Self-limiting, and in short steps. `while :; do sleep 300; done` survives
+# forever if the EXIT trap is ever skipped (kill -9, a wedge, a crashed runner),
+# and a 300s sleep outlives its own parent by up to five minutes. This runs for
+# ~2 minutes at most and never leaves an orphan alive for more than a second,
+# so a mishandled run cannot leave immortal processes in the sweep's field of
+# view.
+LOOP='for _ in $(seq 1 120); do sleep 1; done'
 
 # --- fixtures ---------------------------------------------------------------
 # healthy: untouched after start
@@ -85,7 +112,6 @@ echo "sweep fixtures under $ROOT"
   || fail "untouched script should be fresh, got '$(label_of "$HEALTHY_PID")'"
 
 # The core regression: BOTH supervisors must be seen. `head -1` would inspect one.
-sup_seen=$(run_sweep | awk -F'\t' '$3 == "fleet-supervisor.sh"' | wc -l)
 sup_count=$(count_field 6)
 [ "$sup_count" -eq 2 ] \
   && pass "both fleet-supervisor processes counted (no head -1 truncation)" \
@@ -106,6 +132,18 @@ stale_count=$(count_field 2)
 [ "$stale_count" -ge 2 ] \
   && pass "stale count reports every offender ($stale_count)" \
   || fail "expected >=2 stale, got '$stale_count'"
+
+# The start-time column is what lets the gate tell a pre-existing stale backlog
+# apart from staleness that appeared after a cutoff. If it were empty the gate
+# would treat every offender as new and block on the known backlog, so assert it
+# is a plausible epoch rather than merely present.
+start_col=$(run_sweep | awk -F'\t' -v p="$GHOST_PID" '$2 == p { print $5 }')
+now=$(date +%s)
+if [ -n "$start_col" ] && [ "$start_col" -gt $((now - 600)) ] && [ "$start_col" -le "$now" ]; then
+  pass "stale record carries the process start time (epoch $start_col)"
+else
+  fail "stale record should carry a recent start epoch, got '$start_col'"
+fi
 
 # Scoping: nothing outside the given root may be reported.
 outside=$(run_sweep | awk -F'\t' '$1 != "COUNT"' | grep -c "watchdog" || true)

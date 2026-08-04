@@ -16,6 +16,10 @@
 # Exit 1 = at least one check FAILED -- do NOT request GO until resolved.
 # Exit 2 = usage error / a check could not run.
 #
+# Normally you do not call this directly: scripts/deploy-backup.sh creates the
+# rollback point C3 checks for and then runs this gate, so the whole pre-GO
+# sequence is one command. Running it alone is fine for a read-only look.
+#
 # --- Why C5 sweeps every process, not just the supervisor -------------------
 # Origin (2026-08-04): the running fleet-supervisor held a DELETED inode of its
 # own script since 07-26, so three merged+deployed supervisor changes (OPS-079,
@@ -44,6 +48,10 @@
 
 set -uo pipefail
 
+# Resolved BEFORE the cd below: $0 may be a relative path, and once the working
+# directory changes it no longer points anywhere useful.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 REPO="/home/domin/marveen"
 TARGET="origin/develop"
 FETCH_STALE_SECONDS=900     # 15 min -- older origin/ refs make C1/C2 falsely calm
@@ -62,13 +70,16 @@ cd "$REPO" || { echo "cannot cd $REPO" >&2; exit 2; }
 
 FAILED=0
 WARNED=0
-NOTHING_TO_DEPLOY=0
 RESULTS=()
 
 pass() { RESULTS+=("PASS  $1"); }
 fail() { RESULTS+=("FAIL  $1"); FAILED=$((FAILED + 1)); }
 warn() { RESULTS+=("WARN  $1"); WARNED=$((WARNED + 1)); }
-skip() { RESULTS+=("SKIP  $1"); }
+# NOTE is for a standing limitation that no run can clear. It is deliberately
+# not a WARN: a warning that fires on every single run spends the channel, and
+# the reader can no longer tell "clean" from "clean except one real thing"
+# (thor N3).
+note() { RESULTS+=("NOTE  $1"); }
 
 echo "=== deploy preflight (target: $TARGET) ==="
 echo
@@ -97,8 +108,12 @@ else
   fi
 
   summary=$(echo "$delta_out" | grep -E "^SUMMARY:" | head -1)
+  # deploy-delta-check.py prints no SUMMARY when the delta is empty, so fall
+  # back to its "Delta:" line rather than reporting "no summary line", which
+  # reads like something went wrong when nothing did.
+  [ -n "$summary" ] || summary=$(echo "$delta_out" | grep -E "^Delta:" | head -1)
   if [ "$delta_rc" -eq 0 ]; then
-    pass "C1b delta-risk: delta-check PASS -- ${summary:-no summary line}"
+    pass "C1b delta-risk: delta-check PASS -- ${summary:-no delta summary printed}"
   elif [ "$delta_rc" -eq 1 ] && echo "$summary" | grep -q "HIGH"; then
     # The ONLY downgrade this gate applies: a BLOCK that is specifically about a
     # HIGH-risk delta. Any other exit-1 (delta-check's own error paths) keeps its
@@ -116,15 +131,25 @@ echo
 echo "--- C2: deployed-tip freshness ---"
 # A stale origin/ ref makes both "0 PRs in the delta" and "already at target"
 # falsely reassuring, so surface it before reading either.
-if [ -f .git/FETCH_HEAD ]; then
-  fetch_age=$(( $(date +%s) - $(stat -c %Y .git/FETCH_HEAD) ))
-  if [ "$fetch_age" -gt "$FETCH_STALE_SECONDS" ]; then
-    warn "C2a fetch-freshness: last fetch was $((fetch_age / 60))m ago -- run 'git fetch origin' or $TARGET may be out of date"
+# Ask the remote what the target ref actually is, rather than timing the last
+# fetch. .git/FETCH_HEAD's mtime moves on ANY fetch: fetching refs/pull/462/head
+# during a review -- which both the author and the reviewer do -- marked
+# origin/develop "fresh" while leaving it untouched (thor F3, reproduced N2).
+# One ls-remote is cheaper than that false green and answers the real question.
+if [[ "$TARGET" =~ ^origin/(.+)$ ]]; then
+  branch="${BASH_REMATCH[1]}"
+  remote_sha=$(git ls-remote --heads origin "$branch" 2>/dev/null | awk 'NR==1 {print $1}')
+  local_sha=$(git rev-parse "$TARGET" 2>/dev/null)
+  if [ -z "$remote_sha" ]; then
+    # Consistent with C5b: a claim that could not be checked is not a clean one.
+    fail "C2a target-freshness: cannot reach origin to confirm $branch -- the target ref is UNVERIFIED, so C1's delta range may be wrong. Retry when the remote is reachable."
+  elif [ "$remote_sha" = "$local_sha" ]; then
+    pass "C2a target-freshness: $TARGET (${local_sha:0:8}) matches origin -- delta range is computed against the real head"
   else
-    pass "C2a fetch-freshness: origin refs fetched $((fetch_age / 60))m ago"
+    fail "C2a target-freshness: $TARGET is ${local_sha:0:8} locally but ${remote_sha:0:8} on origin -- run: git fetch origin $branch"
   fi
 else
-  warn "C2a fetch-freshness: no .git/FETCH_HEAD -- cannot tell how old $TARGET is"
+  warn "C2a target-freshness: target '$TARGET' is not an origin/<branch> ref, so its currency cannot be checked against the remote"
 fi
 
 TIP_FILE="store/.deployed-tip"
@@ -142,7 +167,6 @@ else
     if [ -z "$target_sha" ]; then
       fail "C2b deployed-tip: cannot resolve target $TARGET"
     elif [ "$DEPLOYED_TIP" = "$target_sha" ]; then
-      NOTHING_TO_DEPLOY=1
       warn "C2b deployed-tip: already at $TARGET (${target_sha:0:8}) -- nothing to deploy"
     elif git merge-base --is-ancestor "$DEPLOYED_TIP" "$target_sha" 2>/dev/null; then
       behind=$(git rev-list --count "${DEPLOYED_TIP}..${target_sha}")
@@ -167,23 +191,35 @@ echo
 #
 # Keep this glob in sync with scripts/rollback.sh's auto-pick.
 ROLLBACK_ROOT="/tmp/marveen-deploy-backups"
+BACKUP_CMD="bash scripts/deploy-backup.sh"
 echo "--- C3: rollback point ---"
-if [ "$NOTHING_TO_DEPLOY" -eq 1 ]; then
-  skip "C3 rollback: nothing to deploy (C2b) -- the newest backup carries the previous tip by design"
-elif [ -z "$DEPLOYED_TIP" ]; then
-  fail "C3 rollback: skipped, deployed tip unknown (C2b failed)"
+# No skip for the nothing-to-deploy case. That branch was the only one the
+# author ever exercised, and it hid a check that could not pass on the other
+# one (devil-advocate DA-11). Every run now takes the same path.
+if [ -z "$DEPLOYED_TIP" ]; then
+  fail "C3 rollback: cannot check, deployed tip unknown (C2b failed)"
 else
   picked=$(ls -1d "$ROLLBACK_ROOT"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9] 2>/dev/null | sort | tail -1)
   if [ -z "$picked" ]; then
-    fail "C3 rollback: rollback.sh would find NO backup under $ROLLBACK_ROOT -- there is no rollback point"
+    fail "C3 rollback: rollback.sh would find NO backup under $ROLLBACK_ROOT -- there is no rollback point. Run: $BACKUP_CMD"
   elif [ ! -f "$picked/index.js" ]; then
-    fail "C3 rollback: rollback.sh would pick $picked but it has no index.js -- not a usable dist backup"
+    fail "C3 rollback: rollback.sh would pick $picked but it has no top-level index.js -- restoring it would wipe the live dist (rsync --delete). Run: $BACKUP_CMD"
   elif [ ! -f "$picked/deployed-sha.txt" ]; then
-    fail "C3 rollback: rollback.sh would pick $picked but it has NO deployed-sha.txt -- rollback cannot say which build it restores"
+    fail "C3 rollback: rollback.sh would pick $picked but it has NO deployed-sha.txt -- rollback cannot say which build it restores. Run: $BACKUP_CMD"
   else
     backup_sha=$(tr -d '[:space:]' < "$picked/deployed-sha.txt")
     if [ "$backup_sha" != "$DEPLOYED_TIP" ]; then
-      fail "C3 rollback: rollback.sh would restore $picked (${backup_sha:0:8}) but live is ${DEPLOYED_TIP:0:8} -- rollback would restore the WRONG build"
+      # Equality is the right assertion ONLY because the rollback point is now
+      # taken before this gate runs. Under the old GO-then-backup order the
+      # newest backup was permanently one deploy behind and this could never go
+      # green; the fix was to move the producer, not to weaken the check into
+      # "some ancestor", which would happily accept a week-old build.
+      behind=""
+      if git cat-file -e "${backup_sha}^{commit}" 2>/dev/null \
+         && git merge-base --is-ancestor "$backup_sha" "$DEPLOYED_TIP" 2>/dev/null; then
+        behind=" ($(git rev-list --count "${backup_sha}..${DEPLOYED_TIP}") commit(s) behind live)"
+      fi
+      fail "C3 rollback: rollback.sh would restore ${backup_sha:0:8}${behind} but live is ${DEPLOYED_TIP:0:8} -- there is no rollback point for the build that is actually running. Run: $BACKUP_CMD"
     elif cmp -s "$picked/index.js" dist/index.js; then
       pass "C3 rollback: rollback.sh would restore $picked = live build ${DEPLOYED_TIP:0:8}, and it is byte-identical to the current dist"
     else
@@ -221,23 +257,33 @@ else
   elif [ "$dist_mtime" -lt "$last_src_commit" ]; then
     fail "C4 dist: dist/index.js predates the last src/ commit -- build is stale, run npm run build"
   else
-    warn "C4 dist: dist/index.js is newer than the last src/ commit (recency OK; provenance UNVERIFIED -- no build stamp, so the ref it was built from is unknown)"
+    pass "C4 dist: dist/index.js is newer than the last src/ commit -- build is current"
+    note "C4 dist: recency only. Provenance is unverifiable until a build stamp exists (store/.dist-built-from), so a dist built off a parked branch would still pass this check (ENG-048, 08-01)"
   fi
 fi
 echo
 
 # --- C5: every long-running repo shell process runs current code -----------
 echo "--- C5: running-process freshness ---"
-SWEEP="$REPO/scripts/proc-freshness-sweep.py"
+# Resolved next to THIS script, not under $REPO: the two ship together, so a
+# checkout that has the gate always has its detector. Looking it up under $REPO
+# meant running the gate from a worktree or a review branch failed with rc=127
+# even though the file was right there beside it. The sweep still scans $REPO,
+# because the live tree is what gets deployed.
+SWEEP="$SCRIPT_DIR/proc-freshness-sweep.py"
 if [ ! -f "$SWEEP" ]; then
-  c5_report=""
-  c5_rc=127
+  # Distinguished from a crash on purpose: "the detector is not installed" and
+  # "the detector blew up" need different responses, and rc=127 alone conflates
+  # them (devil-advocate DA-17).
+  fail "C5 process-freshness: detector missing at $SWEEP -- the gate cannot check running processes at all"
 else
   c5_report=$(python3 "$SWEEP" "$REPO" 2>&1)
   c5_rc=$?
 fi
-if [ "$c5_rc" -ne 0 ]; then
-  fail "C5 process-freshness: sweep failed to run (rc=$c5_rc) -- treat as unverified, not clean"
+if [ ! -f "$SWEEP" ]; then
+  : # already reported above
+elif [ "$c5_rc" -ne 0 ]; then
+  fail "C5 process-freshness: sweep crashed (rc=$c5_rc) -- treat as unverified, not clean. Output: $(echo "$c5_report" | tail -2 | tr '\n' ' ')"
 else
   echo "$c5_report" | grep -vE '^COUNT' | sed 's/^/  /'
   counts=$(echo "$c5_report" | grep '^COUNT' | head -1)
@@ -247,9 +293,56 @@ else
   n_fresh=$(echo "$counts" | cut -f5)
   n_sup=$(echo "$counts" | cut -f6)
 
-  if [ "${n_stale:-0}" -gt 0 ]; then
-    fail "C5a process-freshness: $n_stale process(es) running code that no longer matches disk -- their deployed changes are INERT until each is restarted"
-  else
+  # --- known backlog vs new staleness ---------------------------------------
+  # On the day this gate was wired the sweep found 25 stale watchdogs, all of
+  # them started before 08-01 and all of them triaged as scheduled hygiene with
+  # no live functional regression (card ff114a06). Failing on that backlog would
+  # make the gate red on its first real use for a reason the operator cannot fix
+  # in the moment -- the surest way to teach the fleet to skip it, which is the
+  # failure this whole PR is about.
+  #
+  # So the backlog is carved out explicitly, by process START TIME, and the
+  # carve-out is dated: after GRACE_EXPIRES it stops applying and the backlog
+  # fails like anything else. A carve-out without an expiry is how a known
+  # exception becomes permanent silence.
+  #
+  # Anything started AFTER the cutoff is NEW staleness -- exactly what the check
+  # is for -- and fails. The supervisor never gets the carve-out: it is the
+  # process that deploys everything else.
+  KNOWN_STALE_BEFORE="2026-08-01 00:00:00"
+  GRACE_EXPIRES="2026-08-11"
+  GRACE_CARD="ff114a06"
+  cutoff_epoch=$(date -d "$KNOWN_STALE_BEFORE" +%s 2>/dev/null || echo 0)
+  grace_active=1
+  [ "$(date +%Y-%m-%d)" \< "$GRACE_EXPIRES" ] || grace_active=0
+
+  n_new_stale=0; n_old_stale=0; sup_stale=0
+  while IFS=$'\t' read -r label pid script why started; do
+    [ "$label" = "STALE" ] || continue
+    if [ "$script" = "fleet-supervisor.sh" ]; then sup_stale=$((sup_stale + 1)); continue; fi
+    # An unreadable start time cannot prove the process predates the cutoff, so
+    # it counts as new -- the carve-out has to fail closed like everything else.
+    if [ "$grace_active" -eq 1 ] && [ -n "$started" ] && [ "$started" -lt "$cutoff_epoch" ]; then
+      n_old_stale=$((n_old_stale + 1))
+    else
+      n_new_stale=$((n_new_stale + 1))
+    fi
+  done <<< "$c5_report"
+
+  if [ "$sup_stale" -gt 0 ]; then
+    fail "C5a supervisor-freshness: the running fleet-supervisor is executing code that no longer matches disk -- every supervisor change is INERT. This is never waived; restart it before deploying."
+  fi
+  if [ "$n_new_stale" -gt 0 ]; then
+    if [ "$grace_active" -eq 1 ]; then
+      fail "C5a process-freshness: $n_new_stale process(es) started after $KNOWN_STALE_BEFORE are running code that no longer matches disk -- this is NEW staleness, not the known backlog. Their deployed changes are INERT until restarted."
+    else
+      fail "C5a process-freshness: $n_new_stale process(es) running code that no longer matches disk. The $GRACE_CARD backlog grace expired on $GRACE_EXPIRES, so the pre-existing ones are no longer carved out."
+    fi
+  fi
+  if [ "$n_old_stale" -gt 0 ]; then
+    warn "C5a process-freshness: $n_old_stale pre-existing stale process(es) (started before $KNOWN_STALE_BEFORE) -- known backlog, staged restart tracked as card $GRACE_CARD. This carve-out EXPIRES $GRACE_EXPIRES and then fails."
+  fi
+  if [ "${n_stale:-0}" -eq 0 ]; then
     pass "C5a process-freshness: all $n_fresh repo shell process(es) run current on-disk code"
   fi
   # "Cannot tell" must never read as "fine" -- that fail-open was how the original

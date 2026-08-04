@@ -17,8 +17,17 @@ classifies each one:
   (fresh)  content matches and the file has not changed since the process began
 
 Output is TSV, one line per non-fresh process, then a COUNT line:
-  <LABEL>\t<pid>\t<script>\t<why>
+  <LABEL>\t<pid>\t<script>\t<why>\t<start epoch, or empty if unreadable>
   COUNT\t<stale>\t<unknown>\t<suspect>\t<fresh>\t<fleet-supervisor count>
+
+The start epoch lets a caller separate a pre-existing backlog of stale processes
+from one that went stale after a given instant. It is the last column so that
+adding it cannot shift the meaning of the earlier ones.
+
+Scope: only processes owned by the same user are visible -- readlink on another
+user's /proc/PID/fd/255 raises, and those processes are skipped silently. Every
+repo shell currently runs as one user, so this is a stated limit rather than a
+gap; it would need revisiting if the fleet ever ran split-UID.
 
 Why fd 255 rather than matching cmdline with pgrep: a cmdline regex also matches
 any shell whose command line merely mentions the script -- including the wrapper
@@ -90,8 +99,10 @@ def sweep(root):
         if name == "fleet-supervisor.sh":
             supervisors += 1
 
+        started = process_start_time(proc_dir, boot)
+
         if not os.path.exists(path):
-            stale.append((pid, name, "script no longer exists on disk"))
+            stale.append((pid, name, "script no longer exists on disk", started))
             continue
 
         try:
@@ -100,16 +111,21 @@ def sweep(root):
             with open(path, "rb") as fh:
                 on_disk = fh.read()
         except OSError as exc:
-            unknown.append((pid, name, "cannot read running script (%s)" % type(exc).__name__))
+            unknown.append((pid, name, "cannot read running script (%s)" % type(exc).__name__, started))
             continue
 
         if running != on_disk:
-            stale.append((pid, name, "running content differs from disk"))
+            stale.append((pid, name, "running content differs from disk", started))
             continue
 
-        started = process_start_time(proc_dir, boot)
-        if started is not None and started + START_MTIME_GRACE_SECONDS < os.path.getmtime(path):
-            suspect.append((pid, name, "file modified after process start; parsed version unverifiable"))
+        # An unreadable start time makes the "modified after start" question
+        # unanswerable, so it goes to UNKNOWN rather than to the fresh count.
+        # Counting it fresh would be the same fail-open this sweep exists to
+        # close: "cannot tell" must not read as "fine" (thor N4).
+        if started is None:
+            unknown.append((pid, name, "content matches but process start time is unreadable", None))
+        elif started + START_MTIME_GRACE_SECONDS < os.path.getmtime(path):
+            suspect.append((pid, name, "file modified after process start; parsed version unverifiable", started))
         else:
             fresh += 1
 
@@ -122,8 +138,9 @@ def main():
         return 2
     stale, unknown, suspect, fresh, supervisors = sweep(sys.argv[1])
     for bucket, label in ((stale, "STALE"), (unknown, "UNKNOWN"), (suspect, "SUSPECT")):
-        for pid, name, why in bucket:
-            print("%s\t%s\t%s\t%s" % (label, pid, name, why))
+        for pid, name, why, started in bucket:
+            print("%s\t%s\t%s\t%s\t%s"
+                  % (label, pid, name, why, "" if started is None else "%.0f" % started))
     print("COUNT\t%d\t%d\t%d\t%d\t%d"
           % (len(stale), len(unknown), len(suspect), fresh, supervisors))
     return 0
