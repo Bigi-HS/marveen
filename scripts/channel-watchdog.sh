@@ -99,7 +99,7 @@ run_once() {
   fi
 
   # --- gate 1: the channels session must EXIST (bridge "running") ---
-  if ! "$TMUX" has-session -t "$SESSION" 2>/dev/null; then
+  if ! "$TMUX" has-session -t "=$SESSION" 2>/dev/null; then
     log "session $SESSION not present -- systemd/supervisor owns (re)start; watchdog no-op"
     return 0
   fi

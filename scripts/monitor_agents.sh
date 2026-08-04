@@ -33,7 +33,7 @@
 #   If the monitor session already exists, the script reattaches it
 #   as-is (fast path). To pick up agents started AFTER the monitor
 #   session was built, kill it first:
-#     tmux kill-session -t monitor
+#     tmux kill-session -t "=monitor"
 #   then re-run the script. Killing the monitor session does NOT touch
 #   the underlying agent sessions -- it only removes the linked-window
 #   references.
@@ -62,7 +62,7 @@ if [ -n "${MONITOR_READONLY:-}" ]; then
 fi
 
 # Fast path: monitor session already exists -- reattach as-is.
-if tmux has-session -t "$SESSION" 2>/dev/null; then
+if tmux has-session -t "=$SESSION" 2>/dev/null; then
   exec "${ATTACH_CMD[@]}"
 fi
 
@@ -74,7 +74,7 @@ capitalize() {
 AGENTS=()
 LABELS=()
 
-if tmux has-session -t "$MAIN_SESSION" 2>/dev/null; then
+if tmux has-session -t "=$MAIN_SESSION" 2>/dev/null; then
   AGENTS+=("$MAIN_SESSION")
   LABELS+=("$(capitalize "$MAIN_AGENT_ID")")
 fi

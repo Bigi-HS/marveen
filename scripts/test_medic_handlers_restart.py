@@ -38,13 +38,19 @@ class FakeExecutor:
     def run(self, argv, timeout=30.0):
         argv = list(argv)
         self.calls.append(argv)
-        # tmux has-session -t <session>
-        if argv[:2] == ["tmux", "has-session"]:
-            session = argv[-1]
-            return ExecResult(0 if session in self.alive else 1, "", "")
-        # tmux kill-session -t <session>
-        if argv[:2] == ["tmux", "kill-session"]:
-            session = argv[-1]
+        # tmux has-session -t "=<session>" / kill-session -t "=<session>".
+        # The '=' is asserted here rather than tolerated: without it tmux falls
+        # back to prefix matching, and `-t marveen` reaches `marveen-channels`
+        # whenever `marveen` is absent (card OPS-106). A fake that silently
+        # accepted either form would let that regression back in.
+        if argv[:2] in (["tmux", "has-session"], ["tmux", "kill-session"]):
+            target = argv[-1]
+            assert target.startswith("="), (
+                "tmux session target must be anchored, got %r" % target
+            )
+            session = target[1:]
+            if argv[1] == "has-session":
+                return ExecResult(0 if session in self.alive else 1, "", "")
             return ExecResult(1 if session in self.kill_fail else 0, "", "")
         return ExecResult(0, "", "")
 
@@ -66,7 +72,10 @@ class FakeExecutor:
 
     # --- test helpers ---------------------------------------------------------
     def killed_sessions(self):
-        return [c[-1] for c in self.calls if c[:2] == ["tmux", "kill-session"]]
+        # Returns session NAMES with the `=` anchor removed. The anchor itself is
+        # asserted in run(); stripping it here keeps the callers about behaviour
+        # ("which session died") rather than about tmux target syntax.
+        return [c[-1].lstrip("=") for c in self.calls if c[:2] == ["tmux", "kill-session"]]
 
     def all_argv(self):
         return self.calls
@@ -134,7 +143,7 @@ class KillPathTests(unittest.TestCase):
         self.assertEqual(ex.killed_sessions(), ["agent-dave"])
         # The kill is SESSION-scoped: argv is the explicit tmux kill-session form.
         self.assertIn(
-            ["tmux", "kill-session", "-t", "agent-dave"], ex.all_argv()
+            ["tmux", "kill-session", "-t", "=agent-dave"], ex.all_argv()
         )
         self.assertIn("ujrainditva", reply.text)
         self.assertIn("agent-dave", reply.text)
@@ -209,8 +218,8 @@ class SafetyTests(unittest.TestCase):
         handlers_restart.handle(_ctx(ex, "genesis"))
         argv = ex.all_argv()
         for session in ("marveen", "marveen-channels"):
-            chk = argv.index(["tmux", "has-session", "-t", session])
-            kill = argv.index(["tmux", "kill-session", "-t", session])
+            chk = argv.index(["tmux", "has-session", "-t", "=" + session])
+            kill = argv.index(["tmux", "kill-session", "-t", "=" + session])
             self.assertLess(chk, kill, session)
 
 

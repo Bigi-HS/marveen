@@ -24,7 +24,7 @@ function sleep(ms: number): Promise<void> {
 
 function isTmuxSessionAlive(session: string): boolean {
   try {
-    execFileSync(TMUX, ['has-session', '-t', session], { timeout: 3000, stdio: 'ignore' })
+    execFileSync(TMUX, ['has-session', '-t', `=${session}`], { timeout: 3000, stdio: 'ignore' })
     return true
   } catch {
     return false

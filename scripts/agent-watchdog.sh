@@ -99,7 +99,7 @@ under_cap() {
 last_launch=0
 consecutive_short=0
 while true; do
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
     now=$(date +%s); lived=$(( now - last_launch ))
     if [ "$last_launch" -ne 0 ] && [ "$lived" -lt "$CRASH_LOOP_THRESHOLD" ]; then
       consecutive_short=$((consecutive_short + 1))
@@ -111,7 +111,7 @@ while true; do
       consecutive_short=0
       log "$SESSION DOWN (lived ${lived}s) -- cooldown ${COOLDOWN}s"; sleep "$COOLDOWN"
     fi
-    if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
       if under_cap; then
         STAMPS+=("$(date +%s)")
         if [ "$consecutive_short" -ge "$CRASH_LOOP_N" ]; then

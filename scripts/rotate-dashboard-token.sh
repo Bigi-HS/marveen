@@ -28,7 +28,7 @@ echo "New dashboard token written to $TOKEN_PATH (mode 0600)."
 PATH_CURATED="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 export PATH="$PATH_CURATED"
 NODE="$(command -v node)"; TMUXB="$(command -v tmux)"
-env -u TMUX "$TMUXB" kill-session -t marveen 2>/dev/null || true
+env -u TMUX "$TMUXB" kill-session -t "=marveen" 2>/dev/null || true
 env -u TMUX "$TMUXB" new-session -d -s marveen -c "$ROOT" "export PATH=\"$PATH_CURATED\" && exec $NODE dist/index.js"
 echo "marveen dashboard restarted (marveen-channels untouched)."
 
