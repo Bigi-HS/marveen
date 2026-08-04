@@ -2,7 +2,7 @@
 """To-Do widget freshness write-heartbeat (spec FS-AC4).
 
 Checks each owner's most recent write to todo_items and, if it is older than the
-threshold (default 26h = 93600s), emits an inter-agent "FRESHNESS ALERT" to
+threshold (default 36h = 129600s), emits an inter-agent "FRESHNESS ALERT" to
 marveen so the fleet can investigate a wedged Claudia/Hibiki. This is the
 deterministic MECHANISM; wiring it to run hourly is a deploy step:
 
@@ -38,7 +38,7 @@ DEFAULT_TOKEN = "store/.dashboard-token"
 # alert is not mis-attributed (overridable at deploy via --from).
 DEFAULT_FROM = "forge"
 OWNERS = ("claudia", "hibiki")
-THRESHOLD_SECONDS = 93600  # 26h (FS-AC4)
+THRESHOLD_SECONDS = 129600  # 36h (FS-AC4; widened from 26h: 24h cycle + 12h margin for outage/restart delays)
 # Suppress a repeat alert for the same ongoing outage within this window.
 REALERT_SUPPRESS_SECONDS = 23 * 3600
 MESSAGES_URL = "http://localhost:3420/api/messages"
@@ -76,9 +76,15 @@ def _load_state(path: Path) -> dict:
 
 def _alert_content(owner: str, ago: int) -> str:
     hours = ago // 3600
+    # Distinguish delayed-task (36-72h) from likely-dead-agent (72h+).
+    # The daily todo-write task runs at 07:00; a delay of 12h+ could be an outage
+    # rather than an agent failure -- phrase the alert accordingly.
+    if hours < 72:
+        detail = "Daily write task appears delayed or missed. Verify the task ran and the agent is healthy."
+    else:
+        detail = "No write in an extended period -- agent may be down or task permanently broken."
     return (
-        f"FRESHNESS ALERT: {owner} has not written to todo_items in {hours}h. "
-        f"Check agent health."
+        f"FRESHNESS ALERT: {owner} has not written to todo_items in {hours}h. {detail}"
     )
 
 
