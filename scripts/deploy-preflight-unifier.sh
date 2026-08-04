@@ -221,7 +221,13 @@ else
       fi
       fail "C3 rollback: rollback.sh would restore ${backup_sha:0:8}${behind} but live is ${DEPLOYED_TIP:0:8} -- there is no rollback point for the build that is actually running. Run: $BACKUP_CMD"
     elif cmp -s "$picked/index.js" dist/index.js; then
-      pass "C3 rollback: rollback.sh would restore $picked = live build ${DEPLOYED_TIP:0:8}, and it is byte-identical to the current dist"
+      # Age is printed because through the documented path (scripts/deploy-backup.sh)
+      # this backup was created seconds ago by the same command that is now
+      # checking it, so the PASS proves less than it looks like. A reader of the
+      # GO request must be able to tell "verified a pre-existing rollback point"
+      # from "created three seconds ago" (devil-advocate DA-23). Byte identity is
+      # likewise guaranteed on that path, so it is corroboration, not evidence.
+      pass "C3 rollback: rollback.sh would restore $picked = live build ${DEPLOYED_TIP:0:8}, byte-identical to the current dist (backup age: $(( ($(date +%s) - $(stat -c %Y "$picked")) ))s)"
     else
       # Not a failure: the documented order is backup-then-build, so once the new
       # artifact is built dist legitimately differs from the rollback point. Byte
@@ -301,14 +307,30 @@ else
   # in the moment -- the surest way to teach the fleet to skip it, which is the
   # failure this whole PR is about.
   #
-  # So the backlog is carved out explicitly, by process START TIME, and the
-  # carve-out is dated: after GRACE_EXPIRES it stops applying and the backlog
-  # fails like anything else. A carve-out without an expiry is how a known
-  # exception becomes permanent silence.
+  # So the backlog is carved out explicitly, and the carve-out is dated: after
+  # GRACE_EXPIRES it stops applying and the backlog fails like anything else. A
+  # carve-out without an expiry is how a known exception becomes permanent
+  # silence.
   #
-  # Anything started AFTER the cutoff is NEW staleness -- exactly what the check
-  # is for -- and fails. The supervisor never gets the carve-out: it is the
-  # process that deploys everything else.
+  # BOTH sides of the relation must predate the cutoff. Staleness is a relation
+  # between a process and a FILE, and the first version keyed on process start
+  # time alone -- which cannot see the failure this whole gate exists for. Land
+  # a real change in a watchdog today and the process that has run since 07-11
+  # goes stale for a NEW reason, but its sweep line is byte-identical to a
+  # backlog line, so it would be waved through as "known" for the whole grace
+  # week (thor N7, devil-advocate DA-22). Requiring the script's last
+  # modification to predate the cutoff too makes the grace cover exactly the
+  # triaged set and nothing else: the moment any of those files changes, that
+  # process fails.
+  #
+  # mtime rather than the last commit time: mtime also catches uncommitted
+  # operational drift in a live watchdog, which is a real state here and one a
+  # commit-time check would silently forgive. Its usual objection -- checkout
+  # churn -- does not apply, because git only rewrites files whose content
+  # actually changes. Where they disagree, mtime errs toward failing.
+  #
+  # The supervisor never gets the carve-out: it is the process that deploys
+  # everything else.
   KNOWN_STALE_BEFORE="2026-08-01 00:00:00"
   GRACE_EXPIRES="2026-08-11"
   GRACE_CARD="ff114a06"
@@ -316,31 +338,49 @@ else
   grace_active=1
   [ "$(date +%Y-%m-%d)" \< "$GRACE_EXPIRES" ] || grace_active=0
 
-  n_new_stale=0; n_old_stale=0; sup_stale=0
-  while IFS=$'\t' read -r label pid script why started; do
+  n_new_stale=0; n_old_stale=0; sup_stale=0; sup_suspect=0
+  suspect_lines=""
+  # Tab is an IFS-WHITESPACE character, so `IFS=$'\t' read` collapses runs of
+  # tabs and an empty field silently shifts every field after it -- an empty
+  # start time would be read as the mtime. Translating to a non-whitespace
+  # delimiter first makes empty fields survive as empty fields. US (0x1f) cannot
+  # occur in the sweep's output. Found by mutation-testing this parser, not by
+  # reading it.
+  while IFS=$'\037' read -r label pid script why started mtime; do
+    if [ "$label" = "SUSPECT" ]; then
+      # Named, not just counted. The supervisor is normally in this bucket
+      # DURING a deploy -- a branch switch rewrites the file while it runs -- so
+      # burying it in a bulk count waived the one process the comment above says
+      # is never waived (thor N8, devil-advocate DA-21).
+      suspect_lines="${suspect_lines}      - pid $pid $script"$'\n'
+      [ "$script" = "fleet-supervisor.sh" ] && sup_suspect=$((sup_suspect + 1))
+      continue
+    fi
     [ "$label" = "STALE" ] || continue
     if [ "$script" = "fleet-supervisor.sh" ]; then sup_stale=$((sup_stale + 1)); continue; fi
-    # An unreadable start time cannot prove the process predates the cutoff, so
-    # it counts as new -- the carve-out has to fail closed like everything else.
-    if [ "$grace_active" -eq 1 ] && [ -n "$started" ] && [ "$started" -lt "$cutoff_epoch" ]; then
+    # An unreadable timestamp cannot prove anything predates the cutoff, so it
+    # counts as new -- the carve-out fails closed like everything else.
+    if [ "$grace_active" -eq 1 ] \
+       && [ -n "$started" ] && [ "$started" -lt "$cutoff_epoch" ] \
+       && [ -n "$mtime" ]   && [ "$mtime"   -lt "$cutoff_epoch" ]; then
       n_old_stale=$((n_old_stale + 1))
     else
       n_new_stale=$((n_new_stale + 1))
     fi
-  done <<< "$c5_report"
+  done <<< "$(printf '%s' "$c5_report" | tr '\t' '\037')"
 
   if [ "$sup_stale" -gt 0 ]; then
     fail "C5a supervisor-freshness: the running fleet-supervisor is executing code that no longer matches disk -- every supervisor change is INERT. This is never waived; restart it before deploying."
   fi
   if [ "$n_new_stale" -gt 0 ]; then
     if [ "$grace_active" -eq 1 ]; then
-      fail "C5a process-freshness: $n_new_stale process(es) started after $KNOWN_STALE_BEFORE are running code that no longer matches disk -- this is NEW staleness, not the known backlog. Their deployed changes are INERT until restarted."
+      fail "C5a process-freshness: $n_new_stale process(es) are running code that no longer matches disk and are NOT covered by the $GRACE_CARD backlog -- either the process or its script is newer than $KNOWN_STALE_BEFORE, or a timestamp was unreadable. This is NEW staleness; those deployed changes are INERT until each process is restarted."
     else
       fail "C5a process-freshness: $n_new_stale process(es) running code that no longer matches disk. The $GRACE_CARD backlog grace expired on $GRACE_EXPIRES, so the pre-existing ones are no longer carved out."
     fi
   fi
   if [ "$n_old_stale" -gt 0 ]; then
-    warn "C5a process-freshness: $n_old_stale pre-existing stale process(es) (started before $KNOWN_STALE_BEFORE) -- known backlog, staged restart tracked as card $GRACE_CARD. This carve-out EXPIRES $GRACE_EXPIRES and then fails."
+    warn "C5a process-freshness: $n_old_stale pre-existing stale process(es) -- both the process and its script predate $KNOWN_STALE_BEFORE, so this is the triaged backlog on card $GRACE_CARD. Carve-out EXPIRES $GRACE_EXPIRES, then fails."
   fi
   if [ "${n_stale:-0}" -eq 0 ]; then
     pass "C5a process-freshness: all $n_fresh repo shell process(es) run current on-disk code"
@@ -350,8 +390,17 @@ else
   if [ "${n_unknown:-0}" -gt 0 ]; then
     fail "C5b process-freshness: $n_unknown process(es) could not be verified -- unverified is not clean"
   fi
+  if [ "$sup_suspect" -gt 0 ]; then
+    # For the supervisor, "cannot tell" has to read as "restart it". An
+    # unnecessary supervisor restart costs seconds; a missed one is the whole
+    # incident this gate was written for. Asking the operator to judge whether
+    # the change was substantive would be asking for a judgement about the
+    # running version on information the sweep has just declared unobtainable.
+    fail "C5c supervisor: the running fleet-supervisor matches disk NOW, but its script changed after the process started, so the version bash actually parsed cannot be established. Restart it rather than guess -- this is not waived either."
+  fi
   if [ "${n_suspect:-0}" -gt 0 ]; then
-    warn "C5c process-freshness: $n_suspect process(es) match on disk but their file changed after they started -- restart if the change was substantive"
+    warn "C5c process-freshness: $n_suspect process(es) match on disk but their file changed after they started -- the parsed version is unverifiable from outside, so restart them if the deploy touched their script:
+${suspect_lines%$'\n'}"
   fi
   # A supervisor that is not running at all is a worse state than a stale one.
   if [ "${n_sup:-0}" -eq 0 ]; then

@@ -70,7 +70,35 @@ TIP=$(tr -d '[:space:]' < "$TIP_FILE")
 git cat-file -e "${TIP}^{commit}" 2>/dev/null || {
   echo "BACKUP ERROR: ${TIP:0:8} from $TIP_FILE is not a commit in this repo" >&2; exit 2; }
 
+# The label is only meaningful if the dist being copied really was built from
+# the tip named in store/.deployed-tip. Nothing ties those two together, so if
+# the operator builds BEFORE taking the backup -- step 1 before step 0 -- this
+# would stamp the NEW build with the OLD sha and produce a rollback point that
+# restores the build you are rolling back FROM, reported with the gate's most
+# reassuring message (devil-advocate DA-23). The author made exactly that
+# ordering mistake earlier on 2026-08-04.
+#
+# HEAD == deployed tip is the cheap proxy: at a genuine pre-GO the live tree is
+# still on the deployed code. It does NOT cover an isolated-worktree build, where
+# the main tree never moves -- only a build stamp closes that, tracked separately.
+HEAD_SHA=$(git rev-parse HEAD 2>/dev/null)
+if [ "$HEAD_SHA" != "$TIP" ]; then
+  echo "BACKUP ERROR: working tree is at ${HEAD_SHA:0:8} but store/.deployed-tip says ${TIP:0:8}." >&2
+  echo "  The tree has moved past the deployed build, so dist/ may already be the NEW build and" >&2
+  echo "  labelling it ${TIP:0:8} would create a rollback point to the build you are replacing." >&2
+  echo "  Take the backup BEFORE checking out and building (skill step 0, then step 1)." >&2
+  exit 2
+fi
+
+# Two runs in the same second would otherwise share a directory and merge into
+# each other. The name must stay exactly YYYYmmdd-HHMMSS -- rollback.sh's
+# auto-pick glob has no room for a suffix -- so wait for the next second rather
+# than decorate the name (thor N10).
 DEST="$BACKUP_ROOT/$(date +%Y%m%d-%H%M%S)"
+while [ -e "$DEST" ]; do
+  sleep 1
+  DEST="$BACKUP_ROOT/$(date +%Y%m%d-%H%M%S)"
+done
 mkdir -p "$DEST" || { echo "BACKUP ERROR: cannot create $DEST" >&2; exit 2; }
 
 # Trailing slash on the source: the CONTENTS go in flat, because that is what
@@ -87,6 +115,15 @@ printf '%s\n' "$TIP" > "$DEST/deployed-sha.txt"
 echo "rollback point: $DEST"
 echo "  build        : ${TIP:0:8}"
 echo "  size         : $(du -sh "$DEST" | cut -f1)"
+
+# Reported, not pruned. Deleting rollback points is a destructive act on
+# break-glass artifacts this script did not create, and 29 of the existing ones
+# are the unusable nested-layout kind that OPS-098 has to triage anyway -- doing
+# it silently here would hide that work rather than finish it (thor N9).
+n_backups=$(ls -1d "$BACKUP_ROOT"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9] 2>/dev/null | wc -l)
+if [ "$n_backups" -gt 30 ]; then
+  echo "  NOTE         : $n_backups rollback points under $BACKUP_ROOT ($(du -sh "$BACKUP_ROOT" 2>/dev/null | cut -f1)). Retention + nested-layout triage is card OPS-098."
+fi
 echo
 
 if [ "$RUN_GATE" -eq 0 ]; then

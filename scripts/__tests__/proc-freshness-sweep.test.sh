@@ -12,6 +12,11 @@
 # also matches the checking shell's own wrapper. Both were demonstrated live
 # (thor, devil-advocate) before this rewrite.
 #
+# RESIDUAL, stated rather than glossed over: if the runner is killed hard enough
+# to skip the EXIT trap, the fixtures still live out their bounded lifetime --
+# up to ~120s, not zero. Bounded was the goal; anything running under this root
+# in that window is this test, not a fleet process.
+#
 # Run: bash scripts/__tests__/proc-freshness-sweep.test.sh
 set -u
 
