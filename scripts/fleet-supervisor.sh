@@ -640,7 +640,11 @@ ensure_n8n_kanban_bridge() {
     rm -f "$pid_file"
   fi
   if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start n8n-kanban-bridge.py on 0.0.0.0:3422"; return 0; fi
-  nohup python3 "$bridge" >> "$STORE/n8n-kanban-bridge.log" 2>&1 &
+  # 9>&- so the bridge never inherits the supervisor's single-instance flock fd.
+  # Without it the bridge outlives the supervisor while still holding the lock,
+  # and the next supervisor start aborts with "another fleet-supervisor is
+  # already running" -- observed live 2026-08-04, see the header note above.
+  nohup python3 "$bridge" >> "$STORE/n8n-kanban-bridge.log" 2>&1 9>&- &
   local new_pid=$!
   echo "$new_pid" > "$pid_file"
   [ -n "$wsl_ip" ] && printf 'http://%s:3422\n' "$wsl_ip" > "$url_file"
