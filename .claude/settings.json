@@ -40,7 +40,8 @@
     ],
     "PostToolUse": [
       { "matcher": "mcp__plugin.telegram.telegram__reply", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/ledger-outbound.py\"", "timeout": 15 } ] },
-      { "matcher": "mcp__", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/mcp-output-pi-scan.py\"", "timeout": 8 } ] }
+      { "matcher": "mcp__", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/mcp-output-pi-scan.py\"", "timeout": 8 } ] },
+      { "matcher": "WebSearch|WebFetch", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/mcp-output-pi-scan.py\"", "timeout": 8 } ] }
     ],
     "SessionStart": [
       { "matcher": "startup", "hooks": [

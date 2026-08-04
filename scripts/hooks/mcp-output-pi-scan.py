@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""PostToolUse hook: MCP tool output prompt-injection scan (card 3b59ef3a).
+"""PostToolUse hook: external tool output prompt-injection scan (cards 3b59ef3a, fab26cbe).
 
-Every mcp__* tool result is scanned for prompt-injection patterns (instruction
-override, role hijack, exfil nudge, shell-injection, role spoofing) BEFORE the
-model continues reasoning on the output.
+Every mcp__* tool result AND every WebSearch / WebFetch result is scanned for
+prompt-injection patterns (instruction override, role hijack, exfil nudge,
+shell-injection, role spoofing) BEFORE the model continues reasoning on the output.
+
+Card fab26cbe part B (security audit d4bd6093 #5): WebSearch and WebFetch return
+third-party content on exactly the same trust footing as an MCP tool result, but
+were previously exempt from this scan.
 
 On a match:
   - Appends to store/aidefence.log (same file as pii-injection-scan.py)
@@ -12,7 +16,7 @@ On a match:
 
 Fail-open: any parse error or exception -> exit 0; exceptions are audited to
 aidefence.log so a silently-crashed scanner is distinguishable from "no hits".
-Matcher in settings.json PostToolUse: mcp__
+Matchers in settings.json PostToolUse: `mcp__` and `WebSearch|WebFetch`.
 """
 import sys
 import os
@@ -22,6 +26,11 @@ from datetime import datetime
 
 INSTALL_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 AUDIT_LOG = os.path.join(INSTALL_DIR, "store", "aidefence.log")
+
+# Built-in tools whose output is third-party content (card fab26cbe part B).
+# Kept as an exact-match set, not a prefix: `WebFetch` must be scanned, a future
+# unrelated `WebhookSend` must not be pulled in by accident.
+WEB_TOOLS = frozenset({"WebSearch", "WebFetch"})
 
 # Patterns that indicate a prompt injection attempt embedded in MCP tool output.
 # Ordered from most specific (high-confidence) to more general.
@@ -73,8 +82,11 @@ def _flatten(obj, depth: int = 0) -> str:
                 parts.append(_flatten(item, depth + 1))
         if parts:
             return "\n".join(parts)
-        # Fallback: join all string values
-        return "\n".join(str(v) for v in obj.values() if isinstance(v, str))
+        # Fallback: recurse into every value. Recursing (rather than keeping only
+        # top-level strings) matters for WebSearch/WebFetch shapes, where the text
+        # lives in a nested list of result objects and a string-only fallback
+        # would flatten to "" and silently scan nothing (card fab26cbe part B).
+        return "\n".join(_flatten(v, depth + 1) for v in obj.values())
     return str(obj)
 
 
@@ -105,8 +117,9 @@ def main() -> None:
         sys.exit(0)
 
     tool_name = payload.get("tool_name") or ""
-    # Only fire on mcp__ tools (PostToolUse matcher also filters, but belt+suspenders)
-    if not tool_name.startswith("mcp__"):
+    # Fire on mcp__ tools and on the built-in web ingestion tools (card fab26cbe
+    # part B). The PostToolUse matcher also filters; belt+suspenders.
+    if not (tool_name.startswith("mcp__") or tool_name in WEB_TOOLS):
         sys.exit(0)
 
     tool_response = payload.get("tool_response")
