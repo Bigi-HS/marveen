@@ -48,6 +48,7 @@ cd "$REPO" || { echo "cannot cd $REPO" >&2; exit 2; }
 
 FAILED=0
 WARNED=0
+NOTHING_TO_DEPLOY=0
 RESULTS=()
 
 pass() { RESULTS+=("PASS  $1"); }
@@ -100,6 +101,7 @@ else
     if [ -z "$target_sha" ]; then
       fail "C2 deployed-tip: cannot resolve target $TARGET"
     elif [ "$DEPLOYED_TIP" = "$target_sha" ]; then
+      NOTHING_TO_DEPLOY=1
       warn "C2 deployed-tip: already at $TARGET (${target_sha:0:8}) -- nothing to deploy"
     elif git merge-base --is-ancestor "$DEPLOYED_TIP" "$target_sha" 2>/dev/null; then
       behind=$(git rev-list --count "${DEPLOYED_TIP}..${target_sha}")
@@ -112,8 +114,16 @@ fi
 echo
 
 # --- C3: rollback backup for the CURRENT deployed tip ----------------------
+#
+# Pre-GO, the deployed tip is the build that is currently live, so the rollback
+# point must match it. Once a deploy has completed the tip is advanced to the new
+# build and the newest backup legitimately carries the PREVIOUS tip -- which is
+# exactly the right rollback point. Failing there would be a false alarm, so C3
+# is skipped whenever C2 already reported that there is nothing to deploy.
 echo "--- C3: rollback backup ---"
-if [ -z "$DEPLOYED_TIP" ]; then
+if [ "$NOTHING_TO_DEPLOY" -eq 1 ]; then
+  RESULTS+=("SKIP  C3 backup: nothing to deploy (C2) -- the newest backup carries the previous tip by design")
+elif [ -z "$DEPLOYED_TIP" ]; then
   fail "C3 backup: skipped, deployed tip unknown (C2 failed)"
 else
   short_tip="${DEPLOYED_TIP:0:7}"
