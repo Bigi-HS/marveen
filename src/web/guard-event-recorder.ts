@@ -18,6 +18,10 @@ let guardKey: Buffer | undefined
 
 function loadOrCreateGuardKey(): Buffer {
   if (guardKey) return guardKey
+  // Track why we are rotating so the warn is specific and always fires when a
+  // pre-existing key is discarded.  A missing file (first start) is silent --
+  // that is not a rotation.
+  let reason: string | null = null
   try {
     if (existsSync(GUARD_KEY_PATH)) {
       const hex = readFileSync(GUARD_KEY_PATH, 'utf-8').trim()
@@ -30,12 +34,16 @@ function loadOrCreateGuardKey(): Buffer {
           guardKey = buf
           return guardKey
         }
+        reason = 'key file decoded to an unexpected length'
+      } else {
+        reason = 'key file is not 64 hex characters'
       }
     }
   } catch (err) {
-    // Log the rotation so the operator knows historical HMACs are no longer
-    // comparable to rows written after this point.
-    logger.warn({ err }, 'guard-event-recorder: key file invalid or unreadable, rotating to a fresh key -- prior content_hash values are no longer comparable')
+    reason = `key file unreadable: ${(err as Error).message}`
+  }
+  if (reason) {
+    logger.warn({ reason }, 'guard-event-recorder: rotating to a fresh key -- prior content_hash values are no longer comparable')
   }
   const fresh = randomBytes(32)
   mkdirSync(join(PROJECT_ROOT, 'store'), { recursive: true })
@@ -88,4 +96,10 @@ export function recordGuardEvent(input: GuardEventInput, nowSec?: number): void 
 // verified without touching the on-disk key file.
 export function _setGuardKeyForTest(key: Buffer): void {
   guardKey = key
+}
+
+// Exposed for tests: clears the cached key so the next call to loadOrCreateGuardKey
+// reads from disk (needed to test the garbage-key-file path).
+export function _resetGuardKeyForTest(): void {
+  guardKey = undefined
 }

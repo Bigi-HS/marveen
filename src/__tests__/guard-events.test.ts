@@ -2,10 +2,15 @@
 // Tests 1-7 from spec section 10. Test 8 (memories-filter pattern names) is
 // covered by SEC-034 (Dave's card) once containsSuspiciousContent is refactored.
 
-import { describe, it, expect, beforeEach, afterAll } from 'vitest'
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest'
 import { Readable } from 'node:stream'
-import { rmSync } from 'node:fs'
+import { rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { createHmac, randomBytes } from 'node:crypto'
+
+vi.mock('../logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
+}))
 import {
   initDatabase,
   insertGuardEvent,
@@ -16,7 +21,9 @@ import {
   GUARD_EVENT_RETENTION_SECS,
 } from '../db.js'
 import { tryHandleGuardEvents } from '../web/routes/guard-events.js'
-import { _setGuardKeyForTest, recordGuardEvent } from '../web/guard-event-recorder.js'
+import { _setGuardKeyForTest, _resetGuardKeyForTest, recordGuardEvent } from '../web/guard-event-recorder.js'
+import { logger } from '../logger.js'
+import { STORE_DIR } from '../config.js'
 
 const TEST_DB = '/tmp/test-guard-events.db'
 
@@ -280,5 +287,30 @@ describe('DA-35 -- hex key validation', () => {
     recordGuardEvent({ mechanism: 'messages-guard', route: '/api/messages', verdict: 'PASS', fromAgent: null, toAgent: null, patternIds: null, maxSeverity: null, findingCount: 0, content: 'test' })
     const [row] = getGuardEvents(1)
     expect(row.content_hash).not.toBe(zeroKeyHmac)
+  })
+})
+
+// ── DA-35 follow-up: garbage key file triggers logger.warn ────────────────────
+// The validation guard catches corrupt key files WITHOUT throwing, so the old
+// catch-only warn was never reached.  The reason-variable pattern fires on any
+// code path that discards a pre-existing key.
+
+describe('DA-35 -- key rotation warn fires on corrupt key file (not just I/O errors)', () => {
+  const GUARD_KEY_PATH = join(STORE_DIR, '.guard-hmac-key')
+
+  afterAll(() => rmSync(GUARD_KEY_PATH, { force: true }))
+
+  it('warn fires when key file contains garbage (non-hex) and names the reason', async () => {
+    writeFileSync(GUARD_KEY_PATH, 'z'.repeat(64), 'utf-8') // 64 non-hex chars
+    _resetGuardKeyForTest()
+    vi.mocked(logger.warn).mockClear()
+
+    recordGuardEvent({ mechanism: 'messages-guard', route: '/api/messages', verdict: 'PASS', fromAgent: null, toAgent: null, patternIds: null, maxSeverity: null, findingCount: 0, content: 'probe' })
+
+    const warnCalls = vi.mocked(logger.warn).mock.calls
+    expect(warnCalls.length).toBeGreaterThan(0)
+    const rotationCall = warnCalls.find(([meta]) => typeof meta === 'object' && meta !== null && 'reason' in meta)
+    expect(rotationCall).toBeDefined()
+    expect((rotationCall![0] as { reason: string }).reason).toMatch(/not 64 hex/)
   })
 })
