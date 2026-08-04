@@ -18,6 +18,19 @@
 # intact afterwards -- a gate that returns the right exit code after already
 # running the rsync would pass a verdict-only test.
 #
+# One piece of the script is deliberately unreachable from here rather than
+# untested: the post-restore `dist/index.js` assertion. The layout gate above it
+# has already proved the source contains index.js, and `set -e` catches a non-zero
+# rsync, so no input through the public interface can reach that assertion with it
+# failing. It is defence in depth against a future edit that weakens the gate, not
+# a gap in coverage -- do not read its absence from this suite as missing tests.
+#
+# Several assertions below check the MESSAGE, not just the exit code, on purpose.
+# The blocker Dave found on PR#464 (case 9) exited 2 both before and after the fix
+# -- before, because `set -e` killed the script at an assignment; after, because
+# the error branch finally runs. An exit-code-only test would have stayed green
+# straight through a break-glass tool that printed nothing at all.
+#
 # Run: bash scripts/__tests__/rollback-layout-gate.test.sh
 set -u
 
@@ -133,6 +146,50 @@ if [[ ! -f "$VICTIM/dist/index.js" && -f "$VICTIM/dist/dist/index.js" ]]; then
   pass "unguarded nested restore destroys the live build and leaves dist/dist/ (the defect)"
 else
   fail "expected the unguarded restore to destroy dist/: $(find "$VICTIM/dist" -type f)"
+fi
+
+# --- 9. no backup at all. THE case that must speak: under `set -euo pipefail` the
+#        `ls` inside all_backups exits 2 on an empty root, pipefail promotes it and
+#        set -e killed the script at the assignment -- before the documented error
+#        branch could print. rc was 2 either way, so assert the MESSAGE. (Dave,
+#        PR#464 review; measured pre-fix as rc=2 with zero bytes of output.)
+EMPTY_ROOT="$WORK/emptyroot"; mkdir -p "$EMPTY_ROOT"
+out=$(ROLLBACK_REPO="$REPO" ROLLBACK_BACKUP_ROOT="$EMPTY_ROOT" bash "$RB" 2>&1); rc=$?
+if [[ $rc -eq 2 ]] && echo "$out" | grep -q "no valid backup dir found" && dist_intact; then
+  pass "empty backup root -> refuses AND says why (not a silent death)"
+else
+  fail "empty root must print 'no valid backup dir found' (rc=$rc, out=[$out])"
+fi
+
+# --- 10. same shape, one step worse: the root does not exist at all.
+out=$(ROLLBACK_REPO="$REPO" ROLLBACK_BACKUP_ROOT="$WORK/does-not-exist" bash "$RB" 2>&1); rc=$?
+if [[ $rc -eq 2 ]] && echo "$out" | grep -q "no valid backup dir found"; then
+  pass "missing backup root -> refuses AND says why"
+else
+  fail "missing root must print the error (rc=$rc, out=[$out])"
+fi
+
+# --- 11. an unreadable dir must not be diagnosed as EMPTY: `ls -A` failing and
+#         succeeding-with-no-output look identical, but one is fixed with chmod and
+#         the other by choosing a different backup.
+mk 20260606-000000; echo "OLD BUILD" > "$BR/20260606-000000/index.js"
+chmod 000 "$BR/20260606-000000"
+out=$(run "$BR/20260606-000000"); rc=$?
+chmod 755 "$BR/20260606-000000"
+if [[ $rc -eq 2 ]] && echo "$out" | grep -qi "permissions" && ! echo "$out" | grep -q "EMPTY" && dist_intact; then
+  pass "unreadable backup -> refused as unreadable, not misreported as empty"
+else
+  fail "unreadable should be distinguished from empty (rc=$rc): $out"
+fi
+
+# --- 12. --audit was only recognised as argv[1], so '--check --audit' died with
+#         "unknown option" -- a flag that works only in one position is a trap in a
+#         tool used under pressure.
+out=$(run --check --audit); rc=$?
+if [[ $rc -eq 0 ]] && ! echo "$out" | grep -q "unknown option"; then
+  pass "--audit is position-independent among the flags"
+else
+  fail "--audit should parse in any flag position (rc=$rc): $out"
 fi
 
 echo

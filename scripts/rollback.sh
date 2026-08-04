@@ -49,13 +49,21 @@ REPO="${ROLLBACK_REPO:-/home/domin/marveen}"
 BACKUP_ROOT="${ROLLBACK_BACKUP_ROOT:-/tmp/marveen-deploy-backups}"
 
 # classify <dir> -> "<class>\t<detail>"
-#   flat    usable as-is
-#   nested  the dist is one level down; detail is the usable path
-#   empty   nothing to restore -- restoring would delete the live build
-#   other   a layout this script cannot interpret; detail lists what is there
+#   flat        usable as-is
+#   nested      the dist is one level down; detail is the usable path
+#   empty       nothing to restore -- restoring would delete the live build
+#   unreadable  cannot be inspected, so it cannot be vouched for
+#   other       a layout this script cannot interpret; detail lists what is there
 classify() {
   local d="$1"
-  if [[ -f "$d/index.js" ]]; then
+  # Checked first so an unreadable dir is not reported as EMPTY: `ls -A` failing
+  # and `ls -A` succeeding with no output are indistinguishable downstream, and
+  # the two need opposite responses (fix the permissions here, pick a different
+  # backup there). Sending the operator after the wrong fix during an incident is
+  # the same failure this gate exists to prevent.
+  if [[ ! -r "$d" || ! -x "$d" ]]; then
+    printf 'unreadable\t-\n'
+  elif [[ -f "$d/index.js" ]]; then
     printf 'flat\t%s\n' "$d"
   elif [[ -z "$(ls -A "$d" 2>/dev/null)" ]]; then
     printf 'empty\t-\n'
@@ -74,8 +82,20 @@ all_backups() {
   ls -1d "$BACKUP_ROOT"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9] 2>/dev/null | sort
 }
 
+CHECK_ONLY=0
+ALLOW_UNLABELLED=0
+AUDIT=0
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --audit)      AUDIT=1; shift ;;
+    --check)      CHECK_ONLY=1; shift ;;
+    --unlabelled) ALLOW_UNLABELLED=1; shift ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+
 # --- audit mode: read-only, safe to run at any time ---------------------------
-if [[ "${1:-}" == "--audit" ]]; then
+if [[ "$AUDIT" -eq 1 ]]; then
   echo "backup layout audit: $BACKUP_ROOT"
   n_ok=0; n_bad=0
   while read -r d; do
@@ -86,29 +106,36 @@ if [[ "${1:-}" == "--audit" ]]; then
       flat)   n_ok=$((n_ok + 1));   printf '  USABLE     %s  %s\n' "$(basename "$d")" "${sha:-(unlabelled)}" ;;
       nested) n_bad=$((n_bad + 1)); printf '  NOT USABLE %s  %s  nested -- restore from %s instead\n' "$(basename "$d")" "${sha:-(unlabelled)}" "$detail" ;;
       empty)  n_bad=$((n_bad + 1)); printf '  DANGEROUS  %s  EMPTY -- restoring from it deletes the live dist and puts nothing back\n' "$(basename "$d")" ;;
+      unreadable) n_bad=$((n_bad + 1)); printf '  NOT USABLE %s  unreadable (permissions) -- cannot be classified\n' "$(basename "$d")" ;;
       *)      n_bad=$((n_bad + 1)); printf '  NOT USABLE %s  unrecognised layout: %s\n' "$(basename "$d")" "$detail" ;;
     esac
   done <<< "$(all_backups)"
   echo "  -- $n_ok usable, $n_bad not usable as-is"
+  # Inventory completeness: all_backups only walks the canonical YYYYMMDD-HHMMSS
+  # glob, which is the right denominator for auto-pick but not for "what is on
+  # disk". Say so, otherwise the audit reads as a full inventory when it is not.
+  n_all=$(find "$BACKUP_ROOT" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
+  n_skipped=$(( n_all - n_ok - n_bad ))
+  if [[ "$n_skipped" -gt 0 ]]; then
+    echo "  -- $n_skipped further dir(s) not counted: the name is not YYYYMMDD-HHMMSS, so"
+    echo "     auto-pick can never reach them. Pass one as an argument to classify it."
+  fi
   exit 0
 fi
-
-CHECK_ONLY=0
-ALLOW_UNLABELLED=0
-while [[ "${1:-}" == --* ]]; do
-  case "$1" in
-    --check)      CHECK_ONLY=1; shift ;;
-    --unlabelled) ALLOW_UNLABELLED=1; shift ;;
-    *) echo "unknown option: $1" >&2; exit 2 ;;
-  esac
-done
 
 # --- locate backup dir ---
 if [[ -n "${1:-}" ]]; then
   BACKUP_DIR="$1"
 else
   # Most recent YYYYMMDD-HHMMSS timestamped dir (not symbolic dirs like last-prev-tip.txt)
-  BACKUP_DIR=$(all_backups | tail -1)
+  #
+  # `|| true` is load-bearing: on an empty or missing BACKUP_ROOT the `ls` inside
+  # all_backups exits 2, pipefail promotes that to the pipeline, and `set -e` kills
+  # the script AT THIS ASSIGNMENT -- before the friendly error below can ever run.
+  # The exit code was 2 either way, so only the message was lost: a break-glass tool
+  # dying in complete silence at the moment it is reached for. Found by Dave on
+  # PR#464; the regression test asserts the MESSAGE, not just the code.
+  BACKUP_DIR=$(all_backups | tail -1 || true)
 fi
 
 if [[ -z "${BACKUP_DIR:-}" || ! -d "$BACKUP_DIR" ]]; then
@@ -132,6 +159,11 @@ case "$CLASS" in
     echo "ROLLBACK ERROR: $BACKUP_DIR is EMPTY." >&2
     echo "  Restoring from it would delete every file in $REPO/dist/ and put nothing back." >&2
     echo "  Pick another backup: 'bash scripts/rollback.sh --audit' lists the usable ones." >&2
+    exit 2 ;;
+  unreadable)
+    echo "ROLLBACK ERROR: $BACKUP_DIR cannot be read (permissions)." >&2
+    echo "  Its contents cannot be classified, so restoring from it would be a guess." >&2
+    echo "  Fix the permissions and re-run, or pick another backup with --audit." >&2
     exit 2 ;;
   *)
     echo "ROLLBACK ERROR: $BACKUP_DIR has no top-level index.js and no dist/index.js." >&2
