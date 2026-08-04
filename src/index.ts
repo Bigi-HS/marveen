@@ -14,7 +14,7 @@ import { join } from 'node:path'
 import { execFileSync, execSync } from 'node:child_process'
 import type { Server as HttpServer } from 'node:http'
 import { STORE_DIR, PID_FILENAME, WEB_PORT, MAIN_AGENT_ID, RESPAWN_ENABLED } from './config.js'
-import { initDatabase, deleteOldMessages } from './db.js'
+import { initDatabase, deleteOldMessages, deleteOldGuardEvents } from './db.js'
 import { initCodetreeDatabase } from './web/codetree-db.js'
 import { startMessageRetentionSweep } from './web/message-retention.js'
 import { runTierDemotionSweep } from './noa-memory.js'
@@ -364,6 +364,7 @@ function releaseLock(): void {
 // digest timers and release the pidfile on the way out).
 let decayInterval: NodeJS.Timeout | null = null
 let messageRetentionInterval: NodeJS.Timeout | null = null
+let guardEventRetentionInterval: NodeJS.Timeout | null = null
 let digestTimer: NodeJS.Timeout | null = null
 let digestInterval: NodeJS.Timeout | null = null
 let heartbeatStarted = false
@@ -383,6 +384,7 @@ const shutdown = (): void => {
     try { stopChannelRequestWatcher() } catch (err) { logger.warn({ err }, 'stopChannelRequestWatcher threw during shutdown') }
     if (decayInterval) clearInterval(decayInterval)
     if (messageRetentionInterval) clearInterval(messageRetentionInterval)
+    if (guardEventRetentionInterval) clearInterval(guardEventRetentionInterval)
     if (digestTimer) clearTimeout(digestTimer)
     if (digestInterval) clearInterval(digestInterval)
 
@@ -476,6 +478,24 @@ async function main(): Promise<void> {
   }
   messageRetentionInterval = startMessageRetentionSweep()
   logger.info('Agent-message retention sweep beallitva (24 oras)')
+
+  // guard_events retention sweep (card SEC-030). Same shape as the
+  // agent_messages sweep above: without a call site the table grows without
+  // bound as soon as the recorder is live. Boot prune is guarded so a sweep
+  // error can never abort startup; the interval swallows its own tick errors.
+  const pruneGuardEvents = (): void => {
+    try {
+      const removed = deleteOldGuardEvents(Math.floor(Date.now() / 1000))
+      if (removed > 0) {
+        logger.info({ removed }, 'guard-events-retention: pruned aged guard_events rows')
+      }
+    } catch (err) {
+      logger.warn({ err }, 'guard-events-retention: sweep failed (non-fatal)')
+    }
+  }
+  pruneGuardEvents()
+  guardEventRetentionInterval = setInterval(pruneGuardEvents, 24 * 60 * 60 * 1000)
+  logger.info('Guard-event retention sweep beallitva (24 oras)')
 
   // Daily digest at 23:00. Timer handles kept so shutdown can drop them.
   function scheduleDailyDigest() {
