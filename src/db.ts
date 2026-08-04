@@ -361,6 +361,32 @@ export function initDatabase(dbPathOverride?: string): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tool_log_session ON tool_call_log(session_id, created_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tool_log_ts ON tool_call_log(created_at)`)
 
+  // --- Guard event log (SEC-030 / card 90c8c74b) ---
+  // Records every AIDefence evaluation on both filter call sites so the
+  // false-positive question can be answered from data. Content is NEVER stored
+  // (excerpt field explicitly excluded); only a keyed HMAC of the trimmed content
+  // is kept (so equality can be tested without the content being recoverable).
+  // Retention: 90 days (separate sweep -- must NOT be caught by the 7-day
+  // agent_messages sweep, which would destroy the denominator).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS guard_events (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at    INTEGER NOT NULL,
+      mechanism     TEXT NOT NULL,
+      route         TEXT NOT NULL,
+      verdict       TEXT NOT NULL,
+      from_agent    TEXT,
+      to_agent      TEXT,
+      pattern_ids   TEXT,
+      max_severity  TEXT,
+      finding_count INTEGER NOT NULL DEFAULT 0,
+      content_hash  TEXT NOT NULL,
+      content_len   INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_guard_events_ts ON guard_events(created_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_guard_events_verdict ON guard_events(mechanism, verdict, created_at)`)
+
   // --- To-Do widget (todo_items) ---
   // A focused daily-execution surface, separate from the kanban backlog. Two
   // owner-scoped lists (Claudia general/learning, Hibiki fitness). ALL CHECK
@@ -1459,5 +1485,103 @@ export function analyzeWorkflowCandidates(sinceSecs = 3600, minToolCalls = 5, ga
 export function pruneToolCallLog(olderThanSecs = 86400): void {
   const cutoff = Math.floor(Date.now() / 1000) - olderThanSecs
   db.prepare('DELETE FROM tool_call_log WHERE created_at < ?').run(cutoff)
+}
+
+// ── Guard events (SEC-030) ───────────────────────────────────────────────────
+
+export interface InsertGuardEventInput {
+  created_at: number
+  mechanism: string
+  route: string
+  verdict: string
+  from_agent: string | null
+  to_agent: string | null
+  pattern_ids: string | null
+  max_severity: string | null
+  finding_count: number
+  content_hash: string
+  content_len: number
+}
+
+export interface GuardEventRow extends InsertGuardEventInput {
+  id: number
+}
+
+export function insertGuardEvent(row: InsertGuardEventInput): void {
+  db.prepare(
+    `INSERT INTO guard_events
+       (created_at, mechanism, route, verdict, from_agent, to_agent,
+        pattern_ids, max_severity, finding_count, content_hash, content_len)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    row.created_at, row.mechanism, row.route, row.verdict,
+    row.from_agent, row.to_agent, row.pattern_ids, row.max_severity,
+    row.finding_count, row.content_hash, row.content_len,
+  )
+}
+
+export const GUARD_EVENT_RETENTION_SECS = 90 * 24 * 60 * 60
+
+export function deleteOldGuardEvents(nowSec: number, retentionSec = GUARD_EVENT_RETENTION_SECS): number {
+  return db.prepare('DELETE FROM guard_events WHERE created_at < ?').run(nowSec - retentionSec).changes
+}
+
+export function getGuardEvents(limit = 100, sinceSec?: number): GuardEventRow[] {
+  if (sinceSec !== undefined) {
+    return db.prepare(
+      'SELECT * FROM guard_events WHERE created_at >= ? ORDER BY created_at DESC, id DESC LIMIT ?'
+    ).all(sinceSec, limit) as GuardEventRow[]
+  }
+  return db.prepare(
+    'SELECT * FROM guard_events ORDER BY created_at DESC, id DESC LIMIT ?'
+  ).all(limit) as GuardEventRow[]
+}
+
+export interface GuardEventSummary {
+  mechanism: string
+  verdict: string
+  pattern_ids: string | null
+  count: number
+}
+
+export interface GuardEventPeerSummary {
+  from_agent: string | null
+  to_agent: string | null
+  count: number
+}
+
+export interface GuardEventHashSummary {
+  content_hash: string
+  count: number
+}
+
+export function getGuardEventSummary(days = 14): {
+  byMechanismVerdict: GuardEventSummary[]
+  byPattern: GuardEventSummary[]
+  byPeer: GuardEventPeerSummary[]
+  retryPressure: GuardEventHashSummary[]
+} {
+  const since = Math.floor(Date.now() / 1000) - days * 86400
+  const byMechanismVerdict = db.prepare(
+    `SELECT mechanism, verdict, NULL as pattern_ids, COUNT(*) as count
+       FROM guard_events WHERE created_at >= ? GROUP BY mechanism, verdict`
+  ).all(since) as GuardEventSummary[]
+  const byPattern = db.prepare(
+    `SELECT mechanism, pattern_ids, NULL as verdict, COUNT(*) as count
+       FROM guard_events
+       WHERE verdict <> 'PASS' AND pattern_ids IS NOT NULL AND created_at >= ?
+       GROUP BY mechanism, pattern_ids ORDER BY count DESC`
+  ).all(since) as GuardEventSummary[]
+  const byPeer = db.prepare(
+    `SELECT from_agent, to_agent, COUNT(*) as count
+       FROM guard_events WHERE verdict = 'BLOCK' AND created_at >= ?
+       GROUP BY from_agent, to_agent ORDER BY count DESC`
+  ).all(since) as GuardEventPeerSummary[]
+  const retryPressure = db.prepare(
+    `SELECT content_hash, COUNT(*) as count FROM guard_events
+       WHERE verdict = 'BLOCK' AND created_at >= ?
+       GROUP BY content_hash HAVING count > 1 ORDER BY count DESC`
+  ).all(since) as GuardEventHashSummary[]
+  return { byMechanismVerdict, byPattern, byPeer, retryPressure }
 }
 
