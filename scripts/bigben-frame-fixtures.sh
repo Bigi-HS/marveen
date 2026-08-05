@@ -15,8 +15,20 @@
 
 set -uo pipefail
 
-FF=/home/domin/marveen/store/whisper-env/env/bin/ffmpeg   # NOT on $PATH
-ANALYZE=/home/domin/marveen/scripts/bigben-frame-analysis.py
+FF=/home/domin/marveen/store/whisper-env/env/bin/ffmpeg   # NOT on $PATH, fixed venv location
+
+# Resolve the analyzer NEXT TO THIS SCRIPT, never by absolute repo path. A
+# reviewer runs this from a worktree or a fresh clone; an absolute path would
+# silently measure whatever sits in the main working tree instead of the
+# checkout under review -- i.e. report PASS for code it never executed.
+# Computed BEFORE any cd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ANALYZE="$SCRIPT_DIR/bigben-frame-analysis.py"
+
+if [ ! -f "$ANALYZE" ]; then
+  echo "analyzer not found next to this script: $ANALYZE" >&2
+  exit 1
+fi
 
 VERIFY=0
 [ "${1:-}" = "--verify" ] && { VERIFY=1; shift; }
