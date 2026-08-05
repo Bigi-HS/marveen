@@ -15,6 +15,7 @@ import {
 import { MAIN_CHANNELS_SESSION } from './web/main-agent.js'
 import { toPendingRetryView } from './pending-retries.js'
 import { sendPendingRetryAlert } from './web/pending-retry-alert.js'
+import { sweepStuckTasks } from './web/stuck-task-sentinel.js'
 import { resolveFromPath } from './platform.js'
 
 // Lazy tmux path -- resolved on first use so module load never throws if tmux absent in test env
@@ -714,6 +715,25 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb()): void {
     } else if (result === 'error') {
       logger.warn({ task: task.id, agent: agentName }, 'scheduler: fire error, will retry on next cron match')
     }
+  }
+
+  // Step 3: backstop. Steps 1 and 2 above are the only places `next_run` ever
+  // moves, and they move it on exactly one verdict ('fired'). Every other
+  // outcome leaves an active task pointing at a slot that has already passed,
+  // and two of them ('missing', 'error') do not even leave a retry row behind
+  // to be escalated. This step watches for that OUTCOME regardless of cause.
+  //
+  // Runs LAST and unconditionally: anything that fired this tick has already
+  // rolled forward, so the sentinel never sees a task mid-flight, and a tick
+  // with nothing due -- which is exactly what the 08-05 incident looked like
+  // from in here -- still gets checked.
+  //
+  // Wrapped because it is a monitor: a watcher that can abort the sweep it
+  // watches is worse than no watcher.
+  try {
+    sweepStuckTasks(nowS, db)
+  } catch (err) {
+    logger.warn({ err }, 'scheduler: stuck-task sentinel failed, sweep continues')
   }
 }
 

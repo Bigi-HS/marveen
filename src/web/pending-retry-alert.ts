@@ -12,15 +12,11 @@
 // and any future caller can reach it without importing the legacy runner, and
 // so the delivery seam is injectable for tests -- a test must never be able to
 // send a real Telegram message.
-import { join } from 'node:path'
-import { PROJECT_ROOT, ALLOWED_CHAT_ID } from '../config.js'
 import { logger } from '../logger.js'
 import { classifyTelegramSendError, type PendingRetryView } from '../pending-retries.js'
-import { readFileOr } from './agent-config.js'
-import { sendTelegramMessage } from './telegram.js'
+import { defaultDeliver, type AlertDeliver } from './operator-alert.js'
 
-/** Delivery seam. Injected in tests; defaults to the real Telegram send. */
-export type AlertDeliver = (text: string) => Promise<void>
+export type { AlertDeliver }
 
 type AlertDb = {
   prepare(sql: string): {
@@ -46,14 +42,6 @@ function releaseAlert(db: AlertDb, taskName: string, agentName: string): void {
     `UPDATE pending_task_retries SET alert_sent_at = NULL
       WHERE task_name = ? AND agent_name = ?`
   ).run(taskName, agentName)
-}
-
-function defaultDeliver(text: string): Promise<void> {
-  const envContent = readFileOr(join(PROJECT_ROOT, '.env'), '')
-  const token = envContent.match(/TELEGRAM_BOT_TOKEN=(.+)/)?.[1]?.trim()
-  if (!token) return Promise.reject(new Error('Telegram API 401: no TELEGRAM_BOT_TOKEN'))
-  if (!ALLOWED_CHAT_ID.trim()) return Promise.reject(new Error('Telegram API 400: empty ALLOWED_CHAT_ID'))
-  return sendTelegramMessage(token, ALLOWED_CHAT_ID, text)
 }
 
 export function formatPendingRetryAlert(view: PendingRetryView): string {
