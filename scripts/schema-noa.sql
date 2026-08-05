@@ -293,6 +293,15 @@ CREATE TABLE pending_task_retries (
   UNIQUE(task_name, agent_name)
 );
 
+-- Stuck-next_run sentinel (CORE/57cf5022). One row per stuck EPISODE, not per
+-- task: the row is deleted as soon as the task's next_run advances again, so a
+-- task that wedges a second time alerts a second time. alert_sent_at is the cap.
+CREATE TABLE IF NOT EXISTS stuck_task_alerts (
+  task_id       TEXT PRIMARY KEY,
+  first_seen    INTEGER NOT NULL,
+  alert_sent_at INTEGER
+);
+
 CREATE TABLE task_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,

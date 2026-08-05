@@ -29,6 +29,10 @@ vi.mock('../web/pending-retry-alert.js', () => ({
   sendPendingRetryAlert: vi.fn(),
 }))
 
+vi.mock('../web/stuck-task-sentinel.js', () => ({
+  sweepStuckTasks: vi.fn(),
+}))
+
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
   return {
@@ -62,6 +66,7 @@ const {
 
 const { isSessionReadyForPrompt, sendPromptToSession } = await import('../web/agent-process.js')
 const { sendPendingRetryAlert } = await import('../web/pending-retry-alert.js')
+const { sweepStuckTasks } = await import('../web/stuck-task-sentinel.js')
 
 // ---------------------------------------------------------------------------
 // DB setup
@@ -827,5 +832,61 @@ describe('runSweepTick: stuck-retry escalation', () => {
     expect(vi.mocked(sendPendingRetryAlert)).not.toHaveBeenCalled()
     expect(db.prepare(`SELECT * FROM pending_task_retries WHERE task_name='stuck-recovers'`).all())
       .toHaveLength(0)
+  })
+})
+
+describe('runSweepTick: stuck next_run sentinel', () => {
+  beforeEach(() => {
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+    vi.mocked(sendPromptToSession).mockReset()
+    vi.mocked(sweepStuckTasks).mockReset()
+  })
+
+  function addTask(db: ReturnType<typeof getNoaDb>, id: string, nextRunOffsetS: number): number {
+    const nowS = Math.floor(Date.now() / 1000)
+    db.prepare(`
+      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES (?, 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?)
+    `).run(id, nowS + nextRunOffsetS, nowS - 100)
+    return nowS
+  }
+
+  it('runs the sentinel on every tick, in seconds', () => {
+    const db = getNoaDb()
+    const nowS = addTask(db, 'anything', 3600)
+
+    runSweepTick(60000, db)
+
+    expect(vi.mocked(sweepStuckTasks)).toHaveBeenCalledOnce()
+    const [passedNowS, passedDb] = vi.mocked(sweepStuckTasks).mock.calls[0]!
+    expect(passedDb).toBe(db)
+    // Seconds, not milliseconds. Feeding ms to a seconds-valued comparison is
+    // what made the live pending-retry API report an age of 20649 days.
+    expect(passedNowS).toBeGreaterThanOrEqual(nowS)
+    expect(passedNowS).toBeLessThan(nowS + 10)
+  })
+
+  it('runs the sentinel even when no task is due -- an empty sweep is when a frozen next_run hides', () => {
+    // The 08-05 incident looked exactly like this from inside the sweep: the
+    // cron select returned nothing to fire, so a detector living inside the
+    // fire loop would have seen a quiet, healthy tick.
+    const db = getNoaDb()
+    addTask(db, 'far-future', 30 * 24 * 3600)
+
+    runSweepTick(60000, db)
+
+    expect(vi.mocked(sweepStuckTasks)).toHaveBeenCalledOnce()
+  })
+
+  it('does not let a sentinel failure abort the sweep', () => {
+    // The sentinel is a monitor. If it throws (bad row, locked DB), the
+    // scheduled tasks must still fire -- a watcher that can take down the
+    // thing it watches is worse than no watcher.
+    const db = getNoaDb()
+    addTask(db, 'must-still-fire', -60)
+    vi.mocked(sweepStuckTasks).mockImplementation(() => { throw new Error('sentinel exploded') })
+
+    expect(() => runSweepTick(60000, db)).not.toThrow()
+    expect(vi.mocked(sendPromptToSession)).toHaveBeenCalled()
   })
 })
