@@ -21,6 +21,111 @@ _spec.loader.exec_module(_mod)
 
 consensus_zone = _mod.consensus_zone
 NoDetectionError = _mod.NoDetectionError
+zone_confidence = _mod.zone_confidence
+zone_share = _mod.zone_share
+summary_of = _mod.summary_of
+
+
+class TestZoneConfidence(unittest.TestCase):
+    """confidence must span the full [0,1] range and ignore the overlapping centre."""
+
+    def test_runner_up_zero_is_full_confidence(self):
+        """One quadrant scoring alone is unambiguous."""
+        totals = {"top-left": 0.8, "top-right": 0.0, "bottom-left": 0.0,
+                  "bottom-right": 0.0, "center": 0.4}
+        self.assertEqual(zone_confidence(totals), 1.0)
+
+    def test_tied_quadrants_is_zero_confidence(self):
+        """Indistinguishable leaders must not read as confident."""
+        totals = {"top-left": 0.5, "top-right": 0.5, "bottom-left": 0.2,
+                  "bottom-right": 0.1, "center": 0.9}
+        self.assertEqual(zone_confidence(totals), 0.0)
+
+    def test_center_does_not_suppress_a_clear_quadrant(self):
+        """A dominant 'center' score must not drag a clear quadrant lead down.
+
+        This is the whole reason centre is excluded: it overlaps all four
+        quadrants, so leaving it in made every margin look small.
+
+        Numbers chosen so the two implementations DISAGREE: excluding centre
+        gives (1.0-0.2)/1.0 = 0.8, including it gives (1.5-1.0)/1.5 = 0.333.
+        With centre at 5.0 both happened to return 0.8 and the test was a
+        rubber stamp -- caught by mutation-testing it on 08-05.
+        """
+        totals = {"top-left": 1.0, "top-right": 0.2, "bottom-left": 0.2,
+                  "bottom-right": 0.2, "center": 1.5}
+        self.assertEqual(zone_confidence(totals), 0.8)
+
+    def test_all_zero_is_zero_not_crash(self):
+        """No signal must return 0.0, never divide by zero."""
+        totals = {k: 0.0 for k in ("top-left", "top-right", "bottom-left",
+                                   "bottom-right", "center")}
+        self.assertEqual(zone_confidence(totals), 0.0)
+
+    def test_confidence_outranges_zone_share(self):
+        """Regression guard for the 08-05 recalibration (card CONT-052).
+
+        zone_share could not separate a perfect detection from garbage: it was
+        capped near 0.5 either way. confidence must react far more strongly to
+        the same input, otherwise the fix did not land.
+        """
+        clear = {"top-left": 1.0, "top-right": 0.0, "bottom-left": 0.0,
+                 "bottom-right": 0.0, "center": 0.5}
+        murky = {"top-left": 0.51, "top-right": 0.50, "bottom-left": 0.50,
+                 "bottom-right": 0.50, "center": 0.50}
+        self.assertGreater(
+            zone_confidence(clear) - zone_confidence(murky),
+            zone_share(clear, "top-left") - zone_share(murky, "top-left"),
+        )
+
+    def test_zone_share_is_not_a_probability(self):
+        """Documented caveat, pinned: share stays low even when unambiguous."""
+        totals = {"top-left": 1.0, "top-right": 0.0, "bottom-left": 0.0,
+                  "bottom-right": 0.0, "center": 1.0}
+        self.assertEqual(zone_share(totals, "top-left"), 0.5)
+
+
+class TestSummarySchema(unittest.TestCase):
+    """stdout must stay a strict subset of the --out file schema."""
+
+    def _result(self):
+        return {
+            "video": "x.mp4", "resolution": "1280x720", "duration_s": 6.0,
+            "frames_analyzed": 4, "speaker_zone": "top-left",
+            "safe_overlay_zone": "bottom-right",
+            "overlay_position_ffmpeg": {"x": "w*0.55", "y": "h*0.60"},
+            "confidence": 0.67, "zone_share": 0.47,
+            "zone_scores": {}, "frame_details": [], "hyperframes_hint": {},
+        }
+
+    def test_summary_fields_exist_in_file_schema(self):
+        """Every shared key must carry the same name AND value in both views."""
+        result = self._result()
+        summary = summary_of(result)
+        for key in _mod.SUMMARY_FIELDS:
+            self.assertIn(key, result, f"{key} missing from file schema")
+            self.assertEqual(summary[key], result[key], f"{key} diverged")
+
+    def test_confidence_present_in_both_views(self):
+        """The pre-08-05 bug: confidence existed only on stdout."""
+        result = self._result()
+        self.assertIn("confidence", result)
+        self.assertIn("confidence", summary_of(result))
+
+    def test_legacy_flat_keys_retained(self):
+        """Old stdout consumers must not break."""
+        summary = summary_of(self._result())
+        self.assertEqual(summary["overlay_ffmpeg_x"], "w*0.55")
+        self.assertEqual(summary["overlay_ffmpeg_y"], "h*0.60")
+
+    def test_no_detection_summary_has_null_coords(self):
+        """overlay_position_ffmpeg is None on no-detection; must not raise."""
+        summary = summary_of({
+            "speaker_zone": "no-detection", "safe_overlay_zone": "no-detection",
+            "overlay_position_ffmpeg": None, "confidence": 0.0, "zone_share": 0.0,
+        })
+        self.assertIsNone(summary["overlay_ffmpeg_x"])
+        self.assertEqual(summary["confidence"], 0.0)
 
 
 class TestConsensusZoneZeroFrame(unittest.TestCase):

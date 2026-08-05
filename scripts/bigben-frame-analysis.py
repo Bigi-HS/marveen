@@ -54,6 +54,96 @@ class NoDetectionError(Exception):
     """Raised when frame_analyses is empty or all composite scores are zero."""
 
 
+def flat_pixels(img):
+    """Flat pixel list for an image.
+
+    Pillow deprecated Image.getdata() (removal scheduled 2027-10-15) in favour
+    of get_flattened_data(). Prefer the new API, fall back for older Pillow.
+    """
+    getter = getattr(img, "get_flattened_data", None)
+    if getter is not None:
+        return list(getter())
+    return list(img.getdata())
+
+
+def zone_confidence(totals):
+    """Margin-based confidence that the winning quadrant is the right one.
+
+    Range [0.0, 1.0], computed over the four DISJOINT quadrants only: "center"
+    overlaps all four, so including it would shrink every margin and make an
+    unambiguous detection look uncertain.
+
+        confidence = (best - runner_up) / best
+
+    0.0 = the two leading quadrants are indistinguishable (no usable signal)
+    1.0 = the runner-up scored zero (unambiguous)
+
+    MEASURED 2026-08-05 on synthetic ground-truth fixtures (media-fixture-verify
+    skill; regenerate with scripts/bigben-frame-fixtures.sh):
+
+        blob in one corner, zone correct ..... 0.659, 0.674, 0.675
+        blob dead centre ..................... 0.009   (-> speaker_zone "center")
+        full-frame test pattern, no subject .. 0.014
+        near-black frame, no subject ......... 0.000
+
+    Signal and noise separate cleanly, with an empty band from 0.014 to 0.659,
+    so `confidence < 0.10` is a safe "no usable signal, do not trust
+    safe_overlay_zone" gate. CAVEAT: the fixtures are easy by construction
+    (hard-edged bright blob on flat background), so 0.66 is an optimistic
+    ceiling, not a typical true positive -- real talking-head footage will
+    score lower and the threshold should be re-measured against it before it
+    gates anything expensive.
+
+    Do NOT gate on `zone_share`: it spans only 0.20 (near-black garbage) to
+    0.49 (perfect detection), so no threshold can separate the two, and the
+    naive `< 0.5` test that its name invites would reject every input.
+    """
+    quads = sorted(
+        (v for k, v in totals.items() if k != "center"), reverse=True
+    )
+    if len(quads) < 2 or quads[0] <= 0:
+        return 0.0
+    return round((quads[0] - quads[1]) / quads[0], 3)
+
+
+def zone_share(totals, speaker_zone):
+    """Winning zone's share of the summed composite scores.
+
+    NOT a probability and NOT a confidence: QUADRANTS contains five OVERLAPPING
+    zones, so the denominator double-counts the centre region and the value is
+    capped well below 1.0 even for a perfect detection. Kept for continuity of
+    the output schema only -- gate on `confidence` instead.
+    """
+    total = sum(totals.values())
+    if total <= 0:
+        return 0.0
+    return round(totals[speaker_zone] / total, 3)
+
+
+SUMMARY_FIELDS = (
+    "speaker_zone",
+    "safe_overlay_zone",
+    "overlay_position_ffmpeg",
+    "confidence",
+    "zone_share",
+)
+
+
+def summary_of(result):
+    """stdout view of the full result.
+
+    Kept a strict SUBSET of the --out file schema, with identical field names,
+    so a consumer can switch between the two without a translation table. The
+    flat `overlay_ffmpeg_x` / `overlay_ffmpeg_y` keys are the pre-08-05 stdout
+    contract and are retained as duplicates for backward compatibility.
+    """
+    summary = {k: result[k] for k in SUMMARY_FIELDS}
+    pos = result.get("overlay_position_ffmpeg") or {}
+    summary["overlay_ffmpeg_x"] = pos.get("x")
+    summary["overlay_ffmpeg_y"] = pos.get("y")
+    return summary
+
+
 def get_video_info(video_path):
     cmd = [
         FFPROBE, "-v", "quiet", "-print_format", "json",
@@ -111,15 +201,15 @@ def analyze_frame(frame_path, width, height):
         # Visual complexity: edge density via filter
         gray = region.convert("L")
         edges = gray.filter(ImageFilter.FIND_EDGES)
-        edge_pixels = list(edges.getdata())
+        edge_pixels = flat_pixels(edges)
         edge_score = sum(edge_pixels) / (len(edge_pixels) * 255)
 
         # Brightness (faces tend to be brighter than background in talking-head videos)
-        brightness_pixels = list(gray.getdata())
+        brightness_pixels = flat_pixels(gray)
         brightness = sum(brightness_pixels) / (len(brightness_pixels) * 255)
 
         # Skin-tone heuristic: look for reddish/warm pixels
-        rgb_pixels = list(region.getdata())
+        rgb_pixels = flat_pixels(region)
         skin_count = sum(
             1 for r, g, b in rgb_pixels
             if r > 95 and g > 40 and b > 20
@@ -203,6 +293,8 @@ def main():
             "speaker_zone": "no-detection",
             "safe_overlay_zone": "no-detection",
             "overlay_position_ffmpeg": None,
+            "confidence": 0.0,
+            "zone_share": 0.0,
             "zone_scores": {},
             "frame_details": frame_analyses,
             "hyperframes_hint": {"note": str(exc)},
@@ -211,13 +303,7 @@ def main():
             with open(args.out, "w") as f:
                 json.dump(no_det, f, indent=2)
             print(f"Result saved to: {args.out}", file=sys.stderr)
-        print(json.dumps({
-            "speaker_zone": "no-detection",
-            "safe_overlay_zone": "no-detection",
-            "overlay_ffmpeg_x": None,
-            "overlay_ffmpeg_y": None,
-            "confidence": 0.0,
-        }, indent=2))
+        print(json.dumps(summary_of(no_det), indent=2))
         return
 
     overlay_pos = OVERLAY_POSITIONS.get(safe_zone, OVERLAY_POSITIONS["top-right"])
@@ -230,6 +316,8 @@ def main():
         "speaker_zone": speaker_zone,
         "safe_overlay_zone": safe_zone,
         "overlay_position_ffmpeg": overlay_pos,
+        "confidence": zone_confidence(totals),
+        "zone_share": zone_share(totals, speaker_zone),
         "zone_scores": {k: round(v, 4) for k, v in totals.items()},
         "frame_details": frame_analyses,
         "hyperframes_hint": {
@@ -244,15 +332,7 @@ def main():
             json.dump(result, f, indent=2)
         print(f"Result saved to: {args.out}", file=sys.stderr)
 
-    print(json.dumps({
-        "speaker_zone": speaker_zone,
-        "safe_overlay_zone": safe_zone,
-        "overlay_ffmpeg_x": overlay_pos["x"],
-        "overlay_ffmpeg_y": overlay_pos["y"],
-        "confidence": round(
-            totals[speaker_zone] / (sum(totals.values()) or 1), 3
-        )
-    }, indent=2))
+    print(json.dumps(summary_of(result), indent=2))
 
 
 if __name__ == "__main__":
