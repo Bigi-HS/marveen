@@ -1,0 +1,8 @@
+# tmux-anchor-lint baseline
+# Generated: see card OPS/043b3ca5
+# Date: 2026-08-04
+# Each entry is an ACCEPTED PRE-EXISTING violation (not a regression).
+# New violations not in this list cause exit 1.
+# Remove an entry here once the violation is fixed.
+# Do NOT add new violations here -- fix them instead.
+#

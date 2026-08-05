@@ -239,19 +239,58 @@ def iter_files(root: str, paths: list[str]):
         yield os.path.join(root, rel)
 
 
+def _load_baseline(path: str) -> set[str]:
+    """Load accepted file:line keys from a baseline file.
+
+    Lines starting with '#' are comments. Each other non-empty line is a
+    'filepath:linenum' key (the first two colon-separated fields of the linter's
+    output). Blank lines are ignored. Any finding whose key matches a baseline
+    entry is suppressed and does NOT count as a new violation -- it is expected
+    pre-existing debt tracked on a card, not a new regression.
+
+    The baseline does NOT suppress advisory findings; those are always shown.
+    """
+    keys = set()
+    try:
+        with open(path) as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # Accept bare 'file:lineno' or full 'file:lineno: description'
+                parts = line.split(":", 2)
+                if len(parts) >= 2:
+                    keys.add(f"{parts[0]}:{parts[1]}")
+    except FileNotFoundError:
+        print(f"error: baseline file not found: {path}", file=sys.stderr)
+        raise SystemExit(2)
+    return keys
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
     ap.add_argument("--strict", action="store_true",
                     help="also fail on the send-keys/capture-pane/display-message family "
                          "(flip this on once that sweep lands)")
+    ap.add_argument("--baseline", metavar="FILE",
+                    help="path to baseline file; findings matching a baseline entry are "
+                         "suppressed and do not cause exit 1 (pre-existing debt, not regressions)")
+    ap.add_argument("--write-baseline", metavar="FILE",
+                    help="write the current enforced findings as a baseline file and exit 0")
     ap.add_argument("paths", nargs="*")
     args = ap.parse_args()
     root = os.path.abspath(args.root)
 
+    baseline: set[str] = set()
+    if args.baseline:
+        baseline = _load_baseline(args.baseline)
+
     findings = 0
+    suppressed = 0
     advisories = []
     scanned = 0
+    new_finding_lines = []
     for path in iter_files(root, args.paths):
         try:
             with open(path, errors="replace") as f:
@@ -263,10 +302,31 @@ def main() -> int:
         for n, line in enumerate(lines, 1):
             enforced, advisory = check_line_split(line)
             for problem in enforced:
-                findings += 1
-                print(f"{rel}:{n}: {problem}")
+                key = f"{rel}:{n}"
+                if key in baseline:
+                    suppressed += 1
+                else:
+                    findings += 1
+                    new_finding_lines.append(f"{rel}:{n}: {problem}")
+                    print(f"{rel}:{n}: {problem}")
             for problem in advisory:
                 advisories.append(f"{rel}:{n}: {problem}")
+
+    if args.write_baseline:
+        with open(args.write_baseline, "w") as fh:
+            fh.write("# tmux-anchor-lint baseline\n")
+            fh.write("# Generated: see card OPS/043b3ca5\n")
+            fh.write("# Date: 2026-08-04\n")
+            fh.write("# Each entry is an ACCEPTED PRE-EXISTING violation (not a regression).\n")
+            fh.write("# New violations not in this list cause exit 1.\n")
+            fh.write("# Remove an entry here once the violation is fixed.\n")
+            fh.write("# Do NOT add new violations here -- fix them instead.\n")
+            fh.write("#\n")
+            for entry in new_finding_lines:
+                key = ":".join(entry.split(":")[:2])
+                fh.write(f"{key}\n")
+        print(f"baseline written: {args.write_baseline} ({findings} entries)", file=sys.stderr)
+        return 0
 
     if advisories:
         # Printed in full, never summarised away. A bound that is not shown reads
@@ -278,8 +338,11 @@ def main() -> int:
         for a in advisories:
             print(a)
 
-    print(f"\nscanned {scanned} file(s), {findings} enforced finding(s), "
-          f"{len(advisories)} advisory", file=sys.stderr)
+    summary_parts = [f"scanned {scanned} file(s)", f"{findings} new finding(s)"]
+    if suppressed:
+        summary_parts.append(f"{suppressed} baselined (expected pre-existing debt)")
+    summary_parts.append(f"{len(advisories)} advisory")
+    print(f"\n{', '.join(summary_parts)}", file=sys.stderr)
     if findings:
         return 1
     if args.strict and advisories:
