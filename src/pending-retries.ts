@@ -26,31 +26,55 @@
  * How long a busy-skipped scheduled task can wait before we escalate the
  * operator via Telegram. The retry itself continues forever: this is the
  * alerting threshold, not an abandon threshold.
+ *
+ * UNITS: seconds, matching what the sweep actually writes into
+ * `pending_task_retries` (`Math.floor(Date.now() / 1000)`). This module used
+ * to be milliseconds while the writer had already moved to seconds, so the
+ * live `/api/schedules/pending` reported `ageDays=20649.6` (56 years) and
+ * `alertDue=true` for every row -- a backstop that produced a number nobody
+ * could act on. One unit, named in the identifier, at every boundary.
  */
-export const ALERT_THRESHOLD_MS = 60 * 60 * 1000
+export const ALERT_THRESHOLD_S = 60 * 60
+
+/**
+ * Coerce a stored timestamp to seconds.
+ *
+ * Rows written before the sweep migration hold MILLISECONDS. Left alone, such
+ * a row makes `now - firstAttempt` hugely negative, which reads as "not old
+ * enough yet" and silently never alerts -- the exact failure this module
+ * exists to prevent. The cutoff (1e11 s ~= year 5138) cannot be a real
+ * second-valued timestamp, so the discrimination is unambiguous.
+ */
+export function toSeconds(ts: number): number {
+  if (!Number.isFinite(ts)) return ts
+  return ts > 1e11 ? Math.floor(ts / 1000) : ts
+}
 
 /**
  * Decide whether the alerting layer should fire a Telegram notification
  * for a pending retry row.
  *
  * Returns true only when:
- *   - the row has been waiting longer than `thresholdMs`, AND
+ *   - the row has been waiting longer than `thresholdS`, AND
  *   - no alert is currently stamped (`alertSentAt` is null).
  *
  * Callers are responsible for stamping `alert_sent_at` before the Telegram
  * send (race guard against concurrent ticks) and clearing it on delivery
  * failure so the next tick can retry.
+ *
+ * All timestamps are SECONDS (see ALERT_THRESHOLD_S).
  */
 export function shouldSendAlert(
-  now: number,
-  firstAttempt: number,
+  nowS: number,
+  firstAttemptS: number,
   alertSentAt: number | null,
-  thresholdMs: number = ALERT_THRESHOLD_MS,
+  thresholdS: number = ALERT_THRESHOLD_S,
 ): boolean {
   if (alertSentAt != null) return false
-  if (!Number.isFinite(firstAttempt) || firstAttempt <= 0) return false
-  if (!Number.isFinite(now) || now < firstAttempt) return false
-  return now - firstAttempt > thresholdMs
+  const first = toSeconds(firstAttemptS)
+  if (!Number.isFinite(first) || first <= 0) return false
+  if (!Number.isFinite(nowS) || nowS < first) return false
+  return nowS - first > thresholdS
 }
 
 /**
@@ -102,6 +126,11 @@ export interface PendingRetryView {
  * Project a raw DB row into the UI view, including the derived `ageMs`
  * (for display) and `alertDue` (= shouldSendAlert). Keeping the derivation
  * here means the UI never has to carry the alert policy.
+ *
+ * `nowS` and the row timestamps are SECONDS; `ageMs` stays milliseconds
+ * because that is the established response contract the dashboard renders
+ * (web/app.js formatPendingAge). The unit conversion happens here, once,
+ * instead of being assumed differently on each side.
  */
 export function toPendingRetryView(
   row: {
@@ -114,8 +143,8 @@ export function toPendingRetryView(
     last_reason: string | null
     alert_sent_at: number | null
   },
-  now: number,
-  thresholdMs: number = ALERT_THRESHOLD_MS,
+  nowS: number,
+  thresholdS: number = ALERT_THRESHOLD_S,
 ): PendingRetryView {
   return {
     id: row.id,
@@ -126,7 +155,7 @@ export function toPendingRetryView(
     attemptCount: row.attempt_count,
     lastReason: row.last_reason,
     alertSentAt: row.alert_sent_at,
-    ageMs: Math.max(0, now - row.first_attempt),
-    alertDue: shouldSendAlert(now, row.first_attempt, row.alert_sent_at, thresholdMs),
+    ageMs: Math.max(0, nowS - toSeconds(row.first_attempt)) * 1000,
+    alertDue: shouldSendAlert(nowS, row.first_attempt, row.alert_sent_at, thresholdS),
   }
 }

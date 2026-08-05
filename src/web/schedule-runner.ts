@@ -421,70 +421,17 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
   }
 }
 
-// Fire a Telegram alert when a pending retry has been stuck past the
-// threshold. Stamps `alert_sent_at` BEFORE the network call so concurrent
-// ticks and crash-restarts cannot race into double-alerting on the same
-// attempt. If the send fails, the stamp is cleared so the next tick can
-// retry -- that way a transient Telegram outage or a bad token doesn't
-// silently suppress every future alert on this row. Net semantics:
-// exactly-one stamp per delivery attempt, at-least-once delivery with a
-// 60s retry cadence until success.
-function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
-  // Stamp first. If another tick raced us, markPendingTaskRetryAlert
-  // returns false (the WHERE alert_sent_at IS NULL guards it) and we
-  // skip the send entirely.
-  const claimed = markPendingTaskRetryAlert(view.taskName, view.agentName, nowMs)
-  if (!claimed) return
-
-  // Validate the delivery config BEFORE building/sending. A missing token
-  // or chat_id is a permanent configuration problem -- it will fail
-  // identically on every 60s tick. Earlier this path (token only) cleared
-  // the stamp on failure, so the alert re-fired every minute forever and
-  // spammed the log; and chat_id was never validated at all, so an empty
-  // ALLOWED_CHAT_ID guaranteed a 400 from Telegram on every attempt. Leave
-  // the stamp in place (it acts as the throttle) and log once so the
-  // operator sees the config gap without the spin. The scheduled task
-  // itself keeps retrying regardless -- only this alert is suppressed.
-  const envPath = join(PROJECT_ROOT, '.env')
-  const envContent = readFileOr(envPath, '')
-  const tokenMatch = envContent.match(/TELEGRAM_BOT_TOKEN=(.+)/)
-  const token = tokenMatch?.[1]?.trim()
-  if (!token) {
-    logger.warn({ task: view.taskName, agent: view.agentName }, 'Pending-retry alert suppressed: no TELEGRAM_BOT_TOKEN (config error, stamp kept to avoid 60s spin)')
-    return
-  }
-  if (!ALLOWED_CHAT_ID.trim()) {
-    logger.warn({ task: view.taskName, agent: view.agentName }, 'Pending-retry alert suppressed: empty ALLOWED_CHAT_ID (config error, stamp kept to avoid 60s spin)')
-    return
-  }
-
-  const ageMinutes = Math.floor(view.ageMs / 60000)
-  const firstAttempt = new Date(view.firstAttempt).toLocaleString('hu-HU')
-  const text = [
-    `[Marveen scheduler] A(z) "${view.taskName}" (${view.agentName}) utemezett feladat ${ageMinutes} perce varakozik.`,
-    `Elso probalkozas: ${firstAttempt}.`,
-    'A rendszer tovabb probalkozik; a dashboard /Utemezesek oldalan visszavonhato.',
-  ].join('\n')
-  ;(async () => {
-    try {
-      await sendTelegramMessage(token, ALLOWED_CHAT_ID, text)
-      logger.info({ task: view.taskName, agent: view.agentName, ageMinutes }, 'Pending-retry Telegram alert sent')
-    } catch (err) {
-      // Distinguish a transient failure (network blip, 429, 5xx) from a
-      // permanent one (4xx: bad chat_id / revoked token). Transient ->
-      // clear the per-attempt stamp so the next tick retries. Permanent
-      // -> KEEP the stamp; retrying every 60s would just repeat the same
-      // rejection and spam the log until the config is fixed.
-      const kind = classifyTelegramSendError(err instanceof Error ? err.message : String(err))
-      if (kind === 'transient') {
-        logger.warn({ err, task: view.taskName, agent: view.agentName }, 'Pending-retry alert delivery failed (transient), clearing stamp for retry')
-        clearPendingTaskRetryAlert(view.taskName, view.agentName)
-      } else {
-        logger.warn({ err, task: view.taskName, agent: view.agentName }, 'Pending-retry alert delivery failed (permanent), stamp kept to avoid 60s spin')
-      }
-    }
-  })()
-}
+// The pending-retry escalation used to live here. It now lives in
+// src/web/pending-retry-alert.ts and is called by the live sweep in
+// src/noa-scheduler.ts (card CORE/57cf5022). The copy in this file had zero
+// call sites after the A4 migration while still reading like live code --
+// which is why a stuck task could go 78 hours without telling anyone. Do not
+// reintroduce a second copy here: this module no longer owns the sweep.
+//
+// STILL DEAD below: sendSkipIfBusyExhaustedAlert and the SKIP_IF_BUSY_*
+// constants also lost their call sites in the same migration. They are left
+// in place rather than silently deleted because the bounded-retry policy they
+// encode has not been re-decided; tracked on the same card.
 
 // Send an out-of-band HTTPS alert when a skipIfBusy task has exhausted all
 // bounded retries without the target session freeing up (card 92f763a2).

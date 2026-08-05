@@ -23,6 +23,12 @@ vi.mock('../web/main-agent.js', () => ({
   MAIN_CHANNELS_SESSION: 'marveen-channels',
 }))
 
+// The escalation layer does real network I/O; a test must never be able to
+// send a Telegram message. Mocked so the sweep wiring can be asserted.
+vi.mock('../web/pending-retry-alert.js', () => ({
+  sendPendingRetryAlert: vi.fn(),
+}))
+
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
   return {
@@ -55,6 +61,7 @@ const {
 } = await import('../noa-scheduler.js')
 
 const { isSessionReadyForPrompt, sendPromptToSession } = await import('../web/agent-process.js')
+const { sendPendingRetryAlert } = await import('../web/pending-retry-alert.js')
 
 // ---------------------------------------------------------------------------
 // DB setup
@@ -734,5 +741,91 @@ describe('runSweepTick: parked (un-submitted) prompt', () => {
     const after = getTask('unknown-task', db)!
     expect(after.last_result).toBe('fired')
     expect(after.next_run).toBeGreaterThan(nowS)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Busy escalation restored (card CORE/57cf5022)
+//
+// The A4 migration (8e65ac2) moved the sweep into noa-scheduler.ts and
+// re-implemented the happy path only: the 1-hour operator escalation was left
+// behind in the legacy runner with zero call sites. Measured cost on
+// 2026-08-05: eleven tasks stuck for up to 78 hours, 4802 retries on the worst
+// row, alert_sent_at NULL on every one. Nobody was told, because nothing could.
+// ---------------------------------------------------------------------------
+
+describe('runSweepTick: stuck-retry escalation', () => {
+  beforeEach(() => {
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(false)
+    vi.mocked(sendPromptToSession).mockReset()
+    vi.mocked(sendPendingRetryAlert).mockReset()
+  })
+
+  function stuckRow(db: ReturnType<typeof getNoaDb>, id: string, ageS: number): number {
+    const nowS = Math.floor(Date.now() / 1000)
+    db.prepare(`
+      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES (?, 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?)
+    `).run(id, nowS - 10, nowS - 100)
+    db.prepare(`
+      INSERT INTO pending_task_retries (task_name, agent_name, first_attempt, last_attempt, attempt_count, last_reason)
+      VALUES (?, 'marveen', ?, ?, 1, 'busy')
+    `).run(id, nowS - ageS, nowS - ageS)
+    return nowS
+  }
+
+  it('escalates a retry row that has been stuck past the threshold', () => {
+    const db = getNoaDb()
+    stuckRow(db, 'stuck-long', 2 * 60 * 60) // 2 hours, threshold is 1
+
+    runSweepTick(60000, db)
+
+    expect(vi.mocked(sendPendingRetryAlert)).toHaveBeenCalledOnce()
+    const [view] = vi.mocked(sendPendingRetryAlert).mock.calls[0]!
+    expect(view.taskName).toBe('stuck-long')
+    expect(view.alertDue).toBe(true)
+  })
+
+  it('stays quiet while the row is still inside the threshold', () => {
+    const db = getNoaDb()
+    stuckRow(db, 'stuck-short', 5 * 60) // 5 minutes
+
+    runSweepTick(60000, db)
+
+    expect(vi.mocked(sendPendingRetryAlert)).not.toHaveBeenCalled()
+  })
+
+  it('does not escalate a row that already carries an alert stamp -- one message per row, not one per tick', () => {
+    const db = getNoaDb()
+    const nowS = stuckRow(db, 'stuck-stamped', 5 * 60 * 60)
+    db.prepare(`UPDATE pending_task_retries SET alert_sent_at=? WHERE task_name='stuck-stamped'`).run(nowS - 60)
+
+    runSweepTick(60000, db)
+
+    expect(vi.mocked(sendPendingRetryAlert)).not.toHaveBeenCalled()
+  })
+
+  it('sees the CURRENT attempt_count, not the pre-update snapshot', () => {
+    // The alert decision re-reads the row after updatePendingRetry, so the
+    // escalation reports the attempt count including this tick.
+    const db = getNoaDb()
+    stuckRow(db, 'stuck-count', 3 * 60 * 60)
+
+    runSweepTick(60000, db)
+
+    const [view] = vi.mocked(sendPendingRetryAlert).mock.calls[0]!
+    expect(view.attemptCount).toBe(2)
+  })
+
+  it('does not escalate a row that fires successfully this tick', () => {
+    const db = getNoaDb()
+    stuckRow(db, 'stuck-recovers', 9 * 60 * 60)
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+
+    runSweepTick(60000, db)
+
+    expect(vi.mocked(sendPendingRetryAlert)).not.toHaveBeenCalled()
+    expect(db.prepare(`SELECT * FROM pending_task_retries WHERE task_name='stuck-recovers'`).all())
+      .toHaveLength(0)
   })
 })
