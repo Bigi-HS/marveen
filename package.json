@@ -11,6 +11,7 @@
     "status": "tsx scripts/status.ts",
     "backfill-embeddings": "tsx scripts/backfill-embeddings.ts",
     "schedule": "tsx src/schedule-cli.ts",
+    "pretest": "python3 scripts/lint-tmux-session-targets.py --baseline scripts/lint-tmux-anchor-baseline.txt",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "design:lint": "node scripts/design-wcag-lint.mjs",
