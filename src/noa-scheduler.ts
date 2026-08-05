@@ -415,7 +415,12 @@ export function buildScheduledTaskPrompt(task: ScheduledTask, agentName: string)
 // attemptFireTask (AC-11)
 // ---------------------------------------------------------------------------
 
-type FireResult = 'fired' | 'busy' | 'missing' | 'error'
+// 'parked' is a send that was typed into the composer but never submitted
+// (card CORE/57cf5022). It is deliberately distinct from 'error': the send
+// mechanically succeeded, so the old code counted it as a fire, rolled
+// next_run forward and wrote a task_runs row for a run that never happened.
+// It is treated like 'busy' by the sweep -- retry, do not advance.
+type FireResult = 'fired' | 'busy' | 'missing' | 'error' | 'parked'
 
 // Snapshot the live tmux session names once. Resolved at the top of a sweep tick
 // and shared across every attemptFireTask call so we spawn `tmux list-sessions`
@@ -456,9 +461,25 @@ function attemptFireTask(
 
   try {
     const fullPrompt = buildScheduledTaskPrompt(task, agentName)
-    sendPromptToSession(session, fullPrompt)
+    const verdict = sendPromptToSession(session, fullPrompt)
+
+    // A parked prompt is a MEASURED non-delivery: the text reached the
+    // composer but no turn started. Claiming a fire here is what froze
+    // eleven tasks for up to 78 hours -- next_run rolled forward on a run
+    // that never happened, and the residue left in the composer made every
+    // later task to this agent read as busy. 'unknown' keeps the old
+    // behaviour on purpose: we cannot prove non-delivery, and re-running a
+    // task that did land is the worse error.
+    if (verdict === 'parked') {
+      logger.warn(
+        { task: task.id, agent: agentName, session },
+        'scheduler: prompt parked in composer (never submitted), residue cleared -- not counted as fired',
+      )
+      return 'parked'
+    }
+
     appendTaskRun(task.id, agentName, db)
-    logger.info({ task: task.id, agent: agentName, session }, 'scheduler: task fired')
+    logger.info({ task: task.id, agent: agentName, session, verdict }, 'scheduler: task fired')
 
     // Post-send resubmit: verbatim from schedule-runner.ts (AC-5)
     const marker = task.type === 'heartbeat'
@@ -656,8 +677,11 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb()): void {
 
     if (result === 'fired') {
       rollForwardFired(task, nowMs, nowS, db)
-    } else if (result === 'busy') {
-      insertPendingRetryIfNew(task.id, agentName, nowS, 'busy', db)
+    } else if (result === 'busy' || result === 'parked') {
+      // Same handling, distinct reason: 'parked' names a send that was
+      // written but never submitted, so the retry queue records WHY the
+      // slot was missed instead of blaming a busy peer.
+      insertPendingRetryIfNew(task.id, agentName, nowS, result, db)
     } else if (result === 'missing') {
       logger.warn({ task: task.id, agent: agentName }, 'scheduler: session missing, skipping (no retry)')
     } else if (result === 'error') {

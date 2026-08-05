@@ -633,3 +633,106 @@ describe('recordTriggerFire', () => {
     // in practice the sweep runs in a single transaction per tick, so this is <1s window.
   })
 })
+
+// ---------------------------------------------------------------------------
+// Parked prompt is NOT a fire (card CORE/57cf5022)
+//
+// Live incident 2026-08-04/05: attemptFireTask reported 'fired' for the act of
+// TYPING the prompt, not for its submission. sendPromptToSession's own
+// submit-confirm loop had already given up ("prompt still parked after
+// retries") and threw that verdict away as a log line. Consequence chain:
+// next_run rolled forward and a task_runs row was written for a run that never
+// happened, while the un-submitted draft left in the composer kept the pane
+// non-idle -- so every LATER task to that agent read as busy, forever. Eleven
+// tasks sat with next_run frozen in the past for up to 78 hours.
+// ---------------------------------------------------------------------------
+
+describe('runSweepTick: parked (un-submitted) prompt', () => {
+  beforeEach(() => {
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+    vi.mocked(sendPromptToSession).mockReset()
+  })
+
+  function insertDueTask(db: ReturnType<typeof getNoaDb>, id: string, nowS: number): void {
+    db.prepare(`
+      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES (?, 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?)
+    `).run(id, nowS - 10, nowS - 100)
+  }
+
+  it('does not roll next_run forward when the prompt never got submitted', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    insertDueTask(db, 'parked-task', nowS)
+    vi.mocked(sendPromptToSession).mockReturnValue('parked')
+
+    runSweepTick(60000, db)
+
+    const after = getTask('parked-task', db)!
+    expect(after.next_run).toBe(nowS - 10)
+    expect(after.last_run).toBeNull()
+    expect(after.last_result).not.toBe('fired')
+  })
+
+  it('does not record a task_runs row for a prompt that never got submitted', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    insertDueTask(db, 'parked-norun', nowS)
+    vi.mocked(sendPromptToSession).mockReturnValue('parked')
+
+    runSweepTick(60000, db)
+
+    const runs = db.prepare(`SELECT * FROM task_runs WHERE name='parked-norun'`).all()
+    expect(runs).toHaveLength(0)
+  })
+
+  it('queues the task for retry so it is not silently dropped', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    insertDueTask(db, 'parked-retry', nowS)
+    vi.mocked(sendPromptToSession).mockReturnValue('parked')
+
+    runSweepTick(60000, db)
+
+    const retries = db.prepare(
+      `SELECT * FROM pending_task_retries WHERE task_name='parked-retry'`
+    ).all() as Array<{ last_reason: string }>
+    expect(retries).toHaveLength(1)
+    expect(retries[0]!.last_reason).toBe('parked')
+  })
+
+  it('fires normally on the next tick once the submit lands', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    insertDueTask(db, 'parked-recover', nowS)
+
+    vi.mocked(sendPromptToSession).mockReturnValue('parked')
+    runSweepTick(60000, db)
+    expect(getTask('parked-recover', db)!.next_run).toBe(nowS - 10)
+
+    vi.mocked(sendPromptToSession).mockReturnValue('submitted')
+    runSweepTick(60000, db)
+
+    const after = getTask('parked-recover', db)!
+    expect(after.last_result).toBe('fired')
+    expect(after.next_run).toBeGreaterThan(nowS)
+    expect(db.prepare(`SELECT * FROM pending_task_retries WHERE task_name='parked-recover'`).all())
+      .toHaveLength(0)
+  })
+
+  it('an unconfirmable send (capture failure) still counts as fired -- unknown must not re-run a task', () => {
+    // The opposite failure direction: treating "cannot tell" as "did not
+    // fire" would re-run a task that may already have executed. Only a
+    // MEASURED parked verdict withholds the roll-forward.
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    insertDueTask(db, 'unknown-task', nowS)
+    vi.mocked(sendPromptToSession).mockReturnValue('unknown')
+
+    runSweepTick(60000, db)
+
+    const after = getTask('unknown-task', db)!
+    expect(after.last_result).toBe('fired')
+    expect(after.next_run).toBeGreaterThan(nowS)
+  })
+})
