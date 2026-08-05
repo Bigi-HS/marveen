@@ -731,11 +731,22 @@ const SUBMIT_RETRY_MAX_ATTEMPTS = 2
 const SUBMIT_RETRY_POLL_MS = '0.3'
 
 // Buffer-clear (Ctrl-U) used pre-flight when shouldClearTruncatedPreamble
-// flags a stale preamble. Sent as a single key name (no `-l` literal
-// flag) so tmux interprets it as the control sequence.
-function clearInputBuffer(session: string): void {
+// flags a stale preamble, and post-flight to take back a prompt whose
+// submit never landed. Sent as a single key name (no `-l` literal flag)
+// so tmux interprets it as the control sequence.
+//
+// Ctrl-U kills to the start of the line, so a composer holding a long
+// wrapped draft needs several presses to empty. The observed live wedge
+// (card CORE/57cf5022) took ~30 for a ~1.6k-char scheduled prompt, and
+// the residue is what poisons the pane -- a partial clear is no better
+// than none, so the repeat count is sized for the worst case we send.
+const CLEAR_BUFFER_PRESSES = 40
+
+function clearInputBuffer(session: string, presses = 1): void {
   try {
-    execFileSync(TMUX, ['send-keys', '-t', session, 'C-u'], { timeout: 5000 })
+    for (let i = 0; i < presses; i++) {
+      execFileSync(TMUX, ['send-keys', '-t', session, 'C-u'], { timeout: 5000 })
+    }
     // Settle briefly so the next send-keys lands in the freshly cleared
     // buffer rather than racing the Ctrl-U.
     execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
@@ -743,6 +754,25 @@ function clearInputBuffer(session: string): void {
     logger.warn({ err, session }, 'Failed to clear pane input buffer before send')
   }
 }
+
+/**
+ * Outcome of a sendPromptToSession call.
+ *
+ *   - 'submitted' -- the composer is clear after the trailing Enter: the
+ *                    prompt started a turn.
+ *   - 'parked'    -- MEASURED failure. The prompt is still sitting in the
+ *                    composer after the whole retry budget. The residue is
+ *                    cleared before returning, because an un-submitted
+ *                    draft keeps the pane non-idle and therefore blocks
+ *                    every later send to this agent.
+ *   - 'unknown'   -- the pane could not be captured (or the retry-Enter
+ *                    itself failed), so neither outcome is proven. Callers
+ *                    must NOT treat this as a failure: re-running on an
+ *                    unknown risks double-executing a task that did land.
+ *                    Nothing is cleared -- a live draft must not be
+ *                    destroyed on a guess.
+ */
+export type SubmitVerdict = 'submitted' | 'parked' | 'unknown'
 
 // Send text to a tmux session as if typed at the prompt.
 // Uses execFileSync so callers can pass raw text -- tmux send-keys -l treats
@@ -763,7 +793,12 @@ function clearInputBuffer(session: string): void {
 // still reports stuck, send up to SUBMIT_RETRY_MAX_ATTEMPTS extra
 // Enters. The retry budget bounds the loop so a pathologically stuck
 // pane gives up rather than spinning.
-export function sendPromptToSession(session: string, text: string): void {
+//
+// The give-up used to be a log line and nothing else, so callers could
+// not tell a delivered prompt from one still sitting in the composer --
+// and the residue silently blocked every subsequent send to that agent
+// (card CORE/57cf5022). The outcome is now returned; see SubmitVerdict.
+export function sendPromptToSession(session: string, text: string): SubmitVerdict {
   dismissSurveyModalIfPresent(session)
   dismissResumeSummaryModalIfPresent(session)
 
@@ -814,17 +849,28 @@ export function sendPromptToSession(session: string, text: string): void {
     try { execFileSync('/bin/sleep', [SUBMIT_RETRY_POLL_MS], { timeout: 2000 }) } catch { /* best effort */ }
     const pane = capturePane(session)
     const action = decideSubmitFollowup(pane, payloadHint, attempt, SUBMIT_RETRY_MAX_ATTEMPTS)
-    if (action === 'done') break
+    if (action === 'done') return 'submitted'
     if (action === 'give-up') {
-      logger.warn({ session, attempt }, 'sendPromptToSession: prompt still parked after retries')
-      break
+      // decideSubmitFollowup gives up for two different reasons. A null
+      // pane means the capture failed -- we measured nothing, so we may
+      // not claim failure and must not clear (the prompt may have
+      // landed, and the composer may hold someone else's draft).
+      if (pane == null) {
+        logger.warn({ session, attempt }, 'sendPromptToSession: submit unconfirmable (capture-pane failed)')
+        return 'unknown'
+      }
+      logger.warn({ session, attempt }, 'sendPromptToSession: prompt still parked after retries, clearing residue')
+      clearInputBuffer(session, CLEAR_BUFFER_PRESSES)
+      return 'parked'
     }
     // action === 'retry-enter'
     try {
       execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
     } catch (err) {
+      // The retry-Enter itself failed (tmux gone, timeout). We know the
+      // pane was stuck, but not whether this Enter landed -- unknown.
       logger.warn({ err, session, attempt }, 'Retry-Enter send failed')
-      break
+      return 'unknown'
     }
   }
 }
