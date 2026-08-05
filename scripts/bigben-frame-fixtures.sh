@@ -66,15 +66,38 @@ echo "fixtures in $OUT"
 
 echo
 fail=0
-read_field() {  # $1=file $2=field
+# One analyzer run per fixture: invoking it per field doubled the ffmpeg work
+# and let the two reads disagree. Prints "<speaker_zone> <confidence>", or
+# nothing at all if the analyzer or the JSON parse failed.
+analyze() {  # $1=fixture name
   python3 "$ANALYZE" --video "$OUT/$1.mp4" --frames 4 2>/dev/null \
-    | python3 -c "import sys,json;print(json.load(sys.stdin)['$2'])"
+    | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["speaker_zone"],d["confidence"])'
+}
+
+is_number() {  # reject empty AND anything non-numeric
+  case "$1" in
+    ''|*[!0-9.]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# "not measured" must be its own LOUD state. An unread confidence used to reach
+# awk as an empty string, which awk coerces to 0 in a numeric compare -- so a
+# crashed analyzer scored 0 < 0.10 and printed "PASS noise". A measurement that
+# never happened was reported as evidence of correctness: exactly the failure
+# this PR exists to remove, in the harness that verifies it.
+measured() {  # $1=label $2=fixture $3=raw analyzer output $4=confidence
+  if [ -z "$3" ] || ! is_number "$4"; then
+    echo "FAIL $1 $2 -> analyzer produced no usable output ('$3'); NOT measured, not a pass"
+    return 1
+  fi
+  return 0
 }
 
 for f in topleft topright bottomleft bottomright; do
   want=$(echo "$f" | sed -E 's/(top|bottom)(left|right)/\1-\2/')
-  got=$(read_field "$f" speaker_zone)
-  conf=$(read_field "$f" confidence)
+  out=$(analyze "$f"); got=${out%% *}; conf=${out##* }
+  measured "measure " "$f" "$out" "$conf" || { fail=1; continue; }
   if [ "$got" = "$want" ]; then
     echo "PASS zone     $f -> $got (confidence $conf)"
   else
@@ -88,7 +111,8 @@ done
 
 # noise floor: the detector may still name a zone, but must not claim confidence
 for f in centered uniform flat; do
-  conf=$(read_field "$f" confidence)
+  out=$(analyze "$f"); conf=${out##* }
+  measured "measure " "$f" "$out" "$conf" || { fail=1; continue; }
   awk -v c="$conf" 'BEGIN{exit !(c < 0.10)}' \
     && echo "PASS noise    $f confidence $conf < 0.10" \
     || { echo "FAIL noise    $f confidence $conf >= 0.10 (false positive)"; fail=1; }
