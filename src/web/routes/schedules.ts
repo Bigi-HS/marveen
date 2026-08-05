@@ -356,8 +356,11 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
   }
 
   if (path === '/api/schedules/pending' && method === 'GET') {
-    const now = Date.now()
-    const rows = listPendingTaskRetries().map(r => toPendingRetryView(r, now))
+    // SECONDS -- the sweep writes pending_task_retries in seconds. Passing
+    // Date.now() here made every row report an age of ~56 years and
+    // alertDue=true (see pending-retries.ts).
+    const nowS = Math.floor(Date.now() / 1000)
+    const rows = listPendingTaskRetries().map(r => toPendingRetryView(r, nowS))
     json(res, rows)
     return true
   }

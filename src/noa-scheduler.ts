@@ -13,6 +13,8 @@ import {
   sendPromptToSession,
 } from './web/agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './web/main-agent.js'
+import { toPendingRetryView } from './pending-retries.js'
+import { sendPendingRetryAlert } from './web/pending-retry-alert.js'
 import { resolveFromPath } from './platform.js'
 
 // Lazy tmux path -- resolved on first use so module load never throws if tmux absent in test env
@@ -176,12 +178,16 @@ function appendTaskRun(name: string, agent: string, db = getNoaDb()): void {
 // ---------------------------------------------------------------------------
 
 type PendingRetryRow = {
+  id: number
   task_name: string
   agent_name: string
   first_attempt: number
   last_attempt: number
   attempt_count: number
   last_reason: string | null
+  // Set once when the operator has been escalated for this row; the NULL
+  // guard on the UPDATE is what caps the escalation at one message per row.
+  alert_sent_at: number | null
 }
 
 function insertPendingRetryIfNew(
@@ -215,6 +221,17 @@ function deletePendingRetry(taskName: string, agentName: string, db = getNoaDb()
   db.prepare(
     'DELETE FROM pending_task_retries WHERE task_name=? AND agent_name=?'
   ).run(taskName, agentName)
+}
+
+// Re-read a row after updatePendingRetry so the alert decision sees the
+// CURRENT attempt_count and alert_sent_at rather than the pre-update snapshot
+// the loop started from.
+function getPendingRetry(
+  taskName: string, agentName: string, db = getNoaDb()
+): PendingRetryRow | undefined {
+  return db.prepare(
+    'SELECT * FROM pending_task_retries WHERE task_name=? AND agent_name=?'
+  ).get(taskName, agentName) as PendingRetryRow | undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -656,6 +673,16 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb()): void {
       deletePendingRetry(row.task_name, row.agent_name, db)
     } else {
       updatePendingRetry(row.task_name, row.agent_name, nowS, result, db)
+      // Escalate a row that has been stuck past the threshold. Restored here
+      // because the A4 migration dropped it (see pending-retry-alert.ts): a
+      // task that never fires is only a silent outage until somebody is told.
+      // Capped by construction -- alert_sent_at is stamped once per row, so a
+      // permanently wedged agent produces one message, not one per tick.
+      const fresh = getPendingRetry(row.task_name, row.agent_name, db)
+      if (fresh) {
+        const view = toPendingRetryView(fresh, nowS)
+        if (view.alertDue) sendPendingRetryAlert(view, nowS, db)
+      }
     }
   }
 
