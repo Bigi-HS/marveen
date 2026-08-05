@@ -82,10 +82,19 @@ is_number() {  # reject empty AND anything non-numeric
 }
 
 # "not measured" must be its own LOUD state. An unread confidence used to reach
-# awk as an empty string, which awk coerces to 0 in a numeric compare -- so a
-# crashed analyzer scored 0 < 0.10 and printed "PASS noise". A measurement that
-# never happened was reported as evidence of correctness: exactly the failure
-# this PR exists to remove, in the harness that verifies it.
+# awk as an empty string, and `awk -v c=""` is NOT a strnum, so `c < 0.10` was a
+# STRING comparison in which the empty string sorts before "0.10". The test held
+# and a crashed analyzer printed "PASS noise": a measurement that never happened,
+# reported as evidence of correctness -- exactly the failure the analyzer change
+# in this branch removes, sitting in the harness that verifies it.
+#
+# Measured on gawk 5.3.2, because the first version of this comment claimed
+# numeric coercion to 0 and that was wrong: with c="" both `c > -1` and `c == 0`
+# are FALSE, which rules numeric coercion out. Values that look numeric ARE
+# strnums and do compare numerically. Non-numeric junk such as "error" sorts
+# AFTER "0.10" and so failed closed by luck -- the empty string was the single
+# value that slipped through, and it is precisely the value a failed
+# measurement produces.
 measured() {  # $1=label $2=fixture $3=raw analyzer output $4=confidence
   if [ -z "$3" ] || ! is_number "$4"; then
     echo "FAIL $1 $2 -> analyzer produced no usable output ('$3'); NOT measured, not a pass"
