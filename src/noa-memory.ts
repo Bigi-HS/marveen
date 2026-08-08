@@ -193,7 +193,49 @@ function float32ArrayToBuffer(vec: Float32Array): Buffer {
 }
 
 // --- Embedding workflow (AC-7) ---
+
+/** Per-row budget. The embed call itself measured ~50ms, so this is generous for it. */
+export const EMBED_TIMEOUT_MS = 5000
+/**
+ * Budget for the first call of a batch. Card ENG/811ce3b2: loading the model is a
+ * ONE-TIME cost (measured 2.18s on a warm page cache, 4.30s cold) and it used to be
+ * billed to the per-row budget, so a cold load failed rows that were never bad.
+ */
+export const EMBED_WARMUP_TIMEOUT_MS = 30000
+
+/**
+ * Why an embed call produced no vector. Card ENG/811ce3b2: these all collapsed into a
+ * single `null`, so the caller could not tell a timeout from an unreachable server --
+ * and the alert text picked one of them. `unknown` is a real value here: an error we
+ * have not classified must not be reported as a cause we measured.
+ */
+export type EmbedFailureKind = 'timeout' | 'connection-refused' | 'no-embedding-in-response' | 'unknown'
+
+export interface EmbedResult {
+  vector: Float32Array | null
+  failure: EmbedFailureKind | null
+  /** Detail for the log (HTTP status, error code). Never an input to a decision. */
+  detail?: string
+}
+
+export function classifyEmbedFailure(err: unknown): EmbedFailureKind {
+  const e = err as { name?: string; code?: string; cause?: { code?: string } } | null
+  if (e?.name === 'AbortError' || e?.name === 'TimeoutError') return 'timeout'
+  const code = e?.code ?? e?.cause?.code
+  if (code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'ENOTFOUND' || code === 'EHOSTUNREACH') {
+    return 'connection-refused'
+  }
+  return 'unknown'
+}
+
 export async function getEmbedding(text: string): Promise<Float32Array | null> {
+  return (await getEmbeddingResult(text)).vector
+}
+
+export async function getEmbeddingResult(
+  text: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<EmbedResult> {
   const hash = crypto.createHash('sha256').update(text).digest('hex')
   const db = getNoaDb()
 
@@ -202,11 +244,12 @@ export async function getEmbedding(text: string): Promise<Float32Array | null> {
     'SELECT embedding FROM embedding_cache WHERE content_hash = ? AND model = ?'
   ).get(hash, EMBED_MODEL) as { embedding: Buffer } | undefined
 
-  if (cached) return bufferToFloat32Array(cached.embedding)
+  if (cached) return { vector: bufferToFloat32Array(cached.embedding), failure: null }
 
-  // AC-7b: Ollama call with 5s timeout (AC-7e: try-catch wraps both HTTP + DB write)
+  // AC-7b: Ollama call on a caller-set budget (AC-7e: try-catch wraps both HTTP + DB write)
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 5000)
+  const timeoutMs = opts.timeoutMs ?? EMBED_TIMEOUT_MS
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const resp = await fetch(`${OLLAMA_URL}/api/embeddings`, {
       method: 'POST',
@@ -216,7 +259,13 @@ export async function getEmbedding(text: string): Promise<Float32Array | null> {
       redirect: 'error',  // I1 reinforcement: a 302 to a remote host must not silently bypass the localhost guard
     })
     const data = await resp.json() as { embedding?: number[] }
-    if (!data.embedding) return null
+    if (!data.embedding) {
+      // Reached the server, got an answer, and the answer carried no vector -- a
+      // missing model looks like this. It used to return a silent null.
+      const detail = `status ${(resp as { status?: number }).status ?? 'unknown'}`
+      logger.warn({ model: EMBED_MODEL, detail }, 'Embedding response carried no vector')
+      return { vector: null, failure: 'no-embedding-in-response', detail }
+    }
 
     // AC-7c: explicit writeFloatLE (not Buffer.from(new Float32Array(vec).buffer))
     const buf = Buffer.allocUnsafe(data.embedding.length * 4)
@@ -227,10 +276,15 @@ export async function getEmbedding(text: string): Promise<Float32Array | null> {
       'INSERT OR REPLACE INTO embedding_cache (content_hash, model, embedding, created_at) VALUES (?, ?, ?, unixepoch())'
     ).run(hash, EMBED_MODEL, buf)
 
-    return bufferToFloat32Array(buf)
+    return { vector: bufferToFloat32Array(buf), failure: null }
   } catch (err) {
-    logger.warn({ err }, 'Embedding generation failed (Ollama unavailable?)')
-    return null
+    // Card ENG/811ce3b2 (misleading-error family, OPS/68195501): the old text asked
+    // "Ollama unavailable?" for every failure. On 08-07 the three failures were
+    // AbortErrors 5.027s apart -- it had connected and timed out. Name what was
+    // measured, or say unknown.
+    const failure = classifyEmbedFailure(err)
+    logger.warn({ err, failure, timeoutMs }, `Embedding generation failed: ${failure}`)
+    return { vector: null, failure }
   } finally {
     clearTimeout(timeout)
   }
@@ -613,11 +667,46 @@ export async function hybridSearch(agentId: string, query: string, limit = 10): 
 }
 
 // BackfillResult + backfillEmbeddings: sequential backfill for NULL-embedding memories.
+
+/**
+ * One value the alert can quote instead of assembling it from three fields.
+ * Card ENG/811ce3b2, gate agreed with NoA 08-07:
+ *   ok               -- nothing to do, or every row embedded (silence)
+ *   partial          -- some rows failed, the list was still worked through
+ *   nothing-embedded -- total > 0 and not one row embedded
+ *   broken-midway    -- rows embedded, then K consecutive failures tripped the fuse
+ */
+export type BackfillOutcome = 'ok' | 'partial' | 'nothing-embedded' | 'broken-midway'
+
 export interface BackfillResult {
   total: number
   succeeded: number
   failed: number
+  /** The run stopped with rows still on the list. See `breakerTripped` for the fuse itself. */
   aborted: boolean
+  /**
+   * The consecutive-failure fuse reached its threshold. Kept separate from `aborted`
+   * because with total <= FAIL_STREAK_LIMIT the fuse firing and the work list running
+   * out are the same event -- on 08-07 the alert claimed the first with the evidence
+   * of the second.
+   */
+  breakerTripped: boolean
+  /** Rows never attempted because the run stopped. 0 means the list was consumed. */
+  remaining: number
+  outcome: BackfillOutcome
+  /** Observed failure reasons, counted. Empty when nothing failed. */
+  failures: Partial<Record<EmbedFailureKind, number>>
+}
+
+/** Consecutive failures that trip the fuse. */
+const FAIL_STREAK_LIMIT = 3
+
+function classifyOutcome(r: {
+  total: number; succeeded: number; failed: number; breakerTripped: boolean
+}): BackfillOutcome {
+  if (r.total === 0 || r.failed === 0) return 'ok'
+  if (r.succeeded === 0) return 'nothing-embedded'
+  return r.breakerTripped ? 'broken-midway' : 'partial'
 }
 
 // Default categories covered by backfill: hot, warm, shared.
@@ -626,7 +715,7 @@ const BACKFILL_DEFAULT_CATEGORIES = ['hot', 'warm', 'shared']
 
 export async function backfillEmbeddings(
   opts: {
-    embed?: (text: string) => Promise<number[] | null>
+    embed?: (text: string, o: { timeoutMs: number }) => Promise<number[] | null>
     onProgress?: (done: number, total: number, succeeded: number) => void
     /** Categories to backfill. Undefined = default (hot/warm/shared). Empty array = all. */
     categories?: string[]
@@ -648,20 +737,33 @@ export async function backfillEmbeddings(
   const total = rows.length
   const update = db.prepare('UPDATE memories SET embedding = ? WHERE id = ?')
 
-  let succeeded = 0, failed = 0, consecutiveFail = 0, aborted = false
+  let succeeded = 0, failed = 0, consecutiveFail = 0, breakerTripped = false
+  let attempted = 0
+  const failures: Partial<Record<EmbedFailureKind, number>> = {}
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]
     const text = row.content + (row.keywords ? ' ' + row.keywords : '')
+    // The model load is a one-time cost, so the first call of the batch gets its own
+    // budget. Spending it on the first REAL row rather than on a throwaway probe: a
+    // separate probe would pay the load and then throw the vector away.
+    const timeoutMs = i === 0 ? EMBED_WARMUP_TIMEOUT_MS : EMBED_TIMEOUT_MS
     let emb: number[] | null = null
+    let failure: EmbedFailureKind | null = null
+    attempted++
     try {
       if (opts.embed) {
-        emb = await opts.embed(text)
+        emb = await opts.embed(text, { timeoutMs })
+        if (!emb) failure = 'unknown'  // an injected embedder gives no reason
       } else {
-        const fa = await getEmbedding(text)
-        emb = fa ? Array.from(fa) : null
+        const r = await getEmbeddingResult(text, { timeoutMs })
+        emb = r.vector ? Array.from(r.vector) : null
+        failure = r.failure
       }
-    } catch { emb = null }
+    } catch (err) {
+      emb = null
+      failure = classifyEmbedFailure(err)
+    }
 
     if (emb && emb.length > 0) {
       const buf = Buffer.allocUnsafe(emb.length * 4)
@@ -672,16 +774,30 @@ export async function backfillEmbeddings(
     } else {
       failed++
       consecutiveFail++
-      if (consecutiveFail >= 3) {
-        logger.warn({ total, succeeded, failed }, 'backfillEmbeddings: 3 consecutive empty embeddings -- embedder unreachable, aborting')
-        aborted = true
+      const kind = failure ?? 'unknown'
+      failures[kind] = (failures[kind] ?? 0) + 1
+      if (consecutiveFail >= FAIL_STREAK_LIMIT) {
+        breakerTripped = true
         break
       }
     }
     opts.onProgress?.(i + 1, total, succeeded)
   }
 
-  return { total, succeeded, failed, aborted }
+  const remaining = total - attempted
+  // Only a stop that LEFT WORK is an abort. With total <= FAIL_STREAK_LIMIT the fuse
+  // and the end of the list fire together, and the old code reported that as aborted.
+  const aborted = breakerTripped && remaining > 0
+  const outcome = classifyOutcome({ total, succeeded, failed, breakerTripped })
+
+  if (breakerTripped) {
+    logger.warn(
+      { total, succeeded, failed, remaining, aborted, outcome, failures },
+      `backfillEmbeddings: ${FAIL_STREAK_LIMIT} consecutive empty embeddings, stopping (${outcome})`,
+    )
+  }
+
+  return { total, succeeded, failed, aborted, breakerTripped, remaining, outcome, failures }
 }
 
 // getDailyLogDates: list distinct dates from daily_logs DESC.
