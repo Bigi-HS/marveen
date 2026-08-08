@@ -245,7 +245,11 @@ Respond ONLY with JSON, nothing else:
     try {
       const r = await backfillEmbeddings()
       // `count` kept for backward compat with the existing dashboard client.
-      json(res, { ok: !r.aborted, count: r.succeeded, ...r })
+      // Card ENG/811ce3b2: `ok` used to be !aborted, and with a work list of 3 a run
+      // where NOTHING embedded reported aborted -- so the flag was carrying a claim
+      // it could not make. The gate agreed with NoA is: silence only when every row
+      // embedded. Quote the outcome, do not reassemble it here.
+      json(res, { ok: r.outcome === 'ok', count: r.succeeded, ...r })
     } catch (err) {
       logger.error({ err }, 'Backfill failed')
       json(res, { error: 'Backfill failed' }, 500)
@@ -260,7 +264,11 @@ Respond ONLY with JSON, nothing else:
       const raw = await readBody(req)
       const body = raw.length ? (JSON.parse(raw.toString()) as { categories?: string[] }) : {}
       const r = await backfillEmbeddings({ categories: body.categories })
-      json(res, { ok: !r.aborted, count: r.succeeded, ...r })
+      // Card ENG/811ce3b2: `ok` used to be !aborted, and with a work list of 3 a run
+      // where NOTHING embedded reported aborted -- so the flag was carrying a claim
+      // it could not make. The gate agreed with NoA is: silence only when every row
+      // embedded. Quote the outcome, do not reassemble it here.
+      json(res, { ok: r.outcome === 'ok', count: r.succeeded, ...r })
     } catch (err) {
       logger.error({ err }, 'Reembed failed')
       json(res, { error: 'Reembed failed' }, 500)
