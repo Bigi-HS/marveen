@@ -73,7 +73,10 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
         true,
         accessScope,
       )
-      json(res, { ok: true, id: result.id })
+      // Card MEM/8ad3a1c9: report the scope that was actually applied. Content-derived
+      // scoping used to leave no trace here at all, so a caller could not tell an
+      // unscoped write from one the classifier had quietly restricted to them.
+      json(res, { ok: true, id: result.id, access_scope: result.access_scope })
     } catch (err) {
       if (err instanceof ScopedSharedError) {
         json(res, { error: err.message }, 400)
