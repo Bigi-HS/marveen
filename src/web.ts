@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL } from './config.js'
+import { bindServer } from './web-bind.js'
 import { SERVER_BOOT_AT_PATH } from './server-boot-path.js'
 import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, extractBearer, buildDashboardAccessMessage, createSession, verifySession, revokeSession, parseCookies, classifyRequestOrigin, rateLimitKey, verifyPassword, hasPasswordCredentials, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from './web/dashboard-auth.js'
 import { getDb } from './db.js'
@@ -93,7 +94,8 @@ function ensureDirs() {
 }
 
 export function startWebServer(port = 3420): http.Server {
-  // SECURITY: Server binds to 127.0.0.1 (see server.listen below). The allowed
+  // SECURITY: Server binds to 127.0.0.1 (see bindServer below -- BOTH the normal
+  // and the port-reclaim path go through it, card SEC/a805f9f0). The allowed
   // browser origins mirror that -- anything else is rejected to prevent CSRF
   // from malicious websites the user may visit while the dashboard is running.
   ensureDirs()
@@ -402,7 +404,13 @@ export function startWebServer(port = 3420): http.Server {
                 try { process.kill(pid, 'SIGKILL') } catch { /* gone */ }
               } catch { /* gone */ }
             }
-            server.listen(port)
+            // Card SEC/a805f9f0: same host scope as the normal bind below. A
+            // host-less listen() here would silently promote the dashboard from
+            // loopback-only to every-interface on a port collision.
+            bindServer(server, port, WEB_HOST, bound => {
+              logger.warn({ port, address: bound?.address, family: bound?.family },
+                'Web dashboard re-bound after port reclaim')
+            })
           }, 1500)
         } else {
           logger.error({ port }, 'Port foglalt de nem talaltunk felszabadithato node processt -- kilepes')
@@ -416,8 +424,12 @@ export function startWebServer(port = 3420): http.Server {
     }
   })
 
-  server.listen(port, WEB_HOST, () => {
-    logger.info({ port }, `Web dashboard: http://localhost:${port}`)
+  bindServer(server, port, WEB_HOST, bound => {
+    // Log the binding we actually got, not the one we asked for: "we are on
+    // loopback" is a security premise other cards lean on (SEC/0fd4dbd8), and it
+    // should be a measurement in the log, not an assumption about which branch ran.
+    logger.info({ port, address: bound?.address, family: bound?.family },
+      `Web dashboard: http://localhost:${port}`)
     // Do NOT log the bearer token: launchd/journal/pipe captures of the
     // structured log would otherwise carry a root-equivalent credential.
     // Print the access instructions to stderr (interactive terminal only, not the
