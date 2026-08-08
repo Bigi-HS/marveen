@@ -66,58 +66,8 @@ describe('bindServer', () => {
   })
 })
 
-// Structural guard: the behavioural tests above prove bindServer is correct, but
-// nothing stops a future edit from adding a fresh raw `server.listen(port)` next
-// to it -- which is exactly how this defect got in. This is red on the pre-fix
-// tree (src/web.ts:405).
-describe('no host-less listen() call site survives in src/', () => {
-  function tsFiles(dir: string): string[] {
-    const out: string[] = []
-    for (const name of readdirSync(dir)) {
-      const full = join(dir, name)
-      if (statSync(full).isDirectory()) {
-        if (name === '__tests__' || name === 'node_modules') continue
-        out.push(...tsFiles(full))
-      } else if (name.endsWith('.ts')) {
-        out.push(full)
-      }
-    }
-    return out
-  }
-
-  function splitTopLevel(args: string): string[] {
-    const parts: string[] = []
-    let depth = 0, current = ''
-    for (const ch of args) {
-      if (ch === '(' || ch === '[' || ch === '{') depth++
-      else if (ch === ')' || ch === ']' || ch === '}') depth--
-      if (ch === ',' && depth === 0) { parts.push(current); current = '' } else current += ch
-    }
-    if (current.trim()) parts.push(current)
-    return parts.map(p => p.trim())
-  }
-
-  const isCallback = (arg: string) => /^(\(|function\b|async\b)/.test(arg)
-
-  // Measured, not assumed: without this the guard reported 6 false positives on
-  // the real tree -- doc comments in config.ts/process-lock.ts that merely name
-  // server.listen() while explaining it. Prose is not a call site.
-  const isComment = (line: string) => /^(\/\/|\/\*|\*)/.test(line.trim())
-
-  it('every .listen( passes an explicit host argument', () => {
-    const violations: string[] = []
-    for (const file of tsFiles(SRC_DIR)) {
-      const lines = readFileSync(file, 'utf-8').split('\n')
-      lines.forEach((line, i) => {
-        if (isComment(line)) return
-        const m = /\.listen\((.*)\)/.exec(line)
-        if (!m) return
-        const args = splitTopLevel(m[1])
-        if (args.length < 2 || isCallback(args[1])) {
-          violations.push(`${file.slice(SRC_DIR.length)}:${i + 1}  ${line.trim()}`)
-        }
-      })
-    }
-    expect(violations).toEqual([])
-  })
-})
+// The structural half of this file moved to listen-host-guard.test.ts, which
+// scans scripts/ as well. It was green here while two live host-less binds sat in
+// scripts/ (DA-42 -> SEC/1d2a4fe0): a property of src/ read as a property of the
+// defect class. Leaving the narrower duplicate would keep asserting the smaller
+// claim next to the real one.
