@@ -42,8 +42,6 @@ import shlex
 
 # ── helpers (shared with destructive-bash) ───────────────────────────────────
 
-_CMD_SUBST_RE = re.compile(r'\$\(|[<>]\(|\)|`')
-
 def _split_subcommands(command):
     """Split on shell sequencing operators + command substitution boundaries.
 
@@ -57,40 +55,130 @@ def _split_subcommands(command):
     Without this, a trailing \\ before \\n leaves a dangling escape that makes
     shlex raise ValueError -> the piece is silently skipped, bypassing URL
     and filename detection in R2/R3 (card 9e465135).
+
+    Substitution boundaries are recognised DURING this scan, not in a regex
+    pre-pass (card 2cb1ed6e).  The pre-pass rewrote `$(` `)` and backticks to
+    ';' while blind to quoting, and this scan then split on ';' while unable to
+    tell an injected separator from a typed one -- so inside double quotes the
+    injected separators were stranded as literal text, the nested command never
+    became its own piece, and the piece classified by its OUTER word:
+
+        echo "$(cat .env)"  ->  ['echo ";cat .env;"']  ->  command word `echo`
+
+    R2, R2b and R3 all consume this function, so all three were bypassed by one
+    pair of quotes.  Which forms are live in which context is asymmetric, and
+    the table is measured against bash rather than assumed:
+
+        form        unquoted   in "double"   in 'single'
+        $( ... )    expands    EXPANDS       literal
+        ` ... `     expands    EXPANDS       literal
+        <( ... )    expands    LITERAL       literal
+
+    Hence: extract substitutions everywhere except inside single quotes, and
+    process substitution only when fully unquoted.  A symmetric rule that also
+    split inside single quotes would re-create the over-block card 295ebfcc
+    removed; a revert re-creates its false positives.  Both naive directions
+    oscillate, which is the tell that quoting was never the axis -- "is this a
+    nested command" is.
     """
     command = re.sub(r'\\\n[ \t]*', ' ', command)
-    normalized = _CMD_SUBST_RE.sub(';', command)
     parts: list[str] = []
     buf: list[str] = []
+    # Quote state saved on entering a substitution: a substitution starts a
+    # FRESH quoting context, so `"$(cat '.env')"` must honour the inner single
+    # quotes rather than inherit the outer double ones.
+    stack: list[tuple[bool, bool]] = []
     in_sq = False  # inside '...'
     in_dq = False  # inside "..."
+
+    def _open_substitution():
+        """Flush the enclosing fragment and start the nested command.
+
+        The flushed fragment must stay parseable on its own: lifting
+        `$(...)` out of `-H "Bearer $(cat f)"` would otherwise leave a dangling
+        `"` behind, shlex raises, and the piece becomes _PARSE_FAIL -- turning a
+        readable command into a fail-closed block. So the open quote is closed on
+        the way out and re-opened on the way back in.
+        """
+        nonlocal buf, in_sq, in_dq
+        parts.append(''.join(buf) + ('"' if in_dq else ''))
+        buf = []
+        stack.append((in_sq, in_dq))
+        in_sq = in_dq = False
+
+    def _close_substitution():
+        nonlocal buf, in_sq, in_dq
+        parts.append(''.join(buf))
+        in_sq, in_dq = stack.pop()
+        buf = ['"'] if in_dq else []
+
     i = 0
-    n = len(normalized)
+    n = len(command)
     while i < n:
-        ch = normalized[i]
+        ch = command[i]
+        nxt = command[i + 1] if i + 1 < n else ''
+
+        # Inside double quotes a backslash escapes only these four; unquoted it
+        # escapes anything -- `find . \( -name x \)` must not be read as a
+        # subshell.  Inside single quotes a backslash is literal.
+        if ch == '\\' and not in_sq and nxt:
+            if in_dq and nxt not in ('"', '$', '`', '\\'):
+                buf.append(ch); i += 1
+                continue
+            buf.append(ch); buf.append(nxt); i += 2
+            continue
+
         if ch == "'" and not in_dq:
             in_sq = not in_sq
-            buf.append(ch)
-        elif ch == '"' and not in_sq:
+            buf.append(ch); i += 1
+            continue
+        if ch == '"' and not in_sq:
             in_dq = not in_dq
-            buf.append(ch)
-        elif not in_sq and not in_dq:
+            buf.append(ch); i += 1
+            continue
+
+        if not in_sq and ch == '$' and nxt == '(':
+            _open_substitution()
+            i += 2
+            continue
+        if not in_sq and ch == '`':
+            _open_substitution()
+            i += 1
+            continue
+        if not in_sq and not in_dq and ch in '<>' and nxt == '(':
+            _open_substitution()
+            i += 2
+            continue
+        # A bare `( ... )` subshell at command position is a nested command too:
+        # `(curl -X PUT ...)` must still classify as curl (card ec7754d7).  Only
+        # at command position -- a stray '(' inside an argument is not an opener.
+        if (not in_sq and not in_dq and ch == '('
+                and not ''.join(buf).strip().split(';')[-1].strip()):
+            _open_substitution()
+            i += 1
+            continue
+        if ch == ')' and stack:
+            _close_substitution()
+            i += 1
+            continue
+
+        if not in_sq and not in_dq:
             if ch in (';', '\n'):
-                parts.append(''.join(buf)); buf = []
-            elif ch == '|':
+                parts.append(''.join(buf)); buf = []; i += 1
+                continue
+            if ch == '|':
                 # || (logical-OR) -> skip second |, split once
-                if i + 1 < n and normalized[i + 1] == '|':
+                if nxt == '|':
                     i += 1
-                parts.append(''.join(buf)); buf = []
-            elif ch == '&' and i + 1 < n and normalized[i + 1] == '&':
+                parts.append(''.join(buf)); buf = []; i += 1
+                continue
+            if ch == '&' and nxt == '&':
                 # && (logical-AND) -> skip second &, split once
                 i += 1
-                parts.append(''.join(buf)); buf = []
-            else:
-                buf.append(ch)
-        else:
-            buf.append(ch)
-        i += 1
+                parts.append(''.join(buf)); buf = []; i += 1
+                continue
+
+        buf.append(ch); i += 1
     parts.append(''.join(buf))
     return parts
 
@@ -207,15 +295,58 @@ def match_external_dir(tool_name: str, path: str) -> bool:
 
 # ── R2: .env file print via Bash ─────────────────────────────────────────────
 
+def _is_localhost_only_curl(command: str) -> bool:
+    """The documented fleet-API shape: a curl whose every URL is loopback.
+
+    Used only to carve out the sanctioned auth-token read (see
+    match_env_file_print). Deliberately strict: the outer command must BE curl,
+    there must be at least one URL, and every URL must be loopback. One external
+    URL anywhere in the command disqualifies the whole command.
+    """
+    pieces = _split_subcommands(command)
+    head = _tokenize(pieces[0]) if pieces else None
+    if head is _PARSE_FAIL or not head or _command_word(head) != 'curl':
+        return False
+    urls = []
+    for piece in pieces:
+        tokens = _tokenize(piece)
+        if tokens is _PARSE_FAIL or not tokens:
+            continue
+        urls.extend(t for t in tokens
+                    if t.startswith('http://') or t.startswith('https://'))
+    return bool(urls) and all(_LOCALHOST_RE.match(u) for u in urls)
+
+
 def match_env_file_print(command: str) -> bool:
     """R2: A print-style Bash command reading a .env/.env.* file or a fleet
     credential file (store/.dashboard-token, ~/.git-credentials, ~/.claude.json).
     .env files hold project credentials; credential files hold fleet API / GitHub
     PAT / Claude auth secrets. Reading either via shell exposes raw content to the
     agent's output context (in-process read; card 0680cf34 extends to token paths).
+
+    ONE CARVE-OUT (card 2cb1ed6e): the auth-token read inside the canonical
+    inter-agent send, which every agent's CLAUDE.md prescribes:
+
+        curl ... http://localhost:3420/api/messages
+             -H "Authorization: Bearer $(cat store/.dashboard-token)" ...
+
+    That read passed only because the quote shield hid it from this rule. Fixing
+    the splitter makes it visible, so without this carve-out closing the hole
+    would block every agent's every send at once, mid-work, fleet-wide -- the
+    repair would be a worse outage than the defect. The carve-out is as narrow as
+    the recipe: fleet TOKEN paths only, .env NEVER, and only when the command is
+    a curl whose every URL is loopback. `cat store/.dashboard-token` on its own,
+    the same read piped anywhere else, or the same header sent to an external
+    host all stay denied.
     """
+    token_read_is_sanctioned = _is_localhost_only_curl(command)
+
     def _is_sensitive(tok: str) -> bool:
-        return bool(_ENV_FILE_RE.search(tok) or _TOKEN_PATHS_RE.search(tok))
+        if _ENV_FILE_RE.search(tok):
+            return True
+        if _TOKEN_PATHS_RE.search(tok):
+            return not token_read_is_sanctioned
+        return False
 
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
