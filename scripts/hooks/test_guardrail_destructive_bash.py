@@ -287,5 +287,72 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
 
 
+# --- port-regression guard for this file's splitter (card 2cb1ed6e, DA-62-E) --
+class QuotedNestedCommandTests(unittest.TestCase):
+    """This guard's splitter is quote-BLIND, and that is currently why it is safe.
+
+    The sibling guard (guardrail-permission-rules.py) was given quote-awareness
+    on 2026-07-01 to remove a set of false positives. That narrowing silently
+    created card 2cb1ed6e: a command nested inside DOUBLE quotes stopped
+    becoming its own piece, so every rule downstream classified it by the OUTER
+    word. It took two commits to close, on the open side and then the close side.
+
+    THIS file never received that change, so it still splits inside quotes and
+    the nested command always becomes its own piece. The bug was created by the
+    narrowing; the un-narrowed copy never had it.
+
+    The forward hazard is a tidy-up. Porting the modern splitter here to make the
+    two siblings consistent is an obvious refactor, and a re-derivation of the
+    07-01 quote-awareness WITHOUT the two follow-up fixes re-creates 2cb1ed6e
+    inside this guard, where the rules are cred-file-print and
+    sensitive-file-print. The refactor is the regression vector and it will look
+    like cleaning up.
+
+    So the property is asserted here as behaviour rather than left resting on the
+    absence of a change: whatever splitter this file uses, these four shapes must
+    isolate the nested command. Port anything you like; this must stay green.
+    """
+
+    NESTED = "rm -rf /"
+    SHAPES = [
+        ("plain", "rm -rf /"),
+        ("unquoted substitution", "echo $(rm -rf /)"),
+        ("double-quoted substitution", 'echo "$(rm -rf /)"'),
+        # the 2cb1ed6e close-side shape: a close paren inside quotes inside the
+        # substitution must not end it early (measured against bash: the second
+        # command runs)
+        ("crafted, close paren inside single quotes",
+         "echo \"$(echo 'x)' ; rm -rf /)\""),
+        ("crafted, backtick form", "echo \"`echo 'x)' ; rm -rf /`\""),
+    ]
+
+    def test_nested_destructive_command_is_isolated_in_every_shape(self):
+        for name, cmd in self.SHAPES:
+            with self.subTest(shape=name):
+                pieces = [p.strip() for p in guard._split_subcommands(cmd)]
+                self.assertIn(self.NESTED, pieces, f"{name}: got {pieces!r}")
+
+    def test_nested_destructive_command_is_denied_in_every_shape(self):
+        """End of the chain: isolation is only interesting if the verdict follows."""
+        for name, cmd in self.SHAPES:
+            with self.subTest(shape=name):
+                denied, rule, _ = guard.classify(
+                    {"tool_name": "Bash", "tool_input": {"command": cmd}})
+                self.assertTrue(denied, f"{name}: not denied")
+                self.assertEqual(rule, "rm-rf-root", f"{name}: denied by {rule!r}")
+
+    def test_the_over_block_cost_is_stated_not_hidden(self):
+        """The price of a quote-blind splitter, asserted in the CURRENT direction.
+
+        A quoted separator is split anyway, so text that merely looks like a
+        command is treated as one. That is the over-block direction (safe), and
+        it is exactly what 07-01 removed from the sibling. If a port ever makes
+        this pass, the port has taken the quote-awareness -- at which point the
+        test above is what decides whether it took the fixes with it.
+        """
+        pieces = [p for p in guard._split_subcommands('grep "foo|bar" file') if p.strip()]
+        self.assertGreater(len(pieces), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
