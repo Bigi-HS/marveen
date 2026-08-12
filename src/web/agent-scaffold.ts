@@ -36,6 +36,12 @@ const DESTRUCTIVE_BASH_HOOK_MARKER = 'guardrail-destructive-bash.py'
 // directory deny, .env file read deny, external curl mutating-method deny.
 const PERMISSION_RULES_HOOK_MARKER = 'guardrail-permission-rules.py'
 
+// The pre-promotion spelling of that same hook. Every agent scaffolded before
+// scripts/promote-guard.py existed still names the checkout copy directly, and
+// the ADD-only merges below cannot fix that: they match on the bare filename, so
+// a legacy entry reads as "already present" and the promoted path never lands.
+const LEGACY_PERMISSION_RULES_PATH = 'scripts/hooks/guardrail-permission-rules.py'
+
 // And the SessionStart per-agent enforcement reminder (card 03a4f57d): the hook is
 // agent-generic (it no-ops for agents without a configured check) so it is safe to
 // backfill fleet-wide -- hibiki gets the inbox-check, claudia the email ask-first.
@@ -120,6 +126,41 @@ export function ensurePermissionRulesHook(target: HooksBlock, template: HooksBlo
   return true
 }
 
+// The single exception to the ADD-only rule in this file, and deliberately the
+// narrowest one that closes the hole: it migrates the permission-rules command
+// off the checkout path onto the promoted one the template ships, for agents
+// that already carry the hook. Without it the pin is inert for the whole
+// existing fleet -- an unreviewed edit to scripts/hooks/ still reaches every
+// agent at its next session start, which is the property the promotion gate
+// exists to remove.
+//
+// Scope is an unstated claim, so it is stated: only the permission-rules hook,
+// only when the existing command carries the legacy path, and only the command
+// string. The other two guards stay on the checkout path on purpose -- neither
+// has a canary yet, and promoting a guard that cannot be canaried would move it
+// behind a gate that cannot actually gate it.
+export function ensurePromotedGuardPath(target: HooksBlock, template: HooksBlock): boolean {
+  const tplCommand = (template.PreToolUse ?? [])
+    .flatMap(e => e.hooks ?? [])
+    .map(h => h.command)
+    .find((c): c is string => typeof c === 'string' && c.includes(PERMISSION_RULES_HOOK_MARKER))
+  if (!tplCommand) return false
+  // The template is the source of truth for the destination. If it still names
+  // the checkout copy there is nothing promoted to migrate onto, and inventing
+  // a path here would point the fleet at a file no gate ever wrote.
+  if (tplCommand.includes(LEGACY_PERMISSION_RULES_PATH)) return false
+  let changed = false
+  for (const entry of target.PreToolUse ?? []) {
+    for (const hook of entry.hooks ?? []) {
+      if (typeof hook.command === 'string' && hook.command.includes(LEGACY_PERMISSION_RULES_PATH)) {
+        hook.command = tplCommand
+        changed = true
+      }
+    }
+  }
+  return changed
+}
+
 // Targeted idempotent merge of the SessionStart per-agent enforcement reminder
 // (card 03a4f57d), mirroring ensureMemoryHook. ADD-only, drift-proof: backfilled
 // into every existing agent's SessionStart at the next boot; the hook itself
@@ -184,8 +225,12 @@ export function ensureAgentHooks(name: string): boolean {
     const permRulesChanged = ensurePermissionRulesHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const sessionEnforceChanged = ensureSessionEnforceHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const freshnessNudgeChanged = ensureFreshnessNudgeHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    // Runs after the ADD-only merges, so a hook that was just installed from the
+    // template is already on the promoted path and this only sees genuinely old
+    // entries.
+    const promotedPathChanged = ensurePromotedGuardPath(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     changed = memChanged || guardChanged || askFirstChanged || destructiveBashChanged || permRulesChanged
-      || sessionEnforceChanged || freshnessNudgeChanged
+      || sessionEnforceChanged || freshnessNudgeChanged || promotedPathChanged
   }
   if (!changed) return false
   mkdirSync(join(agentDir(name), '.claude'), { recursive: true })

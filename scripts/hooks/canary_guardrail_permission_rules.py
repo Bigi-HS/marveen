@@ -41,7 +41,9 @@ MUST_ALLOW = [
     ('run a python script', 'python3 /tmp/dave-probe.py'),
     ('ordinary pipeline', 'command git ls-files | head -20'),
     ('process substitution loop', 'while read -r l; do echo "$l"; done < <(ls)'),
-    ('tmux capture', "tmux capture-pane -t '=agent-dave' -p | tail -30"),
+    # Session-qualified on purpose: bare `=NAME` is a pane target that cannot
+    # resolve, and a canary vector is copied by whoever reads it.
+    ('tmux capture', "tmux capture-pane -t '=agent-dave:' -p | tail -30"),
     ('heredoc without an apostrophe',
      "cat > /tmp/x.py <<'PYEOF'\nprint(1)\nPYEOF\npython3 /tmp/x.py"),
     ('npm test', 'npm run test -- --run'),
