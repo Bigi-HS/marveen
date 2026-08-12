@@ -17,15 +17,15 @@ const ROOT = fileURLToPath(new URL('../../', import.meta.url))
 const SCAN_DIRS = ['src', 'scripts']
 const SKIP_DIRS = new Set(['node_modules', '__tests__', 'dist', 'coverage', '.git'])
 
-// Live, carded, NOT fixed here. These bind an OAuth redirect receiver to every
-// interface; the fix belongs with the missing state nonce on SEC/1d2a4fe0, under
-// security review, not smuggled in through a lint change. This list is a RATCHET:
-// fix one and this test goes red until you remove it from here, add a new one and
-// it goes red immediately.
-const KNOWN_UNFIXED = [
-  'scripts/google-oauth-authorize.ts:54',
-  'scripts/youtube-oauth-authorize.ts:50',
-]
+// RATCHET: sites known to bind host-less, allowed to stay only until their own
+// card lands. Fix one and this test goes red until you remove it from here; add
+// a new one and it goes red immediately.
+//
+// EMPTIED by SEC/1d2a4fe0 (SEC-042): the two OAuth authorize receivers that
+// motivated this scope change now bind loopback via the shared awaitLoopbackCode
+// helper, so both entries would be stale. The ratchet is deliberately left in
+// place, empty -- the next host-less bind should have to argue for itself here.
+const KNOWN_UNFIXED: string[] = []
 
 // MEASURED false positive: python's socket.listen(BACKLOG) takes a connection
 // queue depth, not a host -- the host comes from the bind() above it
