@@ -68,3 +68,7 @@ scripts/bin/
 
 # also ignore a node_modules symlink FILE at repo root (not just the dir)
 /node_modules
+
+# Promoted live guard copies (derived from scripts/hooks/ by scripts/promote-guard.py).
+# Source of truth stays in git; the promoted bytes are a deployment artefact.
+.guard/
