@@ -15,9 +15,19 @@ import { join } from 'node:path'
 // A legitimate idiom, and the file was invisible to content search because of
 // it. This guard keeps the tracked tree searchable.
 //
-// Scope note: this asserts on TRACKED files only. Untracked NULs (worktree
-// copies, logs, store artifacts) are real but are not something a repo test can
-// hold still.
+// SCOPE, STATED SO A PASS CANNOT BE MISREAD (DA-59). This asserts on TRACKED
+// files only, and that is roughly one instance in fifty. When it was written:
+// 1 tracked file carried a NUL, against ~49 untracked ones (worktree copies of
+// that same file, plus logs and store artifacts). So this suite going green
+// means "the committed tree is searchable", NOT "the NUL problem is handled".
+// The untracked count is also not a stable number -- agents create and delete
+// worktrees continuously, so it moves within the hour and should not be quoted.
+//
+// It cannot be widened usefully either. Of the three origins measured, only one
+// is a bug: a deliberate NUL as an in-band marker is legitimate code, and a
+// zero-filled hole from a crashed writer is not something a repo test can
+// prevent. The blind set is a permanent property of the tree, so the defence
+// that actually matters lives at SEARCH time: grep -a / --binary-files=text.
 
 const REPO_ROOT = join(__dirname, '..', '..')
 
