@@ -157,7 +157,14 @@ def _split_subcommands(command):
             _open_substitution()
             i += 1
             continue
-        if ch == ')' and stack:
+        # The closer has to be as quote-aware as the openers above, or a close
+        # paren sitting inside quotes INSIDE the substitution pops the stack
+        # early and swallows the rest of the command into one piece -- the same
+        # endpoint as the defect this function was rewritten to fix (DA-62-C).
+        # Measured: `echo "$(echo 'x)' ; echo M)"` prints M, so that paren
+        # closes nothing.  The stack reset means in_sq/in_dq here are the
+        # substitution's OWN quotes, not the enclosing ones.
+        if ch == ')' and stack and not in_sq and not in_dq:
             _close_substitution()
             i += 1
             continue
