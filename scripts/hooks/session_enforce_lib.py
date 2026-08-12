@@ -64,12 +64,19 @@ def sessionstart_reminder(agent_id):
 # --- UserPromptSubmit long-session anti-bloat nudge (705381e3) ---------------
 
 DEFAULT_NUDGE_CONFIG = {
-    # A session older than this (measured from its first prompt) counts as "long".
+    # No longer a trigger (Boss 2026-08-12): age alone caused constant firing on
+    # 24/7 agents (any session alive >2h fired every cooldown forever). Kept only
+    # so first_seen / age math and the prune logic stay well-defined; should_nudge
+    # MUST NOT depend on it.
     "age_threshold_s": 2 * 3600,
-    # A transcript larger than this counts as "bloated" regardless of wall age.
-    "transcript_bytes_threshold": 350_000,
+    # A transcript at/above this counts as "bloated" and is the ONLY nudge trigger.
+    # Hooks cannot read the true context-token %, so transcript size is the proxy
+    # for "near the limit". Real bloated sessions measured at 7-28 MB; the old
+    # 350 KB threshold fired on nearly every long-lived agent (Boss 2026-08-12).
+    "transcript_bytes_threshold": 5_000_000,
     # Minimum gap between two nudges for the same session (rate-limit / anti-noise).
-    "cooldown_s": 30 * 60,
+    # 60 min so even a genuinely-large session does not spam (Boss 2026-08-12).
+    "cooldown_s": 60 * 60,
     # Sessions untouched for longer than this are pruned from the state file.
     "session_prune_s": 24 * 3600,
 }
@@ -98,12 +105,13 @@ def prune_sessions(state, now, prune_s):
 
 
 def should_nudge(entry, now, transcript_bytes, cfg):
-    """Pure gate. Fire only when the session is long OR bloated AND the cooldown
-    since the last nudge has elapsed. transcript_bytes may be None (unknown) -- in
-    that case only the age signal is considered."""
-    age = max(0.0, now - entry.get("first_seen", now))
+    """Pure gate. Fire ONLY when the session is genuinely large (bloated) AND the
+    cooldown since the last nudge has elapsed. Age is deliberately NOT a trigger
+    (Boss 2026-08-12): age alone made this fire every cooldown forever on 24/7
+    agents regardless of actual context size. transcript_bytes may be None
+    (unknown) -- in that case we do NOT fire (fail-quiet)."""
     bloated = transcript_bytes is not None and transcript_bytes >= cfg["transcript_bytes_threshold"]
-    long_session = age >= cfg["age_threshold_s"] or bloated
+    long_session = bloated
     if not long_session:
         return False
     if (now - entry.get("last_nudge", 0.0)) < cfg["cooldown_s"]:

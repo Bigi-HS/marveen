@@ -53,17 +53,21 @@ class ShouldNudgeTests(unittest.TestCase):
 
     def test_fresh_short_session_does_not_fire(self):
         now = 1_000_000.0
-        e = self._entry(now)  # age 0
+        e = self._entry(now)  # age 0, small transcript
         self.assertFalse(lib.should_nudge(e, now, 1000, CFG))
 
-    def test_old_session_fires(self):
+    def test_old_but_small_session_does_not_fire(self):
+        # The exact case Boss is complaining about: a long-lived 24/7 agent whose
+        # transcript is small. Age is no longer a trigger (Boss 2026-08-12), so
+        # this must stay quiet even though the session is very old and the cooldown
+        # has trivially elapsed.
         now = 1_000_000.0
-        e = self._entry(now - CFG["age_threshold_s"] - 1)
-        self.assertTrue(lib.should_nudge(e, now, 0, CFG))
+        e = self._entry(now - CFG["age_threshold_s"] * 100, last_nudge=0.0)
+        self.assertFalse(lib.should_nudge(e, now, CFG["transcript_bytes_threshold"] - 1, CFG))
 
     def test_bloated_transcript_fires_even_when_young(self):
         now = 1_000_000.0
-        e = self._entry(now - 10)  # very young
+        e = self._entry(now - 10)  # very young, but genuinely large transcript
         self.assertTrue(lib.should_nudge(e, now, CFG["transcript_bytes_threshold"], CFG))
 
     def test_short_session_small_transcript_stays_quiet(self):
@@ -74,21 +78,26 @@ class ShouldNudgeTests(unittest.TestCase):
         self.assertFalse(lib.should_nudge(e, now, 1234, CFG))
 
     def test_cooldown_suppresses_repeat(self):
+        # A genuinely-bloated session that was just nudged must stay quiet within
+        # the cooldown window. (Bloat is the only trigger now, so drive with a
+        # large transcript rather than age.)
         now = 1_000_000.0
-        e = self._entry(now - CFG["age_threshold_s"] - 1, last_nudge=now - 1)
-        self.assertFalse(lib.should_nudge(e, now, 0, CFG))
+        e = self._entry(now - 10, last_nudge=now - 1)
+        self.assertFalse(lib.should_nudge(e, now, CFG["transcript_bytes_threshold"], CFG))
 
     def test_cooldown_elapsed_re_arms(self):
         now = 1_000_000.0
-        e = self._entry(now - CFG["age_threshold_s"] - 1, last_nudge=now - CFG["cooldown_s"] - 1)
-        self.assertTrue(lib.should_nudge(e, now, 0, CFG))
+        e = self._entry(now - 10, last_nudge=now - CFG["cooldown_s"] - 1)
+        self.assertTrue(lib.should_nudge(e, now, CFG["transcript_bytes_threshold"], CFG))
 
-    def test_none_transcript_uses_age_only(self):
+    def test_none_transcript_does_not_fire(self):
+        # transcript_bytes unknown (None) -> fail-quiet, never fire, regardless of
+        # age (Boss 2026-08-12: age is no longer a trigger).
         now = 1_000_000.0
         young = self._entry(now - 10)
         self.assertFalse(lib.should_nudge(young, now, None, CFG))
-        old = self._entry(now - CFG["age_threshold_s"] - 1)
-        self.assertTrue(lib.should_nudge(old, now, None, CFG))
+        old = self._entry(now - CFG["age_threshold_s"] * 100)
+        self.assertFalse(lib.should_nudge(old, now, None, CFG))
 
 
 # --- session-state helpers ---------------------------------------------------
@@ -193,32 +202,53 @@ class NudgeHookTests(unittest.TestCase):
             statef = lib.state_path(d, "hibiki")
             self.assertIn("sfresh", lib.load_state(statef))
 
-    def test_old_session_nudges(self):
+    def _bloated_transcript(self, d):
+        # Write a transcript file at/above the bloat threshold so the hook stats a
+        # genuinely-large session (bloat is the only trigger now, Boss 2026-08-12).
+        tp = os.path.join(d, "transcript.jsonl")
+        with open(tp, "wb") as f:
+            f.truncate(CFG["transcript_bytes_threshold"])
+        return tp
+
+    def test_old_small_session_does_not_nudge(self):
+        # The Boss-reported case: a long-lived 24/7 agent with a small transcript
+        # must NOT nudge. Pre-seed an ancient first_seen but pass no (small)
+        # transcript_path -> stays quiet.
         with tempfile.TemporaryDirectory() as d:
             cwd = os.path.join(_INSTALL, "agents", "hibiki")
             statef = lib.state_path(d, "hibiki")
-            # Pre-seed an old session so its age crosses the threshold at real now.
-            old_first = __import__("time").time() - CFG["age_threshold_s"] - 100
+            old_first = __import__("time").time() - CFG["age_threshold_s"] * 100
             lib.save_state(statef, {"sold": {"first_seen": old_first, "last_nudge": 0.0}})
             p = _run(_NUDGE_HOOK, {"cwd": cwd, "session_id": "sold"},
+                     {"SESSION_ENFORCE_INSTALL_DIR": d})
+            self.assertEqual(p.returncode, 0)
+            self.assertEqual(p.stdout.strip(), "")
+
+    def test_bloated_session_nudges(self):
+        with tempfile.TemporaryDirectory() as d:
+            cwd = os.path.join(_INSTALL, "agents", "hibiki")
+            statef = lib.state_path(d, "hibiki")
+            tp = self._bloated_transcript(d)
+            p = _run(_NUDGE_HOOK, {"cwd": cwd, "session_id": "sbloat", "transcript_path": tp},
                      {"SESSION_ENFORCE_INSTALL_DIR": d})
             self.assertEqual(p.returncode, 0)
             out = json.loads(p.stdout)
             self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
             self.assertIn("VALODI user-utasitas", out["hookSpecificOutput"]["additionalContext"])
             # last_nudge must be stamped so the cooldown now suppresses a repeat.
-            self.assertGreater(lib.load_state(statef)["sold"]["last_nudge"], 0.0)
+            self.assertGreater(lib.load_state(statef)["sbloat"]["last_nudge"], 0.0)
 
-    def test_old_session_within_cooldown_stays_quiet(self):
+    def test_bloated_session_within_cooldown_stays_quiet(self):
         with tempfile.TemporaryDirectory() as d:
             cwd = os.path.join(_INSTALL, "agents", "hibiki")
             statef = lib.state_path(d, "hibiki")
+            tp = self._bloated_transcript(d)
             now = __import__("time").time()
-            lib.save_state(statef, {"sold": {
-                "first_seen": now - CFG["age_threshold_s"] - 100,
+            lib.save_state(statef, {"sbloat": {
+                "first_seen": now - 10,
                 "last_nudge": now - 1,  # just nudged
             }})
-            p = _run(_NUDGE_HOOK, {"cwd": cwd, "session_id": "sold"},
+            p = _run(_NUDGE_HOOK, {"cwd": cwd, "session_id": "sbloat", "transcript_path": tp},
                      {"SESSION_ENFORCE_INSTALL_DIR": d})
             self.assertEqual(p.returncode, 0)
             self.assertEqual(p.stdout.strip(), "")
