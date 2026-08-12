@@ -109,7 +109,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/guardrail-permission-rules.py",
+            "command": "python3 {{PROJECT_ROOT}}/.guard/guardrail-permission-rules.py",
             "timeout": 10
           }
         ]

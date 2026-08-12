@@ -86,12 +86,15 @@ def _require_committed(source, repo_root):
                                'first, then promote' % rel)
 
 
-def _run_gate(kind, script, target, repo_root):
+def _run_gate(kind, script, target, repo_root, pass_target=True):
+    """Run one gate script.  `pass_target` is False for the unit suite, because
+    unittest.main() parses sys.argv and would read the target path as a test
+    name -- the suite already imports the source by convention."""
     if not os.path.isfile(script):
         raise PromotionRefused('no %s found at %s -- a guard without a %s is not '
                                'promotable' % (kind, os.path.relpath(script, repo_root), kind))
-    proc = subprocess.run([sys.executable, script, target], cwd=repo_root,
-                          capture_output=True, text=True)
+    argv = [sys.executable, script] + ([target] if pass_target else [])
+    proc = subprocess.run(argv, cwd=repo_root, capture_output=True, text=True)
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or '').strip().split('\n')[-12:]
         raise PromotionRefused('%s failed (exit %d) for %s:\n%s'
@@ -112,7 +115,7 @@ def promote(name, repo_root=REPO_ROOT, guard_dir=None):
     if not os.path.isfile(p['source']):
         raise PromotionRefused('%s not found in scripts/hooks' % name)
     _require_committed(p['source'], repo_root)
-    suite = _run_gate('suite', p['suite'], p['source'], repo_root)
+    suite = _run_gate('suite', p['suite'], p['source'], repo_root, pass_target=False)
     canary = _run_gate('canary', p['canary'], p['source'], repo_root)
 
     with open(p['source'], 'rb') as fh:

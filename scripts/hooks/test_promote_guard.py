@@ -195,6 +195,17 @@ class GateOrderTests(PromoterFixture):
         with open(os.path.join(self.guard_dir, self.NAME)) as fh:
             self.assertEqual(fh.read(), GUARD_V2)
 
+    def test_the_suite_is_run_with_no_extra_argv(self):
+        # unittest.main() parses sys.argv, so handing a suite the target path
+        # makes it try to load that path as a test name and fail for a reason
+        # that has nothing to do with the guard.  Found on the first real
+        # promotion, which refused with "module __main__ has no attribute
+        # scripts" -- fail-closed working, but reporting a false cause.
+        self.write('scripts/hooks/test_guardrail_example.py',
+                   'import sys\nsys.exit(0 if len(sys.argv) == 1 else 1)\n')
+        self.commit_all()
+        self.promote()   # must not raise
+
     def test_nothing_is_written_when_the_first_gate_refuses(self):
         # No .guard dir at all beforehand: a refusal must not even create it.
         self.write('scripts/hooks/' + self.NAME, GUARD_V2 + '# dirty\n')
@@ -238,6 +249,71 @@ class VerifyTests(PromoterFixture):
                                       guard_dir=self.guard_dir)
         self.assertTrue(report['manifest_matches_live'])
         self.assertFalse(report['live_matches_source'])
+
+
+class LiveWiringTests(unittest.TestCase):
+    """Assertions about THIS repo rather than a fixture, because the wiring IS
+    the deployment: if a hook config drifts back to the checkout copy, the
+    promoter still works perfectly and protects nothing.
+
+    These pins were written after the change, so they prove nothing on their own
+    -- a pin that only ever agrees with you is not an instrument.  The teeth are
+    in test_the_pin_rejects_the_spelling_it_replaced, which runs the same
+    predicate over the OLD committed text and requires it to fail."""
+
+    REPO = os.path.dirname(os.path.dirname(_HERE))
+    PROMOTED = '.guard/guardrail-permission-rules.py'
+    CHECKOUT_SPELLING = 'scripts/hooks/guardrail-permission-rules.py'
+    CONFIGS = ['.claude/settings.json', 'templates/settings.json.template']
+
+    def read(self, rel):
+        with open(os.path.join(self.REPO, rel)) as fh:
+            return fh.read()
+
+    @staticmethod
+    def wiring_is_pinned(text):
+        """A hook config is pinned iff it names the promoted guard and never the
+        checkout copy of it."""
+        return ('.guard/guardrail-permission-rules.py' in text
+                and 'scripts/hooks/guardrail-permission-rules.py' not in text)
+
+    def test_every_hook_config_is_pinned_to_the_promoted_guard(self):
+        for rel in self.CONFIGS:
+            self.assertTrue(self.wiring_is_pinned(self.read(rel)),
+                            '%s does not name the promoted guard, or still names '
+                            'the checkout copy' % rel)
+
+    def test_the_pin_rejects_the_spelling_it_replaced(self):
+        # The predicate has to be able to fail, so run it on what was committed
+        # before this change.  Note .claude/settings.json is GITIGNORED -- the
+        # fleet's live hook config has no history to compare against -- so this
+        # skips per file and then asserts it actually exercised something.  The
+        # first draft skipped out on the first file and reported OK having
+        # checked nothing.
+        checked = 0
+        for rel in self.CONFIGS:
+            old = subprocess.run(['git', 'show', 'HEAD~1:' + rel], cwd=self.REPO,
+                                 capture_output=True, text=True)
+            if old.returncode != 0:
+                continue        # untracked (.claude) or new file: nothing to compare
+            checked += 1
+            self.assertFalse(self.wiring_is_pinned(old.stdout),
+                             'the predicate passes the pre-change %s too, so it '
+                             'is not testing anything' % rel)
+        self.assertGreater(checked, 0,
+                           'no config had a previous revision to test the predicate '
+                           'against -- this test verified nothing')
+
+    def test_the_promoted_guard_exists_and_is_readable(self):
+        live = os.path.join(self.REPO, self.PROMOTED)
+        self.assertTrue(os.path.isfile(live),
+                        'settings.json points at %s but nothing is promoted there'
+                        % self.PROMOTED)
+        with open(live) as fh:
+            source = fh.read()
+        # Parses as Python: a promoted file that cannot compile would fail-open
+        # on every single tool call, which is the worst outcome available here.
+        compile(source, live, 'exec')
 
 
 if __name__ == '__main__':
