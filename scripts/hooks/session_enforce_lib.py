@@ -64,10 +64,12 @@ def sessionstart_reminder(agent_id):
 # --- UserPromptSubmit long-session anti-bloat nudge (705381e3) ---------------
 
 DEFAULT_NUDGE_CONFIG = {
-    # No longer a trigger (Boss 2026-08-12): age alone caused constant firing on
-    # 24/7 agents (any session alive >2h fired every cooldown forever). Kept only
-    # so first_seen / age math and the prune logic stay well-defined; should_nudge
-    # MUST NOT depend on it.
+    # DELIBERATELY INERT. Age was dropped as a trigger (Boss 2026-08-12): alone it
+    # made 24/7 agents fire every cooldown forever, whatever their real context
+    # size. Nothing reads this key any more -- should_nudge does not, and pruning
+    # uses session_prune_s, not this. It is kept only as the recorded "what counts
+    # as long" figure the tests drive age cases from. Re-arming it as a trigger
+    # re-creates the original noise.
     "age_threshold_s": 2 * 3600,
     # A transcript at/above this counts as "bloated" and is the ONLY nudge trigger.
     # Hooks cannot read the true context-token %, so transcript size is the proxy
