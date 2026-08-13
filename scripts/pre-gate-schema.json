@@ -5,8 +5,13 @@
   "description": "Output of scripts/pre-gate-bundle.sh --json (Thor card b45884fb). Mechanical, reproducible evidence sheet handed to the merge gate.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "checks", "diff_additions"],
+  "required": ["verdict", "checks", "diff_additions", "base_anchor"],
   "properties": {
+    "base_anchor": {
+      "description": "Whether `git fetch origin` succeeded before the 3-dot diff. \"stale\" means the fetch FAILED and the diff ran against a possibly-outdated on-disk origin/<branch> -- a green verdict then says nothing about the current remote tip.",
+      "type": "string",
+      "enum": ["fetched", "stale"]
+    },
     "verdict": {
       "description": "Aggregate result. Any check BLOCK -> BLOCK; else any WARN -> WARN; else PASS.",
       "type": "string",

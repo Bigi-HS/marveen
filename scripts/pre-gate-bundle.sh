@@ -88,6 +88,7 @@ pgb_json() {
   PGB_CROSS_MODEL="$CROSS_MODEL_JSON" \
   PGB_SKILL_CHECK="$SKILL_CHECK_JSON" \
   PGB_DA_SENTINEL="$DA_SENTINEL_JSON" \
+  PGB_BASE_ANCHOR="$BASE_ANCHOR" \
   python3 - <<'PY'
 import json, os
 names = os.environ["PGB_NAMES"].splitlines()
@@ -101,6 +102,10 @@ out = {
     "verdict": os.environ["PGB_VERDICT"],
     "checks": checks,
     "diff_additions": int(os.environ["PGB_ADDITIONS"]),
+    # "fetched" | "stale". "stale" means `git fetch origin` FAILED, so the 3-dot
+    # diff ran against a possibly-outdated on-disk origin/<branch>. Consumers must
+    # not read a green verdict as "measured against the current remote tip".
+    "base_anchor": os.environ.get("PGB_BASE_ANCHOR", "fetched"),
 }
 cm = os.environ.get("PGB_CROSS_MODEL", "")
 if cm:
@@ -127,6 +132,10 @@ PY
 # --------------------------------------------------------------------------- #
 # Check accumulator                                                            #
 # --------------------------------------------------------------------------- #
+# Base-anchor state: "fetched" (origin refreshed OK) | "stale" (fetch failed, the
+# base ref on disk may be outdated). Set in main(); defaults to the optimistic
+# value only so that sourcing the script for unit tests keeps a defined variable.
+BASE_ANCHOR="fetched"
 CHECK_NAMES=()
 CHECK_STATUSES=()
 CHECK_DETAILS=()
@@ -753,9 +762,20 @@ main() {
   # intermediate commits from a stale local branch. If the caller passes a bare
   # branch name (e.g. "develop"), resolve it to origin/<branch> so git diff
   # always compares against the remote ancestor, not a potentially-behind local ref.
-  git -C "$INSTALL_DIR" fetch origin --quiet 2>/dev/null || true
+  # The fetch stays FAIL-OPEN (a host with no network must still produce a bundle),
+  # but it must not be SILENT: a swallowed failure previously left the run diffing
+  # against an arbitrarily old on-disk origin/<branch> while printing the exact same
+  # green output as a healthy run. Capture the outcome and report it as evidence.
+  if git -C "$INSTALL_DIR" fetch origin --quiet 2>/dev/null; then
+    BASE_ANCHOR="fetched"
+  else
+    BASE_ANCHOR="stale"
+  fi
   if [[ "$base" != */* ]]; then
     base="origin/$base"
+  fi
+  if [ "$BASE_ANCHOR" = "stale" ]; then
+    record base-fetch WARN "FAILED -- ${base}@$(git -C "$INSTALL_DIR" rev-parse --short "$base" 2>/dev/null || echo unknown) may be outdated; diff is NOT anchored to the current remote tip"
   fi
 
   BASE="$base"; HEAD="$head"; DIFF_ADDITIONS=0
