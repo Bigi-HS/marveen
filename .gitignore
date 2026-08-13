@@ -66,6 +66,11 @@ backups/
 # Local tool binaries (installed via scripts/install-gitleaks.sh, not committed)
 scripts/bin/
 
+# Emit artefacts of the graphify skill (GRAPH_REPORT.md, graph.json, cache/).
+# Regenerated on demand and 13 MB at the repo root, so a stray `git add .` would
+# sweep them into an unrelated commit (measured by kidd, 2026-08-14).
+graphify-out/
+
 # also ignore a node_modules symlink FILE at repo root (not just the dir)
 /node_modules
 
