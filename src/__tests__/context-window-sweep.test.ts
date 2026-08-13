@@ -127,11 +127,22 @@ describe('runContextSweep', () => {
 })
 
 describe('formatAlert', () => {
+  // Inject an identity resolver so the render assertion stays hermetic (does not
+  // depend on the live agents/<name>/agent-config.json display names).
   it('renders one line per crossed agent with %, tokens and model', () => {
-    const text = formatAlert([{ name: 'dave', usage: usage(84, 'claude-opus-4-8[1m]') }])
-    expect(text).toContain('dave: 84%')
+    const text = formatAlert([{ name: 'dave', usage: usage(99, 'claude-opus-4-8[1m]') }], (n) => n)
+    expect(text).toContain('dave: 99%')
     expect(text).toContain('claude-opus-4-8[1m]')
-    expect(text).toContain('80%') // threshold mentioned in the header
+    expect(text).toContain('98%') // threshold mentioned in the header
+  })
+
+  it('renders the display name, not the internal agent id', () => {
+    const text = formatAlert(
+      [{ name: 'radar', usage: usage(99) }],
+      (n) => (n === 'radar' ? 'Radar Scout' : n),
+    )
+    expect(text).toContain('Radar Scout: 99%')
+    expect(text).not.toContain('radar:')
   })
 })
 
