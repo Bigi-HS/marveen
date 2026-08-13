@@ -42,8 +42,69 @@
       "minimum": 0
     },
     "cross_model": {
-      "description": "Optional. Present only when a cross-model id check ran; flags an unexpected/cross Claude model id introduced by the diff.",
-      "type": ["string", "null"]
+      "description": "Optional advisory. Present only with --cross-model. Flags an unexpected/cross Claude model id introduced by the diff. Never affects verdict or exit code.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "agreement",
+            "partial",
+            "contradictory",
+            "skipped",
+            "unavailable",
+            "prompt_leak"
+          ]
+        },
+        "model": {
+          "type": ["string", "null"],
+          "description": "The model id the cross-check ran against, when known."
+        },
+        "flags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Advisory flag names (e.g. prompt-leak-detected). Empty when nothing was flagged."
+        },
+        "low_findings": {
+          "type": "array",
+          "items": { "type": ["string", "null"] },
+          "description": "Only with status=partial: ids of the low/info findings that did not warrant a FLAG."
+        }
+      }
+    },
+    "skill_check": {
+      "description": "Optional advisory. Present only with --skill-check. Never affects verdict or exit code.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["pass", "warn"]
+        },
+        "detail": {
+          "type": "string",
+          "description": "Last SKILL-REGRESSION: line, or the reason the check was skipped."
+        }
+      }
+    },
+    "da_sentinel": {
+      "description": "Advisory. Emitted on every --json run (check_da_sentinel is unconditional): whether a DA T1 sentinel exists in DA_RUNS_DIR. Never affects verdict or exit code.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["present", "warn"]
+        },
+        "detail": {
+          "type": "string",
+          "description": "Reason, when status is warn."
+        }
+      }
     }
   }
 }

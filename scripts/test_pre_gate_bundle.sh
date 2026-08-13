@@ -81,6 +81,86 @@ sys.exit("; ".join(errs) if errs else 0)
 PY
 if [ $? -eq 0 ]; then ok "pgb_json emits schema-valid JSON (required fields + check shape)"; else bad "pgb_json JSON contract"; fi
 
+# 5b) pgb_json WITH the advisory blocks populated (card ENG-066 / eb02442b).
+#
+# Test 5 above leaves CROSS_MODEL_JSON / SKILL_CHECK_JSON / DA_SENTINEL_JSON empty, so the
+# advisory keys never reach the validated document -- the fixture never enters the state
+# where the defect lives. A real `--json` run DOES emit da_sentinel (check_da_sentinel is
+# unconditional) and skill_check (with --skill-check), and the schema declares neither
+# while setting additionalProperties:false. Result: live --json output is schema-invalid.
+#
+# This case populates the advisory vars exactly as the checks do, so the schema assertion
+# actually exercises them. It MUST fail before the schema is extended.
+CHECK_NAMES=(typecheck tests diff-size static)
+CHECK_STATUSES=(PASS PASS PASS PASS)
+CHECK_DETAILS=("tsc clean" "vitest green" "10 additions" "no secrets")
+# Byte-identical to the strings the checks assign (pre-gate-bundle.sh check_da_sentinel /
+# check_skill_regression). If those shapes change, this fixture must change with them.
+DA_SENTINEL_JSON='{"status":"warn","detail":"DA T1 not triggered"}'
+SKILL_CHECK_JSON='{"status":"pass","detail":"SKILL-REGRESSION: 0 regressions"}'
+CROSS_MODEL_JSON=''
+JSON_ADV="$(pgb_json PASS 10)"
+SCHEMA="$SCHEMA" python3 - "$JSON_ADV" <<'PY'
+import json, os, sys
+doc = json.loads(sys.argv[1])
+errs = []
+# The advisory blocks must actually be present -- otherwise this test would pass
+# vacuously and re-create the very fixture gap it exists to close.
+for key in ("da_sentinel", "skill_check"):
+    if key not in doc:
+        errs.append("fixture did not emit %s (test would be vacuous)" % key)
+    elif doc[key].get("status") is None:
+        errs.append("%s has no status" % key)
+try:
+    import jsonschema
+    with open(os.environ["SCHEMA"], encoding="utf-8") as fh:
+        jsonschema.validate(doc, json.load(fh))
+except ImportError:
+    errs.append("jsonschema not installed; schema contract unverified")
+except Exception as exc:
+    errs.append("schema validation: %s" % exc)
+sys.exit("; ".join(errs) if errs else 0)
+PY
+if [ $? -eq 0 ]; then ok "pgb_json with advisory blocks is schema-valid (da_sentinel + skill_check)"; else bad "pgb_json advisory-block JSON contract"; fi
+
+# 5c) cross_model is emitted as an OBJECT, and every status variant must validate.
+#
+# The schema previously typed cross_model as string|null while check_cross_model has
+# always assigned an object ({"status":..,"model":..,"flags":[]}), so --cross-model runs
+# were schema-invalid too. The payload set below is taken from the literals in
+# check_cross_model -- note status=partial carries an extra low_findings key.
+CM_CASES=(
+  '{"status":"agreement","model":"claude-x","flags":[]}'
+  '{"status":"partial","model":"claude-x","flags":[],"low_findings":["f1","f2"]}'
+  '{"status":"contradictory","model":"claude-x","flags":["sev-medium finding"]}'
+  '{"status":"skipped","model":null,"flags":[]}'
+  '{"status":"unavailable","model":null,"flags":[]}'
+  '{"status":"prompt_leak","model":null,"flags":["prompt-leak-detected"]}'
+)
+DA_SENTINEL_JSON=""; SKILL_CHECK_JSON=""
+CM_FAILED=""
+for cm_case in "${CM_CASES[@]}"; do
+  CROSS_MODEL_JSON="$cm_case"
+  CM_JSON="$(pgb_json PASS 0)"
+  SCHEMA="$SCHEMA" python3 - "$CM_JSON" <<'PY' || CM_FAILED="yes"
+import json, os, sys
+doc = json.loads(sys.argv[1])
+if "cross_model" not in doc:
+    sys.exit("fixture did not emit cross_model (test would be vacuous)")
+try:
+    import jsonschema
+    with open(os.environ["SCHEMA"], encoding="utf-8") as fh:
+        jsonschema.validate(doc, json.load(fh))
+except ImportError:
+    sys.exit("jsonschema not installed; schema contract unverified")
+except Exception as exc:
+    sys.exit("schema validation: %s -- payload %s" % (exc.message if hasattr(exc, "message") else exc, doc["cross_model"]))
+PY
+done
+if [ -z "$CM_FAILED" ]; then ok "pgb_json cross_model object validates for all ${#CM_CASES[@]} status variants"; else bad "pgb_json cross_model schema contract"; fi
+CROSS_MODEL_JSON=""
+DA_SENTINEL_JSON=""; SKILL_CHECK_JSON=""   # restore for the cases below
+
 # --------------------------------------------------------------------------- #
 # loki-mode gate steal (card d25ebf19): mock-integrity + test-mutation scans.   #
 # Both are pure, stdin-fed static-diff heuristics (like pgb_count_additions) so #
