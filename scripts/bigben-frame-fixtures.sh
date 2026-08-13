@@ -60,6 +60,25 @@ gen centered    460 180
   -c:v libx264 -pix_fmt yuv420p "$OUT/uniform.mp4"
 "$FF" -y -loglevel error -f lavfi -i "color=c=0x101418:s=1280x720:d=0.04:r=25" \
   -c:v libx264 -pix_fmt yuv420p "$OUT/flat.mp4"
+# Magnitude ladder for the tie case (bigben, 2026-08-14).
+#
+# `flat` already produces a bit-exact four-way tie and already goes through the
+# margin formula -- the tie BRANCH is covered. What was covered at only ONE point
+# is the MAGNITUDE the tie sits at: confidence = (best - runner_up)/best is
+# scale-invariant, so a tie returns 0.0 whether the quadrants score 0.07 or 0.86.
+# Every previous fixture and the unit test pinned the tie near the bottom of that
+# range, so a future weighting that mixed in an ABSOLUTE magnitude term would
+# stay green on `flat` and only break at high signal level -- exactly where real
+# footage lives.
+#
+# These two spread the ladder to ~12.7x (flat 0.067, gray 0.429, white 0.855).
+# One point cannot test an axis; the ladder is the test. Solid full frames are
+# also a realistic input, not a synthetic curiosity: slide, intro card, colour
+# card, whiteboard, a cross-fade landing on a uniform frame.
+"$FF" -y -loglevel error -f lavfi -i "color=c=gray:s=1280x720:d=6:r=25" \
+  -c:v libx264 -pix_fmt yuv420p "$OUT/gray.mp4"
+"$FF" -y -loglevel error -f lavfi -i "color=c=white:s=1280x720:d=6:r=25" \
+  -c:v libx264 -pix_fmt yuv420p "$OUT/white.mp4"
 
 echo "fixtures in $OUT"
 [ "$VERIFY" -eq 1 ] || exit 0
@@ -119,12 +138,24 @@ for f in topleft topright bottomleft bottomright; do
 done
 
 # noise floor: the detector may still name a zone, but must not claim confidence
-for f in centered uniform flat; do
+for f in centered uniform; do
   out=$(analyze "$f"); conf=${out##* }
   measured "measure " "$f" "$out" "$conf" || { fail=1; continue; }
   awk -v c="$conf" 'BEGIN{exit !(c < 0.10)}' \
     && echo "PASS noise    $f confidence $conf < 0.10" \
     || { echo "FAIL noise    $f confidence $conf >= 0.10 (false positive)"; fail=1; }
+done
+
+# Exact-tie ladder: bit-identical quadrants at three magnitudes spanning ~12.7x.
+# Asserted at EXACTLY 0, not merely below the 0.10 gate: a weighting that leaked
+# an absolute-magnitude term would yield a small NON-ZERO confidence that still
+# slips under 0.10 and would be missed. Equality is what pins scale-invariance.
+for f in flat gray white; do
+  out=$(analyze "$f"); conf=${out##* }
+  measured "measure " "$f" "$out" "$conf" || { fail=1; continue; }
+  awk -v c="$conf" 'BEGIN{exit !(c == 0)}' \
+    && echo "PASS tie      $f confidence $conf == 0" \
+    || { echo "FAIL tie      $f confidence $conf != 0 (scale-invariance lost)"; fail=1; }
 done
 
 echo
