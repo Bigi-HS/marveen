@@ -105,7 +105,10 @@ out = {
     # "fetched" | "stale". "stale" means `git fetch origin` FAILED, so the 3-dot
     # diff ran against a possibly-outdated on-disk origin/<branch>. Consumers must
     # not read a green verdict as "measured against the current remote tip".
-    "base_anchor": os.environ.get("PGB_BASE_ANCHOR", "fetched"),
+    # Indexed, NOT .get(..., "fetched"): defaulting an absent anchor to the
+    # optimistic value is the exact defect this field exists to remove. If the
+    # wiring ever breaks, fail loudly instead of silently claiming "fetched".
+    "base_anchor": os.environ["PGB_BASE_ANCHOR"],
 }
 cm = os.environ.get("PGB_CROSS_MODEL", "")
 if cm:

@@ -67,11 +67,27 @@ echo
 # --------------------------------------------------------------------------- #
 # Precondition: the failure really is silent at the git layer.                  #
 # --------------------------------------------------------------------------- #
+# Two separate measurements. The first draft of this block ran the GUARDED form
+# (`... || true`) and then read $? -- structurally always 0, so the assertion could
+# not fail: a demonstration, not a measurement. (Caught by roberts, 2026-08-14. It is
+# the same non-discriminating-assertion defect this whole test exists to prevent, so
+# the correction stays documented here.)
+#
+# (a) the RAW fetch must genuinely fail -- otherwise the fixture is broken and every
+#     assertion below would be measuring a healthy remote.
+if git -C "$CLONE" fetch origin --quiet 2>/dev/null; then
+  bad "fixture: raw fetch SUCCEEDED against a broken remote (fixture is not set up)"
+else
+  ok "fixture: raw fetch genuinely fails against the broken remote"
+fi
+
+# (b) the guarded form the bundle actually uses must nonetheless yield 0 -- this is
+#     the swallowing behaviour under test.
 git -C "$CLONE" fetch origin --quiet 2>/dev/null || true
 FETCH_LINE_EXIT=$?
 [ "$FETCH_LINE_EXIT" -eq 0 ] &&
-  ok "precondition: '|| true' swallows the fetch failure (exit 0)" ||
-  bad "precondition: expected exit 0 from the guarded fetch line"
+  ok "'|| true' swallows the failure (guarded line exits 0 despite (a))" ||
+  bad "expected exit 0 from the guarded fetch line, got $FETCH_LINE_EXIT"
 
 AFTER="$(git -C "$CLONE" rev-parse --short origin/develop)"
 [ "$AFTER" = "$STALE_TIP" ] &&
