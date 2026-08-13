@@ -56,6 +56,7 @@ import {
   isSessionReadyForPrompt,
   proveQuiescentlyIdle,
   sendPromptToSession,
+  type SubmitVerdict,
 } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 
@@ -111,6 +112,26 @@ function appendAbandonmentSentinel(
   } catch (err) {
     logger.warn({ err, id: msg.id }, 'Failed to append delivery-abandonment sentinel')
   }
+}
+
+// Terminal-state decision for a just-injected message, given the SubmitVerdict
+// from sendPromptToSession. Pure so the router's mark-delivered-vs-leave-pending
+// choice is unit-testable without a live tmux session.
+//   - 'submitted' -> deliver: the prompt was confirmed to land.
+//   - 'unknown'   -> deliver: the pane could not be read (or the retry-Enter
+//                   itself failed); the prompt MAY have landed and nothing was
+//                   cleared, so re-sending risks double-executing a task that
+//                   did run (agent-process SubmitVerdict contract). Treat as
+//                   delivered rather than loop.
+//   - 'parked'    -> leave-pending: the submit Enter was swallowed and the
+//                   prompt sat through every retry; sendPromptToSession has
+//                   since CLEARED the residue, so the message definitively did
+//                   NOT execute. Leaving it pending lets a later tick re-deliver
+//                   once the recipient reads idle again. Marking it delivered
+//                   here was the bug that silently dropped the message (it then
+//                   surfaced only as a 360-min "recipient never ready" abandon).
+export function decideDeliveryOutcome(verdict: SubmitVerdict): 'deliver' | 'leave-pending' {
+  return verdict === 'parked' ? 'leave-pending' : 'deliver'
 }
 
 // Checks for pending messages every 5 seconds and injects them into target
@@ -308,7 +329,20 @@ export function startMessageRouter(): NodeJS.Timeout {
         }
         // Inline preamble so a fresh session (post hard-restart) doesn't miss
         // the context that explains the tag semantics.
-        sendPromptToSession(session, prefix + wrapped)
+        const verdict = sendPromptToSession(session, prefix + wrapped)
+        if (decideDeliveryOutcome(verdict) === 'leave-pending') {
+          // 'parked': the prompt sat in the composer through every submit retry
+          // and its residue has now been cleared -> it definitively did NOT
+          // execute. Leave the row pending so a later tick re-delivers once the
+          // recipient reads idle again. We deliberately write NO pending-ack on
+          // this path (no inject was confirmed), keeping the ACK invariant
+          // intact. The 6h hard-TTL still backstops a permanently stuck target.
+          logger.warn(
+            { id: msg.id, from: msg.from_agent, to: msg.to_agent },
+            'Prompt parked after submit retries (residue cleared); leaving pending for re-delivery',
+          )
+          continue
+        }
         if (!markMessageDelivered(msg.id)) {
           logger.warn({ id: msg.id }, 'markMessageDelivered affected 0 rows (deleted concurrently?)')
         }

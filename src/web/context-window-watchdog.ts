@@ -29,6 +29,7 @@ import {
   agentDir,
   readAgentClaudeConfigDir,
   readAgentModel,
+  readAgentDisplayName,
   contextWindowForModel,
   contextPercentForModel,
 } from './agent-config.js'
@@ -40,8 +41,11 @@ const PROVIDER: ChannelProviderType = 'telegram'
 
 // Fire at/above this %, re-arm only after dropping below the lower line. The gap
 // is hysteresis so an agent hovering at the threshold doesn't alert every cycle.
-export const ALERT_THRESHOLD = 80
-export const REARM_THRESHOLD = 70
+// Boss only wants the Telegram alert when an agent is genuinely near the wall
+// (2026-08-13): below this, context is managed by the in-session nudge and the
+// auto-compact watcher, not by pinging Dominik.
+export const ALERT_THRESHOLD = 98
+export const REARM_THRESHOLD = 90
 
 const PROJECT_ROOT = process.env.MARVEEN_ROOT ?? process.cwd()
 const STATE_PATH = join(PROJECT_ROOT, 'store', 'context-watchdog-state.json')
@@ -144,10 +148,13 @@ function fmtK(n: number): string {
   return n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`
 }
 
-export function formatAlert(crossed: Array<{ name: string; usage: ContextUsage }>): string {
+export function formatAlert(
+  crossed: Array<{ name: string; usage: ContextUsage }>,
+  resolveName: (name: string) => string = readAgentDisplayName,
+): string {
   const lines = crossed.map(
     ({ name, usage }) =>
-      `${name}: ${usage.percent}% (${fmtK(usage.tokens)}/${fmtK(usage.windowSize)}${usage.model ? ', ' + usage.model : ''})`,
+      `${resolveName(name)}: ${usage.percent}% (${fmtK(usage.tokens)}/${fmtK(usage.windowSize)}${usage.model ? ', ' + usage.model : ''})`,
   )
   return `⚠️ Kontextus-figyelmeztetes -- agens(ek) a ${ALERT_THRESHOLD}% felett:\n${lines.join('\n')}`
 }
