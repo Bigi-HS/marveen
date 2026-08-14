@@ -1029,6 +1029,133 @@ class AnsiCEscapeExpansionTests(unittest.TestCase):
                         "permission guard allowed %r" % cmd)
 
 
+class AnsiCSplitterTests(unittest.TestCase):
+    r"""The splitter did not know `$'...'` exists, and it runs BEFORE the expander.
+
+    Inside `$'...'` bash reads `\'` as an ESCAPED QUOTE and keeps going.
+    `_split_subcommands` applied the ordinary single-quote rule, where a
+    backslash is literal, so it closed the string one quote early. Quote parity
+    is a state machine and not an offset: the next quote then RE-OPENS a region
+    bash never opened, it stays open to end of line, and every separator after
+    it is swallowed. The rest of the command line collapses into the FIRST piece
+    as arguments, and four of the five rules anchor on the command word of a
+    piece -- so a second command stops being a command to them.
+
+    `_expand_dollar_quoting` already scanned the body correctly. The defect was
+    that two scanners disagreed about one construct while the splitter ran
+    first. No identity assertion covers that: both files held the SAME wrong
+    splitter, so they agreed, and agreeing is not the same as being right.
+
+    Measured before the fix: all five rules allowed, both controls blocked, and
+    the ENFORCED copy blocked every row -- its splitter is quote-BLIND, so it
+    splits on separators it should sometimes respect. The quote-aware rewrite
+    (c84f835) closed twenty cells of that blindness and opened this one. Both
+    are under-blocking and neither version dominates, which is why these rows
+    stay.
+    """
+
+    BS = chr(92)
+    SQ = chr(39)
+    MARKER = "DAVE-T-FAMILY-MARKER"
+
+    # `ls $'a\'b'` -- one ANSI-C word holding an escaped quote, nothing else.
+    BYPASS = "ls $" + SQ + "a" + BS + SQ + "b" + SQ
+    # The same shape with no escape: splitter and bash already agreed here.
+    CONTROL_PLAIN = "ls $" + SQ + "ab" + SQ
+    # The same escape with no dollar: an ordinary quoted word, where a LITERAL
+    # backslash is the correct reading. A fix that moved this row would be
+    # wrong, in the way "quoting disables the guard" was wrong for the O family.
+    CONTROL_NO_DOLLAR = "ls " + SQ + "a" + BS + SQ
+
+    SUBJECTS = (
+        ("rm -rf /", "rm-rf-root"),
+        ("git push --force origin main", "force-push-protected"),
+        ('sqlite3 store/noa.db "DROP TABLE kanban_cards"', "sql-drop"),
+        ("cat ~/.git-credentials", "cred-file-print"),
+        ("cat ~/.ssh/id_rsa", "sensitive-file-print"),
+    )
+
+    def _verdict(self, cmd):
+        return guard.classify({"tool_name": "Bash", "tool_input": {"command": cmd}})
+
+    def test_bash_honours_the_separator_the_splitter_swallowed(self):
+        """Ground truth first, on a decoy: the shape really runs a second command.
+
+        Without this the rest of the class would only prove that a scanner
+        disagrees with someone's reading of the manual.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            decoy = os.path.join(tmp, "decoy")
+            with open(decoy, "w") as handle:
+                handle.write(self.MARKER)
+            out = subprocess.run(
+                ["bash", "--noprofile", "--norc", "-c",
+                 self.BYPASS + " ; cat " + decoy],
+                capture_output=True, text=True, timeout=10, cwd=tmp)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(self.MARKER, out.stdout,
+                      "bash ran no second command, so this shape is not a bypass")
+
+    def test_the_swallowed_separator_does_not_disable_the_rules(self):
+        """All five, because it follows the splitter and not any one rule."""
+        for subject, expected in self.SUBJECTS:
+            cmd = self.BYPASS + " ; " + subject
+            with self.subTest(cmd=cmd):
+                denied, rule, _ = self._verdict(cmd)
+                self.assertTrue(denied, "swallowed separator hid: %r" % cmd)
+                self.assertEqual(rule, expected)
+
+    def test_the_controls_show_it_is_the_escape_and_not_the_form(self):
+        """Both controls blocked while the shape did not, before the fix."""
+        for control in (self.CONTROL_PLAIN, self.CONTROL_NO_DOLLAR):
+            for subject, expected in self.SUBJECTS:
+                cmd = control + " ; " + subject
+                with self.subTest(cmd=cmd):
+                    denied, rule, _ = self._verdict(cmd)
+                    self.assertTrue(denied, "control stopped blocking: %r" % cmd)
+                    self.assertEqual(rule, expected)
+
+    def test_the_separator_is_a_separator_again(self):
+        """The splitter's own layer. The verdict above can be reached by other
+        means; this pins the boundary that produced it."""
+        self.assertEqual(
+            len(guard._split_subcommands(self.BYPASS + " ; true")), 2)
+
+    def test_an_ansi_c_string_still_hides_its_own_separators(self):
+        """The opposite direction, which is what over-fixing would break: a
+        `;` INSIDE `$'...'` is data. bash runs one command, so we must see one
+        piece -- otherwise ordinary commit messages start tripping the guard."""
+        cmd = "git commit -m $" + self.SQ + "fix; not a separator" + self.SQ
+        self.assertEqual(len(guard._split_subcommands(cmd)), 1)
+        denied, rule, _ = self._verdict(cmd)
+        self.assertFalse(denied, "over-block from the splitter fix (%s)" % rule)
+
+    def test_an_unterminated_ansi_c_string_is_not_made_runnable(self):
+        """The fail-open branch stays honest only while unparseable implies
+        unrunnable, so the row is asserted against bash rather than assumed."""
+        cmd = "ls $" + self.SQ + "abc ; rm -rf /"
+        syntax = subprocess.run(["bash", "--noprofile", "--norc", "-n", "-c", cmd],
+                                capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(syntax.returncode, 0,
+                            "bash accepts this, so allowing it is a real gap")
+
+    def test_both_guards_split_this_family_not_just_this_file(self):
+        """The verdict-layer assertion again, on the layer that produced it.
+
+        Helper identity says the two files hold the same splitter. It cannot say
+        the splitter is right, and this defect is exactly the case where they
+        were identical and both wrong.
+        """
+        sibling_path = os.path.join(_HERE, "guardrail-permission-rules.py")
+        spec = importlib.util.spec_from_file_location("perm_guard_split", sibling_path)
+        sibling = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sibling)
+        for mod in (guard, sibling):
+            with self.subTest(module=mod.__name__):
+                self.assertEqual(
+                    len(mod._split_subcommands(self.BYPASS + " ; true")), 2)
+
+
 class SiblingSourceIdentityTests(unittest.TestCase):
     """`# helpers (shared with destructive-bash)` in the sibling header was false.
 

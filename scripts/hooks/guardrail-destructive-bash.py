@@ -186,6 +186,23 @@ def _split_subcommands(command, *, nested=True):
             buf.append(ch); i += 1
             continue
 
+        # `$'...'` is ANSI-C quoting, and inside it `\'` is an ESCAPED QUOTE,
+        # not a close. Reading it with the ordinary single-quote rule (where a
+        # backslash is literal) ends the string one quote early -- and quote
+        # parity is a state machine, not an offset: the next quote RE-OPENS a
+        # region bash never opened, it stays open to end of line, and every
+        # separator after it is swallowed into this piece. All five rules then
+        # look at one piece whose command word is whatever came first.
+        # `_expand_dollar_quoting` already scans the body this way. The two have
+        # to agree, and this one runs first.
+        if not in_sq and not in_dq and ch == '$' and nxt == "'":
+            j = i + 2
+            while j < n and command[j] != "'":
+                j += 2 if command[j] == '\\' else 1
+            # Unterminated: bash rejects the line, so there is nothing to split.
+            buf.append(command[i:j + 1])
+            i = j + 1
+            continue
         if not in_sq and ch == '$' and nxt == '(':
             _open_substitution('$(', ')')
             i += 2
