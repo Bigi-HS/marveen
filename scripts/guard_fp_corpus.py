@@ -429,6 +429,55 @@ CASES = [
         command=("git commit -q -F - << 'EOF'\n"
                  "corpus: land \"dave's\" decisions\nEOF"),
     ),
+
+    # -- J: the fix's OWN blind spot, required by dave 2026-08-14 -------------
+    # These are true positives that MUST STAY BLOCKED. They exist because the
+    # obvious repair for I1 -- read the command word without parsing -- was
+    # measured and regresses 3 of 6 shapes: a naive `split()[0]` sees `FOO=1`,
+    # `sudo` or (after basename) `x`, none of which is an interpreter, so the
+    # rule would decline a command it blocks today. That trades a visible false
+    # positive for a silent false negative, on the fail-closed branch, where
+    # there is no token list to fall back to.
+    #
+    # J1-J3 are the parse-FAILING variants (an unpaired apostrophe in a trailing
+    # comment; `_tokenize` runs with comments=False, so it is not stripped).
+    # J4-J5 are the parseable counterparts: they show `_command_word` already
+    # skips these prefixes correctly when tokens exist. The pair is the point.
+    # The prescribed shape is one shared skip helper called with a token list on
+    # the parsed branch and with raw whitespace-split words on the fail-closed
+    # branch -- one logic, two inputs. Rewriting the skip rules against the raw
+    # string is the [[ported-rule-is-not-the-rule]] shape and is what these rows
+    # exist to catch.
+    dict(
+        id="J1", family="parse-fail-prefix", should=BLOCK,
+        note="MUST STAY BLOCKED: env-assignment prefix, unparseable",
+        why="the command word is python3 reading the credential; FOO=1 is a prefix",
+        command="FOO=1 python3 -c \"print(open('" + DOTENV + "').read())\"  # dave's copy",
+    ),
+    dict(
+        id="J2", family="parse-fail-prefix", should=BLOCK,
+        note="MUST STAY BLOCKED: sudo prefix, unparseable",
+        why="sudo is a prefix, not the command word",
+        command="sudo python3 -c \"print(open('" + DOTENV + "').read())\"  # dave's copy",
+    ),
+    dict(
+        id="J3", family="parse-fail-prefix", should=BLOCK,
+        note="MUST STAY BLOCKED: PATH assignment, unparseable (basename gives 'x')",
+        why="a naive basename of PATH=/x yields x, which is not an interpreter",
+        command="PATH=/x python3 -c \"print(open('" + DOTENV + "').read())\"  # dave's copy",
+    ),
+    dict(
+        id="J4", family="parse-fail-prefix", should=BLOCK,
+        note="parseable counterpart of J1 -- what the shared helper must preserve",
+        why="same command, tokenizable; blocked through the ordinary path today",
+        command="FOO=1 python3 -c \"print(open('" + DOTENV + "').read())\"",
+    ),
+    dict(
+        id="J5", family="parse-fail-prefix", should=BLOCK,
+        note="parseable counterpart of J2",
+        why="same command, tokenizable; blocked through the ordinary path today",
+        command="sudo python3 -c \"print(open('" + DOTENV + "').read())\"",
+    ),
 ]
 
 

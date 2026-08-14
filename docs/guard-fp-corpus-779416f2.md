@@ -209,6 +209,11 @@ deferral working, not a regression.
    landing: it is a **new defect instance**, captured in production. Leaving the
    criterion at seven would let a fix pass the list with the live case still
    red.
+
+   **Quote the number and the row ids together, always.** "Eight rows" on its
+   own erodes by substitution just as a bare count does, only more slowly: the
+   next reader cannot tell whether their eight are these eight.
+
 2. F1–F8 unchanged.
 3. `--compare` → 0 gaps once 2cb1ed6e is in the base branch.
 4. Both copies updated together, or `promote-guard.py` re-run, so `scripts/hooks/`
@@ -228,9 +233,34 @@ deferral working, not a regression.
    command word is `git`, so the very next check would have declined it — the
    rule blocks a command it had already decided not to inspect. Note the fix
    cannot be a plain swap: with `tokens is _PARSE_FAIL` there is no token list
-   to take a command word from, so it needs a parse-free first-word read of the
-   raw string. That is what makes this a design line rather than a two-line
-   reorder.
+   to take a command word from, so it needs a parse-free read of the command
+   word. That is what makes this a design line rather than a two-line reorder --
+   and the naive version of that read has its own regression, which is point 7.
+
+   Measured by dave on both guard copies (byte-identical, md5 `c2f3e619`):
+   `_PARSE_FAIL` branch at line 418, interpreter-word check at 422, `I1`
+   `matched=True` with command word `git`, controls 5/5. His decisive control
+   was the one this corpus did not have: **interpreter AND parse-fail together
+   must stay `True`.** So the two lines cannot simply be swapped — that would be
+   under-blocking, not a fix.
+
+7. **J1–J5 must stay blocked.** They are true positives today and are invisible
+   in the baseline on purpose — they only speak if the fix breaks them. The
+   obvious repair for `I1` (read the command word without parsing) was measured
+   by dave and regresses three of six shapes: `split()[0]` yields `FOO=1`,
+   `sudo`, or `x` after a basename, none of which is an interpreter, so the rule
+   declines a command it blocks today. That trades a **visible false positive
+   for a silent false negative**, on the fail-closed branch, where there is no
+   token list to fall back to.
+
+   The prescribed shape is one shared skip helper (sudo, `VAR=` assignments,
+   basename) called with a **token list** on the parsed branch and with **raw
+   whitespace-split words** on the fail-closed branch. One logic, two inputs, no
+   port — rewriting the skip rules against the raw string is the same
+   ported-rule-is-not-the-rule shape measured on MEM/07596e45. `J4`/`J5` are the
+   parseable counterparts of `J1`/`J2` and pin what `_command_word` already does
+   correctly, so the helper cannot be repaired in a way that satisfies only the
+   raw-string side.
 
 ---
 
@@ -239,14 +269,22 @@ deferral working, not a regression.
 A zero here is a **lower bound, not a proof**, and the bound is worth stating
 because "0 false positives" reads like a guarantee:
 
-- **43 shapes, not a population.** The corpus measures the command forms someone
+- **48 shapes, not a population.** The corpus measures the command forms someone
   thought to write down. The A/B families were built backwards from four blocks
   that actually happened; nobody enumerated the space of unbalanced-quote
-  commands. A shape absent from `CASES` is unmeasured, not safe. The I family is
-  the evidence for that: the `git commit -F -` surface was already **reported**
-  once (hibiki, 2026-08-13) and still was not in `CASES` until it fired again in
-  production. A known surface and a measured row are different things, and only
-  the second one fails a build.
+  commands. A shape absent from `CASES` is unmeasured, not safe.
+- **Reported is not landed, and the corpus only knows what landed.** The
+  `git commit -F -` surface was reported by hibiki on 2026-08-13. It was written
+  down, relayed, and understood — and it still was not in `CASES`, so every
+  green run between then and 08-14 was silent about it. It took the defect
+  firing a second time, in production, for a row to exist. **This corpus is the
+  instrument; a finding that does not land in it is invisible no matter who
+  reported it or where.** The same applies to anything currently sitting only in
+  a message or a memory file: treat it as unmeasured until it is a row.
+- **J1–J5 are regression guards and therefore prove nothing today.** They are
+  `ok` in every baseline run by construction. Their value is entirely
+  conditional on a future fix breaking them; if the fix never touches the
+  command-word path, they will have measured nothing.
 - **The chad family is still UNKNOWN.** Escaped quotes and `$()` inside double
   quotes did not reproduce on the live guard across 14 attempts. Either it was
   measured against the develop-tracked copy, or it is a form I failed to
