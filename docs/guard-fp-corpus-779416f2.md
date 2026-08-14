@@ -3,15 +3,22 @@
 Built by rackham, 2026-08-14, at marveen's request: validate dave's fix against
 **measured** benign cases rather than assumed ones.
 
-Harness: `scripts/guard_fp_corpus.py` (76 cases, runs in <1s, executes nothing).
-`--compare` diffs the two guard copies; `--splitter` reports which splitter a
-per-piece fix would inherit.
+Harness: `scripts/guard_fp_corpus.py` (94 cases, runs in <1s, executes nothing).
+`--compare` diffs the two copies of the permission ruleset; `--splitter` reports
+which splitter a per-piece fix would inherit; `--guards` asks **both guard files**
+the same shapes.
 
 ```
 python3 scripts/guard_fp_corpus.py            # table + summary
 python3 scripts/guard_fp_corpus.py --verbose  # + reported cause vs ground truth
 python3 scripts/guard_fp_corpus.py --compare  # live guard vs develop-tracked
+python3 scripts/guard_fp_corpus.py --guards   # permission vs destructive-bash
 ```
+
+The bash PreToolUse chain is **two files**, so every row names the guard that
+owns it and is asked of that file (the `guard` column). A row measured green on
+one file asserts nothing about the other -- sections 5e and 5f are the two
+measured reasons why.
 
 Every case is a **string** passed to the guard's own `classify()`. The harness
 opens no credential, spawns no shell, makes no network call. It calls the
@@ -120,19 +127,25 @@ must stop naming a specific attack (card's FIX item 3).
 
 ## 2. Measured false negatives
 
-**Fourteen**: E4, plus L2-L6, L8-L11 and L13-L16 (section 5d).
+**Twenty-five**: E4, plus L2-L6, L8-L11, L13-L16 (section 5d), M2-M8
+(section 5e) and N2-N5 (section 5f).
 
-| id | shape | verdict |
-|----|-------|---------|
-| E4 | clean heredoc whose body reads the dotenv file | **allowed** |
-| L2-L6, L8 | a credential read behind `for`/`then`/`while`/`{`/`time`, or behind a bare keyword | **allowed** |
-| L9-L11 | the same wrapper against the dotenv, interpreter and exfiltration rules | **allowed** |
-| L13-L16 | the same read behind `command`, `env`, `timeout 5`, `!` | **allowed** |
+| id | guard | shape | verdict |
+|----|-------|-------|---------|
+| E4 | permission | clean heredoc whose body reads the dotenv file | **allowed** |
+| L2-L6, L8 | permission | a credential read behind `for`/`then`/`while`/`{`/`time`, or behind a bare keyword | **allowed** |
+| L9-L11 | permission | the same wrapper against the dotenv, interpreter and exfiltration rules | **allowed** |
+| L13-L16 | permission | the same read behind `command`, `env`, `timeout 5`, `!` | **allowed** |
+| M2 | destructive | `( rm -rf / )` -- the shape its sibling already blocks | **allowed** |
+| M3-M8 | destructive | the same wrapper class against all five destructive rules | **allowed** |
+| N2-N5 | destructive | one quoted `)`, backtick or `$(` after the command word | **allowed** |
 
 E4 independently reproduces dave's FINDING 2. The L rows arrived on 2026-08-14
-from his per-piece TDD and were reproduced here; they are under-blocks rather
-than the false positives this card was opened for, and their severity is flagged
-to dave rather than settled in this document. All must flip to BLOCK.
+from his per-piece TDD and were reproduced here. The M and N rows are on the
+**second** guard file and are under-blocks of `rm -rf /`, protected-branch
+force-push, SQL drop and credential print; they ride on card SEC/151a0756, which
+dave opened separately for exactly the risk-profile reason this document
+flagged. All must flip to BLOCK.
 
 ---
 
@@ -217,12 +230,22 @@ deferral working, not a regression.
 1. `python3 scripts/guard_fp_corpus.py` → **0 false positives, 0 false negatives**
    on the settled cases. **Ten** rows must flip to allow (A2, A5, B2, **I1**,
    **I6**, **I7** from the parse-fail fix; D4, G2, G6, G7 from the D4 narrowing)
-   and **fourteen** must flip to block (E4; L2-L6, L8-L11, L13-L16 from the
-   command-word fix). Two rows must NOT move: **L7** already blocks and **L12**
-   already allows — they bound the pass-through list from either side, and a run
-   that flips ten and blocks fourteen while breaking one of those two has not
-   passed. The three deferred H rows must still block — they
-   are reported on their own line and do not count.
+   and **twenty-five** must flip to block: E4 and L2-L6, L8-L11, L13-L16 from the
+   command-word fix on the permission file; **M2-M8** from the same fix on the
+   destructive file; **N2-N5** from the splitter fix that is not yet written.
+
+   **Four rows must NOT move**, and they bound the two fixes from either side:
+   **L7** and **M9**/**M10** and **N6**/**N7**, plus **L12** — `L7` already
+   blocks, `L12` and `M9`/`M10` already allow, `N6`/`N7` already block. A run
+   that flips ten and blocks twenty-five while breaking one of those has not
+   passed; each of them exists because a plausible over-wide fix would break it.
+   The three deferred H rows must still block — they are reported on their own
+   line and do not count.
+
+   **The M and N rows are on the second guard file**, so criterion 4 is not a
+   tidiness item for them: a green run proves nothing about a file the harness
+   did not ask. `--guards` must report **0** command-word disagreements and
+   **0** splitter disagreements, or the two files have drifted again.
 
    `I1`, then `I6`/`I7`, were added after the criterion was first locked, and
    they are the additions that change the headline for a reason other than a
@@ -472,6 +495,97 @@ urgency rather than riding along. Flagged to dave rather than decided here. What
 is **not** in question is that the rows belong somewhere measurable: the cost of
 a finding that stays in a message is already recorded in section 6.
 
+**Resolved the same day:** dave had already opened **SEC/151a0756** at urgent
+before the question reached him, so the L, M and N rows ride there and not on
+779416f2.
+
+---
+
+## 5e. There are two guard files, and they are not the same file (M family)
+
+The bash PreToolUse chain is **two hooks**, wired in 28 agent settings files:
+
+| file | live copy | how a change reaches the fleet |
+|------|-----------|-------------------------------|
+| `guardrail-permission-rules.py` | `.guard/` (gitignored, promoted from `e571e673` with a manifest) | re-promotion; merging alone does **not** change it |
+| `guardrail-destructive-bash.py` | this working tree, by absolute path | whatever the shared checkout holds is what runs |
+
+The permission-rules header describes `_split_subcommands`, `_tokenize` and
+`_command_word` as shared with the destructive hook. **They are not.** Each file
+carries its own copy, and card ec7754d7 — which taught `_command_word` to strip
+a leading paren — was applied to one of them.
+
+`--guards` measures this one layer below verdicts, because comparing verdicts
+would confound two things: the files own different rules, so an allow on the
+wrong file means only "not my rule". The command word is the property the header
+claims is shared, and it is defined identically in both:
+
+```
+case  permission    destructive   agree
+M2    rm            (             NO
+L7    cat           (             NO
+      ... every other M row agrees
+```
+
+Two rows differ and **both are the paren**. That is the useful shape of the
+finding: the copies are otherwise in lockstep, which is exactly how a false
+"shared" comment survives review — it is true of almost every shape anyone
+tries. `M2` and `L7` are the same command form with opposite verdicts, today,
+with no change to either file.
+
+The M rows carry the wrapper class across all five destructive rules, and two
+must not move: `M9` (`myfunc rm -rf /`) allows because bash deletes nothing, and
+`M10` (`rm -rf ./build`) allows because the rule is scoped to filesystem roots on
+purpose. A wrapper fix that widens the target set with it has failed.
+
+**The harness had to change too.** A single fleet-wide true-positive control let
+one file's control vouch for the other: if the destructive module stopped
+loading, its rows would all read `allow` and the run would still call itself
+valid on the permission file's evidence. The control is now checked per guard.
+
+---
+
+## 5f. The keyword model agrees; the splitter model does not (N family)
+
+dave shipped the wrapper fix into both files (44/44 and 55/55 on the real hook
+path) and deliberately left the splitter divergent, calling it **"unmeasured,
+not fine"**. Measured 2026-08-14: not fine.
+
+The destructive splitter rewrites every `)`, backtick and `$(` in the **raw**
+string, quotes included. A quoted `)` in an argument after the dangerous command
+word cuts *inside* that argument; the piece is left with an unbalanced quote;
+`_tokenize` returns `None`; the caller skips the unparseable piece. Fail-open.
+**One character, no wrapper, all five rules:**
+
+| shape | destructive | permission |
+|-------|-------------|------------|
+| `cat <PAT-file>` | **BLOCK** | **BLOCK** |
+| `cat <PAT-file> "note )"` | **allowed** | **BLOCK** |
+| `rm -rf /` | **BLOCK** | not its rule |
+| `rm -rf / "note )"` | **allowed** | not its rule |
+
+`N2` is the discriminator, and it is stronger than a divergence: the permission
+file **blocks that exact command**. The shape is blockable; the only variable is
+which splitter reads it. Measured on dave's fix branch as well — all of these
+still allow there, because the wrapper fix and this are orthogonal axes.
+
+Two rows bound the class and must not move. `N6` puts the quoted `)` **before**
+the verb and still blocks, because the cut lands in the earlier piece and the
+dangerous one survives intact: the property is position, so a fix aimed at
+"commands containing a paren" is aimed at the wrong thing. `N7` is a plain quoted
+argument with no substitution character and still blocks: quoting is not the
+trigger. `N4` and `N5` rule out a fix that handles only double quotes, or only
+the paren.
+
+**`N8` exists because this instrument nearly produced a false alarm.** The
+`--guards` table shows the *permission* splitter also leaving an unparsed piece
+on the backtick shape, which looks like the same defect. It is not: the
+credential read lands in a piece that does parse, so the rule fires. Checked
+rather than assumed, because the rule name alone could not settle it — the
+fail-closed parse branch reports the *nearest rule's* name, so `env-file-print`
+appears in both cases. Removing the credential path flips the shape to `allow`,
+which rules the parse branch out. Latent difference, not a demonstrated defect.
+
 ---
 
 ## 6. What this corpus cannot see
@@ -479,7 +593,7 @@ a finding that stays in a message is already recorded in section 6.
 A zero here is a **lower bound, not a proof**, and the bound is worth stating
 because "0 false positives" reads like a guarantee:
 
-- **76 shapes, not a population.** The corpus measures the command forms someone
+- **94 shapes, not a population.** The corpus measures the command forms someone
   thought to write down. The A/B families were built backwards from four blocks
   that actually happened; nobody enumerated the space of unbalanced-quote
   commands. A shape absent from `CASES` is unmeasured, not safe.
@@ -518,9 +632,25 @@ because "0 false positives" reads like a guarantee:
   quotes did not reproduce on the live guard across 14 attempts. Either it was
   measured against the develop-tracked copy, or it is a form I failed to
   construct. Absence of a reproduction is not absence of the defect.
-- **One guard, one moment.** Every row is `classify()` on the live `.guard/`
-  copy as promoted from `e571e673`. `--compare` shows the tracked copy already
-  disagrees on three shapes; re-promotion moves the subject under the results.
+- **One guard, one moment.** Every permission row is `classify()` on the live
+  `.guard/` copy as promoted from `e571e673`. `--compare` shows the tracked copy
+  already disagrees on three shapes; re-promotion moves the subject under the
+  results.
+- **For 76 rows this corpus measured one of the two guard files and never said
+  so.** That is the same unstated-scope defect it was written to expose (`guard-
+  scope-is-an-unstated-claim`), committed by the instrument itself: the header
+  said "the guard", the rows said nothing, and the second file was not merely
+  unmeasured — it was *invisible*, because there was no column in which its
+  absence could show. The `guard` column and `--guards` exist so the scope is
+  now something a reader can see rather than something they must know. **Ask
+  what a green run did not ask.**
+- **Fixed on a branch is not fixed on the fleet, and this corpus reads the
+  enforced copies.** dave's wrapper fix measured 44/44 and 55/55 on his branch
+  while the enforced files were byte-identical to their pre-fix state (checked:
+  same md5, mtimes 18:31 and 21:04, hours earlier). Both numbers are true of
+  different artefacts. The two files also *deliver* differently — one needs
+  re-promotion, the other needs the shared checkout to move — so "merged" is not
+  a synonym for "enforced" for either of them.
 - **Static strings only.** Nothing here executes, which is what makes the corpus
   safe to run — and also means it measures the *decision*, never whether a
   command that slips through would in fact open anything.
