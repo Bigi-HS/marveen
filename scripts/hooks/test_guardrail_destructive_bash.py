@@ -691,23 +691,236 @@ class DollarPrefixedQuotingTests(unittest.TestCase):
                     {"tool_name": "Bash", "tool_input": {"command": cmd}})
                 self.assertTrue(denied, f"variable expansion stopped resolving: {cmd!r}")
 
-    def test_the_escape_expansion_axis_is_named_not_covered(self):
-        """An honest limit, pinned so it is not mistaken for coverage.
+    def test_the_pin_on_escape_expansion_was_inverted_not_deleted(self):
+        """This method used to assert that the escape gap was OPEN, correctly.
 
-        ANSI-C quoting also EXPANDS escapes, so `$'\\x63at'` is `cat` to bash
-        while shlex sees the literal text. This fix removes the quoting prefix;
-        it does not implement the escape expansion. The form is recorded here as
-        a known gap with its measured verdict, so that a later reader finds a
-        stated limit rather than re-deriving it -- and so the day someone closes
-        it, this test is what tells them it moved.
+        A stated limit records what happens today. It does not say whether what
+        happens today is reachable, and that is a different measurement -- one
+        the pin quietly reads as if it had already been taken. rackham took it
+        (P family): the escape expands, the expanded word is looked up AS a
+        command, the read happens, and the shape parses. So the limit became a
+        defect, and a wider one than the pin described.
+
+        The pin fired on the day the axis moved, which is the whole reason to
+        write one down. See AnsiCEscapeExpansionTests for the closure.
         """
         cmd = "$'\\x63at' ~/.git-credentials"
         self.assertTrue(self._reads_a_real_file("$'\\x63at' {0}"),
-                        "if bash stopped reading this, the gap is closed by bash")
-        denied, _, _ = guard.classify(
+                        "bash no longer reads this -- the premise changed")
+        denied, rule, _ = guard.classify(
             {"tool_name": "Bash", "tool_input": {"command": cmd}})
-        self.assertFalse(denied, "escape expansion is now covered -- update this test "
-                                 "and the card, the gap closed")
+        self.assertTrue(denied, "the escape gap reopened")
+        self.assertEqual(rule, "cred-file-print")
+
+
+class AnsiCEscapeExpansionTests(unittest.TestCase):
+    """`$'\\x72m' -rf /` runs rm, and neither guard saw a command word at all.
+
+    The O family hid a PATH from rules that anchor it. This hides the VERB, so
+    it is not confined to the credential rules: one layer further up, no rule
+    even reaches its subject. `_expand_dollar_quoting` was written knowing the
+    escape axis existed and deliberately did not implement it; the axis was
+    pinned instead. Pinning is not covering.
+
+    The direction of the fix is set by the control, not by the bypasses. Plain
+    `'\\x72m'` carries the same escape text and bash never expands it -- it is a
+    command-not-found, and allowing it is CORRECT. So "expand escapes" is the
+    wrong generalization in exactly the way "quoting disables the guard" was for
+    the O family. What bash expands is `$'...'`, and that is what this expands.
+    """
+
+    MARKER = "DAVE-P-FAMILY-MARKER"
+    STYLES = ("hex", "octal", "unicode", "first-char-only")
+    CRED = "~/.git-credentials"
+    KEY = "~/.ssh/id_rsa"
+
+    @staticmethod
+    def _escape_body(word, style):
+        """The word as bash escape text, without the quoting that activates it."""
+        if style == "hex":
+            return "".join("\\x%02x" % ord(c) for c in word)
+        if style == "octal":
+            return "".join("\\%03o" % ord(c) for c in word)
+        if style == "unicode":
+            return "".join("\\u%04x" % ord(c) for c in word)
+        if style == "first-char-only":
+            return "\\x%02x" % ord(word[0]) + word[1:]
+        raise AssertionError("unknown style %r" % style)
+
+    def _ansi_c(self, word, style):
+        return "$'%s'" % self._escape_body(word, style)
+
+    def _plain(self, word, style):
+        """The same escape text with no dollar: bash leaves it literal."""
+        return "'%s'" % self._escape_body(word, style)
+
+    def _verdict(self, cmd):
+        return guard.classify({"tool_name": "Bash", "tool_input": {"command": cmd}})
+
+    def test_the_escape_expands_and_the_word_is_looked_up_as_a_command(self):
+        """Two links, and the second is the one worth measuring.
+
+        That `$'\\x65cho'` is the string `echo` says nothing on its own; the
+        question is whether bash then RESOLVES it. Run against the harmless twin
+        so the answer comes from execution rather than from reasoning about
+        quoting, which is where the author of a scanner goes wrong.
+        """
+        for style in self.STYLES:
+            with self.subTest(style=style):
+                out = subprocess.run(
+                    ["bash", "-c", "%s %s" % (self._ansi_c("echo", style), self.MARKER)],
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                self.assertIn(self.MARKER, out.stdout,
+                              "the hidden verb did not resolve, so it is not a bypass")
+
+    def test_the_plain_quoted_control_does_not_resolve(self):
+        """The row that keeps the fix off the tokenizer as a whole.
+
+        Same escape text, no dollar, and bash does not expand it. Nothing runs,
+        so allowing it is right -- and any fix that blocked it would be blocking
+        a string.
+        """
+        for style in self.STYLES:
+            if style == "first-char-only":
+                continue  # the tail is a real word; only the escape must stay dead
+            with self.subTest(style=style):
+                out = subprocess.run(
+                    ["bash", "-c", "%s %s" % (self._plain("echo", style), self.MARKER)],
+                    capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(out.returncode, 0)
+                self.assertNotIn(self.MARKER, out.stdout)
+                denied, rule, _ = self._verdict("%s -rf /" % self._plain("rm", style))
+                self.assertFalse(denied, "blocked a literal string: %s" % rule)
+
+    def test_a_hidden_verb_does_not_disable_the_rules(self):
+        for style in self.STYLES:
+            for word, rest, expected in (
+                ("rm", " -rf /", "rm-rf-root"),
+                ("cat", " ~/.git-credentials", "cred-file-print"),
+                ("cat", " ~/.ssh/id_rsa", "sensitive-file-print"),
+            ):
+                cmd = self._ansi_c(word, style) + rest
+                with self.subTest(style=style, cmd=cmd):
+                    denied, rule, _ = self._verdict(cmd)
+                    self.assertTrue(denied, "hidden verb defeated the rules: %r" % cmd)
+                    self.assertEqual(rule, expected)
+
+    def test_a_hidden_path_is_still_a_path(self):
+        """The O family axis again, this time reached through the escapes."""
+        for style in self.STYLES:
+            for path, expected in ((self.CRED, "cred-file-print"),
+                                   (self.KEY, "sensitive-file-print")):
+                for cmd in ("cat " + self._ansi_c(path, style),
+                            self._ansi_c("cat", style) + " " + self._ansi_c(path, style)):
+                    with self.subTest(style=style, cmd=cmd):
+                        denied, rule, _ = self._verdict(cmd)
+                        self.assertTrue(denied, "hidden path defeated the rules: %r" % cmd)
+                        self.assertEqual(rule, expected)
+
+    def test_the_expansion_is_scoped_the_way_bash_scopes_it(self):
+        """Where an over-eager expander would start blocking ordinary work.
+
+        bash applies ANSI-C quoting only to `$'...'` standing on its own: not
+        inside double quotes, not inside single quotes, and never to a variable
+        expansion. Each of these carries escape text that a blind expander would
+        happily turn into something else.
+        """
+        must_allow = [
+            r"""echo "an escape $'\x72m' inside double quotes" """,
+            r"""echo 'an escape $'\''\x72m'\'' inside single quotes'""",
+            r"""awk '{print $1}' /tmp/x""",
+            r"""grep -P '\x41' /tmp/x""",
+            r"""git commit -m 'mentions \x72m -rf / in prose'""",
+        ]
+        for cmd in must_allow:
+            with self.subTest(cmd=cmd, expect="allow"):
+                denied, rule, _ = self._verdict(cmd)
+                self.assertFalse(denied, "over-block from expansion: %r (%s)" % (cmd, rule))
+
+        must_block = ["cat $HOME/.ssh/id_rsa", "cat ${HOME}/.git-credentials",
+                      "rm -rf /", "cat ~/.git-credentials"]
+        for cmd in must_block:
+            with self.subTest(cmd=cmd, expect="block"):
+                denied, _, _ = self._verdict(cmd)
+                self.assertTrue(denied, "expansion broke an existing rule: %r" % cmd)
+
+    BENIGN_ANSI_C = [
+        r"IFS=$'\n' read -r line",
+        r"sort -t $'\t' -k2 /tmp/x",
+        r"awk -F $'\t' '{print $1}' /tmp/x",
+        r"cut -d $'\t' -f1 /tmp/x",
+        r"git log --format=$'%h\t%s' -n 5",
+        r"printf $'%s\n' hello",
+        r"echo $'line1\nline2'",
+        r"grep -P $'\t' /tmp/x",
+        r"tmux send-keys -t '=agent-dave:' $'\x03'",
+        r"git commit -m $'first line\n\nbody text'",
+        r"cat $'/tmp/my file.txt'",
+        r"rm -rf $'/tmp/scratch dir'",
+        r"sed -i $'s/\t/ /g' /tmp/x",
+        r"find . -name $'*.log' -newer /tmp/x",
+    ]
+
+    def test_ordinary_ansi_c_quoting_is_not_a_block(self):
+        r"""Hand-built, and it has to be, which is the honest part.
+
+        The 879-command fleet differential that cleared the O family fix contains
+        zero occurrences of `$'`. Re-running it here returns zero differences and
+        means nothing: it never reaches the changed code. Reporting that zero on
+        its own would read as coverage of a surface nobody measured.
+
+        The guard does not read the repository, it reads what a model types, and
+        `IFS=$'\n'` and `-t $'\t'` are the ordinary way to write a delimiter. So
+        the false-positive side is measured on rows written for it. Each one
+        parses, so a row cannot pass by being a typo the rules ignore.
+        """
+        for cmd in self.BENIGN_ANSI_C:
+            with self.subTest(cmd=cmd):
+                syntax = subprocess.run(["bash", "-n", "-c", cmd],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(syntax.returncode, 0,
+                                 "row is not valid bash, so it proves nothing")
+                denied, rule, _ = self._verdict(cmd)
+                self.assertFalse(denied, "expansion blocked ordinary work: %r (%s)"
+                                         % (cmd, rule))
+
+    def test_an_unterminated_quote_is_not_made_runnable(self):
+        """The scanner must not invent a token bash would never build."""
+        for cmd in (r"echo $'\x72m", r"cat $'~/.git-credentials"):
+            with self.subTest(cmd=cmd):
+                syntax = subprocess.run(["bash", "-n", "-c", cmd],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(syntax.returncode, 0,
+                                    "this parses now -- it needs a real verdict")
+                self._verdict(cmd)  # must not raise
+
+    def test_both_guards_deny_this_family_not_just_this_file(self):
+        """The answer to what the identity assertion cannot say.
+
+        Comparing two copies at the helper layer reads like agreement about
+        behaviour and is not. So this asks the layer the verdict actually comes
+        out of, on the same inputs, in both files -- the credential rows, which
+        are the ones both rulesets claim.
+        """
+        import importlib.util
+
+        sibling_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "guardrail-permission-rules.py")
+        spec = importlib.util.spec_from_file_location("sibling_for_ansi_c", sibling_path)
+        sibling = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sibling)
+
+        for style in self.STYLES:
+            for cmd in (self._ansi_c("cat", style) + " " + self.CRED,
+                        "cat " + self._ansi_c(self.CRED, style)):
+                with self.subTest(style=style, cmd=cmd):
+                    self.assertTrue(self._verdict(cmd)[0], "destructive allowed %r" % cmd)
+                    self.assertTrue(
+                        sibling.classify({"tool_name": "Bash",
+                                          "tool_input": {"command": cmd},
+                                          "cwd": "/home/domin/marveen"})[0],
+                        "permission guard allowed %r" % cmd)
 
 
 class SiblingSourceIdentityTests(unittest.TestCase):
@@ -723,7 +936,8 @@ class SiblingSourceIdentityTests(unittest.TestCase):
     made twice, a test should be the thing that says so.
     """
 
-    SHARED = ("_split_subcommands", "_tokenize", "_command_word")
+    SHARED = ("_split_subcommands", "_tokenize", "_command_word",
+              "_expand_dollar_quoting", "_expand_ansi_c")
 
     def setUp(self):
         import importlib.util

@@ -261,28 +261,93 @@ def _split_subcommands(command, *, nested=True):
 _PARSE_FAIL = object()
 
 
-def _strip_dollar_quoting(piece):
-    """Drop the leading `$` of ANSI-C (`$'...'`) and locale (`$"..."`) quoting.
+def _expand_ansi_c(body):
+    r"""Expand the escapes bash expands inside `$'...'`, and only those.
 
-    shlex implements neither form, so it leaves the dollar glued to the token
-    while bash strips it and reads the file (card 151a0756, rackham O family):
+    The escape set is the shell's: the named ones, `\xHH`, `\uHHHH`,
+    `\UHHHHHHHH`, one to three octal digits, and `\cX` for a control character.
+    An escape bash does not recognise is left alone, backslash included, because
+    bash leaves it alone too -- guessing here would invent a token no shell would
+    ever build.
 
-        cat $'~/.git-credentials'  ->  shlex: ['cat', '$~/.git-credentials']
-                                    ->  bash:  reads the file
+    A NUL cannot survive in a bash word, so it is dropped rather than carried
+    into a regex that would then match on something the shell never passes.
+    """
+    hexdigits = "0123456789abcdefABCDEF"
+    named = {
+        "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f",
+        "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+        "\\": "\\", "'": "'", '"': '"', "?": "?",
+    }
+    out = []
+    i = 0
+    n = len(body)
+    while i < n:
+        ch = body[i]
+        if ch != "\\" or i + 1 >= n:
+            out.append(ch)
+            i += 1
+            continue
+        nxt = body[i + 1]
+        if nxt in named:
+            out.append(named[nxt])
+            i += 2
+        elif nxt in ("x", "u", "U"):
+            width = {"x": 2, "u": 4, "U": 8}[nxt]
+            j = i + 2
+            digits = ""
+            while j < n and len(digits) < width and body[j] in hexdigits:
+                digits += body[j]
+                j += 1
+            if digits:
+                out.append(chr(int(digits, 16)))
+                i = j
+            else:
+                out.append(ch)
+                out.append(nxt)
+                i += 2
+        elif nxt in "01234567":
+            j = i + 1
+            digits = ""
+            while j < n and len(digits) < 3 and body[j] in "01234567":
+                digits += body[j]
+                j += 1
+            out.append(chr(int(digits, 8) & 0xFF))
+            i = j
+        elif nxt == "c" and i + 2 < n:
+            out.append(chr(ord(body[i + 2].upper()) ^ 0x40))
+            i += 3
+        else:
+            out.append(ch)
+            out.append(nxt)
+            i += 2
+    return "".join(out).replace("\x00", "")
 
-    A rule that anchors a path to the WHOLE token then stops matching. The
-    anchoring is deliberate, so the fidelity is fixed here rather than by
-    loosening every path rule to a substring search.
 
-    Narrow on purpose, in two directions that a blind strip would break: bash
-    applies neither form INSIDE quotes, so a literal `$'` in a commit message
-    survives; and only a dollar directly before a quote character is removed, so
-    a real expansion (`$HOME/...`, `${HOME}/...`) keeps its dollar and the rules
-    that match those forms keep working.
+def _expand_dollar_quoting(piece):
+    r"""Resolve ANSI-C (`$'...'`) and locale (`$"..."`) quoting the way bash does.
 
-    NOT implemented: ANSI-C escape expansion (`$'\\x63at'` is `cat` to bash).
-    That is a separate axis, pinned as a stated gap in the test suite rather than
-    left for a later reader to rediscover.
+    shlex implements neither, so it leaves the dollar glued to the token while
+    bash strips it -- and, for the ANSI-C form, expands the escapes inside it.
+    Both halves hide a rule's subject, at two different heights:
+
+        cat $'~/.git-credentials'  ->  ['cat', '$~/.git-credentials']   (path)
+        $'\x72m' -rf /             ->  ['\x72m', '-rf', '/']            (verb)
+
+    The path form defeats rules that anchor a path to the whole token. The verb
+    form is worse, because no rule reaches its subject at all -- the guard sees a
+    command word it has never heard of and moves on. Both are fixed here, in the
+    tokenizer, rather than by loosening the anchors: the anchoring is deliberate
+    (card 48d3c0f9), and a substring search would trade one false negative for a
+    class of false positives.
+
+    Scoped exactly as bash scopes it, which is the part that keeps this from
+    blocking ordinary work. bash applies neither form inside single or double
+    quotes, so escape text in a commit message or in `awk '{print $1}'` survives
+    untouched; a real expansion (`$HOME/...`) keeps its dollar; and a plain
+    `'\x72m'` stays the literal string it is -- that one is not a near miss, it
+    is a command bash refuses to find, so allowing it is the correct verdict and
+    an expander that ignored the dollar would be blocking a string.
     """
     out = []
     in_sq = in_dq = False
@@ -290,7 +355,7 @@ def _strip_dollar_quoting(piece):
     n = len(piece)
     while i < n:
         ch = piece[i]
-        if ch == '\\' and not in_sq and i + 1 < n:
+        if ch == "\\" and not in_sq and i + 1 < n:
             out.append(ch)
             out.append(piece[i + 1])
             i += 2
@@ -299,20 +364,34 @@ def _strip_dollar_quoting(piece):
             in_sq = not in_sq
         elif ch == '"' and not in_sq:
             in_dq = not in_dq
-        elif (ch == '$' and not in_sq and not in_dq
-                and i + 1 < n and piece[i + 1] in ('"', "'")):
+        elif (ch == "$" and not in_sq and not in_dq
+                and i + 1 < n and piece[i + 1] == "'"):
+            j = i + 2
+            while j < n and piece[j] != "'":
+                j += 2 if piece[j] == "\\" else 1
+            if j >= n:
+                # Unterminated: bash will not run this either. Drop the dollar
+                # and let the dangling quote reach shlex, which is where the
+                # unparseable verdict already lives.
+                i += 1
+                continue
+            out.append(shlex.quote(_expand_ansi_c(piece[i + 2:j])))
+            i = j + 1
+            continue
+        elif (ch == "$" and not in_sq and not in_dq
+                and i + 1 < n and piece[i + 1] == '"'):
             i += 1
             continue
         out.append(ch)
         i += 1
-    return ''.join(out)
+    return "".join(out)
 
 
 def _tokenize(piece):
     """shlex tokens for a sub-command. shlex does NOT expand ~ or $HOME, so they
     stay literal and matchable."""
     try:
-        return shlex.split(_strip_dollar_quoting(piece), comments=False, posix=True)
+        return shlex.split(_expand_dollar_quoting(piece), comments=False, posix=True)
     except ValueError:
         return _PARSE_FAIL
 
