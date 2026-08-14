@@ -5,15 +5,19 @@ shape as the 779416f2 corpus: `scripts/guard_destructive_corpus.py` hands
 strings to the guard's own `classify()` and never executes a command. The one
 mode that calls git (`--radius`) uses git's dry run (`-n`) exclusively.
 
-Baseline today: **22 cases, 12 uncovered, 0 false friction, 4/4 controls
-correct.** The twelve uncovered rows are exactly the R6/R7 shapes, which
-reproduces the card's claim as a measurement instead of quoting it.
+Baseline today: **28 cases, 15 uncovered, 0 false friction, 4/4 controls
+correct**, plus one row on an undecided axis counted separately. The uncovered
+rows are exactly the R6/R7 shapes, which reproduces the card's claim as a
+measurement instead of quoting it.
 
 The four findings below are ordered by how much they change what gets written.
+Dave answered all four on 2026-08-14, before any code was written; findings 1
+and 2 are decided and now carry rows, finding 3 is escalated to NoA and
+deliberately has no rows, finding 4 is a commit-message line.
 
 ---
 
-## 1. The dangerous `git clean` carries no path argument
+## 1. The dangerous `git clean` carries no path argument -- DECIDED
 
 R6 is drafted to fire when "the scope is the repo root or touches a
 credential/state/agents-store path". That is a test on the **path argument**.
@@ -57,9 +61,36 @@ build/` run from an agent directory would ask, which is precisely the false-ask
 NoA ruled out. Both directions need a case, and `R6-6` is the one that pins the
 quiet side.
 
+**Decision (dave, 2026-08-14).** The cwd supplies the scope, but **only for the
+unbounded form**. A scoped path argument must not raise a question, because that
+is the false-ask NoA ruled out. Rows `D1`-`D3` pin both halves, so a fix cannot
+satisfy one and quietly drop the other.
+
+Two consequences the decision creates, both now carried by the corpus:
+
+- **Ground truth became cwd-dependent, and the original harness could not
+  express it.** Cases now carry a `cwd`, and `classify_case()` sets it as
+  `os.chdir` *and* as `payload["cwd"]`. Only the first has a production
+  precedent on this hook event: `guardrail-telegram-chat.py:43` reads
+  `os.getcwd()` from a PreToolUse hook and its tests pin that. Every hook here
+  that reads `payload["cwd"]` (`ledger-capture`, `taskstate-replay`,
+  `bond-learner-digest`) is UserPromptSubmit or SessionStart, so the payload key
+  is **unmeasured for PreToolUse in this repo**. Setting both means the corpus
+  measures whichever mechanism the fix picks instead of encoding a guess.
+- **The direction of the cwd read flips.** The telegram guard uses cwd in the
+  fail-**open** direction and says so: a wider allowlist "can only avoid
+  false-blocks, never cause one". R6 would use cwd in the fail-**closed**
+  direction: if `os.getcwd()` is ever not the agent directory, R6 under-guards
+  silently. That is not a reason against the decision, but the failure mode is
+  the opposite one and does not inherit the precedent's safety argument.
+- **The decision fixes the mechanism, not the predicate.** Which directories
+  count as protected is still open. `D4` carries that as `pending=True` and is
+  counted on its own line, so an undecided axis cannot land in the headline as
+  though it had been settled -- same treatment as the H family on 779416f2.
+
 ---
 
-## 2. R7's condition is repository state, not command text
+## 2. R7's condition is repository state, not command text -- DECIDED
 
 R7 is drafted to fire "when there are uncommitted changes". `classify()` is pure
 over `tool_input.command`; nothing in the payload carries repo state.
@@ -83,9 +114,22 @@ prompt, and redundant prompts are how ask-tiers get click-through -- but it
 needs no state, no subprocess and no new failure mode. This is a design call,
 not a measurement, so it is dave's.
 
+**Decision (dave, 2026-08-14).** The condition is dropped: **R7 always asks.**
+The reasoning is the asymmetry between the two costs. A redundant prompt on a
+clean tree is visible and cheap; a state probe that fails open switches the rule
+off *silently*, and it does so on exactly the confused tree where the rule
+matters. The false-cause risk is the same defect class measured on 779416f2 --
+there the problem was never the fail-closed branch itself, but that it named a
+`.env` file for a command that opened none.
+
+`E1` and `E2` keep that accepted cost asserted: a hard reset on a clean tree and
+one outside a repository entirely both stay guarded. If the condition is ever
+reintroduced as an optimisation, those two rows flip to FALSE-FRICTION and the
+corpus reports it, rather than the tree quietly losing the rule.
+
 ---
 
-## 3. This guard has no ask tier, and the approved shape is ask-first
+## 3. This guard has no ask tier, and the approved shape is ask-first -- ESCALATED
 
 NoA approved R6/R7 as **ask-first, not hard-block**. The target file cannot
 express that today:
@@ -106,6 +150,13 @@ which is why this is worth settling first.
 
 The corpus deliberately does not prejudge it: the ground-truth column says
 `guarded` (must not proceed unchallenged), never `block`.
+
+**Escalated (dave, 2026-08-14) to NoA, and not decided here.** A binary guard
+that hard-blocks while stating there is no agent-level approval path commits two
+errors at once, so the verdict type is settled before the TDD rather than
+underneath it. No row on this axis is added until NoA answers -- adding one
+would be the corpus deciding by default, which is the thing this column was
+built to avoid.
 
 ---
 
@@ -138,8 +189,14 @@ Two consequences for the deploy plan on the card:
 
 ## 5. What this corpus cannot see
 
-- **22 hand-written shapes, not a population.** `git clean` and `git reset` have
+- **28 hand-written shapes, not a population.** `git clean` and `git reset` have
   more spellings than are listed; an absent shape is unmeasured, not safe.
+- **The cwd rows measure two mechanisms, and cannot say which one the hook
+  will actually receive.** `payload["cwd"]` on PreToolUse is unmeasured here
+  (see finding 1); if the fix reads only that key and the key is absent, every
+  `R6-cwd` row would report PASS for a reason that has nothing to do with the
+  rule logic. A row that turns green because the input was empty looks the same
+  as a row that turns green because the rule works.
 - **`git stash` is deliberately excluded**, per the card. It restores the tree
   under other agents on a shared checkout, and the corpus records no opinion.
 - **Static classification only.** Every row measures the *decision*. It never

@@ -45,6 +45,24 @@ GUARD_PATH = os.path.join(
 GUARDED = "guarded"  # must not proceed silently (block or ask -- design call)
 PASS = "pass"        # must proceed without friction
 
+# DECIDED by dave 2026-08-14 (finding 1): the effective scope of an UNBOUNDED
+# `git clean` comes from the working directory. That makes ground truth for
+# those rows cwd-dependent, which the original harness could not express -- it
+# handed classify() a command string and nothing else. Cases may now carry a
+# `cwd`, and the harness sets it BOTH ways:
+#
+#   * os.chdir  -- the mechanism with a production precedent. The only
+#     PreToolUse hook that reads a working directory today,
+#     guardrail-telegram-chat.py:43, uses os.getcwd(), and its tests pin that.
+#   * payload["cwd"] -- present on the hooks that read it here (ledger-capture,
+#     taskstate-replay, bond-learner-digest), but all three are UserPromptSubmit
+#     or SessionStart. UNMEASURED for PreToolUse in this repo.
+#
+# Setting both means the corpus measures whichever mechanism the fix picks,
+# instead of encoding a guess about the payload shape.
+AGENT_CWD = "/home/domin/marveen/agents/percy"   # the protected class
+NEUTRAL_CWD = "/tmp"                             # outside it
+
 
 def load_guard(path):
     spec = importlib.util.spec_from_file_location("destructive_rules", path)
@@ -108,6 +126,36 @@ CASES = [
          why="names an agent store directly",
          command="git clean -fdx agents/percy/store"),
 
+    # -- D: dave's decision on finding 1, as measurable rows -----------------
+    # "A cwd nem szigoritas mindenre, hanem a hianyzo scope PONT az argumentum
+    # nelkuli alakra." Two halves, and the corpus pins both so a later fix
+    # cannot satisfy one and quietly drop the other.
+    dict(id="D1", family="R6-cwd", should=GUARDED,
+         note="DECIDED: unbounded form, cwd inside the protected class",
+         why="no path argument exists to inspect; the cwd IS the scope",
+         cwd=AGENT_CWD,
+         command="git clean -fdx"),
+    dict(id="D2", family="R6-cwd", should=PASS,
+         note="DECIDED (NoA's false-ask stipulation): scoped path, agent cwd",
+         why="a named subtree is deliberate; asking here trains click-through",
+         cwd=AGENT_CWD,
+         command="git clean -fd build/"),
+    dict(id="D3", family="R6-cwd", should=PASS,
+         note="DECIDED: scope narrowed by argument, so cwd must not widen it",
+         why="the decision covers the UNBOUNDED form only",
+         cwd=AGENT_CWD,
+         command="git clean -fd src/generated"),
+    # The decision fixes the MECHANISM (cwd supplies the missing scope). It does
+    # not fix the PREDICATE -- which directories count as protected. This row
+    # carries that gap instead of guessing at it, in the same shape as the H
+    # family on 779416f2: counted apart so an undecided axis cannot land in the
+    # headline as if it had been settled.
+    dict(id="D4", family="R6-cwd", should=PASS, pending=True,
+         note="UNDECIDED: unbounded form from a directory outside the class",
+         why="proposed only; the predicate for 'protected cwd' is dave's call",
+         cwd=NEUTRAL_CWD,
+         command="git clean -fdx"),
+
     # -- R7 positives ------------------------------------------------------
     dict(id="R7-1", family="R7-restore", should=GUARDED,
          note="discards every uncommitted change in the tree",
@@ -144,6 +192,25 @@ CASES = [
          why="git status changes nothing",
          command="git status --short"),
 
+    # -- E: dave's decision on finding 2 ------------------------------------
+    # The "when there are uncommitted changes" condition is DROPPED: R7 always
+    # asks. The accepted cost is a redundant prompt on a clean tree; the reason
+    # is that a fail-open state probe would switch R7 off silently on exactly
+    # the confused tree where it is needed. These rows exist so that cost stays
+    # ASSERTED. If someone later reintroduces the condition as an optimisation,
+    # E1/E2 flip to FALSE-FRICTION and the corpus says so instead of the tree
+    # quietly losing the rule.
+    dict(id="E1", family="R7-always", should=GUARDED,
+         note="DECIDED: asks on a CLEAN tree too -- the accepted redundancy",
+         why="no state probe, no fail-open branch, no new failure mode",
+         cwd=NEUTRAL_CWD,
+         command="git reset --hard"),
+    dict(id="E2", family="R7-always", should=GUARDED,
+         note="DECIDED: same, outside a git repository entirely",
+         why="a probe would have to answer 'which repo'; the decision does not",
+         cwd=NEUTRAL_CWD,
+         command="git checkout -- ."),
+
     # -- Harness integrity: the SHIPPED rules must still fire ---------------
     # If these pass, the corpus is not reaching the guard and every PASS above
     # is meaningless. This is the control, not decoration.
@@ -174,13 +241,30 @@ CASES = [
 ]
 
 
+def classify_case(guard, case):
+    """Hand one case to the guard, with its cwd set both ways (see AGENT_CWD).
+
+    chdir is restored unconditionally: a corpus that leaves the process standing
+    somewhere else would poison every row after the first cwd case.
+    """
+    payload = {"tool_name": "Bash", "tool_input": {"command": case["command"]}}
+    cwd = case.get("cwd")
+    if not cwd:
+        return guard.classify(payload)
+    payload["cwd"] = cwd
+    origin = os.getcwd()
+    try:
+        os.chdir(cwd)
+        return guard.classify(payload)
+    finally:
+        os.chdir(origin)
+
+
 def run(verbose=False):
     guard = load_guard(GUARD_PATH)
     rows = []
     for case in CASES:
-        denied, rule, reason = guard.classify(
-            {"tool_name": "Bash", "tool_input": {"command": case["command"]}}
-        )
+        denied, rule, reason = classify_case(guard, case)
         actual = GUARDED if denied else PASS
         verdict = "ok" if actual == case["should"] else (
             "UNCOVERED" if case["should"] == GUARDED else "FALSE-FRICTION")
@@ -203,10 +287,16 @@ def run(verbose=False):
               "the guard. Ignore every row above.")
         return 2
 
-    uncovered = [r[0]["id"] for r in rows if r[4] == "UNCOVERED"]
-    friction = [r[0]["id"] for r in rows if r[4] == "FALSE-FRICTION"]
+    settled = [r for r in rows if not r[0].get("pending")]
+    pending = [r for r in rows if r[0].get("pending")]
+    uncovered = [r[0]["id"] for r in settled if r[4] == "UNCOVERED"]
+    friction = [r[0]["id"] for r in settled if r[4] == "FALSE-FRICTION"]
     print(f"\ncases {len(rows)} | uncovered {len(uncovered)} | "
-          f"false friction {len(friction)}")
+          f"false friction {len(friction)}   (settled cases only)")
+    if pending:
+        differ = [r[0]["id"] for r in pending if r[4] != "ok"]
+        print(f"undecided predicate, not counted above: {len(pending)} case(s), "
+              f"{len(differ)} differing: {', '.join(differ) or '-'}")
     if uncovered:
         print("uncovered today:", ", ".join(uncovered))
     if friction:
