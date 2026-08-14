@@ -235,6 +235,15 @@ def _expand_ansi_c(body):
     bash leaves it alone too -- guessing here would invent a token no shell would
     ever build.
 
+    TOTAL BY CONSTRUCTION, which is the property that matters more than the
+    fidelity. `chr()` stops at 0x10FFFF and bash does not: it writes the bytes
+    and carries on. A codepoint above the ceiling therefore has to degrade to
+    literal text here, because the alternative is an exception crossing into
+    _tokenize, where every rule would skip the piece and a destructive command
+    would be allowed by a word appended to it (card 151a0756, rackham Q family).
+    The value this produces is not what bash produces; the point is only that the
+    REST of the command stays visible to the rules.
+
     A NUL cannot survive in a bash word, so it is dropped rather than carried
     into a regex that would then match on something the shell never passes.
     """
@@ -264,13 +273,18 @@ def _expand_ansi_c(body):
             while j < n and len(digits) < width and body[j] in hexdigits:
                 digits += body[j]
                 j += 1
-            if digits:
-                out.append(chr(int(digits, 16)))
-                i = j
-            else:
+            if not digits:
                 out.append(ch)
                 out.append(nxt)
                 i += 2
+                continue
+            try:
+                out.append(chr(int(digits, 16)))
+            except ValueError:
+                out.append(ch)
+                out.append(nxt)
+                out.append(digits)
+            i = j
         elif nxt in "01234567":
             j = i + 1
             digits = ""
@@ -280,7 +294,13 @@ def _expand_ansi_c(body):
             out.append(chr(int(digits, 8) & 0xFF))
             i = j
         elif nxt == "c" and i + 2 < n:
-            out.append(chr(ord(body[i + 2].upper()) ^ 0x40))
+            # Lower-cased ASCII only. `str.upper()` can return TWO characters for
+            # some codepoints, and `ord()` on those raises a TypeError that the
+            # ValueError guard above would not even catch.
+            code = ord(body[i + 2])
+            if 0x61 <= code <= 0x7A:
+                code -= 0x20
+            out.append(chr(code ^ 0x40))
             i += 3
         else:
             out.append(ch)
@@ -353,8 +373,16 @@ def _expand_dollar_quoting(piece):
 
 
 def _tokenize(piece):
+    # The quoting is resolved OUTSIDE the try on purpose. `except ValueError`
+    # here means one thing -- shlex could not parse the quoting -- and an
+    # expander raising inside it would be answering a different question with
+    # that branch. In THIS file that lands on the fail-CLOSED side, so such a
+    # defect surfaces as a block with a false cause; in the sibling the same
+    # defect is a silent allow. Neither is a branch a tokenizer bug should reach:
+    # an internal failure belongs to main(), which fails open loudly.
+    expanded = _expand_dollar_quoting(piece)
     try:
-        return shlex.split(_expand_dollar_quoting(piece), comments=False, posix=True)
+        return shlex.split(expanded, comments=False, posix=True)
     except ValueError:
         return _PARSE_FAIL  # fail-closed: unparseable piece -> callers block
 

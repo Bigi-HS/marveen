@@ -885,6 +885,112 @@ class AnsiCEscapeExpansionTests(unittest.TestCase):
                 self.assertFalse(denied, "expansion blocked ordinary work: %r (%s)"
                                          % (cmd, rule))
 
+    OVER_MAX = r"$'\U0011FFFF'"
+    HUGE = r"$'\UFFFFFFFF'"
+    MAX_VALID = r"$'\U0010FFFF'"
+    SURROGATE = r"$'\uD800'"
+
+    def test_an_escape_above_the_chr_ceiling_does_not_disable_the_rules(self):
+        r"""The regression the expansion itself introduced (rackham, Q family).
+
+        `chr()` stops at 0x10FFFF. bash does not: it writes the bytes and carries
+        on, rc 0. So a codepoint one above the ceiling used to raise ValueError
+        from inside the expander -- and the expander ran inside the try that
+        means "shlex could not parse the quoting". Indistinguishable causes, one
+        branch: _PARSE_FAIL, which the rules here skip. Three separate rules were
+        turned off by ONE appended word, so it follows the tokenizer, not a rule.
+
+        This is the same fail-open branch the splitter work already documented,
+        reached by a new route -- which is why the branch is worth a test and not
+        just a comment.
+        """
+        for name, escape in (("over the ceiling", self.OVER_MAX),
+                             ("far over", self.HUGE),
+                             ("highest valid", self.MAX_VALID),
+                             ("lone surrogate", self.SURROGATE)):
+            for cmd, expected in ((("rm -rf / %s" % escape), "rm-rf-root"),
+                                  (("cat ~/.git-credentials %s" % escape),
+                                   "cred-file-print"),
+                                  (("git push --force origin main %s" % escape),
+                                   "force-push-protected")):
+                with self.subTest(escape=name, cmd=cmd):
+                    self.assertIsNot(guard._tokenize(cmd), guard._PARSE_FAIL,
+                                     "an appended word made the piece unparseable")
+                    denied, rule, _ = self._verdict(cmd)
+                    self.assertTrue(denied, "one appended word disabled a rule: %r" % cmd)
+                    self.assertEqual(rule, expected)
+
+    def test_the_piece_still_runs_in_bash_which_is_why_it_matters(self):
+        r"""Ground truth on BYTES, and the reason that is not a detail.
+
+        This form makes bash emit invalid UTF-8. Decoding its output as text
+        raises, and a runner that lets that through reports the shape as if the
+        SHELL had rejected the command -- an instrument failure that looks
+        exactly like a non-finding. rackham hit it and said so; this measures the
+        bytes so the same mistake cannot be made here.
+        """
+        marker = b"DAVE-Q-FAMILY-MARKER"
+        out = subprocess.run(
+            ["bash", "-c", "echo %s %s; echo SECOND-%s"
+             % (marker.decode(), self.OVER_MAX, marker.decode())],
+            capture_output=True, timeout=10)
+        self.assertEqual(out.returncode, 0)
+        self.assertIn(marker, out.stdout)
+        self.assertIn(b"SECOND-" + marker, out.stdout,
+                      "the statement after it must still run, or this is not a bypass")
+
+    def test_an_expander_failure_is_not_disguised_as_a_quoting_error(self):
+        """The structural half of the fix, and the half a value test cannot see.
+
+        Clamping one ceiling closes one route. It does not stop the NEXT defect
+        in the expander from arriving as a ValueError inside a try whose only
+        meaning is "shlex could not parse this" -- where it becomes a silent
+        allow. So the expansion runs outside that try, and an internal failure
+        reaches main(), which fails open LOUDLY on stderr. That distinction is
+        this file's own stated principle; the expander was violating it.
+        """
+        original = guard._expand_ansi_c
+
+        def boom(body):
+            raise ValueError("simulated expander defect")
+
+        guard._expand_ansi_c = boom
+        try:
+            with self.assertRaises(ValueError):
+                guard._tokenize(r"rm -rf / $'\x41'")
+        finally:
+            guard._expand_ansi_c = original
+
+        self.assertIs(guard._tokenize('rm -rf / "unclosed'), guard._PARSE_FAIL,
+                      "a real quoting error must still reach the parse-fail branch")
+
+    def test_the_two_guards_disagree_on_an_unparseable_piece_by_design(self):
+        """Stated because it is true today, not because it is settled.
+
+        The same unparseable piece is SKIPPED here and BLOCKED by the sibling:
+        this file fails open per piece, that one fails closed. Identical helpers,
+        opposite outcomes -- which the helper-level identity assertion cannot
+        see, and which is the reason the verdict-level one exists. Neither is
+        changed here: which direction is right is a decision about the ruleset,
+        not about the tokenizer.
+        """
+        import importlib.util
+
+        sibling_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "guardrail-permission-rules.py")
+        spec = importlib.util.spec_from_file_location("sibling_for_parse_fail",
+                                                      sibling_path)
+        sibling = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sibling)
+
+        cmd = 'cat ~/.git-credentials "unclosed'
+        self.assertIs(guard._tokenize(cmd), guard._PARSE_FAIL)
+        self.assertFalse(self._verdict(cmd)[0], "this file fails OPEN per piece")
+        self.assertTrue(
+            sibling.classify({"tool_name": "Bash", "tool_input": {"command": cmd},
+                              "cwd": "/home/domin/marveen"})[0],
+            "the sibling fails CLOSED; if that changed, the asymmetry moved")
+
     def test_an_unterminated_quote_is_not_made_runnable(self):
         """The scanner must not invent a token bash would never build."""
         for cmd in (r"echo $'\x72m", r"cat $'~/.git-credentials"):
