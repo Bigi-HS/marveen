@@ -3,7 +3,7 @@
 Built by rackham, 2026-08-14, at marveen's request: validate dave's fix against
 **measured** benign cases rather than assumed ones.
 
-Harness: `scripts/guard_fp_corpus.py` (28 cases, runs in <1s, executes nothing).
+Harness: `scripts/guard_fp_corpus.py` (56 cases, runs in <1s, executes nothing).
 
 ```
 python3 scripts/guard_fp_corpus.py            # table + summary
@@ -47,8 +47,14 @@ This is escalated separately to marveen as a process finding; it is not part of
 
 ## 1. Measured false positives (live guard)
 
-Four benign shapes block. All four report `interpreter-env-read` or
-`env-file-print`, i.e. a **secret-exfiltration** cause, while opening no file.
+**Eight** benign shapes block today: A2, A5, B2, D4, G2, G6, G7, I1. All of them
+report `interpreter-env-read` or `env-file-print`, i.e. a **secret-exfiltration**
+cause, while opening no file.
+
+The table below is the **original four**, measured before any decision landed;
+G2/G6/G7 arrived with the D4 narrowing (section 4b) and I1 is the live capture
+(section 5, acceptance point 1). The count and the ids belong together in every
+reference — a bare "eight" cannot be checked against anything.
 
 | id | shape | reported cause | ground truth |
 |----|-------|----------------|--------------|
