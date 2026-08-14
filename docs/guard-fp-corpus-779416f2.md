@@ -199,10 +199,16 @@ deferral working, not a regression.
 ## 5. Suggested acceptance for the fix
 
 1. `python3 scripts/guard_fp_corpus.py` → **0 false positives, 0 false negatives**
-   on the settled cases. Seven rows must flip to allow (A2, A5, B2 from the
-   parse-fail fix; D4, G2, G6, G7 from the D4 narrowing) and E4 must flip to
-   block. The three deferred H rows must still block — they are reported on
-   their own line and do not count.
+   on the settled cases. **Eight** rows must flip to allow (A2, A5, B2, **I1**
+   from the parse-fail fix; D4, G2, G6, G7 from the D4 narrowing) and E4 must
+   flip to block. The three deferred H rows must still block — they are reported
+   on their own line and do not count.
+
+   `I1` was added after the criterion was first locked, and it is the one
+   addition that changes the headline for a reason other than a decision
+   landing: it is a **new defect instance**, captured in production. Leaving the
+   criterion at seven would let a fix pass the list with the live case still
+   red.
 2. F1–F8 unchanged.
 3. `--compare` → 0 gaps once 2cb1ed6e is in the base branch.
 4. Both copies updated together, or `promote-guard.py` re-run, so `scripts/hooks/`
@@ -215,6 +221,17 @@ deferral working, not a regression.
    the other, which is the shape that teaches agents to route around the guard
    rather than what not to do. Dave took this into the fix scope.
 
+6. **The parse-fail branch is unreachable-gated, so the fix is an ordering
+   problem, not only a message problem.** In `match_interpreter_env_read`,
+   `if tokens is _PARSE_FAIL: return True` sits three lines **above**
+   `if _command_word(tokens) not in _INTERPRETER_CMDS: return False`. `I1`'s
+   command word is `git`, so the very next check would have declined it — the
+   rule blocks a command it had already decided not to inspect. Note the fix
+   cannot be a plain swap: with `tokens is _PARSE_FAIL` there is no token list
+   to take a command word from, so it needs a parse-free first-word read of the
+   raw string. That is what makes this a design line rather than a two-line
+   reorder.
+
 ---
 
 ## 6. What this corpus cannot see
@@ -222,10 +239,14 @@ deferral working, not a regression.
 A zero here is a **lower bound, not a proof**, and the bound is worth stating
 because "0 false positives" reads like a guarantee:
 
-- **38 shapes, not a population.** The corpus measures the command forms someone
+- **43 shapes, not a population.** The corpus measures the command forms someone
   thought to write down. The A/B families were built backwards from four blocks
   that actually happened; nobody enumerated the space of unbalanced-quote
-  commands. A shape absent from `CASES` is unmeasured, not safe.
+  commands. A shape absent from `CASES` is unmeasured, not safe. The I family is
+  the evidence for that: the `git commit -F -` surface was already **reported**
+  once (hibiki, 2026-08-13) and still was not in `CASES` until it fired again in
+  production. A known surface and a measured row are different things, and only
+  the second one fails a build.
 - **The chad family is still UNKNOWN.** Escaped quotes and `$()` inside double
   quotes did not reproduce on the live guard across 14 attempts. Either it was
   measured against the develop-tracked copy, or it is a form I failed to

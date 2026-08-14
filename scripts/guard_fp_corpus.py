@@ -378,6 +378,57 @@ CASES = [
         why="same placeholder template, reached through R2b instead of R2",
         command="python3 -c \"print(open('" + DOTENV + ".sample').read())\"",
     ),
+
+    # -- I: THIRD surface, captured IN PRODUCTION 2026-08-14 ------------------
+    # Not constructed. `I1` is the command that blocked my own commit on the
+    # a0b78305 corpus, reduced to its shape and re-measured against the promoted
+    # guard. A new letter rather than an F row: F means "carve-out boundary" in
+    # this file, and this is a different claim.
+    #
+    # What makes it the strongest evidence on the card:
+    #   * the command word is `git`, not an interpreter, and no path in it
+    #     resembles a dotenv file -- yet the rule NAME reported is
+    #     `interpreter-env-read` ("Bash interpreter opening a .env file").
+    #     The _PARSE_FAIL branch borrows whichever rule was being evaluated, so
+    #     the stated cause is not merely wrong, it is not even stable across
+    #     surfaces (`env-file-print` on the shell-comment surface).
+    #   * the trigger is an ordinary English possessive in a commit message.
+    #   * I2/I3/I5 are differential controls: the same shape allows once the
+    #     apostrophe count is even, or the apostrophe sits inside double quotes.
+    #     One character separates I1 from I2, which is what makes the row a
+    #     measurement of the parse branch rather than of git.
+    dict(
+        id="I1", family="heredoc-git", should=ALLOW,
+        note="LIVE FP 2026-08-14: blocked rackham's own commit (reduced)",
+        why="writes a commit message; opens no file and runs no interpreter",
+        command="git commit -q -F - << 'EOF'\ncorpus: land dave's decisions\nEOF",
+    ),
+    dict(
+        id="I2", family="heredoc-git", should=ALLOW,
+        note="differential control: I1 with the apostrophe removed",
+        why="identical shape; must allow, and does today",
+        command="git commit -q -F - << 'EOF'\ncorpus: land the decisions\nEOF",
+    ),
+    dict(
+        id="I3", family="heredoc-git", should=ALLOW,
+        note="differential control: EVEN apostrophe count in the same body",
+        why="shlex pairs them, so the parse succeeds; allows today",
+        command=("git commit -q -F - << 'EOF'\n"
+                 "corpus: land dave's and thor's decisions\nEOF"),
+    ),
+    dict(
+        id="I4", family="heredoc-git", should=ALLOW,
+        note="the legitimate route taken instead: message from a file",
+        why="recorded so the workaround is on the record, not silent",
+        command="git commit -q -F /tmp/x/msg.txt",
+    ),
+    dict(
+        id="I5", family="heredoc-git", should=ALLOW,
+        note="differential control: apostrophe inside double quotes",
+        why="quoted prose does not break the parse; allows today",
+        command=("git commit -q -F - << 'EOF'\n"
+                 "corpus: land \"dave's\" decisions\nEOF"),
+    ),
 ]
 
 
