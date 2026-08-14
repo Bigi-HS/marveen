@@ -1050,6 +1050,93 @@ CASES = [
             "assumed",
         command='cat /home/domin/.' + "git-" + 'credentials "<(echo x)"',
     ),
+
+    # ---- P: the limit dave named on his own fix -----------------------------
+    # 8a5d0c8 strips the dollar prefix, which closes O1-O3. Writing it up he
+    # named what he had NOT implemented -- ANSI-C quoting also expands ESCAPES,
+    # so `$'\x63at'` is `cat` to bash -- and pinned the current verdict in his
+    # suite instead of claiming coverage. A pin records what happens today; it
+    # does not say whether what happens today is exploitable. That is the
+    # measurement, and it is the reason this corpus exists as a second
+    # instrument rather than a second opinion.
+    #
+    # MEASURED, on his fixed pair, both files asked on every row:
+    #   - the escape really expands (printf on the word alone -- a string
+    #     question, so nothing dangerous ever runs),
+    #   - the expanded word is really LOOKED UP as a command (`$'\x65cho' X`
+    #     prints X, rc 0, in all three escape forms),
+    #   - the read really happens (the harmless twin returns file content),
+    #   - and `bash -n` says the shapes parse.
+    # All four hold, and BOTH files allow. So the class is wider than the pin:
+    # the residue fix addressed a hidden PATH, and the escape form hides the
+    # VERB as well, which reaches the destructive rules and not just the
+    # credential ones.
+    dict(
+        id="P1", family="ansic-escape", should=BLOCK, owner="destructive",
+        note="the verb itself hidden by a hex escape",
+        why="bash expands the word to `cat` and looks it up as a command, "
+            "both measured. _command_word sees a quoted literal, so no rule "
+            "recognises the command at all -- one layer above where O1-O3 sat",
+        command="$'\\x63at' /home/domin/." + "git-" + "credentials",
+    ),
+    dict(
+        id="P2", family="ansic-escape", should=BLOCK, owner="destructive",
+        note="the same, octal instead of hex",
+        why="two encodings of one mechanism, so a fix keyed to `\\x` would "
+            "leave the class open. bash accepts both",
+        command="$'\\162m' -rf /",
+    ),
+    dict(
+        id="P3", family="ansic-escape", should=BLOCK, owner="destructive",
+        note="only ONE letter of the verb escaped",
+        why="`c$'\\x61t'` still runs. Bounds any fix that looks for a wholly "
+            "quoted command word: the word is part bare, part quoted",
+        command="c$'\\x61t' /home/domin/." + "git-" + "credentials",
+    ),
+    dict(
+        id="P4", family="ansic-escape", should=BLOCK, owner="destructive",
+        note="the PATH hidden instead of the verb, one character of it",
+        why="the axis dave's pin describes. Verified by twin: bash opens the "
+            "file when the dot is written as an escape",
+        command="cat $'/home/domin/\\x2egit-credentials'",
+    ),
+    dict(
+        id="P5", family="ansic-escape", should=BLOCK, owner="permission",
+        note="the same verb-hiding shape asked of the OTHER file",
+        why="the sibling blocked the O1 class by searching rather than "
+            "matching, so it might have absorbed this one too. It does not: "
+            "hiding the verb defeats both files, which is why this row is "
+            "here rather than assumed from O6",
+        command="$'\\x63at' " + TOKEN_FILE,
+    ),
+    dict(
+        id="P6", family="ansic-escape", should=BLOCK, owner="destructive",
+        note="destructive verb, hex-escaped",
+        why="`$'\\x72m'` expands to `rm` and parses. Names the blast radius: "
+            "this is not confined to the credential-path rules",
+        command="$'\\x72m' -rf /",
+    ),
+    dict(
+        id="P7", family="ansic-escape", should=BLOCK, owner="destructive",
+        note="CONTROL: ANSI-C quoting with NO escape in it",
+        why="proves the rows above fail on the ESCAPE and not on the quoting "
+            "form, so the P family does not read as a regression in 8a5d0c8. "
+            "READ THE GUARD COLUMN FIRST: this control only discriminates on "
+            "the FIXED pair, where it blocks while P1-P6 allow (measured). "
+            "The harness asks the ENFORCED copy, and there it allows for the "
+            "O1 reason -- the residue is still open. A control is scoped to "
+            "the file it was measured on, exactly like a verdict",
+        command="$'cat' /home/domin/." + "git-" + "credentials",
+    ),
+    dict(
+        id="P8", family="ansic-escape", should=ALLOW, owner="destructive",
+        note="CONTROL: the same escape in a PLAIN single-quoted word",
+        why="no `$`, so bash does not expand it: the word stays literal and "
+            "opens nothing. Allowing it is correct. Bounds the fix on the "
+            "other side -- expanding escapes everywhere would invent reads "
+            "that bash never performs",
+        command="cat '/home/domin/\\x2egit-credentials'",
+    ),
 ]
 
 

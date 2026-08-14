@@ -3,7 +3,7 @@
 Built by rackham, 2026-08-14, at marveen's request: validate dave's fix against
 **measured** benign cases rather than assumed ones.
 
-Harness: `scripts/guard_fp_corpus.py` (102 cases, runs in <1s, executes nothing).
+Harness: `scripts/guard_fp_corpus.py` (110 cases, runs in <1s, executes nothing).
 `--compare` diffs the two copies of the permission ruleset; `--splitter` reports
 which splitter a per-piece fix would inherit; `--guards` asks **both guard files**
 the same shapes; `--parse` reports which rows are valid bash at all.
@@ -128,8 +128,9 @@ must stop naming a specific attack (card's FIX item 3).
 
 ## 2. Measured false negatives
 
-**Twenty-eight**: E4, plus L2-L6, L9-L11, L13-L16 (section 5d), M2-M8
-(section 5e), N2-N4 (section 5f) and O1-O3, O7-O8 (section 5g).
+**Thirty-five**: E4, plus L2-L6, L9-L11, L13-L16 (section 5d), M2-M8
+(section 5e), N2-N4 (section 5f), O1-O3, O7-O8 (section 5g) and P1-P7
+(section 5h).
 
 **Two rows were withdrawn from this count on 2026-08-14** and are reported on
 their own line as `mechanism`: `L8` and `N5` are not valid bash, so nobody can
@@ -146,6 +147,9 @@ run them and letting them through costs nothing. See section 5g.
 | N2-N4 | destructive | one quoted `)` after the command word | **allowed** |
 | O1-O3 | destructive | `$'...'` / `$"..."` around a credential path -- **survives dave's fix** | **allowed** |
 | O7-O8 | destructive | line continuation, process substitution in quotes -- closed by his fix, open on the enforced copy | **allowed** |
+| P1-P4, P6 | destructive | ANSI-C **escapes** hiding the verb or the path -- open on both fixed copies | **allowed** |
+| P5 | permission | the same verb-hiding shape on the sibling file | **allowed** |
+| P7 | destructive | control; a miss on the enforced copy for the O1 reason, blocks on the fixed pair | **allowed** |
 
 E4 independently reproduces dave's FINDING 2. The L rows arrived on 2026-08-14
 from his per-piece TDD and were reproduced here. The M and N rows are on the
@@ -660,12 +664,55 @@ assumes.
 
 ---
 
+## 5h. A pinned verdict is not a measured one (P family)
+
+`8a5d0c8` closes `O1`-`O3` by stripping the dollar residue, and both fixed copies
+now block the whole O family (re-measured here, not taken from the fix's own
+suite). Writing it up, dave named the part he had **not** implemented: ANSI-C
+quoting also expands **escapes**, so `$'\x63at'` is `cat` to bash. He pinned the
+current verdict in his suite rather than claim coverage.
+
+**A pin records what happens today. It does not say whether what happens today is
+exploitable.** That is the missing measurement, and making it is the reason this
+corpus is a second instrument rather than a second opinion.
+
+Measured on the fixed pair, both files asked on every row:
+
+| link in the chain | how it was measured | result |
+| --- | --- | --- |
+| the escape expands | `printf` on the word alone — a string question, so nothing dangerous runs | `$'\x63at'` → `cat`, hex and octal |
+| the expanded word is looked up as a command | `$'\x65cho' X` and its octal and half-escaped forms | prints `X`, rc 0, all three |
+| the read really happens | the harmless twin returns file content | READS |
+| the shape parses | `bash -n`, benign verb substituted | valid |
+
+All four hold and **both files allow**. So the class is **wider than the pin**:
+the residue fix addressed a hidden **path**, and the escape form also hides the
+**verb** (`P1`-`P3`, `P6`), which reaches the destructive rules and not only the
+credential ones. `P4` is the path axis the pin describes. `P5` asks the sibling,
+because the search-not-match behaviour that absorbed the O class might have
+absorbed this one — it does not.
+
+`P8` is the safe-side control: the same escape in a **plain** single-quoted word
+has no `$`, so bash never expands it and the word opens nothing. Allowing it is
+correct, and it bounds the fix — expanding escapes everywhere would invent reads
+that bash does not perform.
+
+`P7` is the other control, and it carries a limit of its own worth reading before
+the number: it discriminates **only on the fixed pair**, where it blocks while
+`P1`-`P6` allow. The harness asks the **enforced** copy, and there it allows for
+the `O1` reason, because the residue is still open on the fleet. **A control is
+scoped to the file it was measured on, exactly like a verdict** — the same rule
+that produced this whole two-file harness, arriving this time on my own control
+row.
+
+---
+
 ## 6. What this corpus cannot see
 
 A zero here is a **lower bound, not a proof**, and the bound is worth stating
 because "0 false positives" reads like a guarantee:
 
-- **102 shapes, not a population.** The corpus measures the command forms someone
+- **110 shapes, not a population.** The corpus measures the command forms someone
   thought to write down. The A/B families were built backwards from four blocks
   that actually happened; nobody enumerated the space of unbalanced-quote
   commands. A shape absent from `CASES` is unmeasured, not safe.
