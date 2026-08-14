@@ -3,7 +3,7 @@
 Built by rackham, 2026-08-14, at marveen's request: validate dave's fix against
 **measured** benign cases rather than assumed ones.
 
-Harness: `scripts/guard_fp_corpus.py` (110 cases, runs in <1s, executes nothing).
+Harness: `scripts/guard_fp_corpus.py` (116 cases, runs in <1s, executes nothing).
 `--compare` diffs the two copies of the permission ruleset; `--splitter` reports
 which splitter a per-piece fix would inherit; `--guards` asks **both guard files**
 the same shapes; `--parse` reports which rows are valid bash at all.
@@ -128,9 +128,13 @@ must stop naming a specific attack (card's FIX item 3).
 
 ## 2. Measured false negatives
 
-**Thirty-five**: E4, plus L2-L6, L9-L11, L13-L16 (section 5d), M2-M8
-(section 5e), N2-N4 (section 5f), O1-O3, O7-O8 (section 5g) and P1-P7
-(section 5h).
+**Thirty-eight**: E4, plus L2-L6, L9-L11, L13-L16 (section 5d), M2-M8
+(section 5e), N2-N4 (section 5f), O1-O3, O7-O8 (section 5g), P1-P7
+(section 5h) and Q1-Q3 (section 5i).
+
+Q1-Q3 are the only rows here measured on a copy that is **not** enforced: they
+are a regression the fix introduces, so the enforced copy blocks them and the
+question cannot be asked there.
 
 **Two rows were withdrawn from this count on 2026-08-14** and are reported on
 their own line as `mechanism`: `L8` and `N5` are not valid bash, so nobody can
@@ -145,11 +149,12 @@ run them and letting them through costs nothing. See section 5g.
 | M2 | destructive | `( rm -rf / )` -- the shape its sibling already blocks | **allowed** |
 | M3-M8 | destructive | the same wrapper class against all five destructive rules | **allowed** |
 | N2-N4 | destructive | one quoted `)` after the command word | **allowed** |
-| O1-O3 | destructive | `$'...'` / `$"..."` around a credential path -- **survives dave's fix** | **allowed** |
+| O1-O3 | destructive | `$'...'` / `$"..."` around a credential path -- closed by 8a5d0c8, open on the enforced copy | **allowed** |
 | O7-O8 | destructive | line continuation, process substitution in quotes -- closed by his fix, open on the enforced copy | **allowed** |
-| P1-P4, P6 | destructive | ANSI-C **escapes** hiding the verb or the path -- open on both fixed copies | **allowed** |
-| P5 | permission | the same verb-hiding shape on the sibling file | **allowed** |
+| P1-P4, P6 | destructive | ANSI-C **escapes** hiding the verb or the path -- closed by 314c897, open on the enforced copy | **allowed** |
+| P5 | permission | the same verb-hiding shape on the sibling file -- same story | **allowed** |
 | P7 | destructive | control; a miss on the enforced copy for the O1 reason, blocks on the fixed pair | **allowed** |
+| Q1-Q3 | destructive (**fixed copy**) | a code point above the Unicode maximum raises in the expander -> parse-fail -> piece skipped | **allowed** |
 
 E4 independently reproduces dave's FINDING 2. The L rows arrived on 2026-08-14
 from his per-piece TDD and were reproduced here. The M and N rows are on the
@@ -707,12 +712,72 @@ row.
 
 ---
 
+## 5i. The fix's own new surface, and it points the other way (Q family)
+
+`314c897` closes the P family by **expanding** escapes in the tokenizer. Right
+layer. It also enlarges what the tokenizer can *fail* at, and this one fails
+open.
+
+The expansion runs **inside** `_tokenize`'s `try/except ValueError`, and the
+expander calls `chr()` on a number the input controls. `chr()` stops at
+`0x10FFFF`. **bash does not** — it emits the bytes and carries on, rc 0. So one
+code point above the Unicode maximum raises `ValueError`, which is
+indistinguishable from a shlex quoting error, so it lands on `_PARSE_FAIL`, and
+on the destructive rules `_PARSE_FAIL` is `if not tokens: continue`. A silent
+allow. **The same fail-open branch as section 5c, reached by a new road.**
+
+| row | shape | enforced copy | fixed copy |
+| --- | --- | --- | --- |
+| Q1 | `rm -rf /` + the trailing word | **block** | **allow** |
+| Q2 | credential read + the trailing word | **block** | **allow** |
+| Q3 | protected-branch force-push + the trailing word | **block** | **allow** |
+
+Three different rules, one trailing word, so it follows the tokenizer rather
+than any rule. **The enforced copy blocks all three. The fix is what opens
+them.**
+
+`Q5` and `Q6` are the safe-side controls and they place the boundary precisely:
+the highest *valid* code point expands and blocks, and a lone surrogate blocks
+too, because `chr(0xD800)` does not raise. So the finding is not "escape
+expansion breaks the guard" and not "unusual code points" — it is the specific
+values `chr()` refuses, and a fix keyed to surrogates would miss `Q1` entirely.
+
+`Q4` is the sibling holding, for a reason worth naming: its parse-fail branch
+fails **closed** while the destructive one skips the piece. Identical helpers,
+opposite outcome. A helper-layer identity assert cannot see this, which is the
+case for the verdict-layer assert dave added — the two instruments catch
+different things and neither substitutes for the other.
+
+### The first measurement of this was void
+
+The twin runner decoded bash output as text and returned `UnicodeDecodeError`,
+because the shape makes bash emit invalid UTF-8. Read quickly, that column looks
+like the shell refusing the command — which would have made the whole family a
+non-finding. It was **the instrument failing, not the shell**. Re-run on bytes:
+rc 0, marker returned, following statements executed, the credential still read,
+`rm -rf` still processing its real target. **An error in the measuring path is
+not a result about the thing measured**, and it fails in the direction that
+makes a real finding disappear quietly.
+
+### A harness defect this exposed
+
+These rows had to name the **copy** they were measured on (`guard_file`). The
+default targets are the enforced copies, which is correct for "is the fleet
+exposed today" and wrong for "did this change introduce something" — asked of
+the enforced copy, `Q1`-`Q3` come back green for the wrong reason. That is the
+`P7` limit from section 5h with consequences, so it is now fixed in the harness
+rather than described: both the main table and `--parse` resolve a row's named
+copy, because printing two verdicts for one row and labelling neither with its
+file is the same defect one level up.
+
+---
+
 ## 6. What this corpus cannot see
 
 A zero here is a **lower bound, not a proof**, and the bound is worth stating
 because "0 false positives" reads like a guarantee:
 
-- **110 shapes, not a population.** The corpus measures the command forms someone
+- **116 shapes, not a population.** The corpus measures the command forms someone
   thought to write down. The A/B families were built backwards from four blocks
   that actually happened; nobody enumerated the space of unbalanced-quote
   commands. A shape absent from `CASES` is unmeasured, not safe.

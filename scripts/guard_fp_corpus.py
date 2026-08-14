@@ -91,6 +91,14 @@ GUARD_PATH = LIVE_GUARD
 # Row owner -> the file that decides that row. Default is the permission ruleset.
 GUARDS = {"permission": LIVE_GUARD, "destructive": DESTRUCTIVE_GUARD}
 
+# The FIX branch copies. A row may name one of these via `guard_file` when the
+# question it asks is "did this change introduce something", because that
+# question cannot be answered against the enforced copy -- the change is not
+# there yet, so the row would come back green for the wrong reason.
+_FIX_TREE = "/home/domin/marveen-wt/2cb1ed6e-per-piece/scripts/hooks/"
+DESTRUCTIVE_FIXED = _FIX_TREE + "guardrail-destructive-bash.py"
+PERMISSION_FIXED = _FIX_TREE + "guardrail-permission-rules.py"
+
 # Ground-truth labels for the `should` column.
 ALLOW = "allow"  # opens no credential -> blocking this is a false positive
 BLOCK = "block"  # genuinely reaches a credential / external side effect
@@ -1137,6 +1145,85 @@ CASES = [
             "that bash never performs",
         command="cat '/home/domin/\\x2egit-credentials'",
     ),
+
+    # ---- Q: the fix's own new surface, and it points the other way ----------
+    # 314c897 closes the P family by EXPANDING escapes in the tokenizer. That is
+    # the right layer, and it also enlarges what the tokenizer can fail at.
+    # Expansion runs INSIDE `_tokenize`'s `try/except ValueError`, and the
+    # expander calls `chr()` on a number the input controls. `chr()` stops at
+    # 0x10FFFF; bash does not -- it emits the bytes and carries on, rc 0.
+    #
+    # So a code point one above the Unicode maximum raises ValueError, which is
+    # indistinguishable from a shlex quoting error, so it lands on _PARSE_FAIL,
+    # and on the destructive rules _PARSE_FAIL is `if not tokens: continue` --
+    # a silent allow. Same fail-open branch as section 5c, reached by a new road.
+    #
+    # MEASURED, and the first measurement was VOID: the twin runner decoded bash
+    # output as text and got UnicodeDecodeError, because the shape makes bash
+    # emit invalid UTF-8. That is the instrument failing, not the shell
+    # refusing. Re-run on BYTES: rc 0, marker returned, following statements
+    # run, the credential still read, `rm -rf` still processing its real target.
+    #
+    # THESE ROWS NAME THEIR COPY. On the ENFORCED copy all three BLOCK, because
+    # it does not expand at all. The regression exists only where the fix is, so
+    # a row asked of the enforced copy would report green and hide it.
+    dict(
+        id="Q1", family="expander-fail-open", should=BLOCK, owner="destructive",
+        guard_file=DESTRUCTIVE_FIXED,
+        note="REGRESSION in 314c897: one trailing word turns the rule off",
+        why="`chr()` raises above 0x10FFFF, the expander runs inside the "
+            "parse-error handler, and the destructive rules skip an unparseable "
+            "piece. bash runs the command unchanged. Blocked by the ENFORCED "
+            "copy, allowed by the fixed one -- the fix is what opened it",
+        command="rm -rf / $'\\U00110000'",
+    ),
+    dict(
+        id="Q2", family="expander-fail-open", should=BLOCK, owner="destructive",
+        guard_file=DESTRUCTIVE_FIXED,
+        note="the same word against the credential rule",
+        why="the twin still returns the file content, so this is a real read "
+            "and not a shape that merely parses",
+        command="cat /home/domin/." + "git-" + "credentials $'\\U00110000'",
+    ),
+    dict(
+        id="Q3", family="expander-fail-open", should=BLOCK, owner="destructive",
+        guard_file=DESTRUCTIVE_FIXED,
+        note="and against protected-branch force-push",
+        why="three different rules, one trailing word: this follows the "
+            "tokenizer, so it is every rule in the file rather than a rule bug",
+        command="git push --force origin main $'\\U00110000'",
+    ),
+    dict(
+        id="Q4", family="expander-fail-open", should=BLOCK, owner="permission",
+        guard_file=PERMISSION_FIXED,
+        note="the sibling holds, and the reason is a POLICY difference",
+        why="the same unparseable piece is blocked here, because this file's "
+            "parse-fail branch fails CLOSED while the destructive one skips the "
+            "piece. The helpers are identical and the outcome is opposite -- an "
+            "identity assert at the helper layer cannot see this, which is the "
+            "case for the verdict-layer assert dave added",
+        command="cat " + TOKEN_FILE + " $'\\U00110000'",
+    ),
+    dict(
+        id="Q5", family="expander-fail-open", should=BLOCK, owner="destructive",
+        guard_file=DESTRUCTIVE_FIXED,
+        note="CONTROL: the highest code point that is still valid",
+        why="`$'\\U0010FFFF'` expands, so the piece parses and the rule fires. "
+            "Bounds the finding to the range check and keeps it off the "
+            "expander as a whole -- without this row 'escape expansion breaks "
+            "the guard' would be the obvious and wrong generalisation",
+        command="rm -rf / $'\\U0010FFFF'",
+    ),
+    dict(
+        id="Q6", family="expander-fail-open", should=BLOCK, owner="destructive",
+        guard_file=DESTRUCTIVE_FIXED,
+        note="CONTROL: a lone surrogate, which python accepts",
+        why="`chr(0xD800)` does not raise, so this one blocks. It marks where "
+            "the boundary actually is: not 'unusual code point', but the "
+            "specific values `chr()` refuses. A fix keyed to surrogates would "
+            "miss Q1 entirely",
+        command="rm -rf / $'\\ud800'",
+    ),
 ]
 
 
@@ -1147,7 +1234,18 @@ def run(verbose=False):
     mods = {name: load_guard(path) for name, path in GUARDS.items()}
     rows, mismatches = [], []
     for case in CASES:
-        guard = mods[case.get("owner", "permission")]
+        # A row may name the COPY it was measured on, not just the file. The
+        # default targets are the enforced copies, which is right for "is the
+        # fleet exposed today" and wrong for "did this fix introduce a
+        # regression": a row measuring the second question against the enforced
+        # copy reports green and hides the answer. That is not hypothetical --
+        # the P7 control slipped exactly this way, and the Q family below is a
+        # regression that only exists on the fixed copy.
+        if "guard_file" in case:
+            guard = mods.setdefault(case["guard_file"],
+                                    load_guard(case["guard_file"]))
+        else:
+            guard = mods[case.get("owner", "permission")]
         denied, rule, reason = guard.classify(
             {"tool_name": "Bash", "tool_input": {"command": case["command"]}}
         )
@@ -1410,7 +1508,15 @@ def parse_check():
     phantom = []
     for case in claimed:
         owner = case.get("owner", "permission")
-        denied = mods[owner].classify(
+        # Honour a row's named copy here too. Resolving it one way in the main
+        # table and another way in this one would print two verdicts for the
+        # same row and label neither with the file it came from.
+        if "guard_file" in case:
+            mod = mods.setdefault(case["guard_file"],
+                                  load_guard(case["guard_file"]))
+        else:
+            mod = mods[owner]
+        denied = mod.classify(
             {"tool_name": "Bash", "tool_input": {"command": case["command"]}})[0]
         ok = _parses_as_bash(case["command"])
         if not ok and not denied:
