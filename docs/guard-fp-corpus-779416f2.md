@@ -3,7 +3,7 @@
 Built by rackham, 2026-08-14, at marveen's request: validate dave's fix against
 **measured** benign cases rather than assumed ones.
 
-Harness: `scripts/guard_fp_corpus.py` (60 cases, runs in <1s, executes nothing).
+Harness: `scripts/guard_fp_corpus.py` (76 cases, runs in <1s, executes nothing).
 `--compare` diffs the two guard copies; `--splitter` reports which splitter a
 per-piece fix would inherit.
 
@@ -118,14 +118,21 @@ must stop naming a specific attack (card's FIX item 3).
 
 ---
 
-## 2. Measured false negative
+## 2. Measured false negatives
+
+**Fourteen**: E4, plus L2-L6, L8-L11 and L13-L16 (section 5d).
 
 | id | shape | verdict |
 |----|-------|---------|
 | E4 | clean heredoc whose body reads the dotenv file | **allowed** |
+| L2-L6, L8 | a credential read behind `for`/`then`/`while`/`{`/`time`, or behind a bare keyword | **allowed** |
+| L9-L11 | the same wrapper against the dotenv, interpreter and exfiltration rules | **allowed** |
+| L13-L16 | the same read behind `command`, `env`, `timeout 5`, `!` | **allowed** |
 
-Independently reproduces dave's FINDING 2. Kept in the corpus as the
-forward-looking control: after the fix it must flip to BLOCK.
+E4 independently reproduces dave's FINDING 2. The L rows arrived on 2026-08-14
+from his per-piece TDD and were reproduced here; they are under-blocks rather
+than the false positives this card was opened for, and their severity is flagged
+to dave rather than settled in this document. All must flip to BLOCK.
 
 ---
 
@@ -210,7 +217,11 @@ deferral working, not a regression.
 1. `python3 scripts/guard_fp_corpus.py` → **0 false positives, 0 false negatives**
    on the settled cases. **Ten** rows must flip to allow (A2, A5, B2, **I1**,
    **I6**, **I7** from the parse-fail fix; D4, G2, G6, G7 from the D4 narrowing)
-   and E4 must flip to block. The three deferred H rows must still block — they
+   and **fourteen** must flip to block (E4; L2-L6, L8-L11, L13-L16 from the
+   command-word fix). Two rows must NOT move: **L7** already blocks and **L12**
+   already allows — they bound the pass-through list from either side, and a run
+   that flips ten and blocks fourteen while breaking one of those two has not
+   passed. The three deferred H rows must still block — they
    are reported on their own line and do not count.
 
    `I1`, then `I6`/`I7`, were added after the criterion was first locked, and
@@ -405,12 +416,70 @@ about a command I have seen.
 
 ---
 
+## 5d. The first word decides everything (L family)
+
+Reported by dave on 2026-08-14 from the per-piece TDD. Reproduced here on the
+promoted copy: his 4×7 matrix comes out **cell for cell identical**.
+
+|  | bare | for | if | while | `{ }` | time | `( )` | myfunc |
+|---|---|---|---|---|---|---|---|---|
+| R2 env read | **BLOCK** | allow | allow | allow | allow | allow | **BLOCK** | allow |
+| R2 token read | **BLOCK** | allow | allow | allow | allow | allow | **BLOCK** | allow |
+| R2b interpreter read | **BLOCK** | allow | allow | allow | allow | allow | **BLOCK** | allow |
+| R3 external exfil | **BLOCK** | allow | allow | allow | allow | allow | **BLOCK** | allow |
+
+**The two harness paths agree on all 32 cells.** The corpus calls `classify()`
+in-process; the hook runs the file as a subprocess with a JSON payload on stdin.
+That equivalence had never been measured, and every number in this document
+depends on it — if the paths diverged, the whole corpus would be measuring
+something the fleet does not run. Checked now, both ways, same table.
+
+**Root.** `_command_word()` returns the first token of the piece, and for
+`do cat <token>` that token is `do`. `L8` isolates it: the bare keyword with no
+compound command around it is already enough, so the loop is not the suspect.
+
+**This is the same defect as K2, seen from the other side.** `do curl ...` is
+not recognised as curl, so the carve-out is lost and a legitimate call
+over-blocks; `do cat <token>` is not recognised as a read, so a credential
+access under-blocks. One missing distinction, opposite symptoms — which is
+exactly why fixing the visible direction alone is the repair to avoid.
+
+### The pass-through list is an unstated claim in both directions
+
+| | row | today | why the row exists |
+|---|---|---|---|
+| too wide | `L12` `myfunc cat <token>` | allowed | bash passes `cat` and the path **as arguments** to an unknown command; nothing reads the file. Must keep allowing, or the fix ships new over-blocking. dave asked for this row. |
+| too narrow | `L13`–`L16` `command`, `env`, `timeout 5`, `!` | allowed | none is a shell keyword, and **every one reaches the file**. A keyword-only list stays blind to all four. |
+
+`L15` (`timeout 5 cat …`) is the one that constrains the implementation: the
+pass-through cannot be "skip token 0", because the prefix carries an argument of
+its own. The fleet has met this prefix family before — in the shimmed-grep work,
+`timeout`/`env`/`nice` reached the real binary by the same route.
+
+**`L7` is a negative control, and the family reads wrong without it.** The
+subshell wrapper `( cat <token> )` **already blocks**: card ec7754d7 strips a
+leading paren in `_command_word`. So the finding is not "the guard is blind to
+wrapping" — it is that the class was **scoped to one wrapper**, which is a
+narrower and more useful statement, and the same shape as `guard-scope-is-an-
+unstated-claim`.
+
+### Severity is not mine to set
+
+Thirteen of these rows are **under-blocks of every bash rule**, reachable by
+typing `for i in 1; do … done`. That is a different risk profile from the false
+positives this card was opened for, and it may want its own card and its own
+urgency rather than riding along. Flagged to dave rather than decided here. What
+is **not** in question is that the rows belong somewhere measurable: the cost of
+a finding that stays in a message is already recorded in section 6.
+
+---
+
 ## 6. What this corpus cannot see
 
 A zero here is a **lower bound, not a proof**, and the bound is worth stating
 because "0 false positives" reads like a guarantee:
 
-- **60 shapes, not a population.** The corpus measures the command forms someone
+- **76 shapes, not a population.** The corpus measures the command forms someone
   thought to write down. The A/B families were built backwards from four blocks
   that actually happened; nobody enumerated the space of unbalanced-quote
   commands. A shape absent from `CASES` is unmeasured, not safe.
