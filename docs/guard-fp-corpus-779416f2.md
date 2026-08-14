@@ -151,11 +151,12 @@ shape is exempt.
 
 ---
 
-## 4b. Dotenv suffix boundary (G1–G8) — decision input for D4
+## 4b. Dotenv suffix boundary — D4 DECIDED (dave, 2026-08-14)
 
-Measured 2026-08-14 at dave's request, before the D4 call is made. The `should`
-column of the G family encodes a **proposal**, not settled ground truth, and the
-harness counts it on its own line so it cannot launder into the headline.
+**Decision: candidate X — the allow anchors on the `.example` ENDING.** The G
+rows are settled acceptance criteria and count in the headline. The measurement
+that produced the decision is kept below, because the rejected alternative is
+the one a later reader will reinvent.
 
 Today `_ENV_FILE_RE = (?:^|/)\.env(?:\.[^/\s]+)?$` treats every suffix after
 `.env` alike, so all eight block. Two candidate narrowings, measured as regexes
@@ -187,21 +188,29 @@ and `_OPEN_ENV_RE` (R2b, interpreter inline code). G1 and G2 are the same
 route around. Narrow both or neither.
 
 `.env.sample` and `.env.template` are the same convention as `.example` and stay
-blocked under both candidates. Not a defect, but worth deciding once rather than
-re-deciding when someone hits it.
+blocked under the chosen rule. **Deliberately deferred** (dave): one narrowing
+ships this round, because a "0 FP / 0 FN" acceptance criterion only means
+something if no second axis moves underneath it. They live in the corpus as the
+H family with `pending=True`; an H row still blocking after the fix is the
+deferral working, not a regression.
 
 ---
 
 ## 5. Suggested acceptance for the fix
 
 1. `python3 scripts/guard_fp_corpus.py` → **0 false positives, 0 false negatives**
-   (A2, A5, B2 flip to allow; E4 flips to block; D4 is a judgement call).
+   on the settled cases. Seven rows must flip to allow (A2, A5, B2 from the
+   parse-fail fix; D4, G2, G6, G7 from the D4 narrowing) and E4 must flip to
+   block. The three deferred H rows must still block — they are reported on
+   their own line and do not count.
 2. F1–F8 unchanged.
 3. `--compare` → 0 gaps once 2cb1ed6e is in the base branch.
 4. Both copies updated together, or `promote-guard.py` re-run, so `scripts/hooks/`
    and `.guard/` do not drift.
 
-D4 (`<dotenv>.example`) is left as a decision for dave: blocking a checked-in
-placeholder template is defensible fail-safe, but it is the shape most likely to
-train agents to route around the guard, which is the cultural cost marveen
-weighted.
+5. **Narrow both surfaces or neither.** The same file is reachable through
+   `_ENV_FILE_RE` (R2, shell print-verbs) and `_OPEN_ENV_RE` (R2b, interpreter
+   inline code) — D4 and G2 are one file via `cat` and via `python3 -c`.
+   Narrowing one alone leaves the template allowed on one path and blocked on
+   the other, which is the shape that teaches agents to route around the guard
+   rather than what not to do. Dave took this into the fix scope.
