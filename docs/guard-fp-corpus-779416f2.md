@@ -3,7 +3,9 @@
 Built by rackham, 2026-08-14, at marveen's request: validate dave's fix against
 **measured** benign cases rather than assumed ones.
 
-Harness: `scripts/guard_fp_corpus.py` (56 cases, runs in <1s, executes nothing).
+Harness: `scripts/guard_fp_corpus.py` (60 cases, runs in <1s, executes nothing).
+`--compare` diffs the two guard copies; `--splitter` reports which splitter a
+per-piece fix would inherit.
 
 ```
 python3 scripts/guard_fp_corpus.py            # table + summary
@@ -47,14 +49,15 @@ This is escalated separately to marveen as a process finding; it is not part of
 
 ## 1. Measured false positives (live guard)
 
-**Eight** benign shapes block today: A2, A5, B2, D4, G2, G6, G7, I1. All of them
-report `interpreter-env-read` or `env-file-print`, i.e. a **secret-exfiltration**
-cause, while opening no file.
+**Ten** benign shapes block today: A2, A5, B2, D4, G2, G6, G7, I1, I6, I7. All of
+them report `interpreter-env-read` or `env-file-print`, i.e. a
+**secret-exfiltration** cause, while opening no file.
 
 The table below is the **original four**, measured before any decision landed;
-G2/G6/G7 arrived with the D4 narrowing (section 4b) and I1 is the live capture
-(section 5, acceptance point 1). The count and the ids belong together in every
-reference — a bare "eight" cannot be checked against anything.
+G2/G6/G7 arrived with the D4 narrowing (section 4b), I1 is the live capture
+(section 5, acceptance point 1), and I6/I7 are a fourth surface of the same
+parse-fail defect (section 5c). The count and the ids belong together in every
+reference — a bare "ten" cannot be checked against anything.
 
 | id | shape | reported cause | ground truth |
 |----|-------|----------------|--------------|
@@ -205,20 +208,23 @@ deferral working, not a regression.
 ## 5. Suggested acceptance for the fix
 
 1. `python3 scripts/guard_fp_corpus.py` → **0 false positives, 0 false negatives**
-   on the settled cases. **Eight** rows must flip to allow (A2, A5, B2, **I1**
-   from the parse-fail fix; D4, G2, G6, G7 from the D4 narrowing) and E4 must
-   flip to block. The three deferred H rows must still block — they are reported
-   on their own line and do not count.
+   on the settled cases. **Ten** rows must flip to allow (A2, A5, B2, **I1**,
+   **I6**, **I7** from the parse-fail fix; D4, G2, G6, G7 from the D4 narrowing)
+   and E4 must flip to block. The three deferred H rows must still block — they
+   are reported on their own line and do not count.
 
-   `I1` was added after the criterion was first locked, and it is the one
-   addition that changes the headline for a reason other than a decision
-   landing: it is a **new defect instance**, captured in production. Leaving the
-   criterion at seven would let a fix pass the list with the live case still
-   red.
+   `I1`, then `I6`/`I7`, were added after the criterion was first locked, and
+   they are the additions that change the headline for a reason other than a
+   decision landing: each is a **new defect instance captured in production**,
+   not a shape someone thought up. Seven would have let a fix pass with the live
+   commit block still red; eight would have let it pass with NoA's card block
+   still red.
 
-   **Quote the number and the row ids together, always.** "Eight rows" on its
-   own erodes by substitution just as a bare count does, only more slowly: the
-   next reader cannot tell whether their eight are these eight.
+   **Quote the number and the row ids together, always.** "Ten rows" on its own
+   erodes by substitution just as a bare count does, only more slowly: the next
+   reader cannot tell whether their ten are these ten. The count has now moved
+   twice for this reason, which is the argument for the habit rather than
+   against it.
 
 2. F1–F8 unchanged.
 3. `--compare` → 0 gaps once 2cb1ed6e is in the base branch.
@@ -297,11 +303,52 @@ directions:
 | K6 | token read riding **behind** a loopback curl | **allowed** |
 | K7 | same, redirected to a file so the token persists | **allowed** |
 | K8 | external host (control) | blocked |
+| K9 | the read hidden inside a double-quoted substitution | allowed |
 
 The over-block comes from the carve-out requiring `pieces[0]` to *be* curl, so a
 leading piece disqualifies the command while a trailing one does not (K2/K3 vs
 K4). The under-block comes from the same boolean then covering *every* piece
 (K6/K7).
+
+**The carve-out is the cause, isolated rather than inferred.** The two guard
+copies differ in at least two things, so a cross-copy delta cannot name a cause.
+Running the live copy twice with `_is_localhost_only_curl` forced to `False` and
+nothing else changed: `K1`, `K6`, `K7` all block; restoring it returns all three
+to `allow`. One variable, and the control comes back.
+
+That measurement also says the carve-out **removed** blocks the develop-tracked
+copy still has (`K6`, `K7`) rather than merely failing to add them. Whether that
+is a loss depends on the answer these rows are waiting for, so `--compare`
+reports the direction and refuses to score it.
+
+### K9 and the branch base (`--splitter`)
+
+NoA approved per-piece sanctioning on 2026-08-14 with conditions; the one that
+lands in this corpus is dave's: the per-piece split must consume the **same
+splitter as the 2cb1ed6e quote shield**, or the per-piece check is bypassed by
+exactly the mechanism it replaces.
+
+K9 asks a different question from K1–K8. They ask what the carve-out decides;
+K9 asks whether there is anything left to decide — whether the credential read
+survives splitting as a piece of its own at all. Its verdict is uninformative
+(allowed on both copies), because the property sits one layer below verdicts:
+
+```
+case  shielded   unshielded   note
+K6    own piece  own piece    separated by an unquoted `;`  (control)
+K9    own piece  FUSED        the read hides inside "$( ... )"
+```
+
+`--splitter` asks each copy with **its own** splitter, tokenizer, read verbs and
+path pattern — re-implementing any of them here would make this a port of the
+rule rather than a measurement of it, and a port differs from the original at
+the edges the question is about.
+
+K6 is the control: same danger, separated by an unquoted `;`, visible to both
+copies. The single property K9 changes is the quoting, and that alone decides
+whether a per-piece check has anything to look at. Branched from develop, a
+per-piece fix would report **green on K9** — not because the shape is safe, but
+because the read is no longer a piece.
 
 **Why this cannot be filed as a false-positive class.** A fix that widens the
 carve-out enough to let K2 and K3 through makes K6 and K7 worse. That is why
@@ -316,12 +363,54 @@ recorded because the fix plan implied otherwise.
 
 ---
 
+## 5c. The proposed "command vs data" axis — measured, did not survive
+
+dave relayed a live block on NoA (2026-08-14) with a mechanism attached: her
+card POST was refused because the **description** contained the example strings,
+so "the guard cannot tell a command from data *about* a command — it punishes
+its own incident documentation", filed as a **separate axis** from the six
+measured cases.
+
+Measured before writing a row. **It does not reproduce.** Eleven card-POST and
+note-writing shapes carrying literal credential paths as prose — single-quoted,
+double-quoted, with and without the auth header, a heredoc body, an appended
+note, a commit message — and **ten of them allow**. The one that blocks blocks
+on an **odd apostrophe**:
+
+| variant | today |
+|---|---|
+| prose with apostrophe, credential path present (`I6`) | **blocked** |
+| same, apostrophe removed (`I8`) | allowed |
+| same, two apostrophes (balanced) | allowed |
+| apostrophe present, **no credential path anywhere** (`I7`) | **blocked** |
+
+`I7` settles it. The block survives with nothing in the command that names a
+secret, so the trigger cannot be the guard mistaking data for a command. This is
+the `I1` defect on a fourth surface — the card API instead of a commit message —
+and the card's existing parse-fail fix covers it. **No separate axis is needed,
+and no separate work.**
+
+**Why the wrong mechanism was believable.** The `_PARSE_FAIL` branch borrows the
+name of whichever rule was being evaluated, so NoA was told `env-file-print` —
+a name that points straight at the credential path sitting in her text. The
+false cause did not merely mislead one reader; it propagated out of the incident
+and into a proposed work item, which is the same failure mode this corpus
+already records for the commit-message surface, one relay longer.
+
+**If the real command surfaces, this is the discriminator.** Unbalanced quote in
+the description → this class, already covered. Balanced quotes and still blocked
+→ a genuinely new axis, and `I6`–`I8` are wrong. I do not have NoA's actual
+command; the claim above is about the mechanism, tested on sixteen shapes, not
+about a command I have seen.
+
+---
+
 ## 6. What this corpus cannot see
 
 A zero here is a **lower bound, not a proof**, and the bound is worth stating
 because "0 false positives" reads like a guarantee:
 
-- **56 shapes, not a population.** The corpus measures the command forms someone
+- **60 shapes, not a population.** The corpus measures the command forms someone
   thought to write down. The A/B families were built backwards from four blocks
   that actually happened; nobody enumerated the space of unbalanced-quote
   commands. A shape absent from `CASES` is unmeasured, not safe.
@@ -333,11 +422,25 @@ because "0 false positives" reads like a guarantee:
   instrument; a finding that does not land in it is invisible no matter who
   reported it or where.** The same applies to anything currently sitting only in
   a message or a memory file: treat it as unmeasured until it is a row.
-- **The four allowed K rows are not four approvals.** `K1`, `K4`, `K6` and `K7`
-  print `allow`/`observed`, which is the same ink a settled passing row uses.
-  Two of them (`K6`, `K7`) are the under-block — the shapes most likely to be
-  wrong. Read the `should` column, not the verdict column: `undecided` means
-  the corpus is reporting, not endorsing.
+- **The five allowed K rows are not five approvals.** `K1`, `K4`, `K6`, `K7` and
+  `K9` print `allow`/`observed`, which is the same ink a settled passing row
+  uses. Three of them (`K6`, `K7`, `K9`) are the under-block — the shapes most
+  likely to be wrong. Read the `should` column, not the verdict column:
+  `undecided` means the corpus is reporting, not endorsing.
+- **This instrument was blind to its own family, and for eight days nothing
+  said so.** `--compare` skipped every row whose `should` was not `BLOCK`, so
+  the K family — which exists *because* the two copies differ — was the one
+  family never compared; and only one direction was summarised, so a block lost
+  by promoting would have printed as an ordinary table row. Both were found by
+  running the family across the copies by hand, i.e. by not trusting the
+  harness. A harness that reports `3 gaps` is reporting three gaps **among the
+  rows it looked at**, and that scope was invisible in the output.
+- **A relayed mechanism is an unmeasured claim.** The command-vs-data axis
+  (section 5c) arrived attached to a real block, from a reliable colleague, with
+  the guard's own rule name apparently confirming it. It still did not survive
+  contact with eleven shapes. The block was real; the reason travelled better
+  than it deserved, because the `_PARSE_FAIL` branch names an unrelated rule and
+  that name reads as a diagnosis.
 - **J1–J5 are regression guards and therefore prove nothing today.** They are
   `ok` in every baseline run by construction. Their value is entirely
   conditional on a future fix breaking them; if the fix never touches the
