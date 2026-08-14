@@ -264,12 +264,58 @@ deferral working, not a regression.
 
 ---
 
+## 5b. The localhost-curl carve-out (K family) — measured, not judged
+
+Reported by dave on 2026-08-14 from a live block on his own gate query, and
+reproduced here independently against the promoted guard: **8 of 8 shapes agree
+with his report.** Two instruments, separate paths.
+
+Every K row is `UNDECIDED`. The policy question belongs to NoA, so the corpus
+records what the guard does and stops there. `UNDECIDED` is not a pending
+`ALLOW`: a pending row carries a proposed ground truth, these carry none, and
+the verdict column says `observed` rather than `ok` so a later reader cannot
+mistake "nobody has decided" for "this passes".
+
+**The mechanism, which is what the rows pin.** `_is_localhost_only_curl` is
+computed over the **whole command** and then used to carve out a **per-piece**
+decision in `match_env_file_print`. One mismatch, two failures in opposite
+directions:
+
+| | shape | today |
+|---|---|---|
+| K1 | the sanctioned loopback call | allowed |
+| K2 | same call inside a `for` loop — dave's live block | **blocked** |
+| K3 | same call after a harmless `echo hi;` | **blocked** |
+| K4 | same call *followed by* `git rev-parse` | allowed |
+| K5 | plain token read (control) | blocked |
+| K6 | token read riding **behind** a loopback curl | **allowed** |
+| K7 | same, redirected to a file so the token persists | **allowed** |
+| K8 | external host (control) | blocked |
+
+The over-block comes from the carve-out requiring `pieces[0]` to *be* curl, so a
+leading piece disqualifies the command while a trailing one does not (K2/K3 vs
+K4). The under-block comes from the same boolean then covering *every* piece
+(K6/K7).
+
+**Why this cannot be filed as a false-positive class.** A fix that widens the
+carve-out enough to let K2 and K3 through makes K6 and K7 worse. That is why
+dave asked for at least one under-block row: a family containing only K1–K4
+would read as "the guard is too strict here" and invite exactly the wrong
+repair.
+
+**This is outside the D4 narrowing.** The trigger is `_TOKEN_PATHS_RE`
+(`.dashboard-token`), not `_ENV_FILE_RE`. The suffix anchoring shipping this
+round does not touch this path in either direction — dave's own correction,
+recorded because the fix plan implied otherwise.
+
+---
+
 ## 6. What this corpus cannot see
 
 A zero here is a **lower bound, not a proof**, and the bound is worth stating
 because "0 false positives" reads like a guarantee:
 
-- **48 shapes, not a population.** The corpus measures the command forms someone
+- **56 shapes, not a population.** The corpus measures the command forms someone
   thought to write down. The A/B families were built backwards from four blocks
   that actually happened; nobody enumerated the space of unbalanced-quote
   commands. A shape absent from `CASES` is unmeasured, not safe.
@@ -281,6 +327,11 @@ because "0 false positives" reads like a guarantee:
   instrument; a finding that does not land in it is invisible no matter who
   reported it or where.** The same applies to anything currently sitting only in
   a message or a memory file: treat it as unmeasured until it is a row.
+- **The four allowed K rows are not four approvals.** `K1`, `K4`, `K6` and `K7`
+  print `allow`/`observed`, which is the same ink a settled passing row uses.
+  Two of them (`K6`, `K7`) are the under-block — the shapes most likely to be
+  wrong. Read the `should` column, not the verdict column: `undecided` means
+  the corpus is reporting, not endorsing.
 - **J1–J5 are regression guards and therefore prove nothing today.** They are
   `ok` in every baseline run by construction. Their value is entirely
   conditional on a future fix breaking them; if the fix never touches the
