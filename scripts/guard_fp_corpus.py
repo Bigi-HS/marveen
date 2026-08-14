@@ -43,7 +43,9 @@ USAGE
 
 import argparse
 import importlib.util
+import itertools
 import os
+import subprocess
 import sys
 
 # Assembled, not literal -- see FILENAME LITERALS above.
@@ -1224,6 +1226,42 @@ CASES = [
             "miss Q1 entirely",
         command="rm -rf / $'\\ud800'",
     ),
+
+    # ---- R: what the differential fuzz found (see --fuzz) -------------------
+    # These three pin the classes bash itself disagreed on, so a later change to
+    # the expander cannot quietly move them. The fuzz is the instrument; these
+    # rows are the parts of its result that belong in a table.
+    dict(
+        id="R1", family="fuzz-divergence", should=ALLOW, owner="destructive",
+        guard_file=DESTRUCTIVE_FIXED, no_effect=True,
+        note="NUL truncation: bash keeps NOTHING after it, the expander keeps "
+             "the rest",
+        why="bash cannot hold a NUL in a word, so the command word here is the "
+            "EMPTY string and no `rm` is run -- blocking it is an over-block. "
+            "Reported on its own line rather than as a false positive: the "
+            "other ten blocked real work, and mixing this in would change what "
+            "that number means to someone setting a priority",
+        command="$'\\0rm' -rf /",
+    ),
+    dict(
+        id="R2", family="fuzz-divergence", should=BLOCK, owner="destructive",
+        guard_file=DESTRUCTIVE_FIXED,
+        note="CONTROL: the `\\cX` divergence does not disarm the rule",
+        why="bash masks the control character, the expander XORs it, so the two "
+            "disagree on digits. It cannot hide anything: bash's form of `\\cX` "
+            "is always a control character, never a letter, so it can never "
+            "spell a verb the expander fails to see",
+        command="rm -rf / $'\\c0'",
+    ),
+    dict(
+        id="R3", family="fuzz-divergence", should=BLOCK, owner="destructive",
+        guard_file=DESTRUCTIVE_FIXED,
+        note="CONTROL: byte versus code point above 0x7F",
+        why="bash emits the raw byte, the expander emits the UTF-8 encoding of "
+            "that code point. A real divergence, and in the safe direction: the "
+            "credential path is still there in both, so the rule fires",
+        command="cat /home/domin/." + "git-" + "credentials $'\\xcc'",
+    ),
 ]
 
 
@@ -1255,6 +1293,13 @@ def run(verbose=False):
             # so nobody can run it and letting it through costs nothing. The row
             # stays because it isolates a MECHANISM, but counting it as a miss
             # would inflate a number other people use to set urgency.
+            verdict = "mechanism"
+        elif case.get("no_effect"):
+            # Valid bash, but it performs no action -- the generalisation of
+            # `not_runnable`, arrived at from the other side. Blocking it is a
+            # real over-block and worth nothing to anyone. The ten false
+            # positives all blocked real work; letting a nonsense string join
+            # them would quietly change what that count means.
             verdict = "mechanism"
         elif case["should"] == UNDECIDED:
             # No ground truth exists yet, so there is nothing to disagree with.
@@ -1290,8 +1335,9 @@ def run(verbose=False):
     # proposal into a measurement, so they are counted on their own line.
     settled = [r for r in rows
                if not r[0].get("pending") and r[0]["should"] != UNDECIDED
-               and not r[0].get("not_runnable")]
-    mechanism = [r for r in rows if r[0].get("not_runnable")]
+               and not r[0].get("not_runnable") and not r[0].get("no_effect")]
+    mechanism = [r for r in rows
+                 if r[0].get("not_runnable") or r[0].get("no_effect")]
     pending = [r for r in rows if r[0].get("pending")]
     observed = [r for r in rows if r[0]["should"] == UNDECIDED]
     fp = [r for r in settled if r[4] == "FALSE-POSITIVE"]
@@ -1304,9 +1350,17 @@ def run(verbose=False):
         print(f"deferred to a later round: {len(pending)} cases, {len(differ)} "
               f"still blocking as expected: {', '.join(differ) or '-'}")
     if mechanism:
-        ids = ", ".join(r[0]["id"] for r in mechanism)
-        print(f"mechanism-only (not valid bash, cannot run, not counted): "
-              f"{len(mechanism)} cases: {ids}")
+        # Two reasons, kept apart: one cannot be parsed, the other parses and
+        # does nothing. Both are excluded from the two headline counts, and
+        # both say so rather than disappearing.
+        unrunnable = [r[0]["id"] for r in mechanism if r[0].get("not_runnable")]
+        inert = [r[0]["id"] for r in mechanism if r[0].get("no_effect")]
+        print(f"mechanism-only (excluded from both counts): "
+              f"{len(mechanism)} cases")
+        if unrunnable:
+            print(f"  not valid bash, cannot run: {', '.join(unrunnable)}")
+        if inert:
+            print(f"  valid bash, but performs no action: {', '.join(inert)}")
     if observed:
         # Printed as raw behaviour, never as a score. There is no correct
         # column to compare against, so any count here would invent one.
@@ -1622,6 +1676,148 @@ def cross_guard():
     return 1 if (differ or split_differ) else 0
 
 
+# Every row in this file is a shape a person thought to type, which is the one
+# thing the corpus can never fix about itself. --fuzz is the exception: bash is
+# the specification for `$'...'`, so it can be asked directly, and it disagrees
+# wherever it likes rather than wherever we looked.
+_FUZZ_ALPHABET = ["\\", "x", "u", "U", "c", "n", "t", "e", "a", "b", "0", "1",
+                  "7", "8", "9", "f", "F", "A", "z", "/", ".", "-", "?"]
+
+# The bytes a command word or a credential path can be built from. A divergence
+# only HIDES something if bash yields subject bytes that the expander does not.
+_SUBJECT_BYTES = set(
+    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-~")
+
+
+def _odd_trailing_backslashes(body):
+    n = 0
+    while n < len(body) and body[len(body) - 1 - n] == "\\":
+        n += 1
+    return n % 2 == 1
+
+
+def _bash_expansions(bodies):
+    """Ask bash what each body expands to. Returns None if the oracle is unsound.
+
+    The control bodies ride in the SAME invocation as the measurement. The first
+    version of this batcher joined its commands without a separator, so every
+    answer came back as the text of the script itself and the run was void while
+    looking clean. A control that does not share the invocation would not have
+    caught it.
+
+    bash cannot hold a NUL inside a word, so NUL is a separator no body can
+    forge. Output is compared as BYTES: decoding it as text is what made an
+    earlier measurement collapse into an error that read like a result.
+    """
+    probe, expect = ["A", "\\x41", "\\n"], [b"A", b"A", b"\n"]
+    full = probe + bodies
+    script = "; ".join("printf '%s' $'" + b + "'; printf '\\0'" for b in full)
+    out = subprocess.run(["bash", "-c", script],
+                         capture_output=True, timeout=120).stdout.split(b"\x00")
+    if len(out) < len(full) or out[:len(probe)] != expect:
+        return None
+    return out[len(probe):len(full)]
+
+
+def _fuzz_self_check():
+    """Prove the hiding detector can FIRE before reporting that it did not.
+
+    A zero from a detector that cannot fail is not a measurement. This runs the
+    same comparison against a deliberately blinded expander -- one that drops
+    every escape -- and requires it to be caught. If this returns False, the
+    zero below means nothing and is not printed as a result.
+    """
+    bodies = ["\\x72", "\\x63\\x61\\x74", "\\x2f"]
+    wants = _bash_expansions(bodies)
+    if wants is None:
+        return False
+    blind = [b"" for _ in bodies]                     # sees none of the letters
+    caught = [w for w, g in zip(wants, blind)
+              if (set(w) & _SUBJECT_BYTES) - (set(g) & _SUBJECT_BYTES)]
+    return len(caught) == len(bodies)
+
+
+def fuzz_expander(max_len=3):
+    """Differential-fuzz the ANSI-C expander against bash."""
+    if not _fuzz_self_check():
+        print("SELF-CHECK FAILED: the hiding detector did not fire on a")
+        print("deliberately blinded expander, so a zero from it would be")
+        print("meaningless. No verdict reported.")
+        return 2
+    mod = load_guard(DESTRUCTIVE_FIXED)
+    if not hasattr(mod, "_expand_ansi_c"):
+        print("this copy has no _expand_ansi_c -- nothing to fuzz here.")
+        print("That is not a pass: the enforced copy does not expand at all.")
+        return 0
+    diverged, hiding, raised, skipped, checked = [], [], [], 0, 0
+    pending = []
+
+    def flush():
+        nonlocal checked
+        if not pending:
+            return True
+        wants = _bash_expansions([b for b, _ in pending])
+        if wants is None:
+            return False
+        for (body, got), want in zip(pending, wants):
+            checked += 1
+            if got != want:
+                diverged.append((body, want, got))
+                if (set(want) & _SUBJECT_BYTES) - (set(got) & _SUBJECT_BYTES):
+                    hiding.append((body, want, got))
+        pending.clear()
+        return True
+
+    for n in range(1, max_len + 1):
+        for combo in itertools.product(_FUZZ_ALPHABET, repeat=n):
+            body = "".join(combo)
+            if _odd_trailing_backslashes(body):
+                # bash would eat the closing quote: an unterminated string, not
+                # an expansion question.
+                skipped += 1
+                continue
+            try:
+                got = mod._expand_ansi_c(body).encode("utf-8", "surrogatepass")
+            except Exception as exc:
+                # The expansion now runs OUTSIDE _tokenize's try (eb7694b), so a
+                # raise here reaches main() rather than becoming _PARSE_FAIL.
+                raised.append((body, f"{type(exc).__name__}: {exc}"))
+                continue
+            pending.append((body, got))
+            if len(pending) >= 400 and not flush():
+                print("ORACLE CONTROL FAILED -- the batch is not measuring bash.")
+                print("No verdict is reported from a run whose oracle is unsound.")
+                return 2
+    if not flush():
+        print("ORACLE CONTROL FAILED -- no verdict reported.")
+        return 2
+
+    print(f"bodies checked: {checked}   "
+          f"(skipped, unterminated in bash: {skipped})")
+    print(f"expander raised: {len(raised)}")
+    for body, err in raised[:10]:
+        print(f"  {body!r:<16} {err}")
+    print(f"diverged from bash: {len(diverged)}")
+    groups = {}
+    for body, want, got in diverged:
+        groups.setdefault(body[:2] if body[:1] == "\\" else "(prefixed)",
+                          []).append((body, want, got))
+    for lead, rows in sorted(groups.items(), key=lambda kv: -len(kv[1]))[:6]:
+        body, want, got = rows[0]
+        print(f"  {lead!r:<12} x{len(rows):<6} e.g. {body!r:<10} "
+              f"bash={want!r:<16} guard={got!r}")
+    print(f"\nHIDING DIRECTION (bash yields subject bytes the expander does "
+          f"not): {len(hiding)}")
+    for body, want, got in hiding[:10]:
+        print(f"  {body!r:<16} bash={want!r:<16} guard={got!r}")
+    print("\nA divergence only hides a subject if bash produces the bytes a verb")
+    print("or a path is made of and the expander does not. Divergences in the")
+    print("other direction can only over-block, which is the safe side here.")
+    print("LIMITS: one alphabet, short bodies, and only _expand_ansi_c -- the")
+    print("surrounding scanner is not fuzzed. A zero is a lower bound.")
+    return 1 if (hiding or raised) else 0
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--verbose", action="store_true",
@@ -1634,7 +1830,12 @@ if __name__ == "__main__":
                     help="ask BOTH guard files the same shapes (M family)")
     ap.add_argument("--parse", action="store_true",
                     help="which BLOCK-labelled rows are valid bash at all")
+    ap.add_argument("--fuzz", nargs="?", type=int, const=3, default=None,
+                    metavar="LEN",
+                    help="differential-fuzz the escape expander against bash")
     args = ap.parse_args()
+    if args.fuzz is not None:
+        sys.exit(fuzz_expander(args.fuzz))
     if args.parse:
         sys.exit(parse_check())
     if args.splitter:

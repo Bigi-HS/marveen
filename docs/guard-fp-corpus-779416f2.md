@@ -3,10 +3,11 @@
 Built by rackham, 2026-08-14, at marveen's request: validate dave's fix against
 **measured** benign cases rather than assumed ones.
 
-Harness: `scripts/guard_fp_corpus.py` (116 cases, runs in <1s, executes nothing).
+Harness: `scripts/guard_fp_corpus.py` (119 cases, runs in <1s, executes nothing).
 `--compare` diffs the two copies of the permission ruleset; `--splitter` reports
 which splitter a per-piece fix would inherit; `--guards` asks **both guard files**
-the same shapes; `--parse` reports which rows are valid bash at all.
+the same shapes; `--parse` reports which rows are valid bash at all; `--fuzz`
+differential-fuzzes the escape expander against bash itself.
 
 ```
 python3 scripts/guard_fp_corpus.py            # table + summary
@@ -14,6 +15,7 @@ python3 scripts/guard_fp_corpus.py --verbose  # + reported cause vs ground truth
 python3 scripts/guard_fp_corpus.py --compare  # live guard vs develop-tracked
 python3 scripts/guard_fp_corpus.py --guards   # permission vs destructive-bash
 python3 scripts/guard_fp_corpus.py --parse    # which BLOCK rows are valid bash
+python3 scripts/guard_fp_corpus.py --fuzz 3   # expander vs bash, as bytes
 ```
 
 The bash PreToolUse chain is **two files**, so every row names the guard that
@@ -128,17 +130,20 @@ must stop naming a specific attack (card's FIX item 3).
 
 ## 2. Measured false negatives
 
-**Thirty-eight**: E4, plus L2-L6, L9-L11, L13-L16 (section 5d), M2-M8
-(section 5e), N2-N4 (section 5f), O1-O3, O7-O8 (section 5g), P1-P7
-(section 5h) and Q1-Q3 (section 5i).
+**Thirty-five**: E4, plus L2-L6, L9-L11, L13-L16 (section 5d), M2-M8
+(section 5e), N2-N4 (section 5f), O1-O3, O7-O8 (section 5g) and P1-P7
+(section 5h).
 
-Q1-Q3 are the only rows here measured on a copy that is **not** enforced: they
-are a regression the fix introduces, so the enforced copy blocks them and the
-question cannot be asked there.
+Q1-Q3 were here and are now **green**: `eb7694b` closed them. They were the only
+rows measured on a copy that is not enforced, because they were a regression the
+fix itself introduced and the question could not be asked on the enforced copy.
 
-**Two rows were withdrawn from this count on 2026-08-14** and are reported on
-their own line as `mechanism`: `L8` and `N5` are not valid bash, so nobody can
-run them and letting them through costs nothing. See section 5g.
+**Three rows are excluded from the two headline counts** and reported on their
+own line as `mechanism`, for two different reasons. `L8` and `N5` are not valid
+bash, so nobody can run them and letting them through costs nothing (section 5g).
+`R1` is valid bash that performs no action, so blocking it is a real over-block
+worth nothing to anyone (section 5j). Both would distort a number other people
+read to set urgency.
 
 | id | guard | shape | verdict |
 |----|-------|-------|---------|
@@ -154,7 +159,6 @@ run them and letting them through costs nothing. See section 5g.
 | P1-P4, P6 | destructive | ANSI-C **escapes** hiding the verb or the path -- closed by 314c897, open on the enforced copy | **allowed** |
 | P5 | permission | the same verb-hiding shape on the sibling file -- same story | **allowed** |
 | P7 | destructive | control; a miss on the enforced copy for the O1 reason, blocks on the fixed pair | **allowed** |
-| Q1-Q3 | destructive (**fixed copy**) | a code point above the Unicode maximum raises in the expander -> parse-fail -> piece skipped | **allowed** |
 
 E4 independently reproduces dave's FINDING 2. The L rows arrived on 2026-08-14
 from his per-piece TDD and were reproduced here. The M and N rows are on the
@@ -770,6 +774,86 @@ rather than described: both the main table and `--parse` resolve a row's named
 copy, because printing two verdicts for one row and labelling neither with its
 file is the same defect one level up.
 
+**Closed by `eb7694b`.** All six Q rows are green on the fixed pair: the expander
+was made total and moved **out** of `_tokenize`'s `try`, so an expander defect
+now reaches `main()` instead of impersonating a quoting error. `Q4` additionally
+changed the *reason* it blocks, from `interpreter-env-read` to `env-file-print` —
+the piece parses now, so the cause reported is true where before it was the
+parse-fail branch borrowing a rule's name. The rows stay: they are what will
+notice if this reopens.
+
+---
+
+## 5j. A different instrument: fuzzing the expander against bash (`--fuzz`)
+
+Every other row in this file is a shape a person thought to type, and that is
+the one thing the corpus cannot fix about itself. Four defects in this area were
+found by hand, and both of us have now named that limit out loud — the pin, then
+a 879-command differential with **zero** `$'` in it, whose named blind spot is
+exactly where the next defect sat.
+
+`$'...'` has a specification and it is executable: **bash**. So it can be asked
+directly, and it disagrees wherever it likes rather than wherever we looked.
+
+```
+python3 scripts/guard_fp_corpus.py --fuzz 3
+```
+
+For every generated body, compare `_expand_ansi_c(B)` against what
+`printf '%s' $'B'` really produces, **as bytes**. Result to length 4 (~12k
+bodies after skipping the ones bash would leave unterminated):
+
+| | |
+| --- | --- |
+| expander raised | **0** |
+| diverged from bash | **1404** |
+| **diverged in the hiding direction** | **0** |
+
+Three real classes, and each fails on the **safe** side:
+
+- **NUL truncation.** bash keeps nothing after a NUL; the expander drops the NUL
+  and keeps the rest. The expander sees *more* than bash (`R1`).
+- **`\cX` on non-letters.** bash masks the low bits, the expander XORs after
+  uppercasing, so they part company on digits. It can never hide a verb, because
+  bash's `\cX` is always a control character and never a letter (`R2`).
+- **Byte versus code point above `0x7F`.** bash emits the raw byte, the expander
+  the UTF-8 encoding of that code point (`R3`).
+
+A divergence can only **hide** a subject if bash produces the bytes a verb or a
+path is made of and the expander does not. Over 12k bodies that happened zero
+times. That is a stronger statement than fourteen hand-written shapes, and it is
+the first claim in this document that does not depend on what occurred to
+somebody.
+
+### Two things that make the zero mean something
+
+**The oracle has a control in the same invocation.** The first batched version
+joined its commands without a separator, so every answer came back as the text
+of the script itself — a clean-looking run measuring nothing. Control bodies now
+ride in the same `bash -c` as the measurement, and a mismatch aborts with no
+verdict printed. Same defect as section 5i's void decode, caught by a control
+this time instead of by luck.
+
+**The detector is proved able to fire.** `--fuzz` first runs the hiding check
+against a deliberately blinded expander and requires it to be caught; if it is
+not, the run prints no result. A zero from a detector that cannot fail is not a
+measurement.
+
+**Limits, stated because a zero invites the opposite reading:** one alphabet,
+bodies up to length 4, and only `_expand_ansi_c` — the surrounding scanner is
+not fuzzed. It is a lower bound.
+
+### A bookkeeping problem `R1` created
+
+`R1` is valid bash that **performs no action**: the command word expands to the
+empty string, so bash runs no `rm`, and blocking it is a genuine over-block worth
+nothing to anyone. Counting it as a false positive would put it beside ten rows
+that blocked **real work**, quietly changing what that number means to whoever
+reads it to set a priority. So it is reported on its own line, as `L8` and `N5`
+are — the same rule reached from the other side: `not_runnable` is "cannot run",
+`no_effect` is "runs and does nothing", and both are excluded from the two
+headline counts and both say so.
+
 ---
 
 ## 6. What this corpus cannot see
@@ -777,7 +861,7 @@ file is the same defect one level up.
 A zero here is a **lower bound, not a proof**, and the bound is worth stating
 because "0 false positives" reads like a guarantee:
 
-- **116 shapes, not a population.** The corpus measures the command forms someone
+- **119 shapes, not a population.** The corpus measures the command forms someone
   thought to write down. The A/B families were built backwards from four blocks
   that actually happened; nobody enumerated the space of unbalanced-quote
   commands. A shape absent from `CASES` is unmeasured, not safe.
