@@ -341,17 +341,25 @@ class QuotedNestedCommandTests(unittest.TestCase):
                 self.assertTrue(denied, f"{name}: not denied")
                 self.assertEqual(rule, "rm-rf-root", f"{name}: denied by {rule!r}")
 
-    def test_the_over_block_cost_is_stated_not_hidden(self):
-        """The price of a quote-blind splitter, asserted in the CURRENT direction.
+    def test_the_port_happened_and_took_the_fixes_with_it(self):
+        """This assertion was inverted by the port, on purpose, and it fired.
 
-        A quoted separator is split anyway, so text that merely looks like a
-        command is treated as one. That is the over-block direction (safe), and
-        it is exactly what 07-01 removed from the sibling. If a port ever makes
-        this pass, the port has taken the quote-awareness -- at which point the
-        test above is what decides whether it took the fixes with it.
+        Until card 151a0756 it read `assertGreater(len(pieces), 1)` and pinned
+        the quote-BLIND behaviour, with a docstring predicting that a future port
+        would flip it. That is what happened: `grep "foo|bar" file` is now one
+        piece, this test went red, and the four shapes above stayed green -- the
+        port took the quote-awareness AND the two follow-up fixes.
+
+        What the old pin got wrong is worth keeping. It reasoned that
+        quote-blindness only ever splits MORE, so it could only over-block, so
+        the un-ported copy was the safe one. Splitting more is not the whole
+        effect: the injected separator also lands inside a quoted string, which
+        makes the piece unparseable, and an unparseable piece is DROPPED. The
+        same blindness was over-blocking on one side and fail-open on the other,
+        and the pin measured only the side that made the file look safe.
         """
         pieces = [p for p in guard._split_subcommands('grep "foo|bar" file') if p.strip()]
-        self.assertGreater(len(pieces), 1)
+        self.assertEqual(len(pieces), 1, f"a quoted pipe is one command: {pieces!r}")
 
 
 class CommandWordPrefixTests(unittest.TestCase):
@@ -439,6 +447,209 @@ class CommandWordPrefixTests(unittest.TestCase):
             with self.subTest(tokens=tokens):
                 self.assertEqual(guard._command_word(tokens),
                                  sibling._command_word(tokens))
+
+
+class QuotedSeparatorFailOpenTests(unittest.TestCase):
+    """One quoted character after the command word turned all five rules off.
+
+    Measured by rackham (N family) and reproduced here through the real hook
+    invocation: five rules x four quoted forms, 20 cells, every one allowed --
+    on the live file AND on the branch that had just closed the command-word
+    gap. The two defects are orthogonal, so 55/55 on that axis said nothing
+    about this one.
+
+    Mechanism, and it is the pre-pass rather than any rule: `_CMD_SUBST_RE.sub`
+    rewrote `)` `` ` `` `$(` to ';' in the RAW string, blind to quoting. Inside a
+    quoted argument that injected separator cuts the piece in half, both halves
+    are left with an unbalanced quote, `_tokenize` raises and returns None, and
+    every rule reads `if not tokens: continue`. The dangerous piece is not
+    misclassified -- it is never examined. Fail-open.
+
+        rm -rf /            -> ['rm -rf /']              BLOCK
+        rm -rf / "note )"   -> ['rm -rf / "note ', '"']  allow
+
+    QuotedNestedCommandTests above states the opposite property, and it was
+    green throughout: quote-blindness splits MORE, which is the safe direction.
+    That is true and it is not the whole axis -- the same blindness also breaks
+    quoting, and pieces that fail to parse are dropped. A test that asserts the
+    safe half of a two-sided property reads as coverage.
+    """
+
+    PAYLOADS = [
+        ("rm-rf-root", "rm -rf /"),
+        ("force-push-protected", "git push --force origin main"),
+        ("sql-drop", 'sqlite3 store/noa.db "DROP TABLE kanban_cards"'),
+        ("cred-file-print", "cat ~/.git-credentials"),
+        ("sensitive-file-print", "cat ~/.ssh/id_rsa"),
+    ]
+    # The split matters, and I asserted it wrongly before measuring it. All four
+    # forms were allowed, so all four read as the same finding -- but only the
+    # two paren forms are VALID bash. The other two cannot run, so allowing them
+    # costs nothing: they are cell count, not danger. Ten dangerous cells, not
+    # twenty. Both sets are pinned, for opposite reasons.
+    RUNNABLE_FORMS = [
+        ("double-quoted close paren", '{0} "note )"'),
+        ("single-quoted close paren", "{0} 'note )'"),
+    ]
+    UNRUNNABLE_FORMS = [
+        ("double-quoted backtick", '{0} "note `"'),
+        ("double-quoted dollar-paren", '{0} "note $("'),
+    ]
+    QUOTED_FORMS = RUNNABLE_FORMS + UNRUNNABLE_FORMS
+
+    def test_a_quoted_separator_does_not_disable_the_rules(self):
+        for expected_rule, payload in self.PAYLOADS:
+            for name, form in self.QUOTED_FORMS:
+                cmd = form.format(payload)
+                with self.subTest(rule=expected_rule, form=name):
+                    denied, rule, _ = guard.classify(
+                        {"tool_name": "Bash", "tool_input": {"command": cmd}})
+                    self.assertTrue(denied, f"quoted separator turned the rule off: {cmd!r}")
+                    self.assertEqual(rule, expected_rule)
+
+    def test_which_bypass_forms_are_actually_runnable(self):
+        """What separates a bypass from a curiosity, measured rather than counted.
+
+        A form bash refuses to parse cannot be run, so allowing it costs nothing.
+        `bash -n` parses without executing, which is what makes the distinction
+        assertable at all -- and it is the distinction a raw cell count hides:
+        twenty allowed cells, ten of them reachable.
+
+        Pinned in both directions, because the unrunnable pair is what a future
+        reader would otherwise re-measure to find out whether the fix is
+        over-broad.
+        """
+        payload = self.PAYLOADS[0][1]
+        for name, form in self.RUNNABLE_FORMS:
+            with self.subTest(form=name, expect="valid"):
+                cmd = form.format(payload)
+                rc = subprocess.run(["bash", "-n"], input=cmd, text=True,
+                                    capture_output=True).returncode
+                self.assertEqual(rc, 0, f"expected runnable: {cmd!r}")
+        for name, form in self.UNRUNNABLE_FORMS:
+            with self.subTest(form=name, expect="syntax error"):
+                cmd = form.format(payload)
+                rc = subprocess.run(["bash", "-n"], input=cmd, text=True,
+                                    capture_output=True).returncode
+                self.assertNotEqual(rc, 0, f"expected unrunnable: {cmd!r}")
+
+    def test_an_unparseable_piece_is_only_ever_unrunnable(self):
+        """What the per-piece fail-open is allowed to cost, stated as a property.
+
+        The rules skip a piece they cannot tokenize. That is safe only while an
+        unparseable piece implies an unrunnable command -- which is true for a
+        genuinely unbalanced quote and was FALSE for an injected separator,
+        because the pre-pass manufactured the imbalance out of a valid command.
+        With the split done during a quote-aware scan the imbalance can only
+        come from the operator, so this asserts the implication rather than the
+        symptom: any command whose pieces do not all tokenize must be rejected
+        by bash itself.
+        """
+        commands = [form.format(p) for _, p in self.PAYLOADS
+                    for _, form in self.QUOTED_FORMS]
+        commands += ['echo "a )" && rm -rf /', "rm -rf / 'note'",
+                     'grep "foo|bar" file', "(rm -rf /)", "rm -rf /"]
+        for cmd in commands:
+            with self.subTest(cmd=cmd):
+                pieces = guard._split_subcommands(cmd)
+                unparseable = [p for p in pieces
+                               if p.strip() and guard._tokenize(p) is guard._PARSE_FAIL]
+                if unparseable:
+                    rc = subprocess.run(["bash", "-n"], input=cmd, text=True,
+                                        capture_output=True).returncode
+                    self.assertNotEqual(
+                        rc, 0,
+                        f"dropped {unparseable!r} from a command bash accepts: {cmd!r}")
+
+    def test_the_rows_that_must_not_move(self):
+        """The edges that rule out the plausible over-broad fixes.
+
+        Named by rackham against the M/N corpus, and each one kills a different
+        shortcut: a fix aimed at double quotes only, at parens only, or at "any
+        command containing a paren" breaks one of these.
+        """
+        cases = [
+            # (command, denied)
+            ("myfunc rm -rf /", False),          # M9: bash runs a function, nothing is deleted
+            ("rm -rf ./build", False),           # M10: the rule is scoped to roots on purpose
+            ('git commit -m "do not rm -rf / here"', False),
+            ('grep "foo|bar" file', False),      # a quoted pipe is an argument
+            ("echo rm -rf /", False),
+            ('echo "a )" && rm -rf /', True),    # N6: the class is position-dependent
+            ('rm -rf / "note"', True),           # N7: the quote is not the trigger
+            ("(rm -rf /)", True),                # unspaced subshell, card ec7754d7
+            ("( rm -rf / )", True),
+            ("for x in 1; do rm -rf /; done", True),
+        ]
+        for cmd, want_denied in cases:
+            with self.subTest(cmd=cmd):
+                denied, rule, _ = guard.classify(
+                    {"tool_name": "Bash", "tool_input": {"command": cmd}})
+                self.assertEqual(denied, want_denied,
+                                 f"{cmd!r} -> denied={denied} ({rule})")
+
+
+class SiblingSourceIdentityTests(unittest.TestCase):
+    """`# helpers (shared with destructive-bash)` in the sibling header was false.
+
+    The two files hold copies, they had already drifted on the paren row, and the
+    comment is what kept anyone from measuring the second copy -- it asserted a
+    property nobody had checked, and read like a finished measurement.
+
+    Behavioural agreement is not enough to catch this class: the two copies
+    agreed on almost every command-word input while their SPLITTERS disagreed on
+    a bypass. So the three helpers are now compared as SOURCE. If a fix has to be
+    made twice, a test should be the thing that says so.
+    """
+
+    SHARED = ("_split_subcommands", "_tokenize", "_command_word")
+
+    def setUp(self):
+        import importlib.util
+        sibling_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "guardrail-permission-rules.py")
+        spec = importlib.util.spec_from_file_location("sibling_guard", sibling_path)
+        self.sibling = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.sibling)
+
+    @staticmethod
+    def _code_shape(fn):
+        """The function as CODE: parsed, docstring dropped, positions dropped.
+
+        Comparing raw text would force one file to carry the other prose, and
+        each guard has to be able to explain itself in terms of its own rules.
+        Comment drift is not the hazard here -- a fix landing in one copy is,
+        and that always shows up in the tree.
+        """
+        import ast
+        import inspect
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        node = tree.body[0]
+        if (node.body and isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Constant)
+                and isinstance(node.body[0].value.value, str)):
+            node.body = node.body[1:]
+        return ast.dump(node)
+
+    def test_the_shared_helpers_have_identical_code(self):
+        for name in self.SHARED:
+            with self.subTest(helper=name):
+                self.assertEqual(
+                    self._code_shape(getattr(guard, name)),
+                    self._code_shape(getattr(self.sibling, name)),
+                    f"{name} has drifted between the two guards; a fix landing "
+                    f"in one copy only is how card 151a0756 happened")
+
+    def test_the_comparison_can_actually_fail(self):
+        """A green identity test proves nothing if the comparison is degenerate.
+
+        `ast.dump` on two different functions must differ, or the test above
+        would pass on any pair -- including the pre-fix pair it exists to catch.
+        """
+        self.assertNotEqual(self._code_shape(guard._command_word),
+                            self._code_shape(guard._tokenize))
 
 
 if __name__ == "__main__":

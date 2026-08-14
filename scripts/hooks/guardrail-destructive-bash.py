@@ -88,29 +88,186 @@ _SQL_CLIENTS = frozenset({"sqlite3", "psql", "mysql", "mariadb"})
 _SQL_DROP_RE = re.compile(r"\b(?:DROP|TRUNCATE)\s+(?:TABLE|DATABASE)\b", re.IGNORECASE)
 
 
-# Command-substitution delimiters ($(  )  `) are neutralized to separators so an
-# inner command (e.g. the `cat` in `echo $(cat ~/.git-credentials)`) becomes its
-# own piece with its own command word, instead of being hidden as an argument.
-_CMD_SUBST_RE = re.compile(r"\$\(|\)|`")
-
-
-def _split_subcommands(command):
+def _split_subcommands(command, *, nested=True):
     """Split a command line into the pieces that each start with their own
-    command word, on the shell operators that sequence commands (and on
-    command-substitution boundaries). Lets us catch `echo x && rm -rf ~` and the
-    inner command of `$( ... )` while keeping per-subcommand command-word context."""
-    normalized = _CMD_SUBST_RE.sub(";", command)
-    return re.split(r"(?:&&|\|\||[;|\n])", normalized)
+    command word, on the shell operators that sequence commands and on
+    command-substitution boundaries. Lets us catch `echo x && rm -rf ~` and the
+    inner `rm` of `$( ... )` while keeping per-piece command-word context.
+
+    Quote-aware, and that is the point of card 151a0756. This file used to find
+    the substitution boundaries in a regex PRE-PASS over the raw string, blind
+    to quoting, so a close paren inside a quoted ARGUMENT was rewritten to a
+    separator and the split landed in the middle of the string. Both halves were
+    left with an unbalanced quote, `_tokenize` raised, and every rule skips a
+    piece it cannot tokenize -- so the dangerous piece was never examined:
+
+        rm -rf /            -> ['rm -rf /']              BLOCK
+        rm -rf / "note )"   -> ['rm -rf / "note ', '"']  allow
+
+    Five rules, four quoted forms, twenty cells, all open, and no wrapper
+    needed. Finding the boundaries DURING this scan is what closes it: a close
+    paren is a boundary only where bash treats it as one.
+
+    `nested=False` yields top-level segments instead. Nothing in this file calls
+    that mode; it is carried so that both copies of this function stay identical,
+    which SiblingSourceIdentityTests asserts.
+
+    The two guards hold COPIES rather than importing one shared module on
+    purpose: promote-guard.py promotes a SINGLE file into .guard/, so an import
+    of a neighbouring module would resolve against a directory that does not
+    contain it, the hook would raise on every invocation, and a crashing hook
+    fails open on everything. The duplication is deliberate; the test is what
+    keeps it honest.
+    """
+    command = re.sub(r'\\\n[ \t]*', ' ', command)
+    parts: list[str] = []
+    buf: list[str] = []
+    # Quote state saved on entering a substitution: a substitution starts a
+    # FRESH quoting context, so `"$(cat '.env')"` must honour the inner single
+    # quotes rather than inherit the outer double ones.
+    stack: list[tuple[bool, bool, str]] = []
+    in_sq = False  # inside '...'
+    in_dq = False  # inside "..."
+
+    def _open_substitution(opener, closer):
+        """Flush the enclosing fragment and start the nested command.
+
+        The flushed fragment must stay parseable on its own: lifting
+        `$(...)` out of `-H "Bearer $(cat f)"` would otherwise leave a dangling
+        `"` behind, shlex raises, and the piece becomes _PARSE_FAIL -- turning a
+        readable command into a fail-closed block. So the open quote is closed on
+        the way out and re-opened on the way back in.
+
+        In top-level mode nothing is flushed: the substitution keeps its literal
+        text inside the enclosing segment, and the stack only records that we are
+        no longer at top level.
+        """
+        nonlocal buf, in_sq, in_dq
+        if nested:
+            parts.append(''.join(buf) + ('"' if in_dq else ''))
+            buf = []
+        else:
+            buf.append(opener)
+        stack.append((in_sq, in_dq, closer))
+        in_sq = in_dq = False
+
+    def _close_substitution(closer):
+        nonlocal buf, in_sq, in_dq
+        if nested:
+            parts.append(''.join(buf))
+            in_sq, in_dq, _ = stack.pop()
+            buf = ['"'] if in_dq else []
+        else:
+            buf.append(closer)
+            in_sq, in_dq, _ = stack.pop()
+
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        nxt = command[i + 1] if i + 1 < n else ''
+
+        # Inside double quotes a backslash escapes only these four; unquoted it
+        # escapes anything -- `find . \( -name x \)` must not be read as a
+        # subshell.  Inside single quotes a backslash is literal.
+        if ch == '\\' and not in_sq and nxt:
+            if in_dq and nxt not in ('"', '$', '`', '\\'):
+                buf.append(ch); i += 1
+                continue
+            buf.append(ch); buf.append(nxt); i += 2
+            continue
+
+        if ch == "'" and not in_dq:
+            in_sq = not in_sq
+            buf.append(ch); i += 1
+            continue
+        if ch == '"' and not in_sq:
+            in_dq = not in_dq
+            buf.append(ch); i += 1
+            continue
+
+        if not in_sq and ch == '$' and nxt == '(':
+            _open_substitution('$(', ')')
+            i += 2
+            continue
+        if not in_sq and ch == '`':
+            # In nested mode a closing backtick simply opens another (empty)
+            # piece, which is harmless there. Top-level mode must actually close,
+            # or the rest of the command would stay inside a substitution that
+            # never ends and would never split into segments again.
+            if not nested and stack and stack[-1][2] == '`':
+                _close_substitution('`')
+            else:
+                _open_substitution('`', '`')
+            i += 1
+            continue
+        if not in_sq and not in_dq and ch in '<>' and nxt == '(':
+            _open_substitution(ch + '(', ')')
+            i += 2
+            continue
+        # A bare `( ... )` subshell at command position is a nested command too:
+        # `(curl -X PUT ...)` must still classify as curl (card ec7754d7).  Only
+        # at command position -- a stray '(' inside an argument is not an opener.
+        if (not in_sq and not in_dq and ch == '('
+                and not ''.join(buf).strip().split(';')[-1].strip()):
+            _open_substitution('(', ')')
+            i += 1
+            continue
+        # The closer has to be as quote-aware as the openers above, or a close
+        # paren sitting inside quotes INSIDE the substitution pops the stack
+        # early and swallows the rest of the command into one piece -- the same
+        # endpoint as the defect this function was rewritten to fix (DA-62-C).
+        # Measured: `echo "$(echo 'x)' ; echo M)"` prints M, so that paren
+        # closes nothing.  The stack reset means in_sq/in_dq here are the
+        # substitution's OWN quotes, not the enclosing ones.
+        # Nested mode pops on ANY ')' with a non-empty stack, unchanged. Top-level
+        # mode requires the opener to match, so a ')' inside a backtick pair does
+        # not end the segment early.
+        if (ch == ')' and stack and not in_sq and not in_dq
+                and (nested or stack[-1][2] == ')')):
+            _close_substitution(')')
+            i += 1
+            continue
+
+        # Separators split only at top level. In nested mode the stack is empty
+        # whenever we are inside a substitution's own piece, so this reads the
+        # same as before; in top-level mode it keeps `a $(b; c) d` as one segment.
+        if not in_sq and not in_dq and not (stack and not nested):
+            if ch in (';', '\n'):
+                parts.append(''.join(buf)); buf = []; i += 1
+                continue
+            if ch == '|':
+                # || (logical-OR) -> skip second |, split once
+                if nxt == '|':
+                    i += 1
+                parts.append(''.join(buf)); buf = []; i += 1
+                continue
+            if ch == '&' and nxt == '&':
+                # && (logical-AND) -> skip second &, split once
+                i += 1
+                parts.append(''.join(buf)); buf = []; i += 1
+                continue
+
+        buf.append(ch); i += 1
+    parts.append(''.join(buf))
+    return parts
+
+
+# Sentinel returned by _tokenize on shlex ValueError (malformed shell syntax).
+# Callers skip such a piece. That is safe only while an unparseable piece implies
+# an UNRUNNABLE command -- true for an unbalanced quote the operator typed, false
+# for one the old pre-pass manufactured out of a valid command.
+# QuotedSeparatorFailOpenTests asserts that implication against `bash -n`.
+_PARSE_FAIL = object()
 
 
 def _tokenize(piece):
     """shlex tokens for a sub-command. shlex does NOT expand ~ or $HOME, so they
-    stay literal and matchable. Returns None on a malformed (unbalanced-quote)
-    piece so callers can fail open for that piece."""
+    stay literal and matchable."""
     try:
         return shlex.split(piece, comments=False, posix=True)
     except ValueError:
-        return None
+        return _PARSE_FAIL
 
 
 # Words that can stand where the command word stands without BEING the command.
@@ -156,9 +313,10 @@ def _command_word(tokens):
         if "=" in tok and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
             continue  # env assignment prefix
         # A subshell tokenizes as '(rm', so the paren is not part of the name.
-        cmd = os.path.basename(tok.lstrip("("))
+        cmd = tok.lstrip("(")
         if not cmd:
             continue
+        cmd = os.path.basename(cmd)
         if cmd in _COMMAND_PREFIXES:
             after_prefix = True
             continue
@@ -176,7 +334,7 @@ def match_rm_rf_root(command):
     root (/, ~, $HOME, /home/<user>). NOT a deeper path (worktree rm is fine)."""
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
-        if not tokens:
+        if tokens is _PARSE_FAIL or not tokens:
             continue
         if _command_word(tokens) != "rm":
             continue
@@ -213,7 +371,7 @@ def match_force_push_protected(command):
     non-force push to main both pass."""
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
-        if not tokens:
+        if tokens is _PARSE_FAIL or not tokens:
             continue
         if _command_word(tokens) != "git" or "push" not in tokens:
             continue
@@ -246,7 +404,7 @@ def match_sql_drop(command):
         return False
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
-        if not tokens:
+        if tokens is _PARSE_FAIL or not tokens:
             continue
         if _command_word(tokens) in _SQL_CLIENTS:
             return True
@@ -259,7 +417,7 @@ def match_cred_file_print(command):
     read via `$(cat ...)` in every fleet-ops recipe."""
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
-        if not tokens:
+        if tokens is _PARSE_FAIL or not tokens:
             continue
         if _command_word(tokens) not in _PRINT_VERBS:
             continue
@@ -275,7 +433,7 @@ def match_sensitive_file_print(command):
     Sibling of match_cred_file_print (which guards ~/.git-credentials)."""
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
-        if not tokens:
+        if tokens is _PARSE_FAIL or not tokens:
             continue
         if _command_word(tokens) not in _PRINT_VERBS:
             continue
