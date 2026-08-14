@@ -226,9 +226,56 @@ def _split_subcommands(command, *, nested=True):
 # piece we cannot prove it is safe (card 295ebfcc).
 _PARSE_FAIL = object()
 
+def _strip_dollar_quoting(piece):
+    """Drop the leading `$` of ANSI-C (`$'...'`) and locale (`$"..."`) quoting.
+
+    shlex implements neither form, so it leaves the dollar glued to the token
+    while bash strips it and reads the file (card 151a0756, rackham O family):
+
+        cat $'~/.git-credentials'  ->  shlex: ['cat', '$~/.git-credentials']
+                                    ->  bash:  reads the file
+
+    A rule that anchors a path to the WHOLE token then stops matching. The
+    anchoring is deliberate, so the fidelity is fixed here rather than by
+    loosening every path rule to a substring search.
+
+    Narrow on purpose, in two directions that a blind strip would break: bash
+    applies neither form INSIDE quotes, so a literal `$'` in a commit message
+    survives; and only a dollar directly before a quote character is removed, so
+    a real expansion (`$HOME/...`, `${HOME}/...`) keeps its dollar and the rules
+    that match those forms keep working.
+
+    NOT implemented: ANSI-C escape expansion (`$'\\x63at'` is `cat` to bash).
+    That is a separate axis, pinned as a stated gap in the test suite rather than
+    left for a later reader to rediscover.
+    """
+    out = []
+    in_sq = in_dq = False
+    i = 0
+    n = len(piece)
+    while i < n:
+        ch = piece[i]
+        if ch == '\\' and not in_sq and i + 1 < n:
+            out.append(ch)
+            out.append(piece[i + 1])
+            i += 2
+            continue
+        if ch == "'" and not in_dq:
+            in_sq = not in_sq
+        elif ch == '"' and not in_sq:
+            in_dq = not in_dq
+        elif (ch == '$' and not in_sq and not in_dq
+                and i + 1 < n and piece[i + 1] in ('"', "'")):
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return ''.join(out)
+
+
 def _tokenize(piece):
     try:
-        return shlex.split(piece, comments=False, posix=True)
+        return shlex.split(_strip_dollar_quoting(piece), comments=False, posix=True)
     except ValueError:
         return _PARSE_FAIL  # fail-closed: unparseable piece -> callers block
 

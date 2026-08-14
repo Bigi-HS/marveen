@@ -589,6 +589,127 @@ class QuotedSeparatorFailOpenTests(unittest.TestCase):
                                  f"{cmd!r} -> denied={denied} ({rule})")
 
 
+class DollarPrefixedQuotingTests(unittest.TestCase):
+    """`$'...'` and `$"..."` hid a credential path from every anchored rule here.
+
+    Found by rackham (O family) while attacking the scanner rather than the port,
+    and it is not in the scanner: both guards tokenize this identically. shlex
+    does not implement ANSI-C (`$'...'`) or locale (`$"..."`) quoting, so it
+    leaves the dollar attached to the path:
+
+        cat $'~/.git-credentials'  ->  ['cat', '$~/.git-credentials']
+
+    bash strips it and reads the file (measured below, not argued). The rules in
+    THIS file anchor the path to the whole token on purpose (card 48d3c0f9), so
+    the stray dollar defeats them; the sibling happens to substring-search and
+    blocks. Same helper, same tokens, opposite verdict -- one layer BELOW the
+    identity assertion, which is exactly what that assertion cannot see.
+
+    So the fix is tokenizer fidelity, not looser anchors: the anchors are the
+    documented intent, and loosening them to match the sibling would trade a
+    false negative for a class of false positives.
+
+    O4/O5 are why "quoting disables the guard" is the wrong generalization. An
+    escaped path and a concatenated-quote path normalize on their own and have
+    always blocked, so a fix aimed at quoting in general would be aimed at the
+    wrong thing.
+    """
+
+    MARKER = "DAVE-O-FAMILY-MARKER"
+    CRED = "~/.git-credentials"
+    KEY = "~/.ssh/id_rsa"
+
+    BYPASS_FORMS = [
+        ("dollar-single (ANSI-C)", "cat $'{0}'"),
+        ("dollar-double (locale)", 'cat $"{0}"'),
+    ]
+    ALREADY_BLOCKED_FORMS = [
+        ("bare", "cat {0}"),
+        ("single-quoted", "cat '{0}'"),
+        ("double-quoted", 'cat "{0}"'),
+    ]
+
+    def _reads_a_real_file(self, template):
+        """Ground truth by execution, against a decoy -- never a real credential.
+
+        Whether a form actually reads is the only thing that separates a bypass
+        from a curiosity, and reasoning about bash quoting is precisely where the
+        author of a scanner goes wrong. So the test measures it instead.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            decoy = os.path.join(td, "decoy-credentials")
+            with open(decoy, "w") as fh:
+                fh.write(self.MARKER + "\n")
+            out = subprocess.run(["bash", "-c", template.format(decoy)],
+                                 capture_output=True, text=True, timeout=10)
+            return self.MARKER in (out.stdout or "")
+
+    def test_the_bypass_forms_really_read_the_file(self):
+        for name, template in self.BYPASS_FORMS:
+            with self.subTest(form=name):
+                self.assertTrue(self._reads_a_real_file(template),
+                                f"{name} does not read, so it is not a bypass")
+
+    def test_the_control_can_tell_reading_from_not_reading(self):
+        self.assertTrue(self._reads_a_real_file("cat {0}"))
+        self.assertFalse(self._reads_a_real_file("echo {0}"))
+
+    def test_dollar_quoting_does_not_hide_a_credential_path(self):
+        for path, expected in ((self.CRED, "cred-file-print"),
+                               (self.KEY, "sensitive-file-print")):
+            for name, template in self.BYPASS_FORMS + self.ALREADY_BLOCKED_FORMS:
+                cmd = template.format(path)
+                with self.subTest(form=name, path=path):
+                    denied, rule, _ = guard.classify(
+                        {"tool_name": "Bash", "tool_input": {"command": cmd}})
+                    self.assertTrue(denied, f"dollar quoting hid the path: {cmd!r}")
+                    self.assertEqual(rule, expected)
+
+    def test_normalisation_is_quote_aware_and_narrow(self):
+        """The edges that separate this fix from `strip every leading dollar`.
+
+        Inside double or single quotes bash does NOT apply ANSI-C quoting, so a
+        literal `$'` there must survive untouched -- otherwise a commit message
+        or an echo becomes a block. And a real variable expansion must keep its
+        dollar, or `$HOME/.ssh/id_rsa` stops resolving the way the rules expect.
+        """
+        must_allow = [
+            "echo \"price is $'5'\"",
+            "git commit -m \"note about $'quoting'\"",
+            "echo 'literal $\\'x\\''",
+        ]
+        for cmd in must_allow:
+            with self.subTest(cmd=cmd, expect="allow"):
+                denied, rule, _ = guard.classify(
+                    {"tool_name": "Bash", "tool_input": {"command": cmd}})
+                self.assertFalse(denied, f"over-block from normalisation: {cmd!r} ({rule})")
+
+        must_block = ["cat $HOME/.ssh/id_rsa", "cat ${HOME}/.git-credentials"]
+        for cmd in must_block:
+            with self.subTest(cmd=cmd, expect="block"):
+                denied, _, _ = guard.classify(
+                    {"tool_name": "Bash", "tool_input": {"command": cmd}})
+                self.assertTrue(denied, f"variable expansion stopped resolving: {cmd!r}")
+
+    def test_the_escape_expansion_axis_is_named_not_covered(self):
+        """An honest limit, pinned so it is not mistaken for coverage.
+
+        ANSI-C quoting also EXPANDS escapes, so `$'\\x63at'` is `cat` to bash
+        while shlex sees the literal text. This fix removes the quoting prefix;
+        it does not implement the escape expansion. The form is recorded here as
+        a known gap with its measured verdict, so that a later reader finds a
+        stated limit rather than re-deriving it -- and so the day someone closes
+        it, this test is what tells them it moved.
+        """
+        cmd = "$'\\x63at' ~/.git-credentials"
+        self.assertTrue(self._reads_a_real_file("$'\\x63at' {0}"),
+                        "if bash stopped reading this, the gap is closed by bash")
+        denied, _, _ = guard.classify(
+            {"tool_name": "Bash", "tool_input": {"command": cmd}})
+        self.assertFalse(denied, "escape expansion is now covered -- update this test "
+                                 "and the card, the gap closed")
+
+
 class SiblingSourceIdentityTests(unittest.TestCase):
     """`# helpers (shared with destructive-bash)` in the sibling header was false.
 
