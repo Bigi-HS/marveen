@@ -3,16 +3,17 @@
 Built by rackham, 2026-08-14, at marveen's request: validate dave's fix against
 **measured** benign cases rather than assumed ones.
 
-Harness: `scripts/guard_fp_corpus.py` (94 cases, runs in <1s, executes nothing).
+Harness: `scripts/guard_fp_corpus.py` (102 cases, runs in <1s, executes nothing).
 `--compare` diffs the two copies of the permission ruleset; `--splitter` reports
 which splitter a per-piece fix would inherit; `--guards` asks **both guard files**
-the same shapes.
+the same shapes; `--parse` reports which rows are valid bash at all.
 
 ```
 python3 scripts/guard_fp_corpus.py            # table + summary
 python3 scripts/guard_fp_corpus.py --verbose  # + reported cause vs ground truth
 python3 scripts/guard_fp_corpus.py --compare  # live guard vs develop-tracked
 python3 scripts/guard_fp_corpus.py --guards   # permission vs destructive-bash
+python3 scripts/guard_fp_corpus.py --parse    # which BLOCK rows are valid bash
 ```
 
 The bash PreToolUse chain is **two files**, so every row names the guard that
@@ -127,18 +128,24 @@ must stop naming a specific attack (card's FIX item 3).
 
 ## 2. Measured false negatives
 
-**Twenty-five**: E4, plus L2-L6, L8-L11, L13-L16 (section 5d), M2-M8
-(section 5e) and N2-N5 (section 5f).
+**Twenty-eight**: E4, plus L2-L6, L9-L11, L13-L16 (section 5d), M2-M8
+(section 5e), N2-N4 (section 5f) and O1-O3, O7-O8 (section 5g).
+
+**Two rows were withdrawn from this count on 2026-08-14** and are reported on
+their own line as `mechanism`: `L8` and `N5` are not valid bash, so nobody can
+run them and letting them through costs nothing. See section 5g.
 
 | id | guard | shape | verdict |
 |----|-------|-------|---------|
 | E4 | permission | clean heredoc whose body reads the dotenv file | **allowed** |
-| L2-L6, L8 | permission | a credential read behind `for`/`then`/`while`/`{`/`time`, or behind a bare keyword | **allowed** |
+| L2-L6 | permission | a credential read behind `for`/`then`/`while`/`{`/`time` | **allowed** |
 | L9-L11 | permission | the same wrapper against the dotenv, interpreter and exfiltration rules | **allowed** |
 | L13-L16 | permission | the same read behind `command`, `env`, `timeout 5`, `!` | **allowed** |
 | M2 | destructive | `( rm -rf / )` -- the shape its sibling already blocks | **allowed** |
 | M3-M8 | destructive | the same wrapper class against all five destructive rules | **allowed** |
-| N2-N5 | destructive | one quoted `)`, backtick or `$(` after the command word | **allowed** |
+| N2-N4 | destructive | one quoted `)` after the command word | **allowed** |
+| O1-O3 | destructive | `$'...'` / `$"..."` around a credential path -- **survives dave's fix** | **allowed** |
+| O7-O8 | destructive | line continuation, process substitution in quotes -- closed by his fix, open on the enforced copy | **allowed** |
 
 E4 independently reproduces dave's FINDING 2. The L rows arrived on 2026-08-14
 from his per-piece TDD and were reproduced here. The M and N rows are on the
@@ -588,12 +595,77 @@ which rules the parse branch out. Latent difference, not a demonstrated defect.
 
 ---
 
+## 5g. A count of cells is not a count of risk, and the one attack that survived
+
+### dave's correction, generalised until it bit me
+
+He reproduced the N family, extended it to four quoted shapes, called all four a
+finding — then measured with `bash -n` and found only two are valid bash. A shape
+that cannot parse cannot run, so letting it through is free. Ten dangerous cells,
+not twenty.
+
+The generalisation was the harness's job, not his. Every false-negative count
+this document has printed assumed its rows were runnable, and that assumption was
+never measured. `--parse` now checks every `BLOCK`-labelled row, and it found
+**two**: `N5` (his instance) and **`L8` (mine)**. `L8` is the isolator that proved
+the first word alone defeats `_command_word` — it did that job perfectly, it sits
+in the family dave built his fix from, and a bare `do` is a bash syntax error, so
+it was never an exploitable miss. I published it as one for two rounds.
+
+Both rows stay, reported as `mechanism` on their own line. They are evidence about
+how the guard reads a command; they are not evidence that anything can be run.
+**The miss count is what other people read to set urgency**, so a shape that
+cannot run must not sit inside it.
+
+`--parse` substitutes a benign verb before parsing. Parse validity is decided by
+quoting and operators, never by which word a plain word is — and the harness must
+not hand a destructive string to bash even under `-n`. The destructive guard
+correctly refused exactly that when it was first attempted, which is the right
+outcome: a measurement that needs a control switched off is the wrong measurement.
+
+### The scanner held; the layer below it did not
+
+dave asked for attacks on the ported scanner rather than verification of the port,
+because AST-identical copies mean one scanner defect is now two. Fourteen attacks:
+nested quote switching, escaped quotes inside quotes, line continuation, process
+substitution as an argument and inside quotes, here-strings, nested substitution
+with a quoted paren, backslash-escaped separators, quoted text that merely looks
+like a separator. **Thirteen held.**
+
+Ground truth here is *measured*, not reasoned: each shape was also run against a
+harmless temp file, and the file content coming back is what defines "this really
+reads". Reasoning about bash quoting is precisely where a scanner author goes
+wrong, so the corpus should not repeat that guess in its `should` column.
+
+The one that got through is **not in the scanner**, which is why dave's identity
+assertion is both correct and blind to it. Both tokenizers return the **same
+token** — the helpers really are identical. The dollar-prefixed quoting forms
+leave a `$` glued to the front of the path, and the destructive rules match a
+credential path as a **whole anchored token** while the permission rule
+**searches** for it as a substring. Same helpers, same token, opposite verdict,
+one layer below the assertion.
+
+It is a class, not a curiosity: both dollar-prefixed quoting forms (`O1`, `O2`),
+against every anchored path rule in the file (`O3` is the SSH-key rule), and bash
+reads the file in all three. `O4` and `O5` are the safe-side controls — escaped
+and concatenated quoting are normalised away by shlex and still block, so "quoting
+defeats the guard" is the wrong generalisation and would aim the fix at the
+tokenizer. **The fix does not need inventing: `O6` is the sibling file blocking
+the same shape.**
+
+`O7` and `O8` are two of the three surfaces dave named that his port *does* close.
+They are here because they are still open on the **enforced** copy, so promoting
+the fix becomes something this corpus measures rather than something anyone
+assumes.
+
+---
+
 ## 6. What this corpus cannot see
 
 A zero here is a **lower bound, not a proof**, and the bound is worth stating
 because "0 false positives" reads like a guarantee:
 
-- **94 shapes, not a population.** The corpus measures the command forms someone
+- **102 shapes, not a population.** The corpus measures the command forms someone
   thought to write down. The A/B families were built backwards from four blocks
   that actually happened; nobody enumerated the space of unbalanced-quote
   commands. A shape absent from `CASES` is unmeasured, not safe.
