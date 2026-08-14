@@ -214,3 +214,28 @@ deferral working, not a regression.
    Narrowing one alone leaves the template allowed on one path and blocked on
    the other, which is the shape that teaches agents to route around the guard
    rather than what not to do. Dave took this into the fix scope.
+
+---
+
+## 6. What this corpus cannot see
+
+A zero here is a **lower bound, not a proof**, and the bound is worth stating
+because "0 false positives" reads like a guarantee:
+
+- **38 shapes, not a population.** The corpus measures the command forms someone
+  thought to write down. The A/B families were built backwards from four blocks
+  that actually happened; nobody enumerated the space of unbalanced-quote
+  commands. A shape absent from `CASES` is unmeasured, not safe.
+- **The chad family is still UNKNOWN.** Escaped quotes and `$()` inside double
+  quotes did not reproduce on the live guard across 14 attempts. Either it was
+  measured against the develop-tracked copy, or it is a form I failed to
+  construct. Absence of a reproduction is not absence of the defect.
+- **One guard, one moment.** Every row is `classify()` on the live `.guard/`
+  copy as promoted from `e571e673`. `--compare` shows the tracked copy already
+  disagrees on three shapes; re-promotion moves the subject under the results.
+- **Static strings only.** Nothing here executes, which is what makes the corpus
+  safe to run — and also means it measures the *decision*, never whether a
+  command that slips through would in fact open anything.
+
+If the fix lands and the corpus reads 0/0, the honest claim is "none of the 38
+measured shapes misfire", not "the guard has no false positives".
