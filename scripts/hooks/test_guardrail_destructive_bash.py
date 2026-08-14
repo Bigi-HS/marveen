@@ -354,5 +354,92 @@ class QuotedNestedCommandTests(unittest.TestCase):
         self.assertGreater(len(pieces), 1)
 
 
+class CommandWordPrefixTests(unittest.TestCase):
+    """A word standing before the command hid EVERY rule in this file.
+
+    `_command_word` returned the first token, so the piece `do rm -rf /` had
+    command word `do` and no rule applied. Measured through the real hook
+    invocation before the fix: 55 cells, 50 allowed, only the bare column
+    blocked -- `for x in 1; do rm -rf /; done` passed.
+
+    The sibling guard blocked the paren form, because card ec7754d7 landed
+    there. It never reached this copy, although the sibling header calls these
+    helpers shared. So the paren row below is not decoration: it is the row that
+    measures whether the two copies still agree.
+    """
+
+    WRAPPERS = [
+        "{0}",
+        "for x in 1; do {0}; done",
+        "if true; then {0}; fi",
+        "while read l; do {0}; done",
+        "until false; do {0}; done",
+        "{{ {0}; }}",
+        "time {0}",
+        "( {0} )",
+        "command {0}",
+        "env {0}",
+        "timeout 5 {0}",
+        "! {0}",
+    ]
+    PAYLOADS = [
+        ("rm-rf-root", "rm -rf /"),
+        ("rm-rf-root", "rm -rf /home/domin"),
+        ("force-push-protected", "git push --force origin main"),
+    ]
+
+    def test_a_prefix_does_not_disable_the_rules(self):
+        for expected_rule, payload in self.PAYLOADS:
+            for wrapper in self.WRAPPERS:
+                cmd = wrapper.format(payload)
+                with self.subTest(cmd=cmd):
+                    denied, rule, _ = guard.classify(
+                        {"tool_name": "Bash", "tool_input": {"command": cmd}})
+                    self.assertTrue(denied, f"a prefix must not turn the rule off: {cmd!r}")
+                    self.assertEqual(rule, expected_rule)
+
+    def test_the_skip_list_did_not_become_too_broad(self):
+        """Skipping is for words that CANNOT be the command, plus a wrapper's own
+        argument. Widening it to any unrecognised word would turn text that
+        merely mentions a command into a block."""
+        for cmd in [
+            "echo rm -rf /",
+            "git commit -m 'mention of rm -rf / in a message'",
+            "grep do scripts/deploy.sh",
+            "rm -rf /home/domin/marveen-wt/scratch",   # a deep path is allowed
+        ]:
+            with self.subTest(cmd=cmd):
+                denied, rule, _ = guard.classify(
+                    {"tool_name": "Bash", "tool_input": {"command": cmd}})
+                self.assertFalse(denied, f"must not become a false positive: {cmd!r} ({rule})")
+
+    def test_the_two_guards_share_the_same_prefix_model(self):
+        """The sibling guard holds a COPY of this helper, and copies drift.
+
+        They already had: the paren handling of card ec7754d7 landed in the
+        sibling and never arrived here, so one guard blocked `( rm -rf / )` and
+        the other did not -- while the sibling header described the helpers as
+        shared. This asserts the agreement instead of describing it, so the next
+        divergence fails a test rather than waiting to be measured.
+        """
+        import importlib.util
+        sibling_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "guardrail-permission-rules.py")
+        spec = importlib.util.spec_from_file_location("sibling_guard", sibling_path)
+        sibling = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sibling)
+
+        self.assertEqual(guard._SHELL_KEYWORDS, sibling._SHELL_KEYWORDS)
+        self.assertEqual(guard._COMMAND_PREFIXES, sibling._COMMAND_PREFIXES)
+        self.assertEqual(guard._PREFIX_ARG_RE.pattern, sibling._PREFIX_ARG_RE.pattern)
+        # And the same tokens must resolve to the same command word in both.
+        for tokens in (["do", "rm", "-rf", "/"], ["timeout", "5", "cat", ".env"],
+                       ["!", "git", "push"], ["(rm", "-rf", "/"],
+                       ["echo", "rm"], ["FOO=bar", "sudo", "cat", "f"]):
+            with self.subTest(tokens=tokens):
+                self.assertEqual(guard._command_word(tokens),
+                                 sibling._command_word(tokens))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

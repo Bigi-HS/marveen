@@ -113,15 +113,61 @@ def _tokenize(piece):
         return None
 
 
+# Words that can stand where the command word stands without BEING the command.
+# Kept in sync with the sibling guard on purpose: the two files hold COPIES of
+# these helpers, and a fix landing in one copy while silently missing the other
+# is how this defect survived -- the paren handling of card ec7754d7 reached the
+# sibling and never got here, which is what made the two measurably disagree.
+_SHELL_KEYWORDS = frozenset(
+    {
+        "do", "done", "then", "else", "elif", "fi", "esac", "in", "coproc",
+        "for", "if", "while", "until", "case", "select", "function", "{", "}", "!",
+    }
+)
+
+# Wrappers that RUN the command that follows, so the real command word is further
+# right. Measured, not assumed: each of these reaches the command.
+_COMMAND_PREFIXES = frozenset(
+    {
+        "sudo", "command", "builtin", "exec", "nohup", "env", "nice", "ionice",
+        "time", "timeout", "stdbuf", "setsid", "doas",
+    }
+)
+
+# A wrapper may carry its own argument before the command (`timeout 5 rm -rf /`),
+# so skipping cannot be "skip token 0" -- that returns the duration as the
+# command word and misses the rm.
+_PREFIX_ARG_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+
+
 def _command_word(tokens):
-    """The effective command word of a token list: skip a leading `sudo`, env
-    assignments (FOO=bar), and absolute paths -> return the basename, or ''."""
+    """The effective command word of a token list: skip words that cannot BE the
+    command -- `sudo`, env assignments (FOO=bar), shell keywords, and wrappers
+    that run what follows -- then return the basename, or ''.
+
+    Before card 151a0756 only `sudo` and assignments were skipped, so the piece
+    `do rm -rf /` reported `do`, and every rule in this file stopped applying.
+    """
+    after_prefix = False
     for tok in tokens:
-        if tok == "sudo":
+        if tok in _SHELL_KEYWORDS:
+            after_prefix = False
             continue
         if "=" in tok and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
             continue  # env assignment prefix
-        return os.path.basename(tok)
+        # A subshell tokenizes as '(rm', so the paren is not part of the name.
+        cmd = os.path.basename(tok.lstrip("("))
+        if not cmd:
+            continue
+        if cmd in _COMMAND_PREFIXES:
+            after_prefix = True
+            continue
+        # Only a wrapper's own flags and duration are skipped, and only directly
+        # after it. Widening this to any unrecognised word would make `echo rm
+        # -rf /` a block, and echo destroys nothing.
+        if after_prefix and (tok.startswith("-") or _PREFIX_ARG_RE.match(tok)):
+            continue
+        return cmd
     return ""
 
 
