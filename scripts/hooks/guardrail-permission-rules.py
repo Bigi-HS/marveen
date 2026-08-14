@@ -42,8 +42,15 @@ import shlex
 
 # ── helpers (shared with destructive-bash) ───────────────────────────────────
 
-def _split_subcommands(command):
+def _split_subcommands(command, *, nested=True):
     """Split on shell sequencing operators + command substitution boundaries.
+
+    `nested=False` yields TOP-LEVEL segments instead: substitutions stay inline
+    with the command that contains them, and a separator inside one does not
+    split. That answers a different question -- "which command does this nested
+    read belong to" -- which R2 needs to scope its carve-out (see
+    match_env_file_print). Both modes share this one scanner on purpose: two
+    scanners would drift, and every quoting fix has had to be made exactly once.
 
     Quote-aware: | ; && || \\n are only treated as separators OUTSIDE single-
     or double-quoted strings.  A bare regex split on | would cut inside quoted
@@ -87,11 +94,11 @@ def _split_subcommands(command):
     # Quote state saved on entering a substitution: a substitution starts a
     # FRESH quoting context, so `"$(cat '.env')"` must honour the inner single
     # quotes rather than inherit the outer double ones.
-    stack: list[tuple[bool, bool]] = []
+    stack: list[tuple[bool, bool, str]] = []
     in_sq = False  # inside '...'
     in_dq = False  # inside "..."
 
-    def _open_substitution():
+    def _open_substitution(opener, closer):
         """Flush the enclosing fragment and start the nested command.
 
         The flushed fragment must stay parseable on its own: lifting
@@ -99,18 +106,29 @@ def _split_subcommands(command):
         `"` behind, shlex raises, and the piece becomes _PARSE_FAIL -- turning a
         readable command into a fail-closed block. So the open quote is closed on
         the way out and re-opened on the way back in.
+
+        In top-level mode nothing is flushed: the substitution keeps its literal
+        text inside the enclosing segment, and the stack only records that we are
+        no longer at top level.
         """
         nonlocal buf, in_sq, in_dq
-        parts.append(''.join(buf) + ('"' if in_dq else ''))
-        buf = []
-        stack.append((in_sq, in_dq))
+        if nested:
+            parts.append(''.join(buf) + ('"' if in_dq else ''))
+            buf = []
+        else:
+            buf.append(opener)
+        stack.append((in_sq, in_dq, closer))
         in_sq = in_dq = False
 
-    def _close_substitution():
+    def _close_substitution(closer):
         nonlocal buf, in_sq, in_dq
-        parts.append(''.join(buf))
-        in_sq, in_dq = stack.pop()
-        buf = ['"'] if in_dq else []
+        if nested:
+            parts.append(''.join(buf))
+            in_sq, in_dq, _ = stack.pop()
+            buf = ['"'] if in_dq else []
+        else:
+            buf.append(closer)
+            in_sq, in_dq, _ = stack.pop()
 
     i = 0
     n = len(command)
@@ -138,15 +156,22 @@ def _split_subcommands(command):
             continue
 
         if not in_sq and ch == '$' and nxt == '(':
-            _open_substitution()
+            _open_substitution('$(', ')')
             i += 2
             continue
         if not in_sq and ch == '`':
-            _open_substitution()
+            # In nested mode a closing backtick simply opens another (empty)
+            # piece, which is harmless there. Top-level mode must actually close,
+            # or the rest of the command would stay inside a substitution that
+            # never ends and would never split into segments again.
+            if not nested and stack and stack[-1][2] == '`':
+                _close_substitution('`')
+            else:
+                _open_substitution('`', '`')
             i += 1
             continue
         if not in_sq and not in_dq and ch in '<>' and nxt == '(':
-            _open_substitution()
+            _open_substitution(ch + '(', ')')
             i += 2
             continue
         # A bare `( ... )` subshell at command position is a nested command too:
@@ -154,7 +179,7 @@ def _split_subcommands(command):
         # at command position -- a stray '(' inside an argument is not an opener.
         if (not in_sq and not in_dq and ch == '('
                 and not ''.join(buf).strip().split(';')[-1].strip()):
-            _open_substitution()
+            _open_substitution('(', ')')
             i += 1
             continue
         # The closer has to be as quote-aware as the openers above, or a close
@@ -164,12 +189,19 @@ def _split_subcommands(command):
         # Measured: `echo "$(echo 'x)' ; echo M)"` prints M, so that paren
         # closes nothing.  The stack reset means in_sq/in_dq here are the
         # substitution's OWN quotes, not the enclosing ones.
-        if ch == ')' and stack and not in_sq and not in_dq:
-            _close_substitution()
+        # Nested mode pops on ANY ')' with a non-empty stack, unchanged. Top-level
+        # mode requires the opener to match, so a ')' inside a backtick pair does
+        # not end the segment early.
+        if (ch == ')' and stack and not in_sq and not in_dq
+                and (nested or stack[-1][2] == ')')):
+            _close_substitution(')')
             i += 1
             continue
 
-        if not in_sq and not in_dq:
+        # Separators split only at top level. In nested mode the stack is empty
+        # whenever we are inside a substitution's own piece, so this reads the
+        # same as before; in top-level mode it keeps `a $(b; c) d` as one segment.
+        if not in_sq and not in_dq and not (stack and not nested):
             if ch in (';', '\n'):
                 parts.append(''.join(buf)); buf = []; i += 1
                 continue
@@ -200,16 +232,59 @@ def _tokenize(piece):
     except ValueError:
         return _PARSE_FAIL  # fail-closed: unparseable piece -> callers block
 
+# Words that can stand where the command word stands without BEING the command.
+# Until card 151a0756 only three were handled -- `sudo`, a VAR=x assignment and
+# the bare `(` subshell -- each added when a report of the day showed it. That is
+# what a mis-scoped error class looks like from the inside: the piece produced by
+#
+#     for x in 1; do cat store/.dashboard-token; done
+#
+# is `do cat store/.dashboard-token`, its command word was `do`, `do` is in no
+# verb set, and so R2, R2b and R3 all silently stopped applying. Measured on the
+# promoted copy through the real hook invocation: five wrapper forms turned every
+# deny rule off, while `( … )` still blocked -- the class was scoped to one
+# wrapper, not to the position.
+_SHELL_KEYWORDS = frozenset({
+    'do', 'done', 'then', 'else', 'elif', 'fi', 'esac', 'in', 'coproc',
+    'for', 'if', 'while', 'until', 'case', 'select', 'function', '{', '}', '!',
+})
+
+# Wrappers that RUN the command that follows them, so the real command word is
+# further right. Measured, not assumed: `command`, `env`, `timeout 5` and `!` all
+# reach the file (rackham, corpus rows L13-L16). The fleet has met this family
+# before -- the same prefixes reached the real binary past the grep shim.
+_COMMAND_PREFIXES = frozenset({
+    'sudo', 'command', 'builtin', 'exec', 'nohup', 'env', 'nice', 'ionice',
+    'time', 'timeout', 'stdbuf', 'setsid', 'doas',
+})
+
+# A wrapper may carry its OWN argument before the command (`timeout 5 cat f`,
+# `nice -n 10 cat f`), so skipping is not "skip token 0" -- that would return the
+# duration as the command word and miss the read.
+_PREFIX_ARG_RE = re.compile(r'^\d+(?:\.\d+)?[smhd]?$')
+
 def _command_word(tokens):
+    after_prefix = False
     for tok in tokens:
-        if tok == 'sudo':
+        if tok in _SHELL_KEYWORDS:
+            after_prefix = False
             continue
         if '=' in tok and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', tok):
             continue
         # Strip leading ( from subshell context: (curl ...) tokenizes as '(curl'
         cmd = tok.lstrip('(')
-        if cmd:
-            return os.path.basename(cmd)
+        if not cmd:
+            continue
+        cmd = os.path.basename(cmd)
+        if cmd in _COMMAND_PREFIXES:
+            after_prefix = True
+            continue
+        # Only a wrapper's own flags/duration are skipped, and only directly
+        # after it. Widening this to "any unrecognised word" would invent a new
+        # false positive: `echo cat .env` prints a string, it reads nothing.
+        if after_prefix and (tok.startswith('-') or _PREFIX_ARG_RE.match(tok)):
+            continue
+        return cmd
     return ''
 
 # Verbs that read their positional argument AS A FILE (not as a string to print).
@@ -346,33 +421,41 @@ def match_env_file_print(command: str) -> bool:
     the same read piped anywhere else, or the same header sent to an external
     host all stay denied.
     """
-    token_read_is_sanctioned = _is_localhost_only_curl(command)
-
-    def _is_sensitive(tok: str) -> bool:
+    def _is_sensitive(tok: str, sanctioned: bool) -> bool:
         if _ENV_FILE_RE.search(tok):
             return True
         if _TOKEN_PATHS_RE.search(tok):
-            return not token_read_is_sanctioned
+            return not sanctioned
         return False
 
-    for piece in _split_subcommands(command):
-        tokens = _tokenize(piece)
-        if tokens is _PARSE_FAIL:
-            # Targeted fail-closed: only block when the unparseable piece also
-            # contains the specific threat pattern (a sensitive filename).
-            if _is_sensitive(piece):
-                return True
-            continue
-        if not tokens:
-            continue
-        if _command_word(tokens) not in _FILE_READ_VERBS:
-            continue
-        # Check every non-flag argument for a sensitive file pattern.
-        for tok in tokens[1:]:
-            if tok.startswith('-'):
+    # The sanction is a property of ONE curl invocation, so it is decided per
+    # top-level segment rather than per command string. Deciding it once for the
+    # whole string had two opposite failures from the same offset (card 151a0756
+    # sibling): any leading piece that was not curl disqualified a legitimate
+    # send, and once a command did qualify the exemption also covered pieces
+    # AFTER the curl, so `<loopback curl>; cat <token>` passed. Only the first
+    # hurts anyone, which is why the tempting repair -- widening the carve-out --
+    # is the one that makes the silent direction worse.
+    for segment in _split_subcommands(command, nested=False):
+        sanctioned = _is_localhost_only_curl(segment)
+        for piece in _split_subcommands(segment):
+            tokens = _tokenize(piece)
+            if tokens is _PARSE_FAIL:
+                # Targeted fail-closed: only block when the unparseable piece also
+                # contains the specific threat pattern (a sensitive filename).
+                if _is_sensitive(piece, sanctioned):
+                    return True
                 continue
-            if _is_sensitive(tok):
-                return True
+            if not tokens:
+                continue
+            if _command_word(tokens) not in _FILE_READ_VERBS:
+                continue
+            # Check every non-flag argument for a sensitive file pattern.
+            for tok in tokens[1:]:
+                if tok.startswith('-'):
+                    continue
+                if _is_sensitive(tok, sanctioned):
+                    return True
     return False
 
 
@@ -401,11 +484,16 @@ _OPEN_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
-# NOTE: _split_subcommands + _tokenize are NOT used here because _split_subcommands
-# replaces ALL ')' with ';', which destroys inline code strings that contain
-# parentheses (e.g. open('.env').read()). Instead we tokenize the raw command
-# directly with shlex, which handles quoted strings correctly, then scan for the
-# -c/-e flag and inspect its value token for .env open patterns.
+# This rule used to tokenize the RAW command and never split it, because the old
+# splitter rewrote every ')' to ';' in a regex pre-pass and so destroyed inline
+# code containing parentheses (`open('.env').read()`). That pre-pass is gone
+# (card 2cb1ed6e): the scan is quote-aware, and `(` only opens a nested command
+# when it is unquoted at command position -- which the paren in `print(open(...))`
+# never is. The stale note mattered, because not splitting meant any word before
+# the interpreter hid it: `for x in 1; do python3 -c "…" ; done` tokenized whole,
+# the command word was `for`, and the rule stopped (card 151a0756).
+# The PARSE-FAIL surface is deliberately left on the whole command, exactly as
+# before, so this change widens detection without moving the fail-closed line.
 
 
 def match_interpreter_env_read(command: str) -> bool:
@@ -414,33 +502,34 @@ def match_interpreter_env_read(command: str) -> bool:
     bypass shell file-read verbs and therefore slip past R2.
     Script-file invocations (python3 script.py) are not inspected because
     we cannot read the file contents statically."""
-    tokens = _tokenize(command)
-    if tokens is _PARSE_FAIL:
+    if _tokenize(command) is _PARSE_FAIL:
         return True  # fail-closed: unparseable interpreter command -> block
-    if not tokens:
-        return False
-    if _command_word(tokens) not in _INTERPRETER_CMDS:
-        return False
-    # Walk tokens looking for -c/-e flags or <<< (here-string) followed by code.
-    i = 1
-    while i < len(tokens):
-        tok = tokens[i]
-        code = None
-        if tok in ('-c', '-e') and i + 1 < len(tokens):
-            code = tokens[i + 1]
-            i += 2
-        elif tok.startswith(('-c', '-e')) and len(tok) > 2:
-            code = tok[2:]
-            i += 1
-        elif tok == '<<<' and i + 1 < len(tokens):
-            # here-string: `python3 <<< "code"` -- the next token IS the code
-            code = tokens[i + 1]
-            i += 2
-        else:
-            i += 1
+    for piece in _split_subcommands(command):
+        tokens = _tokenize(piece)
+        if tokens is _PARSE_FAIL or not tokens:
             continue
-        if code and (_OPEN_ENV_RE.search(code) or _OPEN_TOKEN_RE.search(code)):
-            return True
+        if _command_word(tokens) not in _INTERPRETER_CMDS:
+            continue
+        # Walk tokens looking for -c/-e flags or <<< (here-string) followed by code.
+        i = 1
+        while i < len(tokens):
+            tok = tokens[i]
+            code = None
+            if tok in ('-c', '-e') and i + 1 < len(tokens):
+                code = tokens[i + 1]
+                i += 2
+            elif tok.startswith(('-c', '-e')) and len(tok) > 2:
+                code = tok[2:]
+                i += 1
+            elif tok == '<<<' and i + 1 < len(tokens):
+                # here-string: `python3 <<< "code"` -- the next token IS the code
+                code = tokens[i + 1]
+                i += 2
+            else:
+                i += 1
+                continue
+            if code and (_OPEN_ENV_RE.search(code) or _OPEN_TOKEN_RE.search(code)):
+                return True
     return False
 
 
