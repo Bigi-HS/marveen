@@ -5,7 +5,7 @@ shape as the 779416f2 corpus: `scripts/guard_destructive_corpus.py` hands
 strings to the guard's own `classify()` and never executes a command. The one
 mode that calls git (`--radius`) uses git's dry run (`-n`) exclusively.
 
-Baseline today: **28 cases, 15 uncovered, 0 false friction, 4/4 controls
+Baseline today: **29 cases, 16 uncovered, 0 false friction, 4/4 controls
 correct**, plus one row on an undecided axis counted separately. The uncovered
 rows are exactly the R6/R7 shapes, which reproduces the card's claim as a
 measurement instead of quoting it.
@@ -76,7 +76,10 @@ Two consequences the decision creates, both now carried by the corpus:
   that reads `payload["cwd"]` (`ledger-capture`, `taskstate-replay`,
   `bond-learner-digest`) is UserPromptSubmit or SessionStart, so the payload key
   is **unmeasured for PreToolUse in this repo**. Setting both means the corpus
-  measures whichever mechanism the fix picks instead of encoding a guess.
+  measures whichever mechanism the fix picks instead of encoding a guess -- and
+  `D5` withholds the payload key so that "measures whichever" cannot become
+  "passes on the wrong one". Dave's call: **the fix reads `os.getcwd()`**, and
+  the payload key is at most a supplement.
 - **The direction of the cwd read flips.** The telegram guard uses cwd in the
   fail-**open** direction and says so: a wider allowlist "can only avoid
   false-blocks, never cause one". R6 would use cwd in the fail-**closed**
@@ -196,7 +199,20 @@ Two consequences for the deploy plan on the card:
   (see finding 1); if the fix reads only that key and the key is absent, every
   `R6-cwd` row would report PASS for a reason that has nothing to do with the
   rule logic. A row that turns green because the input was empty looks the same
-  as a row that turns green because the rule works.
+  as a row that turns green because the rule works. **`D5` is the control for
+  exactly this**: it withholds the payload key while standing the process in an
+  agent directory, so a fix that depends on a key production may never send goes
+  red there while `D1` is green. Without `D5` this bullet would be a caveat
+  nobody can act on; with it, the blindness has a failing row.
+- **The cwd read is fail-closed here, and the precedent is fail-open.**
+  `guardrail-telegram-chat.py` reads a working directory in the direction where
+  being wrong can only avoid a false block. R6 reads it in the direction where
+  being wrong means **under-guarding silently**: if `os.getcwd()` is ever not
+  the agent directory -- a wrapper, a hook invoked from elsewhere, a future
+  launcher change -- the unbounded form stops being guarded and nothing says so.
+  The decision stands; what does not carry over is the precedent's safety
+  argument. This belongs in the rule's own message as well, so a reader of the
+  block text knows the scope came from the cwd and not from the command.
 - **`git stash` is deliberately excluded**, per the card. It restores the tree
   under other agents on a shared checkout, and the corpus records no opinion.
 - **Static classification only.** Every row measures the *decision*. It never

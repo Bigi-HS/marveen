@@ -155,6 +155,22 @@ CASES = [
          why="proposed only; the predicate for 'protected cwd' is dave's call",
          cwd=NEUTRAL_CWD,
          command="git clean -fdx"),
+    # DISCRIMINATOR (dave, 2026-08-14). Without this row the cwd family is a
+    # green sequence that an empty input would also produce: the harness sets
+    # both mechanisms, so a fix reading ONLY payload["cwd"] passes D1 even
+    # though that key is unmeasured on PreToolUse. Here the payload key is
+    # deliberately ABSENT while the process stands in the agent directory --
+    # the production arrangement, since os.getcwd() is what
+    # guardrail-telegram-chat.py:43 reads and its tests pin.
+    #
+    # Reading: D5 red while D1 green == the fix depends on a payload key that
+    # may never arrive, and the rule is dead in production while the corpus
+    # says green. That is the exact failure this row exists to make loud.
+    dict(id="D5", family="R6-cwd", should=GUARDED, cwd_mode="chdir_only",
+         note="DISCRIMINATOR: no payload cwd key, process IS in the agent dir",
+         why="same danger as D1; only the delivery mechanism differs",
+         cwd=AGENT_CWD,
+         command="git clean -fdx"),
 
     # -- R7 positives ------------------------------------------------------
     dict(id="R7-1", family="R7-restore", should=GUARDED,
@@ -251,7 +267,9 @@ def classify_case(guard, case):
     cwd = case.get("cwd")
     if not cwd:
         return guard.classify(payload)
-    payload["cwd"] = cwd
+    # cwd_mode="chdir_only" withholds the payload key on purpose -- see D5.
+    if case.get("cwd_mode") != "chdir_only":
+        payload["cwd"] = cwd
     origin = os.getcwd()
     try:
         os.chdir(cwd)
