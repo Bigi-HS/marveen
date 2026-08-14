@@ -151,6 +151,47 @@ shape is exempt.
 
 ---
 
+## 4b. Dotenv suffix boundary (G1–G8) — decision input for D4
+
+Measured 2026-08-14 at dave's request, before the D4 call is made. The `should`
+column of the G family encodes a **proposal**, not settled ground truth, and the
+harness counts it on its own line so it cannot launder into the headline.
+
+Today `_ENV_FILE_RE = (?:^|/)\.env(?:\.[^/\s]+)?$` treats every suffix after
+`.env` alike, so all eight block. Two candidate narrowings, measured as regexes
+over the same filenames:
+
+| filename | safe to read? | X: ends `.example` | Y: component after `.env` |
+|---|---|---|---|
+| `.env.example` | yes | allow | allow |
+| `.env.local` | **no** | block | block |
+| `.env.production` | **no** | block | block |
+| `.env.example.bak` | **no** | block | **allow — leak** |
+| `.env.local.example` | yes | allow | block (over-narrow) |
+| `config/.env.example` | yes | allow | allow |
+| `.env` | **no** | block | block |
+| `.env.sample` | yes | block (over-narrow) | block (over-narrow) |
+
+**X leaks nothing; Y leaks `.env.example.bak`.** A `.bak` sitting beside a
+template is at least as likely to be a copy of the real file, so the ending is
+the load-bearing property — anchoring on the component right after `.env` reads
+`example` there and lets it through. Both rules are wrong on `.env.sample`, but
+in the safe direction.
+
+**Second finding, independent of which rule is chosen.** The same file is
+reachable through two different patterns: `_ENV_FILE_RE` (R2, shell print-verbs)
+and `_OPEN_ENV_RE` (R2b, interpreter inline code). G1 and G2 are the same
+`.env.example` file via `cat` and via `python3 -c`; G3 and G8 likewise for
+`.env.local`. Narrowing only one leaves `cat <dotenv>.example` allowed while
+`open('<dotenv>.example')` still blocks — the inconsistency an agent learns to
+route around. Narrow both or neither.
+
+`.env.sample` and `.env.template` are the same convention as `.example` and stay
+blocked under both candidates. Not a defect, but worth deciding once rather than
+re-deciding when someone hits it.
+
+---
+
 ## 5. Suggested acceptance for the fix
 
 1. `python3 scripts/guard_fp_corpus.py` → **0 false positives, 0 false negatives**
