@@ -1,0 +1,13 @@
+{
+  "model": "claude-sonnet-4-6",
+  "securityProfile": "developer-senior",
+  "claudeConfigDir": "/home/domin/marveen/agents/vane/.claude-config",
+  "team": {
+    "role": "member",
+    "reportsTo": "thor",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": []
+  },
+  "displayName": "Vane"
+}

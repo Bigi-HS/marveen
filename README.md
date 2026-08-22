@@ -41,7 +41,6 @@ Részletes, funkciónkénti leírások a [`docs/`](docs/README.md) mappában —
 | Channels (Telegram / Slack) | [docs/channels.md](docs/channels.md) |
 | Printing-press CLI-k | [docs/printing-press-cli.md](docs/printing-press-cli.md) |
 | Skool CLI | [docs/skool-cli.md](docs/skool-cli.md) |
-| connectors.hu | [docs/connectors-hu.md](docs/connectors-hu.md) |
 | Vault & titkosítás | [docs/vault.md](docs/vault.md) |
 | Dream-engine | [docs/dream-engine.md](docs/dream-engine.md) |
 | Háttér-feladatok | [docs/background-tasks.md](docs/background-tasks.md) |

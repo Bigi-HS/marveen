@@ -1,0 +1,20 @@
+{
+  "data": [
+    {
+      "id": "stream123",
+      "user_id": "9998887",
+      "user_login": "dominik",
+      "user_name": "Dominik",
+      "game_id": "27471",
+      "game_name": "Minecraft",
+      "type": "live",
+      "title": "Building stuff",
+      "viewer_count": 247,
+      "started_at": "2026-06-28T18:00:00Z",
+      "language": "hu",
+      "thumbnail_url": "https://example.com/thumb.jpg",
+      "is_mature": false
+    }
+  ],
+  "pagination": {}
+}

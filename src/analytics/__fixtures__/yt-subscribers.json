@@ -1,0 +1,15 @@
+{
+  "kind": "youtubeAnalytics#resultTable",
+  "columnHeaders": [
+    {"name": "day", "dataType": "STRING"},
+    {"name": "subscribersGained", "dataType": "INTEGER"},
+    {"name": "subscribersLost", "dataType": "INTEGER"}
+  ],
+  "rows": [
+    ["2026-06-24", 42, 5],
+    ["2026-06-25", 51, 8],
+    ["2026-06-26", 38, 6],
+    ["2026-06-27", 29, 11],
+    ["2026-06-28", 63, 7]
+  ]
+}

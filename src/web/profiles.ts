@@ -5,9 +5,10 @@ import { PROJECT_ROOT } from '../config.js'
 // Each profile is a JSON file under templates/profiles/ with an allow/deny
 // list that Claude Code's native permissions engine understands. Choosing a
 // strict profile also drops --dangerously-skip-permissions, so Claude Code
-// enforces the allow/deny list rather than bypassing it. Channels plugin
-// permission prompts (the Telegram Allow/Deny inline buttons) still fire
-// because they live on a different notification channel.
+// enforces the allow/deny list rather than bypassing it -- but ONLY for a
+// channel-less agent (see computeSkipFlag). A channel agent keeps the bypass:
+// an interactive permission prompt has no usable surface on Telegram/Slack and
+// leaks the raw prompt into the chat after a restart while the callback stalls.
 export interface ProfileTemplate {
   id: string
   label: string
@@ -46,6 +47,17 @@ export function loadProfileTemplate(id: string): ProfileTemplate {
   }
   if (id !== 'default') return loadProfileTemplate('default')
   return HARDCODED_DEFAULT_PROFILE
+}
+
+// Decide whether a launched agent gets --dangerously-skip-permissions. A strict
+// profile drops the flag so Claude Code enforces the allow/deny list -- but a
+// channel agent (Telegram/Slack/Discord) MUST keep the bypass regardless of
+// profile: an interactive permission prompt cannot be answered on the channel,
+// so it leaks into the chat on restart and the callback stalls (Boss complaint,
+// card af398086/b407711f). The flag is therefore dropped ONLY for a strict
+// profile with no channel. Returns the flag WITH its trailing space, or ''.
+export function computeSkipFlag(permissionMode: ProfileTemplate['permissionMode'], hasChannel: boolean): string {
+  return permissionMode === 'strict' && !hasChannel ? '' : '--dangerously-skip-permissions '
 }
 
 export function resolveProfilePlaceholders(value: string, ctx: { HOME: string; AGENT_DIR: string }): string {

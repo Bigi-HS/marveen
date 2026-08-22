@@ -1,0 +1,9 @@
+# BigBen script dependencies
+# Install: pip install -r scripts/requirements-bigben.txt
+# Whisper env: /home/domin/marveen/store/whisper-env/env/bin/pip install -r scripts/requirements-bigben.txt
+
+# Excel generation (dubscript-to-xlsx.py)
+openpyxl>=3.1.0
+
+# PDF generation (dubscript-booth-pdf.py)
+reportlab>=4.0.0

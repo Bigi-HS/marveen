@@ -12,10 +12,147 @@ function resolveTemplatePlaceholders(content: string): string {
   return content.replaceAll('{{PROJECT_ROOT}}', PROJECT_ROOT)
 }
 
-// Idempotent migration: every agent's settings.json should carry the
-// PreCompact hook (memory save + skill reflection). Pre-refactor agents
-// were scaffolded before scaffoldAgentDir seeded the template, so their
-// file is permissions-only. Merge the template's hooks block in place.
+// Substring that uniquely identifies the SessionStart memory auto-inject hook
+// inside a hooks-block command, so the targeted merge below can find it in the
+// template and detect whether an agent already carries it.
+const MEMORY_HOOK_MARKER = 'memory-replay.py'
+
+// Same idea for the PreToolUse Telegram broadcast/injection guardrail (item 2b):
+// uniquely identifies its hook command so the targeted merge can backfill it
+// into agents that already have a hooks block (and would otherwise be skipped
+// by the all-or-nothing seed forever).
+const GUARDRAIL_HOOK_MARKER = 'guardrail-telegram-chat.py'
+
+// And the PreToolUse ask-first approval gate (item 2b, "ask first" bucket):
+// gates irreversible/external-effect MCP tools behind the confirm-channel.
+const ASK_FIRST_HOOK_MARKER = 'guardrail-ask-first.py'
+
+// And the PreToolUse destructive-Bash hard-block (card dd48afb6): a narrow
+// deny-list that flat-blocks catastrophic Bash commands (rm -rf root, force-push
+// to a protected branch, SQL DROP via a client, PAT cred-file print).
+const DESTRUCTIVE_BASH_HOOK_MARKER = 'guardrail-destructive-bash.py'
+
+// And the PreToolUse last-match-wins permission ruleset (card 13974213): external-
+// directory deny, .env file read deny, external curl mutating-method deny.
+const PERMISSION_RULES_HOOK_MARKER = 'guardrail-permission-rules.py'
+
+// And the SessionStart per-agent enforcement reminder (card 03a4f57d): the hook is
+// agent-generic (it no-ops for agents without a configured check) so it is safe to
+// backfill fleet-wide -- hibiki gets the inbox-check, claudia the email ask-first.
+const SESSION_ENFORCE_HOOK_MARKER = 'session-start-enforce.py'
+
+// And the UserPromptSubmit long-session anti-bloat freshness nudge (card 705381e3):
+// threshold-gated + rate-limited, fleet-wide, no-ops on normal turns.
+const FRESHNESS_NUDGE_HOOK_MARKER = 'prompt-freshness-nudge.py'
+
+type HookCommand = { type?: string; command?: string; prompt?: string }
+type HookEntry = { matcher?: string; hooks?: HookCommand[] }
+type HooksBlock = Record<string, HookEntry[]>
+
+function entryReferences(entry: HookEntry, marker: string): boolean {
+  return (entry.hooks ?? []).some(h => typeof h.command === 'string' && h.command.includes(marker))
+}
+
+// Targeted idempotent merge: ensure the template's memory SessionStart
+// auto-inject hook(s) are present in `target`. Returns true iff it mutated
+// `target`. It only ever ADDS the memory entry (appended to SessionStart);
+// it never removes or rewrites the agent's own hooks. This is what lets an
+// agent that already has a hooks block -- and is therefore skipped by the
+// all-or-nothing seed in ensureAgentHooks -- still pick up a hook that was
+// added to the template after the agent was first scaffolded.
+export function ensureMemoryHook(target: HooksBlock, template: HooksBlock): boolean {
+  const memoryEntries = (template.SessionStart ?? []).filter(e => entryReferences(e, MEMORY_HOOK_MARKER))
+  if (memoryEntries.length === 0) return false  // template has no memory hook -> nothing to merge
+  const existingStart = target.SessionStart ?? []
+  if (existingStart.some(e => entryReferences(e, MEMORY_HOOK_MARKER))) return false  // already present
+  target.SessionStart = [...existingStart, ...memoryEntries]
+  return true
+}
+
+// Targeted idempotent merge of the PreToolUse Telegram guardrail, mirroring
+// ensureMemoryHook. ADD-only: appends the template's guardrail entry to the
+// agent's PreToolUse list iff absent; never removes or rewrites an agent's own
+// PreToolUse hooks. This is what makes the guard drift-proof -- every existing
+// agent picks it up at the next boot backfill without a profile rewrite.
+export function ensureGuardrailHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.PreToolUse ?? []).filter(e => entryReferences(e, GUARDRAIL_HOOK_MARKER))
+  if (entries.length === 0) return false  // template has no guardrail hook -> nothing to merge
+  const existing = target.PreToolUse ?? []
+  if (existing.some(e => entryReferences(e, GUARDRAIL_HOOK_MARKER))) return false  // already present
+  target.PreToolUse = [...existing, ...entries]
+  return true
+}
+
+// Targeted idempotent merge of the PreToolUse ask-first approval gate, mirroring
+// ensureGuardrailHook. ADD-only, drift-proof: backfilled into every existing
+// agent at the next boot, never removing or rewriting an agent's own hooks.
+export function ensureAskFirstHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.PreToolUse ?? []).filter(e => entryReferences(e, ASK_FIRST_HOOK_MARKER))
+  if (entries.length === 0) return false  // template has no ask-first hook -> nothing to merge
+  const existing = target.PreToolUse ?? []
+  if (existing.some(e => entryReferences(e, ASK_FIRST_HOOK_MARKER))) return false  // already present
+  target.PreToolUse = [...existing, ...entries]
+  return true
+}
+
+// Targeted idempotent merge of the PreToolUse destructive-Bash hard-block,
+// mirroring ensureAskFirstHook. ADD-only, drift-proof: backfilled into every
+// existing agent at the next boot so the deny-list reaches the whole fleet
+// without a profile rewrite, never removing or rewriting an agent's own hooks.
+export function ensureDestructiveBashHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.PreToolUse ?? []).filter(e => entryReferences(e, DESTRUCTIVE_BASH_HOOK_MARKER))
+  if (entries.length === 0) return false  // template has no destructive-bash hook -> nothing to merge
+  const existing = target.PreToolUse ?? []
+  if (existing.some(e => entryReferences(e, DESTRUCTIVE_BASH_HOOK_MARKER))) return false  // already present
+  target.PreToolUse = [...existing, ...entries]
+  return true
+}
+
+// Targeted idempotent merge of the PreToolUse permission-rules gate (card 13974213):
+// external-directory deny, .env file read deny, external-curl mutating deny.
+// ADD-only; never removes or rewrites existing PreToolUse entries.
+export function ensurePermissionRulesHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.PreToolUse ?? []).filter(e => entryReferences(e, PERMISSION_RULES_HOOK_MARKER))
+  if (entries.length === 0) return false
+  const existing = target.PreToolUse ?? []
+  if (existing.some(e => entryReferences(e, PERMISSION_RULES_HOOK_MARKER))) return false
+  target.PreToolUse = [...existing, ...entries]
+  return true
+}
+
+// Targeted idempotent merge of the SessionStart per-agent enforcement reminder
+// (card 03a4f57d), mirroring ensureMemoryHook. ADD-only, drift-proof: backfilled
+// into every existing agent's SessionStart at the next boot; the hook itself
+// no-ops for agents without a configured reminder.
+export function ensureSessionEnforceHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.SessionStart ?? []).filter(e => entryReferences(e, SESSION_ENFORCE_HOOK_MARKER))
+  if (entries.length === 0) return false
+  const existing = target.SessionStart ?? []
+  if (existing.some(e => entryReferences(e, SESSION_ENFORCE_HOOK_MARKER))) return false
+  target.SessionStart = [...existing, ...entries]
+  return true
+}
+
+// Targeted idempotent merge of the UserPromptSubmit long-session freshness nudge
+// (card 705381e3). ADD-only; creates the UserPromptSubmit block if the agent has
+// none (older agents were scaffolded without one), never rewrites existing entries.
+export function ensureFreshnessNudgeHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.UserPromptSubmit ?? []).filter(e => entryReferences(e, FRESHNESS_NUDGE_HOOK_MARKER))
+  if (entries.length === 0) return false
+  const existing = target.UserPromptSubmit ?? []
+  if (existing.some(e => entryReferences(e, FRESHNESS_NUDGE_HOOK_MARKER))) return false
+  target.UserPromptSubmit = [...existing, ...entries]
+  return true
+}
+
+// Idempotent migration: every agent's settings.json should carry the shared
+// hooks (PreCompact memory-save/skill-reflection + the SessionStart taskstate
+// and memory auto-inject replays). Two cases:
+//   - Pre-refactor agents have a permissions-only file (no hooks block): seed
+//     the whole template hooks block.
+//   - Agents that already have a hooks block were scaffolded before a given
+//     hook existed in the template, so the all-or-nothing seed would skip them
+//     forever. For those we run a targeted merge of just the memory hook.
 export function ensureAgentHooks(name: string): boolean {
   const settingsPath = join(agentDir(name), '.claude', 'settings.json')
   const tplPath = join(PROJECT_ROOT, 'templates', 'settings.json.template')
@@ -32,8 +169,25 @@ export function ensureAgentHooks(name: string): boolean {
   if (existsSync(settingsPath)) {
     try { existing = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { /* overwrite */ }
   }
-  if (existing.hooks) return false  // user already has hooks, leave alone
-  existing.hooks = tpl.hooks
+  let changed = false
+  if (!existing.hooks) {
+    existing.hooks = tpl.hooks  // permissions-only agent -> seed full template hooks
+    changed = true
+  } else {
+    // Agent already has hooks: leave them alone, but additively backfill the
+    // hooks added to the template after the agent was scaffolded -- the memory
+    // auto-inject (SessionStart) and the Telegram guardrail (PreToolUse).
+    const memChanged = ensureMemoryHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    const guardChanged = ensureGuardrailHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    const askFirstChanged = ensureAskFirstHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    const destructiveBashChanged = ensureDestructiveBashHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    const permRulesChanged = ensurePermissionRulesHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    const sessionEnforceChanged = ensureSessionEnforceHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    const freshnessNudgeChanged = ensureFreshnessNudgeHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    changed = memChanged || guardChanged || askFirstChanged || destructiveBashChanged || permRulesChanged
+      || sessionEnforceChanged || freshnessNudgeChanged
+  }
+  if (!changed) return false
   mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
   atomicWriteFileSync(settingsPath, JSON.stringify(existing, null, 2))
   return true

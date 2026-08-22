@@ -1,10 +1,30 @@
 import Database from 'better-sqlite3'
-import { join } from 'node:path'
-import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync } from 'node:fs'
-import { STORE_DIR, DB_FILENAME, ALLOWED_CHAT_ID, OLLAMA_URL } from './config.js'
+import { join, sep } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync, realpathSync } from 'node:fs'
+import { STORE_DIR, DB_FILENAME, PROJECT_ROOT } from './config.js'
 import { logger } from './logger.js'
+import { emitDashboardEvent, type DashboardEvent } from './event-bus.js'
+import { priorityForColumn, columnTypeIsInteger, type PriorityValue } from './priority.js'
+import { resolveNoaDbPath } from './db-path.js'
+import { migrateGateTables } from './web/gate-db.js'
+import { migrateAgentTokenTable } from './web/agent-token-registry.js'
+import { migrateAckRegistry } from './web/ack-registry.js'
 
 let db: Database.Database
+
+// Cached storage type of agent_messages.priority (card 88849f24). The column is
+// TEXT on claudeclaw.db and INTEGER on noa.db; the write side must persist the
+// matching representation (TEXT is CHECK-constrained, so a number would 500).
+// Probed lazily once per DB handle via PRAGMA table_info and reset on every
+// initDatabase so a cutover (new handle) re-detects.
+let agentMessagePriorityIsInteger: boolean | undefined
+
+let txEventBuffer: DashboardEvent[] | null = null
+
+function emitOrDefer(event: DashboardEvent): void {
+  if (txEventBuffer) txEventBuffer.push(event)
+  else emitDashboardEvent(event)
+}
 
 // Lock the DB file and its sidecars (WAL, SHM, rollback journal) down to
 // owner-only. better-sqlite3 opens the main file with the process umask
@@ -19,7 +39,9 @@ let db: Database.Database
 //   (2) After Database() + PRAGMA wal, chmod the sidecars (WAL/SHM/
 //       journal) -- they were created during the pragma call at umask.
 //       This path also fixes older installs whose files sit at 0o644.
-function tightenDbPermissions(dbPath: string): void {
+// Exported for tests: lets db.test.ts verify the 0o644 -> 0o600 narrowing on a
+// throwaway temp file without touching the live vault (store/claudeclaw.db).
+export function tightenDbPermissions(dbPath: string): void {
   const sidecars = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, `${dbPath}-journal`]
   for (const path of sidecars) {
     if (!existsSync(path)) continue
@@ -43,7 +65,22 @@ export function initDatabase(dbPathOverride?: string): void {
   if (db) {
     try { db.close() } catch { /* already closed */ }
   }
-  const dbPath = useOverride ? dbPathOverride! : join(STORE_DIR, DB_FILENAME)
+  // The live DB path is store/claudeclaw.db unless NOA_DB_PATH points elsewhere
+  // (the noa.db cutover switch, card 88849f24). resolveNoaDbPath enforces a .db
+  // suffix + project-root containment (rejects ../ escapes and out-of-root
+  // absolutes); for an existing target we additionally realpath-check to defeat
+  // symlink escape. A test override bypasses both (it picks its own path).
+  const dbPath = useOverride
+    ? dbPathOverride!
+    : resolveNoaDbPath(process.env['NOA_DB_PATH'], PROJECT_ROOT, join(STORE_DIR, DB_FILENAME))
+  if (!useOverride && process.env['NOA_DB_PATH']?.trim() && existsSync(dbPath)) {
+    const realDb = realpathSync(dbPath)
+    const realRoot = realpathSync(PROJECT_ROOT)
+    const rootWithSep = realRoot.endsWith(sep) ? realRoot : realRoot + sep
+    if (!realDb.startsWith(rootWithSep)) {
+      throw new Error(`NOA_DB_PATH resolves via symlink outside the project root: ${process.env['NOA_DB_PATH']}`)
+    }
+  }
   // Step 1: close the TOCTOU window on fresh installs. openSync with 'wx'
   // + 0o600 creates the file ONLY if it doesn't exist and sets the strict
   // mode atomically. better-sqlite3 then opens the existing file rather
@@ -61,62 +98,14 @@ export function initDatabase(dbPathOverride?: string): void {
     }
   }
   db = new Database(dbPath)
+  // New handle: forget the previous DB's priority-column probe (card 88849f24).
+  agentMessagePriorityIsInteger = undefined
   db.pragma('journal_mode = WAL')
+  // ~16 agents + dashboard + watchdogs write concurrently; auto-retry on lock
+  // instead of throwing "database is locked", and relax fsync (safe under WAL).
+  db.pragma('busy_timeout = 5000')
+  db.pragma('synchronous = NORMAL')
   if (!useOverride) tightenDbPermissions(dbPath)
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      chat_id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL,
-      updated_at INTEGER NOT NULL,
-      message_count INTEGER NOT NULL DEFAULT 0
-    )
-  `)
-
-  // Migráció: message_count oszlop hozzáadása meglévő DB-hez
-  try {
-    db.exec('ALTER TABLE sessions ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0')
-  } catch {
-    // már létezik, rendben
-  }
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS memories (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      chat_id TEXT NOT NULL,
-      topic_key TEXT,
-      content TEXT NOT NULL,
-      sector TEXT NOT NULL CHECK(sector IN ('semantic','episodic')),
-      salience REAL NOT NULL DEFAULT 1.0,
-      created_at INTEGER NOT NULL,
-      accessed_at INTEGER NOT NULL
-    )
-  `)
-
-  db.exec(`
-    CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-      content,
-      content='memories',
-      content_rowid='id'
-    )
-  `)
-
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-      INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
-    END
-  `)
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-      INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content);
-    END
-  `)
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-      INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content);
-      INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
-    END
-  `)
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
@@ -132,65 +121,6 @@ export function initDatabase(dbPathOverride?: string): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_status_next ON scheduled_tasks(status, next_run)`)
-
-  // --- Kanban ---
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS kanban_cards (
-      id TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
-      description TEXT,
-      status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','in_progress','waiting','done')),
-      assignee TEXT,
-      priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
-      project TEXT,
-      due_date INTEGER,
-      sort_order REAL NOT NULL DEFAULT 0,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      archived_at INTEGER
-    )
-  `)
-  // Migration: add project column to kanban_cards for installs created
-  // before #89 (whose CREATE TABLE IF NOT EXISTS ran without `project`
-  // and is a no-op on the next boot). Without this, createKanbanCard
-  // and updateKanbanCard fail with `table kanban_cards has no column
-  // named project` and no card can be saved.
-  try {
-    db.exec('ALTER TABLE kanban_cards ADD COLUMN project TEXT')
-  } catch {
-    // column already exists
-  }
-  try {
-    db.exec('ALTER TABLE kanban_cards ADD COLUMN parent_id TEXT REFERENCES kanban_cards(id)')
-  } catch {
-    // column already exists
-  }
-  db.exec('CREATE INDEX IF NOT EXISTS idx_kanban_parent ON kanban_cards(parent_id)')
-  // Migration: add dispatched_at to kanban_cards (kanban -> agent dispatch
-  // once-only guard). Older installs created the table without it.
-  try {
-    db.exec('ALTER TABLE kanban_cards ADD COLUMN dispatched_at INTEGER')
-  } catch {
-    // column already exists
-  }
-  // Migration: add agent_id, category, auto_generated columns to memories
-  try {
-    db.exec("ALTER TABLE memories ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'marveen'")
-  } catch {
-    // column already exists
-  }
-  try {
-    db.exec("ALTER TABLE memories ADD COLUMN category TEXT NOT NULL DEFAULT 'general' CHECK(category IN ('user_pref','project','feedback','learning','shared','general'))")
-  } catch {
-    // column already exists
-  }
-  try {
-    db.exec('ALTER TABLE memories ADD COLUMN auto_generated INTEGER NOT NULL DEFAULT 0')
-  } catch {
-    // column already exists
-  }
-
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_agent ON memories(agent_id, category)`)
 
   // --- Conversation-continuity ledger (deterministic; P0 2026-06-02) ---
   // A durable ROLLING TRANSCRIPT of every channel turn -- inbound user messages
@@ -219,113 +149,6 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_convlog_agent ON conversation_log(agent_id, created_at)`)
 
-  // Migration: hot/warm/cold/shared tier system with an enforced CHECK.
-  // Rebuilds the table whenever its current schema doesn't include the
-  // canonical CHECK -- covers both the legacy ('user_pref'...) and the
-  // post-refactor-no-check states, and is idempotent on fresh DBs.
-  try {
-    const current = db.prepare("SELECT sql FROM sqlite_master WHERE name='memories'").get() as { sql: string } | undefined
-    const hasCanonicalCheck = !!current?.sql?.match(/CHECK\s*\(\s*category\s+IN\s*\(\s*'hot'\s*,\s*'warm'\s*,\s*'cold'\s*,\s*'shared'\s*\)\s*\)/i)
-    if (current?.sql && !hasCanonicalCheck) {
-      // Preserve keywords if the column exists; older DBs rebuilt this table
-      // before the keywords ADD COLUMN ran, so NULL out in that case.
-      const cols = db.prepare("PRAGMA table_info(memories)").all() as { name: string }[]
-      const keywordsExpr = cols.some(c => c.name === 'keywords') ? 'keywords' : 'NULL'
-      db.exec(`
-        CREATE TABLE memories_new (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          chat_id TEXT NOT NULL,
-          topic_key TEXT,
-          content TEXT NOT NULL,
-          sector TEXT NOT NULL CHECK(sector IN ('semantic','episodic')),
-          salience REAL NOT NULL DEFAULT 1.0,
-          created_at INTEGER NOT NULL,
-          accessed_at INTEGER NOT NULL,
-          agent_id TEXT NOT NULL DEFAULT 'marveen',
-          category TEXT NOT NULL DEFAULT 'warm' CHECK(category IN ('hot','warm','cold','shared')),
-          auto_generated INTEGER NOT NULL DEFAULT 0,
-          keywords TEXT
-        );
-        INSERT INTO memories_new SELECT id, chat_id, topic_key, content, sector, salience, created_at, accessed_at, agent_id,
-          CASE category
-            WHEN 'hot' THEN 'hot'
-            WHEN 'warm' THEN 'warm'
-            WHEN 'cold' THEN 'cold'
-            WHEN 'shared' THEN 'shared'
-            WHEN 'user_pref' THEN 'warm'
-            WHEN 'project' THEN 'warm'
-            WHEN 'general' THEN 'warm'
-            WHEN 'feedback' THEN 'cold'
-            WHEN 'learning' THEN 'cold'
-            ELSE 'warm'
-          END,
-          auto_generated,
-          ${keywordsExpr}
-        FROM memories;
-        DROP TABLE memories;
-        ALTER TABLE memories_new RENAME TO memories;
-      `)
-      // Recreate FTS and triggers for new schema (now includes keywords)
-      db.exec(`DROP TABLE IF EXISTS memories_fts`)
-      db.exec(`CREATE VIRTUAL TABLE memories_fts USING fts5(content, keywords, content='memories', content_rowid='id')`)
-      db.exec(`DROP TRIGGER IF EXISTS memories_ai`)
-      db.exec(`DROP TRIGGER IF EXISTS memories_ad`)
-      db.exec(`DROP TRIGGER IF EXISTS memories_au`)
-      db.exec(`CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, content, keywords) VALUES (new.id, new.content, new.keywords); END`)
-      db.exec(`CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN INSERT INTO memories_fts(memories_fts, rowid, content, keywords) VALUES('delete', old.id, old.content, old.keywords); END`)
-      db.exec(`CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN INSERT INTO memories_fts(memories_fts, rowid, content, keywords) VALUES('delete', old.id, old.content, old.keywords); INSERT INTO memories_fts(rowid, content, keywords) VALUES (new.id, new.content, new.keywords); END`)
-      db.exec(`INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`)
-      db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_agent ON memories(agent_id, category)`)
-    }
-  } catch (err) {
-    // Previously this silently swallowed every error which masked the
-    // CHECK-constraint drop that Bug #2 described. Log loudly instead so
-    // a broken migration is obvious in the dashboard log.
-    const msg = err instanceof Error ? err.message : String(err)
-    if (!/already exists/i.test(msg)) {
-      console.error('[db] memories migration failed:', msg)
-    }
-  }
-
-  // If the table already has the new schema but no keywords column (edge case)
-  try {
-    db.exec('ALTER TABLE memories ADD COLUMN keywords TEXT')
-  } catch {
-    // column already exists
-  }
-
-  // Migration: embedding column for vector search
-  try {
-    db.exec('ALTER TABLE memories ADD COLUMN embedding TEXT')
-  } catch {
-    // column already exists
-  }
-
-  // Daily logs table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS daily_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      agent_id TEXT NOT NULL,
-      date TEXT NOT NULL,
-      content TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    )
-  `)
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_daily_logs_date ON daily_logs(agent_id, date)`)
-
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_status ON kanban_cards(status, archived_at)`)
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS kanban_comments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      card_id TEXT NOT NULL,
-      author TEXT NOT NULL,
-      content TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    )
-  `)
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_comments_card ON kanban_comments(card_id)`)
-
   // --- Agent Messages ---
   db.exec(`
     CREATE TABLE IF NOT EXISTS agent_messages (
@@ -337,10 +160,51 @@ export function initDatabase(dbPathOverride?: string): void {
       result TEXT,
       created_at INTEGER NOT NULL,
       delivered_at INTEGER,
-      completed_at INTEGER
+      completed_at INTEGER,
+      ack_expected INTEGER NOT NULL DEFAULT 0,
+      priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
+      in_reply_to INTEGER
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_messages_status ON agent_messages(status, to_agent)`)
+  // Migration: add ack_expected to agent_messages (delivery ACK protocol, card
+  // 1a99b7e2). Older installs created the table without it. Opt-in per message;
+  // default 0 so nothing is tracked until a sender sets it (no cry-wolf).
+  try {
+    db.exec('ALTER TABLE agent_messages ADD COLUMN ack_expected INTEGER NOT NULL DEFAULT 0')
+  } catch {
+    // column already exists
+  }
+  // Migration: add priority to agent_messages (priority-based abandonment, card
+  // 28d2179f). Default 'normal' keeps the legacy 60-min escalation for every
+  // pre-existing row; only 'urgent'/'high' messages escalate sooner. The CHECK
+  // references only its own column, so SQLite permits it in ADD COLUMN.
+  try {
+    db.exec("ALTER TABLE agent_messages ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent'))")
+  } catch {
+    // column already exists
+  }
+  // Migration: add in_reply_to to agent_messages (ACK auto-correlation enabler,
+  // card d4fe794f). Nullable, no default -> a plain message stays unthreaded
+  // (NULL); only a reply carries the parent message id. Additive + fail-open so
+  // pre-existing rows and senders that never set it keep working. The router /
+  // ACK protocol (card 1a99b7e2) consumes it to auto-correlate a reply without
+  // an explicit mark-done.
+  try {
+    db.exec('ALTER TABLE agent_messages ADD COLUMN in_reply_to INTEGER')
+  } catch {
+    // column already exists
+  }
+
+  // card 0ae61457 (A2): persist escalation timestamp so the in-process
+  // escalationState Map can be restored after a restart -- preventing a stale
+  // pending message from appearing as a "genuine first crossing" and triggering
+  // a duplicate in-band alert to the main agent.
+  try {
+    db.exec('ALTER TABLE agent_messages ADD COLUMN last_escalated_at INTEGER')
+  } catch {
+    // column already exists
+  }
 
   // --- Pending Channel Requests (Slack channel opt-in workflow) ---
   db.exec(`
@@ -444,6 +308,12 @@ export function initDatabase(dbPathOverride?: string): void {
     `)
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_token_usage_dedup ON token_usage(agent, session_id, timestamp, input_tokens, output_tokens)`)
   }
+  // Card bb4992dc: per-row model (so the cost rollup prices each row at its own
+  // rate) + parent->child lineage (spawned_by = the orchestrating agent for a
+  // workflow phantom child). Both additive, nullable, idempotent ALTERs -- legacy
+  // rows keep NULL and the rollup falls back to the agent's configured model.
+  try { db.exec('ALTER TABLE token_usage ADD COLUMN model TEXT') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE token_usage ADD COLUMN spawned_by TEXT') } catch { /* already exists */ }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS token_usage_cursors (
@@ -463,12 +333,19 @@ export function initDatabase(dbPathOverride?: string): void {
       status TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new','reviewed','kanban','rejected')),
       source TEXT NOT NULL DEFAULT 'marveen',
       kanban_id TEXT,
+      impact INTEGER,
+      effort INTEGER,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_idea_box_status ON idea_box(status)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_idea_box_category ON idea_box(category)`)
+  // Card 9c089734: Impact/Effort scoring (1..5 or NULL). Additive, nullable,
+  // idempotent ALTERs for the already-deployed idea_box table; legacy rows stay
+  // unscored (NULL).
+  try { db.exec('ALTER TABLE idea_box ADD COLUMN impact INTEGER') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE idea_box ADD COLUMN effort INTEGER') } catch { /* already exists */ }
 
   // --- Tool Call Log (auto-recorder) ---
   db.exec(`
@@ -484,10 +361,164 @@ export function initDatabase(dbPathOverride?: string): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tool_log_session ON tool_call_log(session_id, created_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tool_log_ts ON tool_call_log(created_at)`)
 
+  // --- Guard event log (SEC-030 / card 90c8c74b) ---
+  // Records every AIDefence evaluation on both filter call sites so the
+  // false-positive question can be answered from data. Content is NEVER stored
+  // (excerpt field explicitly excluded); only a keyed HMAC of the trimmed content
+  // is kept (so equality can be tested without the content being recoverable).
+  // Retention: 90 days (separate sweep -- must NOT be caught by the 7-day
+  // agent_messages sweep, which would destroy the denominator).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS guard_events (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at    INTEGER NOT NULL,
+      mechanism     TEXT NOT NULL,
+      route         TEXT NOT NULL,
+      verdict       TEXT NOT NULL,
+      from_agent    TEXT,
+      to_agent      TEXT,
+      pattern_ids   TEXT,
+      max_severity  TEXT,
+      finding_count INTEGER NOT NULL DEFAULT 0,
+      content_hash  TEXT NOT NULL,
+      content_len   INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_guard_events_ts ON guard_events(created_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_guard_events_verdict ON guard_events(mechanism, verdict, created_at)`)
+
+  // --- To-Do widget (todo_items) ---
+  // A focused daily-execution surface, separate from the kanban backlog. Two
+  // owner-scoped lists (Claudia general/learning, Hibiki fitness). ALL CHECK
+  // enums are set in this initial CREATE — widening a CHECK after the table
+  // exists silently fails under better-sqlite3's default FK enforcement, so
+  // kind='progress' (learning items) is included from the start (DM-AC1/AC3).
+  // The owner enum carries 'bond' from the start for fresh installs; existing
+  // DBs are widened by migrateTodoOwnerBond below (card 2f7cd951).
+  // Timestamps are epoch-SECONDS, always server-stamped (DM-AC2).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS todo_items (
+      id            TEXT PRIMARY KEY,
+      owner         TEXT NOT NULL CHECK(owner IN ('claudia','hibiki','bond')),
+      section       TEXT CHECK(section IN ('general','learning','fitness')),
+      kind          TEXT CHECK(kind IN ('task','habit','metric','progress')),
+      title         TEXT NOT NULL,
+      detail        TEXT,
+      done          INTEGER NOT NULL DEFAULT 0,
+      status        TEXT,
+      target_val    REAL,
+      actual_val    REAL,
+      sort_order    REAL,
+      last_progress_at INTEGER,
+      progress_note TEXT,
+      created_at    INTEGER NOT NULL,
+      updated_at    INTEGER NOT NULL,
+      done_at       INTEGER
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_todo_owner ON todo_items(owner, created_at)`)
+
+  // Widen the owner CHECK on existing DBs to admit 'bond' (card 2f7cd951). The
+  // CREATE above no-ops on an already-existing table, so a live DB keeps the
+  // narrow CHECK and owner='bond' writes would 400 forever; a table rebuild is
+  // required. Dedicated, unit-tested function for the same reason as the kanban
+  // someday migration. Defensive: a failure logs but never bricks boot.
+  try {
+    migrateTodoOwnerBond(db)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[db] todo_items bond-owner migration failed:', msg)
+  }
+
+  // Mechanical merge-gate enforcement tables (card fa11eb63). Additive
+  // CREATE-IF-NOT-EXISTS + indexes, no FK, so it is a no-op on an existing DB
+  // and can never break boot. Defensive: a failure logs but never bricks boot.
+  try {
+    migrateGateTables(db)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[db] gate tables migration failed:', msg)
+  }
+
+  // Per-agent capability token registry (card b1ce5118). Additive
+  // CREATE-IF-NOT-EXISTS + indexes, no FK, so it is a no-op on an existing DB
+  // and can never break boot. Defensive: a failure logs but never bricks boot.
+  try {
+    migrateAgentTokenTable(db)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[db] agent-token table migration failed:', msg)
+  }
+
+  // ACK-capability V2 runtime registry (card 83b7ec10). Additive
+  // CREATE-IF-NOT-EXISTS, no FK -> no-op on an existing DB, never bricks boot.
+  try {
+    migrateAckRegistry(db)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[db] ack registry migration failed:', msg)
+  }
+
   // One-shot migration from the old JSON file (which had a read-modify-write
   // race). Import rows if they exist, then rename the file so we don't keep
   // re-importing. Wrapped in a transaction so a crash mid-import is safe.
   migrateTaskRunsFromJson()
+}
+
+// Widen todo_items.owner CHECK to include 'bond' via a table rebuild (card
+// 2f7cd951). Modelled on migrateKanbanCardsSomeday: idempotent (skips if the
+// CHECK already admits bond, or the table doesn't exist yet), atomic, with
+// foreign_keys toggled OFF *outside* the transaction (the pragma is a no-op
+// inside one). todo_items has no FK today, but we follow the canonical SQLite
+// recipe and assert row-count parity before COMMIT so a partial copy aborts.
+export function migrateTodoOwnerBond(db: Database.Database): void {
+  const current = db.prepare("SELECT sql FROM sqlite_master WHERE name='todo_items'").get() as { sql: string } | undefined
+  if (!current?.sql) return // fresh install — CREATE already carries 'bond'
+  const hasBond = !!current.sql.match(/CHECK\s*\(\s*owner\s+IN\s*\([^)]*'bond'[^)]*\)\s*\)/i)
+  if (hasBond) return
+
+  const prevForeignKeys = db.pragma('foreign_keys', { simple: true })
+  db.pragma('foreign_keys = OFF')
+  try {
+    const rebuild = db.transaction(() => {
+      const before = (db.prepare('SELECT COUNT(*) AS c FROM todo_items').get() as { c: number }).c
+      db.exec('DROP TABLE IF EXISTS todo_items_new')
+      db.exec(`
+        CREATE TABLE todo_items_new (
+          id            TEXT PRIMARY KEY,
+          owner         TEXT NOT NULL CHECK(owner IN ('claudia','hibiki','bond')),
+          section       TEXT CHECK(section IN ('general','learning','fitness')),
+          kind          TEXT CHECK(kind IN ('task','habit','metric','progress')),
+          title         TEXT NOT NULL,
+          detail        TEXT,
+          done          INTEGER NOT NULL DEFAULT 0,
+          status        TEXT,
+          target_val    REAL,
+          actual_val    REAL,
+          sort_order    REAL,
+          last_progress_at INTEGER,
+          progress_note TEXT,
+          created_at    INTEGER NOT NULL,
+          updated_at    INTEGER NOT NULL,
+          done_at       INTEGER
+        );
+        INSERT INTO todo_items_new (rowid, id, owner, section, kind, title, detail, done, status,
+          target_val, actual_val, sort_order, last_progress_at, progress_note, created_at, updated_at, done_at)
+          SELECT rowid, id, owner, section, kind, title, detail, done, status,
+          target_val, actual_val, sort_order, last_progress_at, progress_note, created_at, updated_at, done_at FROM todo_items;
+        DROP TABLE todo_items;
+        ALTER TABLE todo_items_new RENAME TO todo_items;
+      `)
+      db.exec('CREATE INDEX IF NOT EXISTS idx_todo_owner ON todo_items(owner, created_at)')
+      const after = (db.prepare('SELECT COUNT(*) AS c FROM todo_items').get() as { c: number }).c
+      if (after !== before) {
+        throw new Error(`todo_items bond rebuild row-count mismatch: ${before} -> ${after}`)
+      }
+    })
+    rebuild()
+  } finally {
+    db.pragma(`foreign_keys = ${prevForeignKeys ? 'ON' : 'OFF'}`)
+  }
 }
 
 function migrateTaskRunsFromJson(): void {
@@ -520,298 +551,6 @@ function migrateTaskRunsFromJson(): void {
 
 export function getDb(): Database.Database {
   return db
-}
-
-// --- Munkamenetek ---
-
-export function getSession(chatId: string): { sessionId: string; messageCount: number } | undefined {
-  const row = db
-    .prepare('SELECT session_id, message_count FROM sessions WHERE chat_id = ?')
-    .get(chatId) as { session_id: string; message_count: number } | undefined
-  if (!row) return undefined
-  return { sessionId: row.session_id, messageCount: row.message_count }
-}
-
-export function setSession(chatId: string, sessionId: string, messageCount = 0): void {
-  db.prepare(
-    'INSERT OR REPLACE INTO sessions (chat_id, session_id, updated_at, message_count) VALUES (?, ?, ?, ?)'
-  ).run(chatId, sessionId, Math.floor(Date.now() / 1000), messageCount)
-}
-
-export function incrementSessionCount(chatId: string): number {
-  db.prepare('UPDATE sessions SET message_count = message_count + 1 WHERE chat_id = ?').run(chatId)
-  const row = db.prepare('SELECT message_count FROM sessions WHERE chat_id = ?').get(chatId) as { message_count: number } | undefined
-  return row?.message_count ?? 0
-}
-
-export function clearSession(chatId: string): void {
-  db.prepare('DELETE FROM sessions WHERE chat_id = ?').run(chatId)
-}
-
-// --- Memória ---
-
-export interface Memory {
-  id: number
-  chat_id: string
-  topic_key: string | null
-  content: string
-  sector: 'semantic' | 'episodic'
-  salience: number
-  created_at: number
-  accessed_at: number
-  agent_id: string
-  category: string  // 'hot' | 'warm' | 'cold' | 'shared'
-  auto_generated: number
-  keywords: string | null
-  embedding: string | null
-}
-
-export function saveMemory(
-  chatId: string,
-  content: string,
-  sector: 'semantic' | 'episodic',
-  topicKey?: string
-): void {
-  const now = Math.floor(Date.now() / 1000)
-  db.prepare(
-    'INSERT INTO memories (chat_id, topic_key, content, sector, salience, created_at, accessed_at) VALUES (?, ?, ?, ?, 1.0, ?, ?)'
-  ).run(chatId, topicKey ?? null, content, sector, now, now)
-}
-
-// Build a safe FTS5 MATCH expression from a free-form user query.
-//
-// FTS5 treats AND / OR / NOT / NEAR as reserved operators only when uppercase
-// and unquoted -- so we lowercase everything, which turns them into ordinary
-// search terms. We also cap the number and length of tokens to bound query
-// cost (the sanitizer previously allowed an arbitrary-length prefix expansion
-// that could make a single request scan the entire index).
-export function buildFtsMatchExpression(query: string): string {
-  const MAX_TOKENS = 20
-  const MAX_TOKEN_LEN = 64
-  const sanitized = query
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, '')
-    .trim()
-  if (!sanitized) return ''
-  const tokens = sanitized
-    .split(/\s+/)
-    .filter((t) => t.length > 0)
-    .slice(0, MAX_TOKENS)
-    .map((t) => t.slice(0, MAX_TOKEN_LEN) + '*')
-  return tokens.join(' ')
-}
-
-export function searchMemories(query: string, chatId: string, limit = 3): Memory[] {
-  const terms = buildFtsMatchExpression(query)
-  if (!terms) return []
-  try {
-    return db
-      .prepare(
-        `SELECT m.* FROM memories m
-         JOIN memories_fts f ON m.id = f.rowid
-         WHERE f.content MATCH ? AND m.chat_id = ?
-         ORDER BY rank
-         LIMIT ?`
-      )
-      .all(terms, chatId, limit) as Memory[]
-  } catch {
-    return []
-  }
-}
-
-export function recentMemories(chatId: string, limit = 5): Memory[] {
-  return db
-    .prepare('SELECT * FROM memories WHERE chat_id = ? ORDER BY accessed_at DESC LIMIT ?')
-    .all(chatId, limit) as Memory[]
-}
-
-export function touchMemory(id: number): void {
-  const now = Math.floor(Date.now() / 1000)
-  db.prepare(
-    'UPDATE memories SET accessed_at = ?, salience = MIN(salience + 0.1, 5.0) WHERE id = ?'
-  ).run(now, id)
-}
-
-export function decayMemories(): void {
-  const oneWeekAgo = Math.floor(Date.now() / 1000) - 7 * 86400
-  // Gentler decay: 0.5% per day, only for memories older than 1 week
-  // Never delete -- salience just goes lower but memories persist
-  db.prepare('UPDATE memories SET salience = MAX(salience * 0.995, 0.01) WHERE created_at < ?').run(oneWeekAgo)
-}
-
-export function getMemoriesForChat(chatId: string, limit = 10): Memory[] {
-  return db
-    .prepare('SELECT * FROM memories WHERE chat_id = ? ORDER BY accessed_at DESC LIMIT ?')
-    .all(chatId, limit) as Memory[]
-}
-
-export function saveAgentMemory(
-  agentId: string,
-  content: string,
-  category: string,  // hot, warm, cold, shared
-  keywords?: string,
-  autoGenerated: boolean = false
-): { id: number } {
-  const now = Math.floor(Date.now() / 1000)
-  const info = db.prepare(
-    'INSERT INTO memories (chat_id, topic_key, content, sector, salience, created_at, accessed_at, agent_id, category, auto_generated, keywords) VALUES (?, ?, ?, ?, 1.0, ?, ?, ?, ?, ?, ?)'
-  ).run(ALLOWED_CHAT_ID, null, content, 'semantic', now, now, agentId, category, autoGenerated ? 1 : 0, keywords ?? null)
-  const id = Number(info.lastInsertRowid)
-
-  // Fire-and-forget: generate embedding asynchronously
-  generateEmbedding(content + (keywords ? ' ' + keywords : '')).then(emb => {
-    if (emb) {
-      db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(JSON.stringify(emb), id)
-    }
-  }).catch(() => {})
-
-  return { id }
-}
-
-export function getAgentMemories(agentId: string, limit: number = 20): Memory[] {
-  return db.prepare(
-    "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') ORDER BY accessed_at DESC LIMIT ?"
-  ).all(agentId, limit) as Memory[]
-}
-
-export function searchAgentMemories(agentId: string, query: string, limit: number = 10): Memory[] {
-  const terms = buildFtsMatchExpression(query)
-  if (!terms) return []
-  try {
-    return db.prepare(
-      `SELECT m.* FROM memories m
-       JOIN memories_fts f ON m.id = f.rowid
-       WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared')
-       ORDER BY rank LIMIT ?`
-    ).all(terms, agentId, limit) as Memory[]
-  } catch {
-    return db.prepare(
-      "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?"
-    ).all(agentId, `%${query}%`, `%${query}%`, limit) as Memory[]
-  }
-}
-
-export function getMemoryStats(): { total: number; byAgent: Record<string, number>; byTier: Record<string, number>; withEmbedding: number } {
-  const total = (db.prepare('SELECT COUNT(*) as c FROM memories').get() as {c:number}).c
-  const withEmbedding = (db.prepare('SELECT COUNT(*) as c FROM memories WHERE embedding IS NOT NULL').get() as {c:number}).c
-  const agentRows = db.prepare('SELECT agent_id, COUNT(*) as c FROM memories GROUP BY agent_id').all() as {agent_id:string, c:number}[]
-  const tierRows = db.prepare('SELECT category, COUNT(*) as c FROM memories GROUP BY category').all() as {category:string, c:number}[]
-  const byAgent: Record<string, number> = {}
-  const byTier: Record<string, number> = {}
-  for (const r of agentRows) byAgent[r.agent_id] = r.c
-  for (const r of tierRows) byTier[r.category] = r.c
-  return { total, byAgent, byTier, withEmbedding }
-}
-
-export function updateMemory(id: number, content: string, category?: string, agentId?: string, keywords?: string): boolean {
-  const now = Math.floor(Date.now() / 1000)
-  const sets: string[] = ['content = ?', 'accessed_at = ?']
-  const params: unknown[] = [content, now]
-  if (category) { sets.push('category = ?'); params.push(category) }
-  if (agentId) { sets.push('agent_id = ?'); params.push(agentId) }
-  if (keywords !== undefined) { sets.push('keywords = ?'); params.push(keywords) }
-  params.push(id)
-  return db.prepare(`UPDATE memories SET ${sets.join(', ')} WHERE id = ?`).run(...params).changes > 0
-}
-
-// --- Daily logs ---
-
-export function appendDailyLog(agentId: string, content: string): void {
-  const now = Math.floor(Date.now() / 1000)
-  const today = new Date().toISOString().split('T')[0]
-  db.prepare('INSERT INTO daily_logs (agent_id, date, content, created_at) VALUES (?, ?, ?, ?)').run(agentId, today, content, now)
-}
-
-export function getDailyLog(agentId: string, date: string): { id: number; content: string; created_at: number }[] {
-  return db.prepare('SELECT id, content, created_at FROM daily_logs WHERE agent_id = ? AND date = ? ORDER BY created_at ASC').all(agentId, date) as { id: number; content: string; created_at: number }[]
-}
-
-export function getDailyLogDates(agentId: string, limit: number = 14): string[] {
-  return (db.prepare('SELECT DISTINCT date FROM daily_logs WHERE agent_id = ? ORDER BY date DESC LIMIT ?').all(agentId, limit) as { date: string }[]).map(r => r.date)
-}
-
-// --- Session Recall ---
-
-export interface RecallResult {
-  logs: { id: number; agent_id: string; date: string; content: string; created_at: number }[]
-  memories: Memory[]
-  dateRange: { from: string; to: string }
-}
-
-function toBudapestTs(dateStr: string, endOfDay: boolean): number {
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'Europe/Budapest',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  })
-  const refDate = new Date(`${dateStr}T${endOfDay ? '23:59:59' : '00:00:00'}`)
-  const parts = fmt.formatToParts(refDate)
-  const get = (t: string) => parts.find(p => p.type === t)?.value || '0'
-  const localStr = `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}:${get('second')}`
-  const localMs = new Date(localStr + 'Z').getTime()
-  const offsetMs = localMs - refDate.getTime()
-  const target = new Date(`${dateStr}T${endOfDay ? '23:59:59' : '00:00:00'}Z`)
-  return Math.floor((target.getTime() - offsetMs) / 1000)
-}
-
-function escapeLike(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')
-}
-
-export function recallByDateRange(from: string, to: string, agentId?: string): RecallResult {
-  const logSql = agentId
-    ? 'SELECT id, agent_id, date, content, created_at FROM daily_logs WHERE date >= ? AND date <= ? AND agent_id = ? ORDER BY date ASC, created_at ASC'
-    : 'SELECT id, agent_id, date, content, created_at FROM daily_logs WHERE date >= ? AND date <= ? ORDER BY date ASC, created_at ASC'
-  const logParams = agentId ? [from, to, agentId] : [from, to]
-  const logs = db.prepare(logSql).all(...logParams) as RecallResult['logs']
-
-  const fromTs = toBudapestTs(from, false)
-  const toTs = toBudapestTs(to, true)
-  const memSql = agentId
-    ? "SELECT * FROM memories WHERE created_at >= ? AND created_at <= ? AND (agent_id = ? OR category = 'shared') ORDER BY created_at ASC"
-    : 'SELECT * FROM memories WHERE created_at >= ? AND created_at <= ? ORDER BY created_at ASC'
-  const memParams = agentId ? [fromTs, toTs, agentId] : [fromTs, toTs]
-  const memories = db.prepare(memSql).all(...memParams) as Memory[]
-
-  return { logs, memories, dateRange: { from, to } }
-}
-
-export function recallSearch(query: string, agentId?: string, limit = 50): RecallResult {
-  const terms = buildFtsMatchExpression(query)
-  let memories: Memory[] = []
-  const escaped = escapeLike(query)
-  if (terms) {
-    try {
-      const sql = agentId
-        ? `SELECT m.* FROM memories m JOIN memories_fts f ON m.id = f.rowid WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared') ORDER BY m.created_at DESC LIMIT ?`
-        : `SELECT m.* FROM memories m JOIN memories_fts f ON m.id = f.rowid WHERE f.memories_fts MATCH ? ORDER BY m.created_at DESC LIMIT ?`
-      memories = agentId
-        ? db.prepare(sql).all(terms, agentId, limit) as Memory[]
-        : db.prepare(sql).all(terms, limit) as Memory[]
-    } catch {
-      const sql = agentId
-        ? "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') ORDER BY created_at DESC LIMIT ?"
-        : "SELECT * FROM memories WHERE (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') ORDER BY created_at DESC LIMIT ?"
-      const pat = `%${escaped}%`
-      memories = agentId
-        ? db.prepare(sql).all(agentId, pat, pat, limit) as Memory[]
-        : db.prepare(sql).all(pat, pat, limit) as Memory[]
-    }
-  }
-
-  const logSql = agentId
-    ? "SELECT id, agent_id, date, content, created_at FROM daily_logs WHERE content LIKE ? ESCAPE '\\' AND agent_id = ? ORDER BY date DESC, created_at DESC LIMIT ?"
-    : "SELECT id, agent_id, date, content, created_at FROM daily_logs WHERE content LIKE ? ESCAPE '\\' ORDER BY date DESC, created_at DESC LIMIT ?"
-  const logPat = `%${escaped}%`
-  const logs = agentId
-    ? db.prepare(logSql).all(logPat, agentId, limit) as RecallResult['logs']
-    : db.prepare(logSql).all(logPat, limit) as RecallResult['logs']
-
-  const dates = logs.map(l => l.date)
-  const from = dates.length ? dates[dates.length - 1] : ''
-  const to = dates.length ? dates[0] : ''
-
-  return { logs, memories, dateRange: { from, to } }
 }
 
 // --- Background tasks ---
@@ -949,166 +688,228 @@ export function updateTask(id: string, prompt: string, schedule: string, nextRun
   return db.prepare('UPDATE scheduled_tasks SET prompt = ?, schedule = ?, next_run = ? WHERE id = ?').run(prompt, schedule, nextRun, id).changes > 0
 }
 
-// --- Kanban ---
+// Start of the current calendar day in the server's local TZ (Europe/Budapest).
+// Done cards last touched before this are auto-archived, so the board's "Kész"
+// column only shows what was completed today.
+function startOfTodayEpoch(): number {
+  const d = new Date()
+  d.setHours(0, 0, 0, 0)
+  return Math.floor(d.getTime() / 1000)
+}
 
-export interface KanbanCard {
+// ===== To-Do widget time helpers =====
+
+// Server-side epoch-seconds stamp. The SINGLE source for every todo_items
+// timestamp so INSERT/UPDATE call-sites can never disagree on units (PR #126
+// lesson: a mixed ms/s column silently breaks the day-boundary comparison).
+export function nowEpochS(): number {
+  return Math.floor(Date.now() / 1000)
+}
+
+// The To-Do widget's daily-reset boundary: 03:00 wall-clock Europe/Budapest.
+// 03:00 is deliberately OUTSIDE the DST-ambiguous 02:00-03:00 window, so the
+// boundary instant is unambiguous on both transition nights.
+const TODO_TZ = 'Europe/Budapest'
+const TODO_DAY_OFFSET_HOURS = 3 // 03:00
+
+// UTC offset (seconds, positive east of UTC) that `tz` has at a given instant,
+// derived via Intl — never a hardcoded constant, so it tracks CET<->CEST.
+function tzOffsetSeconds(tz: string, instant: Date): number {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false, hourCycle: 'h23',
+  })
+  const parts = fmt.formatToParts(instant)
+  const get = (t: string): number => Number(parts.find((p) => p.type === t)!.value)
+  const asIfUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'))
+  return Math.round((asIfUtc - instant.getTime()) / 1000)
+}
+
+// Epoch-seconds of "03:00 wall-clock Budapest" on the given calendar date. The
+// naive 03:00 instant is never in the DST gap, so the offset lookup is unambiguous.
+function budapestBoundaryEpoch(year: number, month: number, day: number): number {
+  const naiveUtcMs = Date.UTC(year, month - 1, day, TODO_DAY_OFFSET_HOURS, 0, 0)
+  const offset = tzOffsetSeconds(TODO_TZ, new Date(naiveUtcMs))
+  return Math.floor(naiveUtcMs / 1000) - offset
+}
+
+// dayBucket(epoch): epoch-seconds of the start of the "day" (the 03:00 Budapest
+// boundary at or before the timestamp) containing the given instant. This is the
+// ONLY definition of the today/carried boundary (DB-AC1). DST-aware (DB-AC3): the
+// UTC instant of "03:00 Budapest" shifts by one hour across CET<->CEST, computed
+// from Intl, NOT a fixed UTC offset. Idempotent: dayBucket(dayBucket(x))==dayBucket(x).
+export function dayBucket(epochSeconds: number): number {
+  const d = new Date(epochSeconds * 1000)
+  // Budapest calendar date of the instant (date only, no hour ambiguity).
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TODO_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+  })
+  const [year, month, day] = fmt.format(d).split('-').map(Number)
+  let boundary = budapestBoundaryEpoch(year, month, day)
+  if (epochSeconds < boundary) {
+    // Before today's 03:00 -> belongs to the previous calendar day's bucket.
+    // Step the date back in pure UTC date arithmetic (no tz, so a "day" is never
+    // stretched/shrunk by DST here).
+    const prev = new Date(Date.UTC(year, month - 1, day))
+    prev.setUTCDate(prev.getUTCDate() - 1)
+    boundary = budapestBoundaryEpoch(prev.getUTCFullYear(), prev.getUTCMonth() + 1, prev.getUTCDate())
+  }
+  return boundary
+}
+
+
+// ===== To-Do widget (todo_items) =====
+
+export type TodoOwner = 'claudia' | 'hibiki' | 'bond'
+export type TodoSection = 'general' | 'learning' | 'fitness'
+export type TodoKind = 'task' | 'habit' | 'metric' | 'progress'
+
+export interface TodoItem {
   id: string
-  // Stable running number derived from the SQLite rowid (insertion order, never
-  // reused) -- a human-friendly "#N" shown next to the 8-char hex id.
-  seq?: number
+  owner: TodoOwner
+  section: TodoSection | null
+  kind: TodoKind | null
   title: string
-  description: string | null
-  status: 'planned' | 'in_progress' | 'waiting' | 'done'
-  assignee: string | null
-  priority: 'low' | 'normal' | 'high' | 'urgent'
-  project: string | null
-  parent_id: string | null
-  due_date: number | null
-  sort_order: number
+  detail: string | null
+  done: number
+  status: string | null
+  target_val: number | null
+  actual_val: number | null
+  sort_order: number | null
+  last_progress_at: number | null
+  progress_note: string | null
   created_at: number
   updated_at: number
-  archived_at: number | null
-  // Set the first time the card is moved to in_progress and the assigned agent
-  // is woken (kanban -> agent dispatch). NULL = never dispatched; the once-only
-  // guard so re-dragging a card does not re-prompt the agent.
-  dispatched_at: number | null
+  done_at: number | null
 }
 
-export interface KanbanComment {
-  id: number
-  card_id: string
-  author: string
-  content: string
-  created_at: number
+// Fields an agent POST may set when creating/editing. Timestamps (created_at,
+// updated_at, done_at) and `done` are server-controlled and never read from the
+// request body (DM-AC2).
+export interface TodoWriteFields {
+  section?: TodoSection | null
+  kind?: TodoKind | null
+  title?: string
+  detail?: string | null
+  status?: string | null
+  target_val?: number | null
+  actual_val?: number | null
+  sort_order?: number | null
+  progress_note?: string | null
 }
 
-export function listKanbanCards(): KanbanCard[] {
-  const thirtyDaysAgo = Math.floor(Date.now() / 1000) - 30 * 86400
-  // Auto-archive done cards older than 30 days
+export function createTodoItem(item: TodoWriteFields & { id: string; owner: TodoOwner }): void {
+  const now = nowEpochS()
   db.prepare(
-    "UPDATE kanban_cards SET archived_at = ? WHERE status = 'done' AND archived_at IS NULL AND updated_at < ?"
-  ).run(Math.floor(Date.now() / 1000), thirtyDaysAgo)
-  return db
-    .prepare('SELECT rowid AS seq, * FROM kanban_cards WHERE archived_at IS NULL ORDER BY sort_order ASC')
-    .all() as KanbanCard[]
-}
-
-export function listKanbanCardsSummary(): { status: string; title: string; assignee: string | null; priority: string; id: string }[] {
-  return db
-    .prepare("SELECT id, title, status, assignee, priority FROM kanban_cards WHERE archived_at IS NULL ORDER BY status, sort_order ASC")
-    .all() as any[]
-}
-
-export function getKanbanCard(id: string): KanbanCard | undefined {
-  return db.prepare('SELECT rowid AS seq, * FROM kanban_cards WHERE id = ?').get(id) as KanbanCard | undefined
-}
-
-export function createKanbanCard(card: {
-  id: string
-  title: string
-  description?: string
-  status?: KanbanCard['status']
-  assignee?: string
-  priority?: KanbanCard['priority']
-  project?: string
-  parent_id?: string
-  due_date?: number
-}): void {
-  const now = Math.floor(Date.now() / 1000)
-  const status = card.status ?? 'planned'
-  const maxRow = db.prepare(
-    'SELECT MAX(sort_order) as m FROM kanban_cards WHERE status = ? AND archived_at IS NULL'
-  ).get(status) as { m: number | null }
-  const sortOrder = (maxRow?.m ?? -1) + 1
-
-  db.prepare(
-    `INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO todo_items
+       (id, owner, section, kind, title, detail, done, status, target_val, actual_val,
+        sort_order, last_progress_at, progress_note, created_at, updated_at, done_at)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, NULL, ?, ?, ?, NULL)`
   ).run(
-    card.id, card.title, card.description ?? null, status,
-    card.assignee ?? null, card.priority ?? 'normal',
-    card.project ?? null, card.parent_id ?? null, card.due_date ?? null, sortOrder, now, now
+    item.id, item.owner, item.section ?? null, item.kind ?? 'task', item.title ?? '',
+    item.detail ?? null, item.status ?? null, item.target_val ?? null, item.actual_val ?? null,
+    item.sort_order ?? null, item.progress_note ?? null, now, now,
   )
 }
 
-export function updateKanbanCard(id: string, fields: Partial<Omit<KanbanCard, 'id' | 'created_at'>>): boolean {
-  const card = getKanbanCard(id)
-  if (!card) return false
-  const now = Math.floor(Date.now() / 1000)
-  const f = { ...card, ...fields, updated_at: now }
+export function getTodoItem(id: string): TodoItem | undefined {
+  return db.prepare('SELECT * FROM todo_items WHERE id = ?').get(id) as TodoItem | undefined
+}
+
+// Active rows for an owner: everything EXCEPT items completed before today's
+// bucket (TC-AC3 lazy archive — yesterday's done items just stop appearing; there
+// is no archive column). Ordered for stable rendering.
+export function listActiveTodos(owner: TodoOwner): TodoItem[] {
+  const nowBucket = dayBucket(nowEpochS())
   return db.prepare(
-    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, due_date=?, sort_order=?, updated_at=?, archived_at=?
-     WHERE id=?`
-  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.due_date, f.sort_order, f.updated_at, f.archived_at, id).changes > 0
+    `SELECT * FROM todo_items
+       WHERE owner = ? AND NOT (done = 1 AND done_at IS NOT NULL AND done_at < ?)
+       ORDER BY sort_order IS NULL, sort_order ASC, created_at ASC`
+  ).all(owner, nowBucket) as TodoItem[]
 }
 
-export function getChildCards(parentId: string): KanbanCard[] {
-  return db.prepare('SELECT * FROM kanban_cards WHERE parent_id = ? AND archived_at IS NULL ORDER BY sort_order ASC').all(parentId) as KanbanCard[]
-}
-
-export function moveKanbanCard(id: string, status: KanbanCard['status'], sortOrder: number): boolean {
-  const now = Math.floor(Date.now() / 1000)
+// Update agent-writable fields. Server stamps updated_at; ignores timestamp/done
+// fields in the patch.
+export function updateTodoItem(id: string, fields: TodoWriteFields): boolean {
+  const cur = getTodoItem(id)
+  if (!cur) return false
+  const now = nowEpochS()
+  const f = {
+    section: fields.section ?? cur.section,
+    kind: fields.kind ?? cur.kind,
+    title: fields.title ?? cur.title,
+    detail: fields.detail ?? cur.detail,
+    status: fields.status ?? cur.status,
+    target_val: fields.target_val ?? cur.target_val,
+    actual_val: fields.actual_val ?? cur.actual_val,
+    sort_order: fields.sort_order ?? cur.sort_order,
+    progress_note: fields.progress_note ?? cur.progress_note,
+  }
   return db.prepare(
-    'UPDATE kanban_cards SET status=?, sort_order=?, updated_at=? WHERE id=?'
-  ).run(status, sortOrder, now, id).changes > 0
+    `UPDATE todo_items SET section=?, kind=?, title=?, detail=?, status=?, target_val=?,
+       actual_val=?, sort_order=?, progress_note=?, updated_at=? WHERE id=?`
+  ).run(f.section, f.kind, f.title, f.detail, f.status, f.target_val, f.actual_val,
+    f.sort_order, f.progress_note, now, id).changes > 0
 }
 
-// Stamp the once-only kanban -> agent dispatch guard. Returns false if the
-// card id does not exist.
-export function markKanbanCardDispatched(id: string): boolean {
-  const now = Math.floor(Date.now() / 1000)
-  return db.prepare('UPDATE kanban_cards SET dispatched_at=? WHERE id=?').run(now, id).changes > 0
+export function markTodoDone(id: string): boolean {
+  const now = nowEpochS()
+  return db.prepare(
+    'UPDATE todo_items SET done=1, done_at=?, updated_at=? WHERE id=?'
+  ).run(now, now, id).changes > 0
 }
 
-export function archiveKanbanCard(id: string): boolean {
-  const now = Math.floor(Date.now() / 1000)
-  return db.prepare('UPDATE kanban_cards SET archived_at=?, updated_at=? WHERE id=?').run(now, now, id).changes > 0
+export function tickTodoProgress(id: string, progressNote: string | null): boolean {
+  const now = nowEpochS()
+  return db.prepare(
+    'UPDATE todo_items SET last_progress_at=?, progress_note=?, updated_at=? WHERE id=?'
+  ).run(now, progressNote, now, id).changes > 0
 }
 
-export function listKanbanProjects(): string[] {
+export function deleteTodoItem(id: string): boolean {
+  return db.prepare('DELETE FROM todo_items WHERE id = ?').run(id).changes > 0
+}
+
+// Freshness sentinel (FS-AC1): seconds since the owner's most recent write, or
+// null when the owner has no rows.
+export function todoLastWriteAgoSeconds(owner: TodoOwner): number | null {
+  const row = db.prepare(
+    'SELECT MAX(updated_at) AS m FROM todo_items WHERE owner = ?'
+  ).get(owner) as { m: number | null }
+  if (row?.m == null) return null
+  return nowEpochS() - row.m
+}
+
+// The N most recent dayBucket boundaries up to and including the current one,
+// newest first. Steps bucket-by-bucket (NOT now - k*86400), so the 03:00 offset
+// never drifts the window (FIT-AC5).
+export function recentDayBuckets(count: number, now = nowEpochS()): number[] {
+  const buckets: number[] = []
+  let b = dayBucket(now)
+  for (let i = 0; i < count; i++) {
+    buckets.push(b)
+    b = dayBucket(b - 1)
+  }
+  return buckets
+}
+
+// Derived 7-bucket training-adherence (FIT-AC5): count of the last 7 buckets in
+// which Hibiki has at least one kind='habit' training item with status='done'.
+// No stored streak column — computed from daily rows each read.
+export function trainingAdherence(owner: TodoOwner, bucketCount = 7, now = nowEpochS()): { active: number; total: number } {
+  const buckets = recentDayBuckets(bucketCount, now) // newest -> oldest
+  const oldest = buckets[buckets.length - 1]
   const rows = db.prepare(
-    "SELECT DISTINCT project FROM kanban_cards WHERE project IS NOT NULL AND project != '' AND archived_at IS NULL ORDER BY project"
-  ).all() as Array<{ project: string }>
-  return rows.map(r => r.project)
-}
-
-export function deleteKanbanCard(id: string): boolean {
-  db.prepare('DELETE FROM kanban_comments WHERE card_id = ?').run(id)
-  return db.prepare('DELETE FROM kanban_cards WHERE id = ?').run(id).changes > 0
-}
-
-export function getKanbanComments(cardId: string): KanbanComment[] {
-  return db.prepare('SELECT * FROM kanban_comments WHERE card_id = ? ORDER BY created_at ASC').all(cardId) as KanbanComment[]
-}
-
-export function addKanbanComment(cardId: string, author: string, content: string): KanbanComment {
-  const now = Math.floor(Date.now() / 1000)
-  const info = db.prepare(
-    'INSERT INTO kanban_comments (card_id, author, content, created_at) VALUES (?, ?, ?, ?)'
-  ).run(cardId, author, content, now)
-  db.prepare('UPDATE kanban_cards SET updated_at = ? WHERE id = ?').run(now, cardId)
-  return { id: Number(info.lastInsertRowid), card_id: cardId, author, content, created_at: now }
-}
-
-// --- Heartbeat helpers ---
-
-export interface HeartbeatKanbanSummary {
-  urgent: KanbanCard[]
-  in_progress: KanbanCard[]
-  waiting: KanbanCard[]
-}
-
-export function getHeartbeatKanbanSummary(): HeartbeatKanbanSummary {
-  const urgent = db
-    .prepare("SELECT * FROM kanban_cards WHERE archived_at IS NULL AND priority = 'urgent' AND status != 'done'")
-    .all() as KanbanCard[]
-  const in_progress = db
-    .prepare("SELECT * FROM kanban_cards WHERE archived_at IS NULL AND status = 'in_progress'")
-    .all() as KanbanCard[]
-  const waiting = db
-    .prepare("SELECT * FROM kanban_cards WHERE archived_at IS NULL AND status = 'waiting'")
-    .all() as KanbanCard[]
-  return { urgent, in_progress, waiting }
+    `SELECT created_at FROM todo_items
+       WHERE owner = ? AND kind = 'habit' AND status = 'done' AND created_at >= ?`
+  ).all(owner, oldest) as Array<{ created_at: number }>
+  const activeBuckets = new Set<number>()
+  for (const r of rows) activeBuckets.add(dayBucket(r.created_at))
+  let active = 0
+  for (const b of buckets) if (activeBuckets.has(b)) active++
+  return { active, total: bucketCount }
 }
 
 // --- Agent Messages ---
@@ -1123,17 +924,63 @@ export interface AgentMessage {
   created_at: number
   delivered_at: number | null
   completed_at: number | null
+  // 1 when the sender expects a receipt-ack (delegation / opt-in): the message
+  // router records a pending-ack on successful inject so an undelivered/ignored
+  // ACK-expected message is escalated. 0 (default) = best-effort, no tracking
+  // (delivery ACK protocol, card 1a99b7e2).
+  ack_expected: number
+  // Escalation urgency for the delivery retry/abandonment policy (card 28d2179f).
+  // Same enum as kanban_cards; 'normal' is the default and keeps the legacy 60-min
+  // escalate-after. Higher urgency only shortens the ALERT timing, never the 6 h
+  // hard-TTL -- see thresholdsForPriority in web/delivery-retry.ts.
+  // TEXT enum on claudeclaw.db, migrated INTEGER (25/50/75/100) on noa.db. Read
+  // sites normalize either form via toPriorityInt (card 88849f24).
+  priority: PriorityValue
+  // Sender-side parent: the id of the message this one replies to, or null for
+  // an unthreaded message. Lets the router auto-correlate a reply to its ask
+  // (ACK auto-correlation enabler, card d4fe794f). Additive + fail-open.
+  in_reply_to: number | null
 }
 
-export function createAgentMessage(from: string, to: string, content: string): AgentMessage {
+/**
+ * Whether agent_messages.priority is an INTEGER column on the live DB (card
+ * 88849f24). Probed once per handle from PRAGMA table_info and cached. Determines
+ * which representation createAgentMessage persists so a write is valid against
+ * both the pre-cutover TEXT (CHECK) column and the post-cutover INTEGER column.
+ */
+function isAgentMessagePriorityInteger(): boolean {
+  if (agentMessagePriorityIsInteger === undefined) {
+    const col = (db.prepare('PRAGMA table_info(agent_messages)').all() as Array<{ name: string; type: string }>)
+      .find((c) => c.name === 'priority')
+    agentMessagePriorityIsInteger = columnTypeIsInteger(col?.type)
+  }
+  return agentMessagePriorityIsInteger
+}
+
+export function createAgentMessage(
+  from: string,
+  to: string,
+  content: string,
+  ackExpected = false,
+  priority: PriorityValue = 'normal',
+  inReplyTo: number | null = null,
+): AgentMessage {
   const now = Math.floor(Date.now() / 1000)
+  const ack = ackExpected ? 1 : 0
+  // Persist the representation matching the live column type: an integer for the
+  // migrated noa.db column, the CHECK-safe tier string for the legacy TEXT column
+  // (card 88849f24). The returned object reflects what was stored.
+  const storedPriority = priorityForColumn(priority, isAgentMessagePriorityInteger())
   const info = db.prepare(
-    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(from, to, content, 'pending', now)
+    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, ack_expected, priority, in_reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(from, to, content, 'pending', now, ack, storedPriority, inReplyTo)
+  const id = Number(info.lastInsertRowid)
+  emitOrDefer({ type: 'message', id: String(id), action: 'created' })
   return {
-    id: Number(info.lastInsertRowid),
+    id,
     from_agent: from, to_agent: to, content, status: 'pending',
     result: null, created_at: now, delivered_at: null, completed_at: null,
+    ack_expected: ack, priority: storedPriority, in_reply_to: inReplyTo,
   }
 }
 
@@ -1146,23 +993,85 @@ export function getPendingMessages(toAgent?: string): AgentMessage[] {
     .all() as AgentMessage[]
 }
 
+/**
+ * Current status of each of the given message ids, as a Map (id -> status).
+ * Ids with no row are simply absent from the map. Used by the delivery-sentinel
+ * boot-fold (card 681f99b0) to reconcile outstanding pending-acks against the
+ * message lifecycle. Chunked to stay under SQLite's bound-parameter limit even
+ * though the live id set is tiny.
+ */
+export function getMessageStatusesByIds(ids: number[]): Map<number, string> {
+  const out = new Map<number, string>()
+  const CHUNK = 500
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const slice = ids.slice(i, i + CHUNK)
+    if (slice.length === 0) continue
+    const placeholders = slice.map(() => '?').join(',')
+    const rows = db.prepare(`SELECT id, status FROM agent_messages WHERE id IN (${placeholders})`)
+      .all(...slice) as { id: number; status: string }[]
+    for (const r of rows) out.set(r.id, r.status)
+  }
+  return out
+}
+
 export function markMessageDelivered(id: number): boolean {
   const now = Math.floor(Date.now() / 1000)
-  return db.prepare("UPDATE agent_messages SET status = 'delivered', delivered_at = ? WHERE id = ?").run(now, id).changes > 0
+  const changed = db.prepare("UPDATE agent_messages SET status = 'delivered', delivered_at = ? WHERE id = ?").run(now, id).changes > 0
+  if (changed) emitOrDefer({ type: 'message', id: String(id), action: 'delivered' })
+  return changed
 }
 
 export function markMessageDone(id: number, result?: string): boolean {
   const now = Math.floor(Date.now() / 1000)
-  return db.prepare("UPDATE agent_messages SET status = 'done', result = ?, completed_at = ? WHERE id = ?").run(result ?? null, now, id).changes > 0
+  const changed = db.prepare("UPDATE agent_messages SET status = 'done', result = ?, completed_at = ? WHERE id = ?").run(result ?? null, now, id).changes > 0
+  if (changed) emitOrDefer({ type: 'message', id: String(id), action: 'done' })
+  return changed
 }
 
 export function markMessageFailed(id: number, error?: string): boolean {
   const now = Math.floor(Date.now() / 1000)
-  return db.prepare("UPDATE agent_messages SET status = 'failed', result = ?, completed_at = ? WHERE id = ?").run(error ?? null, now, id).changes > 0
+  const changed = db.prepare("UPDATE agent_messages SET status = 'failed', result = ?, completed_at = ? WHERE id = ?").run(error ?? null, now, id).changes > 0
+  if (changed) emitOrDefer({ type: 'message', id: String(id), action: 'failed' })
+  return changed
 }
 
 export function listAgentMessages(limit = 50): AgentMessage[] {
   return db.prepare('SELECT * FROM agent_messages ORDER BY created_at DESC LIMIT ?').all(limit) as AgentMessage[]
+}
+
+// Default retention for agent_messages rows (card f1ea52c0, layer 3). A
+// delivered/done/failed row is pure history past this, and a still-'pending'
+// row this old is unambiguously abandoned -- the message-router's delivery
+// hard-TTL gives up within hours, so 7 days is far beyond any live delivery
+// window. Without a sweep the table grows without bound (thousands of delivered
+// rows accumulated in prod; 89 eight-day-old rows were deleted by hand 06-22).
+export const MESSAGE_RETENTION_SEC = 7 * 24 * 60 * 60
+
+// Delete agent_messages whose created_at is older than the retention cutoff,
+// across all statuses. Returns the number of rows removed. Cheap and
+// opportunistic, mirroring sweepOrphanTaskStates; run on a low-frequency
+// interval (see startMessageRetentionSweep). created_at is epoch SECONDS.
+export function deleteOldMessages(nowSec: number, retentionSec: number = MESSAGE_RETENTION_SEC): number {
+  const cutoff = nowSec - retentionSec
+  return db.prepare('DELETE FROM agent_messages WHERE created_at < ?').run(cutoff).changes
+}
+
+// card 0ae61457 (A2): persist escalation timestamp for the pending-message
+// router so the in-process escalationState Map survives server restarts.
+export function updateMessageLastEscalatedAt(id: number, epochMs: number): void {
+  db.prepare('UPDATE agent_messages SET last_escalated_at = ? WHERE id = ?').run(epochMs, id)
+}
+
+// Restore the escalation Map from pending messages that already have a recorded
+// last_escalated_at. Called once at startup before startMessageRouter() so the
+// router never re-fires an in-band alert for messages that were already escalated.
+export function loadEscalationState(): Map<number, number> {
+  const rows = db.prepare(
+    "SELECT id, last_escalated_at FROM agent_messages WHERE status = 'pending' AND last_escalated_at IS NOT NULL"
+  ).all() as Array<{ id: number; last_escalated_at: number }>
+  const map = new Map<number, number>()
+  for (const row of rows) map.set(row.id, row.last_escalated_at)
+  return map
 }
 
 // System/automation participants that are not real conversation peers. They are
@@ -1370,101 +1279,6 @@ export function markPendingTaskRetryAlert(taskName: string, agentName: string, t
     .prepare('UPDATE pending_task_retries SET alert_sent_at = ? WHERE task_name = ? AND agent_name = ? AND alert_sent_at IS NULL')
     .run(ts, taskName, agentName).changes > 0
 }
-
-// --- Vector Search (Ollama + nomic-embed-text) ---
-
-const EMBED_MODEL = 'nomic-embed-text'
-
-export async function generateEmbedding(text: string): Promise<number[] | null> {
-  try {
-    const resp = await fetch(`${OLLAMA_URL}/api/embeddings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: EMBED_MODEL, prompt: text.slice(0, 2000) }),
-    })
-    const data = await resp.json() as { embedding?: number[] }
-    return data.embedding || null
-  } catch (err) {
-    // Debug-level so it doesn't spam default INFO logs when Ollama isn't
-    // running (the common case on most user machines). Enables "why does
-    // hybrid search only return FTS results?" diagnostics without noise.
-    logger.debug({ err, ollamaUrl: OLLAMA_URL }, 'Embedding generation failed (Ollama not running?)')
-    return null
-  }
-}
-
-export function cosineSimilarity(a: number[], b: number[]): number {
-  let dotProduct = 0, normA = 0, normB = 0
-  for (let i = 0; i < a.length; i++) {
-    dotProduct += a[i] * b[i]
-    normA += a[i] * a[i]
-    normB += b[i] * b[i]
-  }
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB))
-}
-
-export function vectorSearch(agentId: string, queryEmbedding: number[], limit: number = 10): Memory[] {
-  const rows = db.prepare(
-    "SELECT * FROM memories WHERE embedding IS NOT NULL AND (agent_id = ? OR category = 'shared')"
-  ).all(agentId) as Memory[]
-
-  const scored = rows.map(m => {
-    try {
-      const emb = JSON.parse(m.embedding!) as number[]
-      return { memory: m, score: cosineSimilarity(queryEmbedding, emb) }
-    } catch {
-      return { memory: m, score: 0 }
-    }
-  })
-
-  scored.sort((a, b) => b.score - a.score)
-  return scored.slice(0, limit).map(s => s.memory)
-}
-
-export async function hybridSearch(agentId: string, query: string, limit: number = 10): Promise<Memory[]> {
-  const k = 60 // RRF constant
-
-  // FTS5 results
-  const ftsResults = searchAgentMemories(agentId, query, limit * 2)
-
-  // Vector results
-  const queryEmbedding = await generateEmbedding(query)
-  const vecResults = queryEmbedding ? vectorSearch(agentId, queryEmbedding, limit * 2) : []
-
-  // Reciprocal Rank Fusion
-  const scores: Map<number, number> = new Map()
-  const byId: Map<number, Memory> = new Map()
-
-  ftsResults.forEach((m, rank) => {
-    scores.set(m.id, (scores.get(m.id) || 0) + 1 / (k + rank + 1))
-    byId.set(m.id, m)
-  })
-
-  vecResults.forEach((m, rank) => {
-    scores.set(m.id, (scores.get(m.id) || 0) + 1 / (k + rank + 1))
-    byId.set(m.id, m)
-  })
-
-  const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1])
-  return ranked.slice(0, limit).map(([id]) => byId.get(id)!)
-}
-
-export async function backfillEmbeddings(): Promise<number> {
-  const rows = db.prepare('SELECT id, content, keywords FROM memories WHERE embedding IS NULL').all() as { id: number; content: string; keywords: string | null }[]
-  let count = 0
-  for (const row of rows) {
-    const text = row.content + (row.keywords ? ' ' + row.keywords : '')
-    const emb = await generateEmbedding(text)
-    if (emb) {
-      db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(JSON.stringify(emb), row.id)
-      count++
-    }
-    // Small delay to not overwhelm Ollama
-    await new Promise(r => setTimeout(r, 100))
-  }
-  return count
-}
-
 // --- Pending Channel Requests ---
 
 export interface PendingChannelRequest {
@@ -1550,6 +1364,8 @@ export interface IdeaBoxRow {
   status: 'new' | 'reviewed' | 'kanban' | 'rejected'
   source: string
   kanban_id: string | null
+  impact: number | null
+  effort: number | null
   created_at: number
   updated_at: number
 }
@@ -1563,15 +1379,17 @@ export function listIdeas(opts?: { status?: string; category?: string }): IdeaBo
   return db.prepare(q).all(...params) as IdeaBoxRow[]
 }
 
-export function createIdea(idea: Omit<IdeaBoxRow, 'created_at' | 'updated_at'>): void {
+export function createIdea(
+  idea: Omit<IdeaBoxRow, 'created_at' | 'updated_at' | 'impact' | 'effort'> & { impact?: number | null; effort?: number | null },
+): void {
   const now = Math.floor(Date.now() / 1000)
   db.prepare(
-    `INSERT INTO idea_box (id, title, description, category, status, source, kanban_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(idea.id, idea.title, idea.description ?? null, idea.category, idea.status, idea.source, idea.kanban_id ?? null, now, now)
+    `INSERT INTO idea_box (id, title, description, category, status, source, kanban_id, impact, effort, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(idea.id, idea.title, idea.description ?? null, idea.category, idea.status, idea.source, idea.kanban_id ?? null, idea.impact ?? null, idea.effort ?? null, now, now)
 }
 
-export function updateIdea(id: string, patch: Partial<Pick<IdeaBoxRow, 'title' | 'description' | 'category' | 'status' | 'kanban_id'>>): boolean {
+export function updateIdea(id: string, patch: Partial<Pick<IdeaBoxRow, 'title' | 'description' | 'category' | 'status' | 'kanban_id' | 'impact' | 'effort'>>): boolean {
   const now = Math.floor(Date.now() / 1000)
   const sets: string[] = ['updated_at = ?']
   const params: unknown[] = [now]
@@ -1580,6 +1398,8 @@ export function updateIdea(id: string, patch: Partial<Pick<IdeaBoxRow, 'title' |
   if (patch.category !== undefined) { sets.push('category = ?'); params.push(patch.category) }
   if (patch.status !== undefined) { sets.push('status = ?'); params.push(patch.status) }
   if (patch.kanban_id !== undefined) { sets.push('kanban_id = ?'); params.push(patch.kanban_id) }
+  if (patch.impact !== undefined) { sets.push('impact = ?'); params.push(patch.impact) }
+  if (patch.effort !== undefined) { sets.push('effort = ?'); params.push(patch.effort) }
   params.push(id)
   return db.prepare(`UPDATE idea_box SET ${sets.join(', ')} WHERE id = ?`).run(...params).changes > 0
 }
@@ -1665,5 +1485,93 @@ export function analyzeWorkflowCandidates(sinceSecs = 3600, minToolCalls = 5, ga
 export function pruneToolCallLog(olderThanSecs = 86400): void {
   const cutoff = Math.floor(Date.now() / 1000) - olderThanSecs
   db.prepare('DELETE FROM tool_call_log WHERE created_at < ?').run(cutoff)
+}
+
+// ── Guard events (SEC-030) ───────────────────────────────────────────────────
+
+export interface InsertGuardEventInput {
+  created_at: number
+  mechanism: string
+  route: string
+  verdict: string
+  from_agent: string | null
+  to_agent: string | null
+  pattern_ids: string | null
+  max_severity: string | null
+  finding_count: number
+  content_hash: string
+  content_len: number
+}
+
+export interface GuardEventRow extends InsertGuardEventInput {
+  id: number
+}
+
+export function insertGuardEvent(row: InsertGuardEventInput): void {
+  db.prepare(
+    `INSERT INTO guard_events
+       (created_at, mechanism, route, verdict, from_agent, to_agent,
+        pattern_ids, max_severity, finding_count, content_hash, content_len)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    row.created_at, row.mechanism, row.route, row.verdict,
+    row.from_agent, row.to_agent, row.pattern_ids, row.max_severity,
+    row.finding_count, row.content_hash, row.content_len,
+  )
+}
+
+export const GUARD_EVENT_RETENTION_SECS = 90 * 24 * 60 * 60
+
+export function deleteOldGuardEvents(nowSec: number, retentionSec = GUARD_EVENT_RETENTION_SECS): number {
+  return db.prepare('DELETE FROM guard_events WHERE created_at < ?').run(nowSec - retentionSec).changes
+}
+
+export function getGuardEvents(limit = 100, sinceSec?: number): GuardEventRow[] {
+  if (sinceSec !== undefined) {
+    return db.prepare(
+      'SELECT * FROM guard_events WHERE created_at >= ? ORDER BY created_at DESC, id DESC LIMIT ?'
+    ).all(sinceSec, limit) as GuardEventRow[]
+  }
+  return db.prepare(
+    'SELECT * FROM guard_events ORDER BY created_at DESC, id DESC LIMIT ?'
+  ).all(limit) as GuardEventRow[]
+}
+
+export interface GuardEventSummary {
+  mechanism: string
+  verdict: string
+  pattern_ids: string | null
+  count: number
+}
+
+export interface GuardEventSenderSummary {
+  from_agent: string | null
+  count: number
+}
+
+export function getGuardEventSummary(days = 14): {
+  byMechanismVerdict: GuardEventSummary[]
+  byPattern: GuardEventSummary[]
+  bySender: GuardEventSenderSummary[]
+} {
+  const since = Math.floor(Date.now() / 1000) - days * 86400
+  const byMechanismVerdict = db.prepare(
+    `SELECT mechanism, verdict, NULL as pattern_ids, COUNT(*) as count
+       FROM guard_events WHERE created_at >= ? GROUP BY mechanism, verdict`
+  ).all(since) as GuardEventSummary[]
+  const byPattern = db.prepare(
+    `SELECT mechanism, pattern_ids, NULL as verdict, COUNT(*) as count
+       FROM guard_events
+       WHERE verdict <> 'PASS' AND pattern_ids IS NOT NULL AND created_at >= ?
+       GROUP BY mechanism, pattern_ids ORDER BY count DESC`
+  ).all(since) as GuardEventSummary[]
+  // Spec section 8: per-sender block counts. from_agent only -- no to_agent pair
+  // (peer pairs are a fingerprintable side channel, per DA-30).
+  const bySender = db.prepare(
+    `SELECT from_agent, COUNT(*) as count
+       FROM guard_events WHERE verdict = 'BLOCK' AND created_at >= ?
+       GROUP BY from_agent ORDER BY count DESC`
+  ).all(since) as GuardEventSenderSummary[]
+  return { byMechanismVerdict, byPattern, bySender }
 }
 

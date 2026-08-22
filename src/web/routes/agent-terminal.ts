@@ -12,9 +12,11 @@ import type { RouteContext } from './types.js'
 const TMUX = resolveFromPath('tmux')
 
 // Per-agent dashboard terminal: live pane stream (SSE), keystroke injection,
-// and the scripted /login flow. All gated by the dashboard token (the SSE
-// endpoint accepts the token via ?token= because EventSource cannot set
-// headers -- see the auth gate in web.ts). Szabi 2026-06-03.
+// and the scripted /login flow. All gated by the dashboard auth check in web.ts
+// (HttpOnly session cookie or Bearer header). The SSE endpoint relies on the
+// session cookie the browser sends automatically on same-origin EventSource
+// (withCredentials); the legacy ?token= query fallback was removed in card
+// 32bcf962. Szabi 2026-06-03.
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -22,7 +24,7 @@ function sleep(ms: number): Promise<void> {
 
 function isTmuxSessionAlive(session: string): boolean {
   try {
-    execFileSync(TMUX, ['has-session', '-t', session], { timeout: 3000, stdio: 'ignore' })
+    execFileSync(TMUX, ['has-session', '-t', `=${session}`], { timeout: 3000, stdio: 'ignore' })
     return true
   } catch {
     return false

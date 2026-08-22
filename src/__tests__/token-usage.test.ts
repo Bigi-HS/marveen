@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest'
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { getDb, initDatabase } from '../db.js'
+import { getNoaDb, initNoaDb } from '../noa-memory.js'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const SCHEMA_SQL = readFileSync(join(__dirname, '..', '..', 'scripts', 'schema-noa.sql'), 'utf8')
 
 const TEST_DIR = '/tmp/test-token-usage'
 const PROJECTS_DIR = join(TEST_DIR, '.claude', 'projects')
@@ -297,15 +302,22 @@ describe('deduplication', () => {
 })
 
 describe('correlateWithKanban', () => {
+  beforeAll(() => {
+    // correlateWithKanban reads kanban_cards from getNoaDb(); use in-memory noa.db for test isolation
+    initNoaDb(':memory:')
+    getNoaDb().exec(SCHEMA_SQL)
+  })
+
   it('links token_usage rows to kanban cards by agent and time range', async () => {
     const db = getDb()
+    const noaDb = getNoaDb()  // kanban_cards now lives in noa.db
     const baseTs = 1716200000
 
-    // Insert a kanban card (created_at is NOT NULL)
-    db.prepare(`
-      INSERT OR IGNORE INTO kanban_cards (id, title, status, priority, assignee, project, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run('test-kanban-1', 'Test Task', 'in_progress', 'normal', 'test-main', 'test-project', baseTs, baseTs)
+    // Insert a kanban card into noa.db (correlateWithKanban reads from there)
+    noaDb.prepare(`
+      INSERT OR IGNORE INTO kanban_cards (id, title, status, priority, assignee, project, created_at, updated_at, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('test-kanban-1', 'Test Task', 'in_progress', 'normal', 'test-main', 'test-project', baseTs, baseTs, 0)
 
     const { correlateWithKanban } = await import('../web/token-usage.js')
     correlateWithKanban()
@@ -318,7 +330,95 @@ describe('correlateWithKanban', () => {
     expect(rows[0].task_title).toBe('Test Task')
 
     // Cleanup
-    db.prepare("DELETE FROM kanban_cards WHERE id = 'test-kanban-1'").run()
+    noaDb.prepare("DELETE FROM kanban_cards WHERE id = 'test-kanban-1'").run()
+  })
+})
+
+describe('spawnedByForFile (lineage predicate, card bb4992dc)', () => {
+  it('marks a /subagents/ transcript as a child of the source agent', async () => {
+    const { spawnedByForFile } = await import('../web/token-usage.js')
+    expect(spawnedByForFile('dave',
+      '/home/x/.claude/projects/-home-x-agents-dave/abc-uuid/subagents/agent-123.jsonl')).toBe('dave')
+  })
+  it('returns null for an agent own-session transcript', async () => {
+    const { spawnedByForFile } = await import('../web/token-usage.js')
+    expect(spawnedByForFile('dave',
+      '/home/x/.claude/projects/-home-x-agents-dave/abc-uuid.jsonl')).toBeNull()
+  })
+  it('is path-segment based, so an agent-foo dir name is never mistaken for a child', async () => {
+    const { spawnedByForFile } = await import('../web/token-usage.js')
+    // A bare file whose name merely starts with "agent-" is NOT under /subagents/.
+    expect(spawnedByForFile('marveen',
+      '/home/x/.claude/projects/-home-x-marveen/agent-foobar.jsonl')).toBeNull()
+  })
+})
+
+describe('cost rollup (cache-aware) + lineage', () => {
+  const baseTs = 1716400000
+  // 11-column insert incl. the new model + spawned_by attribution columns.
+  function insertRow(db: any, row: {
+    agent: string; session: string; ts: number; input: number; output: number;
+    cr?: number; cc?: number; model?: string | null; spawnedBy?: string | null;
+  }) {
+    db.prepare(`
+      INSERT OR IGNORE INTO token_usage
+      (agent, session_id, timestamp, input_tokens, output_tokens,
+       cache_read_tokens, cache_creation_tokens, content_preview, tool_name, model, spawned_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(row.agent, row.session, row.ts, row.input, row.output,
+      row.cr ?? 0, row.cc ?? 0, null, null, row.model ?? null, row.spawnedBy ?? null)
+  }
+
+  beforeAll(() => {
+    const db = getDb()
+    db.exec("DELETE FROM token_usage WHERE agent LIKE 'tc-%'")
+    // Priced rows with an explicit model so cost is deterministic.
+    // sonnet: $3 in / $15 out / $0.30 cacheRead per MTok.
+    insertRow(db, { agent: 'tc-io', session: 's1', ts: baseTs, input: 1_000_000, output: 1_000_000, model: 'claude-sonnet-4-6' })
+    insertRow(db, { agent: 'tc-cache', session: 's1', ts: baseTs, input: 0, output: 0, cr: 1_000_000, model: 'claude-sonnet-4-6' })
+    insertRow(db, { agent: 'tc-null', session: 's1', ts: baseTs, input: 1_000_000, output: 0, model: null })
+    // Lineage: a parent with two phantom children + its own session.
+    insertRow(db, { agent: 'tc-parent', session: 'child-1', ts: baseTs, input: 1_000_000, output: 0, model: 'claude-sonnet-4-6', spawnedBy: 'tc-parent' })
+    insertRow(db, { agent: 'tc-parent', session: 'child-2', ts: baseTs, input: 1_000_000, output: 0, model: 'claude-sonnet-4-6', spawnedBy: 'tc-parent' })
+    insertRow(db, { agent: 'tc-parent', session: 'own', ts: baseTs, input: 1_000_000, output: 0, model: 'claude-sonnet-4-6', spawnedBy: null })
+  })
+
+  afterAll(() => {
+    getDb().exec("DELETE FROM token_usage WHERE agent LIKE 'tc-%'")
+  })
+
+  it('prices input + output per the row model in the summary', async () => {
+    const { getTokenSummary } = await import('../web/token-usage.js')
+    const s = getTokenSummary(baseTs - 1, baseTs + 1).find(r => r.agent === 'tc-io')
+    expect(s).toBeDefined()
+    expect(s!.totalCostUsd).toBeCloseTo(18, 6) // 3 + 15
+  })
+
+  it('prices cache_read (the dominant component) -- not ignored', async () => {
+    const { getTokenSummary } = await import('../web/token-usage.js')
+    const s = getTokenSummary(baseTs - 1, baseTs + 1).find(r => r.agent === 'tc-cache')
+    expect(s!.totalCostUsd).toBeCloseTo(0.3, 6) // 1M cacheRead @ $0.30/MTok
+  })
+
+  it('still prices a NULL-model row via the agent configured-model fallback (> 0, not dropped)', async () => {
+    const { getTokenSummary } = await import('../web/token-usage.js')
+    const s = getTokenSummary(baseTs - 1, baseTs + 1).find(r => r.agent === 'tc-null')
+    expect(s).toBeDefined()
+    expect(s!.totalInput).toBe(1_000_000)
+    expect(s!.totalCostUsd).toBeGreaterThan(0)
+  })
+
+  it('rolls phantom-child cost up to the parent, separable from its own session', async () => {
+    const { getLineageRollup, getCostBySession } = await import('../web/token-usage.js')
+    const roll = getLineageRollup(baseTs - 1, baseTs + 1).find(r => r.parent === 'tc-parent')
+    expect(roll).toBeDefined()
+    expect(roll!.childSessions).toBe(2)
+    expect(roll!.childCostUsd).toBeCloseTo(6, 6) // 2 children x 1M in @ $3
+
+    const sessions = getCostBySession({ agent: 'tc-parent', from: baseTs - 1, to: baseTs + 1 })
+    expect(sessions.length).toBe(3)
+    expect(sessions.filter(s => s.spawnedBy === 'tc-parent').length).toBe(2)
+    expect(sessions.filter(s => s.spawnedBy === null).length).toBe(1)
   })
 })
 
@@ -344,7 +444,7 @@ describe('tryHandleTokenUsage route handler', () => {
     }
 
     return {
-      ctx: { req: {} as any, res: res as any, path, method, url },
+      ctx: { req: {} as any, res: res as any, path, method, url, identity: { agentId: 'operator', scopes: ['admin:*'], source: 'operator' as const } },
       getResponse: () => ({ status: responseStatus, body: responseBody ? JSON.parse(responseBody) : null }),
     }
   }

@@ -1,0 +1,26 @@
+[
+  {
+    "name": "Creatine monohydrate",
+    "source_vendor": "EXAMPLE vendor",
+    "procurement_date": "2026-06-01",
+    "intake_schedule": [
+      { "time": "08:00", "days": "daily", "notes": "with breakfast" }
+    ]
+  },
+  {
+    "name": "Vitamin D3",
+    "source_vendor": "EXAMPLE vendor",
+    "procurement_date": "2026-06-01",
+    "intake_schedule": [
+      { "time": "08:00", "days": "daily", "notes": "with a fat source" }
+    ]
+  },
+  {
+    "name": "Magnesium",
+    "source_vendor": "EXAMPLE vendor",
+    "procurement_date": "2026-06-01",
+    "intake_schedule": [
+      { "time": "22:00", "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "notes": "before sleep" }
+    ]
+  }
+]

@@ -1,0 +1,14 @@
+{
+  "model": "claude-sonnet-4-6",
+  "securityProfile": "default",
+  "displayName": "Percy",
+  "team": {
+    "role": "member",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": []
+  },
+  "claudeConfigDir": "/home/domin/marveen/agents/percy/.claude-config",
+  "channelProvider": "telegram"
+}

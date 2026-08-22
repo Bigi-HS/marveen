@@ -21,6 +21,15 @@
 
 export type PaneState = 'idle' | 'busy' | 'typing' | 'unknown' | 'error'
 
+// The footer + input-box patterns below were last hand-validated against this
+// CLI version. This is a DOCUMENTATION reference only -- no runtime code reads
+// it (the live drift enforcement is the pane-detector gate, card 56ad0fa3:
+// fleet-supervisor.sh flags a CLI drift and the pane-dependent watchdogs stand
+// down via pane-detector-gate.ts until a c12 smoke clears it with
+// `tsx scripts/pane-detector-smoke-clear.ts`). Bump this when the regexes are
+// re-validated against a new CLI release, for human reference.
+export const PANE_DETECTOR_BASELINE_CLI_VERSION = '2.1.160'
+
 // Claude Code shows the footer in one of two modes: the default "bypass"
 // permissions mode (permissive) and the "strict" mode. Both are "idle"
 // surfaces. If neither is visible the pane is not a recognised Claude
@@ -73,6 +82,19 @@ const IDLE_FOOTER_RX = /bypass permissions on(?: \(shift\+tab to cycle\)| · \d+
 // label. `esc to interrupt` is the footer-scoped fallback. A future
 // Claude Code release that renames the spinner labels will miss the
 // label regex but still be caught by the tokens pattern.
+
+// Known Claude Code turn-spinner labels (last validated: CLI 2.x, 2026-06-21).
+// Non-exhaustive by design: the bare token-counter pattern is the authoritative
+// fallback. Update this list when the CLI adds or renames spinners; the regex
+// below is rebuilt from it automatically so there's only one place to edit.
+export const CLAUDE_SPINNER_LABELS: readonly string[] = [
+  'Combobulating', 'Beaming', 'Thinking', 'Pondering', 'Reticulating',
+  'Configuring', 'Noodling', 'Ruminating', 'Percolating', 'Cogitating',
+  'Deliberating', 'Contemplating', 'Musing', 'Brewing', 'Synthesizing',
+  'Distilling', 'Refining', 'Simmering', 'Crafting', 'Formulating',
+  'Consulting', 'Unfurling', 'Unspooling', 'Unraveling',
+]
+
 const BUSY_INDICATORS: RegExp[] = [
   /\besc to interrupt\b/,
   // Tokens-down-arrow counter: "(52s · ↓ 2.6k tokens ..." Turn-scoped,
@@ -82,7 +104,7 @@ const BUSY_INDICATORS: RegExp[] = [
   // the same line. The tail requirement kills the "Thinking…" prose
   // false positive. Non-exhaustive by design; the bare tokens pattern
   // above is the authoritative fallback.
-  /\b(?:Combobulating|Beaming|Thinking|Pondering|Reticulating|Configuring|Noodling|Ruminating|Percolating|Cogitating|Deliberating|Contemplating|Musing|Brewing|Synthesizing|Distilling|Refining|Simmering|Crafting|Formulating|Consulting|Unfurling|Unspooling|Unraveling)…\s*\(\s*\d+s\s*·\s*↓/,
+  new RegExp(`\\b(?:${CLAUDE_SPINNER_LABELS.join('|')})…\\s*\\(\\s*\\d+s\\s*·\\s*↓`),
 ]
 
 // Pasted-text placeholder. Claude Code lifts bursts of input keys into
@@ -91,15 +113,141 @@ const BUSY_INDICATORS: RegExp[] = [
 // a second prompt on top.
 const PENDING_PASTE_RX = /\[Pasted text #\d+/
 
+// Usage/session-limit modal (PR #130 DA review, HIGH). When the shared Claude
+// account hits its limit the session renders a blocking "What do you want to
+// do? / Stop and wait for limit to reset / Upgrade your plan" menu. Some
+// renders of that surface (notably an empty input box plus a "... usage limit
+// · resets at 3pm" footer) present a structural input box with no parked text,
+// so the d3339db9 structural recogniser would otherwise read them as 'idle' =
+// READY and the message-router/scheduler would inject a prompt INTO a limited
+// session (it never processes; on reset it may auto-submit stale). The guard
+// below classifies any usage-limit surface as 'busy' regardless of box/footer.
+//
+// Two-tier signal model (PR #130 + card 732bb084):
+//
+//   STRONG -- the menu action line "Stop and wait for limit to reset". This is
+//     unambiguous Claude Code UI chrome, not natural reply prose, so it is
+//     sufficient ALONE to recognise the menu (matching token-outage-bridge.ts's
+//     authoritative LIMIT_PATTERNS). Required to close the truncated-viewport
+//     gap: a short pane scrolls the limit PHRASE off the top of the visible
+//     capture, leaving only this option line + input box + footer; a phrase-AND-
+//     corroboration rule would miss it -> 'idle' = READY = a prompt injected
+//     INTO a limited session (the false-busy bug class, opposite direction).
+//
+//   WEAK -- a bare reset time ("resets at 3pm"). It can legitimately appear in
+//     reply prose ("the nightly cron resets at 3am"), so it counts only TOGETHER
+//     with a limit phrase. On its own it must NOT trip the menu, otherwise a
+//     healthy idle agent is read as busy and its inbound queues/abandons (the
+//     over-block direction). A lone limit phrase is likewise insufficient: an
+//     agent reviewing token-outage code can print one in its reply.
+//
+// All signals are scoped to the bottom lines (the menu renders there), never
+// deep scrollback. The authoritative, fuller pattern list lives in
+// token-outage-bridge.ts (LIMIT_PATTERNS); both derive from the verbatim
+// 2026-06-07 Dave+Thor freeze captures and are kept INLINE here to preserve
+// this module's zero-import, unit-testable design.
+const LIMIT_PHRASE_RX = /you've (?:hit|reached) your (?:usage|session) limit|(?:usage|session) limit reached|claude usage limit|limit will reset/i
+const LIMIT_MENU_OPTION_RX = /stop and wait for limit to reset/i
+const LIMIT_RESET_TIME_RX = /resets?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)/i
+const LIMIT_MENU_TAIL_LINES = 18
+
 // Input-box separator lines are made of U+2500 BOX DRAWINGS LIGHT
 // HORIZONTAL. At least 10 in a run to ignore stray `-` glyphs.
 const BOX_SEP_RX = /^─{10,}/
 
-// Prompt line inside the input box. `❯` followed by at least one tab/
-// space and then a non-whitespace character means the user (or a
-// send-keys that didn't submit) parked text there. Single-line match
-// ([ \t] not \s) to avoid crossing into the next line.
-const PARKED_INPUT_RX = /❯[ \t]+\S/
+// Prompt line inside the input box. `❯` followed by at least one
+// horizontal whitespace and then a non-whitespace character means the
+// user (or a send-keys that didn't submit) parked text there. The live
+// box now renders the prompt as `❯` + U+00A0 (NO-BREAK SPACE), not a
+// regular space (CLI-drift verified 2026-06-23, card f1ea52c0), so the
+// class must cover ANY whitespace except newline -- `[^\S\n]` matches
+// space, tab, U+00A0 and any future unicode space glyph while staying
+// single-line (never crossing into the next line). The trailing `\S`
+// keeps an empty box (`❯` + space, nothing typed) classified idle.
+const PARKED_INPUT_RX = /❯[^\S\n]+\S/
+
+/**
+ * Locate the live Claude Code input box from STRUCTURE alone: the two
+ * bottom-most box-separator lines (─{10,}) that frame a ❯ prompt line.
+ *
+ * Footer-text independent on purpose. Claude Code's footer slot rotates
+ * onboarding tips ("gh auth login · ← for agents", "← for agents", …),
+ * and for some sessions the leading "⏵⏵ bypass permissions on
+ * (shift+tab to cycle)" permission-mode segment is absent, leaving only a
+ * tip. Keying idle-surface recognition on the footer text (IDLE_FOOTER_RX)
+ * then misreads those panes as 'unknown', and the message-router/scheduler
+ * treat the agent as permanently busy, so the message is silently dropped
+ * after the abandon window (card d3339db9, 2026-06-12 Bond-meeting
+ * incident). The box structure does not rotate, so it is the reliable
+ * surface signal.
+ *
+ * Returns the {topSep, bottomSep} line indices, or null when the pane has
+ * no live input box (a shell, a permission dialog, raw output): callers
+ * treat null as "not a promptable Claude Code surface".
+ */
+function findInputBoxBounds(lines: string[]): { topSep: number; bottomSep: number } | null {
+  // Bottom-most separator: the box's lower rule. The footer/tip line sits
+  // BELOW it and is plain text (never ─{10,}), so scanning from the end
+  // lands on the box bottom, not the footer.
+  let bottomSep = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (BOX_SEP_RX.test(lines[i])) { bottomSep = i; break }
+  }
+  if (bottomSep <= 0) return null
+  let topSep = -1
+  for (let i = bottomSep - 1; i >= 0; i--) {
+    if (BOX_SEP_RX.test(lines[i])) { topSep = i; break }
+  }
+  if (topSep < 0) return null
+  // The framed region must contain a ❯ prompt, otherwise two unrelated
+  // rule lines (a markdown table, ASCII art) would be misread as a box.
+  for (let i = topSep + 1; i < bottomSep; i++) {
+    if (lines[i].includes('❯')) return { topSep, bottomSep }
+  }
+  return null
+}
+
+/**
+ * Cursor-aware ghost/autosuggestion discrimination (card c8d13cc0).
+ *
+ * The Claude Code TUI draws a dim autosuggestion into an EMPTY composer to the
+ * RIGHT of the cursor; a real draft sits to the LEFT. `tmux capture-pane -p`
+ * strips the dim attribute, so the suggestion and a real draft are
+ * byte-identical in the captured string -- the cursor column is the only
+ * reliable, version-independent discriminator (the standard shell-autosuggest
+ * shape). Returns true when the parked text on the cursor's prompt line is
+ * PURELY a suggestion: the cursor sits at (or before) the first visible glyph,
+ * so nothing has actually been typed and the composer is empty (promptable).
+ *
+ * Conservative by design: any ambiguity (cursor on another row, cursor past the
+ * prompt content, no caret) returns false so the caller keeps the safe 'typing'
+ * classification. A false-IDLE is the destructive direction -- a prompt would
+ * concatenate into a real draft -- so the guard only fires on the unambiguous
+ * empty-composer-with-suggestion shape. Residual edge: a real draft whose
+ * cursor was manually moved to the line start (Home) is indistinguishable here
+ * and would read as ghost; autonomous panes never do this, and the structural
+ * redeliver layer (follow-up) catches any such miss.
+ */
+function isGhostSuggestionOnly(
+  lines: string[],
+  box: { topSep: number; bottomSep: number },
+  cursor: { x: number; y: number },
+): boolean {
+  // The cursor must sit on a prompt line strictly inside the live box.
+  if (cursor.y <= box.topSep || cursor.y >= box.bottomSep) return false
+  const line = lines[cursor.y]
+  if (line === undefined) return false
+  const caret = line.indexOf('❯')
+  if (caret < 0) return false
+  // Content starts at the first non-whitespace glyph after the caret marker
+  // (the prompt renders `❯` + a space or U+00A0 before any text/suggestion).
+  let start = caret + 1
+  while (start < line.length && /[^\S\n]/.test(line[start]!)) start++
+  if (start >= line.length) return false // no visible text on this line
+  // Cursor at/before the first glyph -> nothing typed -> the visible text is a
+  // suggestion drawn to the right of the cursor (empty composer).
+  return cursor.x <= start
+}
 
 // Persistent Anthropic thinking-block API error. When an assistant turn
 // ends with a 400 about thinking/redacted_thinking blocks that "cannot
@@ -183,11 +331,98 @@ export function detectsThinkingBlockError(pane: string): boolean {
   return false
 }
 
+/**
+ * True when the live tail shows the Claude Code usage/session-limit menu.
+ *
+ * Two-tier match within the bottom LIMIT_MENU_TAIL_LINES:
+ *   - the STRONG menu action line ("Stop and wait for limit to reset") alone,
+ *     since it is UI chrome that cannot appear in natural reply prose -- this
+ *     catches the truncated-viewport render where the limit phrase scrolled
+ *     off-screen (card 732bb084); OR
+ *   - a limit PHRASE together with a WEAK reset-time corroboration, so an agent
+ *     that merely prints one limit phrase (or a bare reset time) in its reply
+ *     prose is not misclassified.
+ *
+ * Scoped to the tail because the menu renders at the bottom, never in deep
+ * scrollback. See token-outage-bridge.ts (LIMIT_PATTERNS) for the authoritative,
+ * fuller matcher used by the separate token-free auto-ACK bridge; this inline
+ * copy keeps pane-state.ts dependency-free.
+ */
+// Grace (minutes) past a banner's reset clock-time before it counts as STALE.
+// A small slack avoids un-tripping right on the boundary while the limit is
+// still lifting.
+const LIMIT_RESET_STALE_GRACE_MIN = 3
+
+// Minute-of-day (0..1439) of `nowMs` in the fleet's canonical TZ (Europe/Budapest),
+// so a banner's wall-clock reset time ("6:50pm") is compared in the same frame the
+// CLI rendered it in. Pure given nowMs; Intl is a built-in (keeps the zero-import design).
+function budapestMinuteOfDay(nowMs: number): number {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Budapest',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(nowMs))
+  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? '0') % 24
+  const min = Number(parts.find((p) => p.type === 'minute')?.value ?? '0')
+  return h * 60 + min
+}
+
+// True when the WEAK-path banner's reset clock-time is already in the PAST (the
+// scrolled-back leftover of a limit that has since reset). A usage-limit reset is
+// always within ~5h, so across the midnight wrap the NEAREST interpretation is the
+// correct one. Fail-safe: an unparseable time returns false (keep tripping) so an
+// odd render never silently suppresses a real limit. STRONG-path (active modal)
+// callers never reach this.
+function limitResetTimeIsStale(tail: string, nowMs: number): boolean {
+  const m = tail.match(/resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i)
+  if (!m) return false
+  let h = parseInt(m[1]!, 10)
+  const min = m[2] ? parseInt(m[2], 10) : 0
+  if (h < 1 || h > 12 || min > 59) return false
+  if (h === 12) h = 0
+  if (m[3]!.toLowerCase() === 'pm') h += 12
+  const resetMinOfDay = h * 60 + min
+  let delta = resetMinOfDay - budapestMinuteOfDay(nowMs) // minutes until reset
+  if (delta >= 720) delta -= 1440
+  if (delta < -720) delta += 1440
+  return delta <= -LIMIT_RESET_STALE_GRACE_MIN
+}
+
+export function detectsUsageLimitMenu(pane: string, nowMs: number = Date.now()): boolean {
+  if (!pane) return false
+  const tail = pane.split('\n').slice(-LIMIT_MENU_TAIL_LINES).join('\n')
+  // STRONG: the menu action line is UI chrome of an ACTIVE blocking modal you are
+  // sitting in -- always a limit, regardless of any reset time shown.
+  if (LIMIT_MENU_OPTION_RX.test(tail)) return true
+  // WEAK: phrase + reset-time corroboration. Suppress a STALE banner (reset already
+  // passed) so a leftover footer cannot pin an otherwise-idle pane 'busy' forever
+  // (the self-reinforcing limit-deadlock: busy -> no prompt -> no fresh output ->
+  // banner stays in tail -> busy). card c7987f52.
+  if (!(LIMIT_PHRASE_RX.test(tail) && LIMIT_RESET_TIME_RX.test(tail))) return false
+  return !limitResetTimeIsStale(tail, nowMs)
+}
+
 export interface DetectPaneStateOptions {
   /** If true, the 'typing' state (text parked in input box) is
    * merged into 'busy'. Default false -- callers that care about
    * "user actively composing" vs "mid-turn" can distinguish. */
   mergeTypingAsBusy?: boolean
+  /** Pane cursor position (0-indexed column,row), sampled with the same
+   * capture via `tmux display-message -p '#{cursor_x},#{cursor_y}'`. When
+   * provided, the parked-input check uses it to tell a real typed draft from
+   * a dim ghost/autosuggestion drawn into an EMPTY composer (card c8d13cc0):
+   * the TUI draws the suggestion to the RIGHT of the cursor, a real draft to
+   * the LEFT. `tmux capture-pane -p` strips the dim attribute, so ghost and
+   * draft are byte-identical in the string and the cursor column is the only
+   * reliable, version-independent discriminator. Omitted -> the content-only
+   * heuristic (PARKED_INPUT_RX) is used (safe legacy behaviour). */
+  cursor?: { x: number; y: number }
+  /** Wall-clock (epoch ms) used to age out a STALE usage-limit banner whose reset
+   * time has already passed. Defaults to Date.now() so live callers inherit the
+   * staleness guard with no change; tests inject a fixed instant for determinism.
+   * card c7987f52. */
+  nowMs?: number
 }
 
 /**
@@ -198,6 +433,9 @@ export interface DetectPaneStateOptions {
  *   2. Any BUSY_INDICATOR matches anywhere -> 'busy'. This includes the
  *      wider spinner/token-count fallbacks that catch the frame-level
  *      footer gap.
+ *   2b. Usage/session-limit modal in the live tail -> 'busy'. Checked before
+ *      the surface/idle returns so a limited session (which can render a box
+ *      or idle-looking footer) is never treated as promptable.
  *   3. No idle footer visible -> 'unknown' (pane is not Claude Code).
  *   4. Wedged thinking-block API error in the live tail -> 'error'.
  *      Checked after the busy guard (a live turn is never 'error') and
@@ -217,31 +455,51 @@ export function detectPaneState(
     if (rx.test(pane)) return 'busy'
   }
 
-  if (!IDLE_FOOTER_RX.test(pane)) return 'unknown'
+  // Usage/session-limit modal: never a promptable surface, even when it shows
+  // a structural input box or an idle-looking footer. Checked before the
+  // surface/idle/typing returns so the message-router and scheduler never
+  // inject a prompt into a limited session (PR #130 DA review, HIGH).
+  if (detectsUsageLimitMenu(pane, opts.nowMs)) return 'busy'
+
+  // Surface recognition by POSITIVE input-affordance (card d978f8bd). 'idle'
+  // (promptable) must be PROVEN by a live structural input box -- the two
+  // box-separators framing a ❯ prompt, the affordance into which a prompt can
+  // actually be typed. A recognised footer is NOT sufficient on its own: a
+  // truncated viewport (box scrolled off), a mid-render frame, or a non-
+  // promptable surface can carry an idle-looking footer with no live box, and
+  // treating those as idle was the optimistic fall-through that let the
+  // scheduler/router inject into a non-ready pane (RETRO #130 root finding).
+  // A missing box -> 'unknown' (not-ready); the never-drop retry (#136) defers
+  // rather than drops, and the abandon-rate metric (732bb084) watches the
+  // false-BUSY cost. The box is also the footer-text-independent signal that
+  // keeps channel-less rotating-tip-footer agents promptable (d3339db9).
+  const lines = pane.split('\n')
+  const box = findInputBoxBounds(lines)
+  if (box === null) return 'unknown'
 
   if (detectsThinkingBlockError(pane)) return 'error'
 
   if (PENDING_PASTE_RX.test(pane)) return 'busy'
 
-  // Find the input box: two BOX_SEP_RX lines framing the current prompt.
-  // Scan UPWARDS from the footer so we stay inside the live box and
-  // don't pick up historical ❯ lines from scrollback.
-  const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
-  if (footerIdx >= 0) {
-    let bottomSep = -1
-    for (let i = footerIdx - 1; i >= 0; i--) {
-      if (BOX_SEP_RX.test(lines[i])) { bottomSep = i; break }
-    }
-    let topSep = -1
-    if (bottomSep > 0) {
-      for (let i = bottomSep - 1; i >= 0; i--) {
-        if (BOX_SEP_RX.test(lines[i])) { topSep = i; break }
-      }
-    }
-    if (topSep >= 0 && bottomSep > topSep) {
-      const inputLines = lines.slice(topSep + 1, bottomSep)
-      if (inputLines.some(l => PARKED_INPUT_RX.test(l))) {
+  // Text parked in the live input box -> 'typing'. The box is located
+  // structurally (footer-text independent), so a parked draft is detected
+  // even on the rotating-tip-footer surfaces. Scoped to the region between
+  // the two bottom-most separators, so a historical ❯ in scrollback above
+  // the box is never mistaken for live parked input.
+  if (box !== null) {
+    const inputLines = lines.slice(box.topSep + 1, box.bottomSep)
+    const parkedLines = inputLines.filter(l => PARKED_INPUT_RX.test(l))
+    if (parkedLines.length > 0) {
+      // Cursor-aware ghost guard (card c8d13cc0): an empty composer showing
+      // ONLY a dim autosuggestion is promptable, not a parked draft. Applied
+      // only to the unambiguous single-parked-line shape with the cursor for
+      // discrimination; a multi-line draft or absent cursor keeps the safe
+      // 'typing' classification (a false-IDLE would concatenate into a draft).
+      const ghostOnly =
+        opts.cursor != null &&
+        parkedLines.length === 1 &&
+        isGhostSuggestionOnly(lines, box, opts.cursor)
+      if (!ghostOnly) {
         return opts.mergeTypingAsBusy ? 'busy' : 'typing'
       }
     }
@@ -250,13 +508,192 @@ export function detectPaneState(
   return 'idle'
 }
 
+// One pane capture for the quiescence proof: the captured string plus the live
+// cursor (for the empty-vs-ghost-vs-draft discrimination on the latest sample).
+export interface QuiescenceSample {
+  pane: string
+  cursor?: { x: number; y: number }
+}
+
+// Every hard busy/blocked signal detectPaneState treats as "do not inject",
+// collapsed into one predicate. A live turn (spinner/`esc to interrupt`/token
+// counter), a usage-limit modal, a wedged thinking-block error, or a pending
+// paste must ALL veto the quiescence proof -- a static usage-limit modal is the
+// dangerous one: it does not mutate, so byte-stability alone would pass it.
+function hasHardBusySignal(pane: string): boolean {
+  if (!pane) return false
+  for (const rx of BUSY_INDICATORS) if (rx.test(pane)) return true
+  if (detectsUsageLimitMenu(pane)) return true
+  if (detectsThinkingBlockError(pane)) return true
+  if (PENDING_PASTE_RX.test(pane)) return true
+  return false
+}
+
+/**
+ * Heuristic-INDEPENDENT "is this pane idle?" proof for the L2 delivery backstop
+ * (card d4aa1d14). The cursor-guard (#284) is the belt: it fixes the one known
+ * false-not-ready shape (an empty composer showing a dim autosuggestion). This
+ * is the suspenders: a signal ORTHOGONAL to the parked-input / cursor heuristics
+ * so a PERSISTENT false-not-ready (a future ghost variant, a resize echo, an
+ * unforeseen surface) self-heals instead of stranding a recipient until restart.
+ *
+ * Why orthogonal and not just a re-read: detectPaneState is pure over the
+ * captured string and is recomputed fresh every poll -- there is no sticky busy
+ * state to clear, so a persistent misclassification returns the SAME wrong
+ * answer on every retry. The independent question is "is anything happening?": a
+ * live Claude Code turn ALWAYS mutates the at-or-above-box region (spinner frames
+ * cycle, the `(Ns · ↓ tokens · esc to interrupt)` counter ticks, tokens stream).
+ * A region that is byte-identical across several samples spanning a short window
+ * is therefore a finished turn, regardless of what the content heuristics say.
+ *
+ * Returns true ONLY when ALL hold (false on any doubt -- a false-IDLE that
+ * concatenates a prompt into a real draft is the destructive direction, the very
+ * failure #284 guards against):
+ *   1. >= 2 samples (need at least two to prove stability).
+ *   2. NO sample carries a hard busy/blocked signal (hasHardBusySignal).
+ *   3. The latest sample has a structural input box (no box -> 'unknown' surface;
+ *      the documented c88bc682 boundary, deliberately NOT covered here).
+ *   4. CRITICAL INVARIANT: the composer is EMPTY, or holds ONLY a ghost
+ *      autosuggestion (cursor at/before the first glyph, per #284). A real parked
+ *      draft (cursor past the text, or multiple parked lines) returns false.
+ *   5. The at-or-above-box region (lines up to and including the box bottom
+ *      separator -- excludes the rotating-tip footer rendered below it) is
+ *      byte-identical across EVERY sample.
+ */
+export function isQuiescentlyIdle(samples: QuiescenceSample[]): boolean {
+  if (samples.length < 2) return false
+
+  // (2) a live or blocked turn must never be overridden.
+  for (const s of samples) {
+    if (hasHardBusySignal(s.pane)) return false
+  }
+
+  // (3) the latest sample must be a promptable Claude Code surface.
+  const latest = samples[samples.length - 1]!
+  const latestLines = latest.pane.split('\n')
+  const box = findInputBoxBounds(latestLines)
+  if (box === null) return false
+
+  // (4) empty or ghost-only composer -- NEVER redeliver into a real draft.
+  const inputLines = latestLines.slice(box.topSep + 1, box.bottomSep)
+  const parkedLines = inputLines.filter(l => PARKED_INPUT_RX.test(l))
+  if (parkedLines.length > 0) {
+    const ghostOnly =
+      parkedLines.length === 1 &&
+      latest.cursor != null &&
+      isGhostSuggestionOnly(latestLines, box, latest.cursor)
+    if (!ghostOnly) return false
+  }
+
+  // (5) the at-or-above-box region is byte-stable across all samples. The
+  // rotating-tip footer sits BELOW the bottom separator, so slicing at
+  // bottomSep+1 excludes the one element that legitimately changes while idle.
+  // A sample whose box cannot be located keys to null and fails the match
+  // (conservative: a vanished box between samples is not "stable idle").
+  const regionKey = (pane: string): string | null => {
+    const lines = pane.split('\n')
+    const b = findInputBoxBounds(lines)
+    if (b === null) return null
+    return lines.slice(0, b.bottomSep + 1).join('\n')
+  }
+  const ref = regionKey(latest.pane)
+  if (ref === null) return false
+  for (const s of samples) {
+    if (regionKey(s.pane) !== ref) return false
+  }
+  return true
+}
+
 /**
  * True when the pane is in the specific "accepting a new prompt" state.
  * 'typing' counts as not-ready because the user has unsubmitted text
  * in the input box and a new prompt would concatenate into it.
  */
-export function isReadyForPrompt(pane: string): boolean {
-  return detectPaneState(pane) === 'idle'
+export function isReadyForPrompt(pane: string, opts: DetectPaneStateOptions = {}): boolean {
+  return detectPaneState(pane, opts) === 'idle'
+}
+
+/**
+ * Coarse, operator-facing activity label for an agent: the value the dashboard
+ * shows ("working / idle / stopped"). This is the SINGLE source of truth shared
+ * by the `/api/agents/activity` route and the agent-status realtime watcher
+ * (card edf73bd7 F2) -- both call this helper so the polled value and the pushed
+ * transition can never drift. Pure over (running, pane); `pane === null` means
+ * the session could not be captured (running but unreadable).
+ */
+export type AgentActivityLabel = 'working' | 'idle' | 'stopped' | 'unknown' | 'error'
+
+export function computeAgentActivityLabel(running: boolean, pane: string | null): AgentActivityLabel {
+  if (!running) return 'stopped'
+  if (pane === null) return 'unknown'
+  const s = detectPaneState(pane)
+  if (s === 'busy' || s === 'typing') return 'working'
+  if (s === 'idle') return 'idle'
+  return s // 'unknown' | 'error'
+}
+
+/**
+ * True when a turn is ACTIVELY in progress -- a live spinner / token-stream
+ * indicator is rendering RIGHT NOW. This is a strict subset of the coarse
+ * 'busy' state: `detectPaneState` also returns 'busy' for a usage-limit menu
+ * and for pending-paste stubs, neither of which is a running turn. Those are
+ * explicitly excluded here.
+ *
+ * Why a dedicated predicate: it is the ONLY surface into which queued input is
+ * safe to inject. Claude Code defers text typed during an active turn to the
+ * next turn boundary (it never interrupts the in-flight tool call), so a
+ * `/compact` queued here runs cleanly AFTER the current turn. A blocking
+ * surface -- a permission dialog or a usage-limit menu -- STOPS the spinner, so
+ * it cannot match BUSY_INDICATORS; gating on this predicate therefore guarantees
+ * we never land an Enter on a dialog (the #130 false-ready failure class). Idle,
+ * typing, unknown and error panes all return false (a running turn is the only
+ * true case), so the existing idle-gated tiers keep sole ownership of their
+ * surfaces.
+ */
+export function isActivelyWorking(pane: string): boolean {
+  if (!pane || !pane.trim()) return false
+  // A usage-limit menu is classified 'busy' by detectPaneState but is a
+  // blocking modal, not a running turn -- never queue into it.
+  if (detectsUsageLimitMenu(pane)) return false
+  // A genuine in-flight turn shows a spinner / `(Ns · ↓ … tokens)` indicator.
+  return BUSY_INDICATORS.some(rx => rx.test(pane))
+}
+
+// External state for idle-nudge classification. Cannot be derived from the
+// pane string alone -- see detectsStalledIdle for the invariant that makes
+// this external injection load-bearing.
+export interface IdleNudgeContext {
+  /**
+   * True when the agent has at least one open obligation (an open kanban
+   * card or an unacknowledged inter-agent message). This is the ONLY signal
+   * that distinguishes a stalled session (e.g. "API Overloaded -> dropped to
+   * idle without completing the task") from a genuinely done session at the
+   * pane-capture level: both render an identical empty ❯ prompt.
+   */
+  hasOpenTask: boolean
+}
+
+/**
+ * True when the pane is idle but the agent has an open task -- a state
+ * that warrants an idle-nudge from the watchdog (card 845750ad).
+ *
+ * CRITICAL INVARIANT: "API Overloaded -> empty prompt" and "genuinely done
+ * -> idle" are pane-capture IDENTICAL. Neither the busy indicators, the
+ * footer text, nor the input box structure can distinguish them. The
+ * distinguishing signal is entirely external: does the agent have a pending
+ * obligation? The harness MUST inject context.hasOpenTask from the kanban /
+ * message store rather than trying to infer it from the pane string.
+ *
+ * Three boundary cases (card 845750ad fixture corpus):
+ *   [A] idle + hasOpenTask=true  -> true  (stalled, e.g. post-overload)
+ *   [B] busy + hasOpenTask=true  -> false (mid-turn, not stalled)
+ *   [C] idle + hasOpenTask=false -> false (genuinely done, no nudge)
+ *
+ * @param pane    The raw `tmux capture-pane -p` output.
+ * @param context External agent state -- whether the agent has an open task.
+ */
+export function detectsStalledIdle(pane: string, context: IdleNudgeContext): boolean {
+  return detectPaneState(pane) === 'idle' && context.hasOpenTask
 }
 
 // Locate the live Claude Code input box and return its inner content as
@@ -269,19 +706,9 @@ export function isReadyForPrompt(pane: string): boolean {
 // "not enough signal to act, do nothing".
 function liveInputBox(pane: string): string | null {
   const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
-  if (footerIdx < 0) return null
-  let bottomSep = -1
-  for (let i = footerIdx - 1; i >= 0; i--) {
-    if (BOX_SEP_RX.test(lines[i])) { bottomSep = i; break }
-  }
-  if (bottomSep <= 0) return null
-  let topSep = -1
-  for (let i = bottomSep - 1; i >= 0; i--) {
-    if (BOX_SEP_RX.test(lines[i])) { topSep = i; break }
-  }
-  if (topSep < 0) return null
-  return lines.slice(topSep + 1, bottomSep).join('\n')
+  const box = findInputBoxBounds(lines)
+  if (box === null) return null
+  return lines.slice(box.topSep + 1, box.bottomSep).join('\n')
 }
 
 // Marker strings from prompt-safety.ts preambles. We do NOT import them
@@ -362,10 +789,10 @@ export function shouldRetrySubmit(
   for (const rx of BUSY_INDICATORS) {
     if (rx.test(pane)) return false
   }
-  // Without an idle footer the pane is either not Claude Code or in an
-  // unknown render state. Be conservative and skip.
-  if (!IDLE_FOOTER_RX.test(pane)) return false
-
+  // Without a live input box the pane is either not Claude Code or in an
+  // unknown render state -- be conservative and skip. The box is located
+  // structurally (footer-text independent) so the retry path also covers
+  // channel-less agents whose footer shows only a rotating tip (d3339db9).
   const inputBox = liveInputBox(pane)
   if (inputBox == null) return false
 
@@ -584,6 +1011,44 @@ export function stuckInputSignature(pane: string): string | null {
   if (detectPaneState(pane) !== 'typing') return null
   const box = liveInputBox(pane)
   if (box == null) return null
+  const sig = box.replace(/\s+/g, ' ').trim()
+  return sig.length > 0 ? sig : null
+}
+
+// A stable signature of a `[Pasted text #N]` placeholder parked in the live
+// input box, or null when there is no recoverable stale-paste stall.
+//
+// detectPaneState classifies a pending-paste placeholder as 'busy' (an
+// injection-avoidance measure: the scheduler must not pile prompts onto a
+// parked paste), so stuckInputSignature -- which only fires for the 'typing'
+// state -- never sees it. That left a real failure mode uncovered (card
+// 1b0f58ba): when the closing Enter is swallowed on the channel-notification
+// path, the pasted payload sits parked indefinitely and only the bounded
+// post-send retry in sendPromptToSession could ever recover it (a ~1s window).
+// This signature feeds the same decideStuckInputRecovery machinery so the
+// stuck-input watcher can re-submit a genuinely stalled paste.
+//
+// Returns null (no recovery) unless ALL of these hold, so it never fires on a
+// pane that is legitimately busy or still receiving input:
+//   - the pane is NOT actively working -- no live spinner / token stream. A
+//     spinner alongside the placeholder means the turn is really processing
+//     the paste, so an Enter would land mid-turn (adversarial fixture c).
+//   - the pane is NOT a usage-limit modal -- that is a real blocking surface
+//     owned by the usage-limit handlers, not a swallowed-Enter stall.
+//   - there IS a live input box and the placeholder is inside it -- a
+//     `[Pasted text]` echo left in scrollback is not live parked input.
+//
+// The signature is the whitespace-collapsed input box, so a growing burst
+// (the char count climbs, or a second placeholder appears between polls)
+// yields a different signature and the watcher's confirm window restarts
+// rather than recovering prematurely (adversarial fixture b).
+export function pendingPasteSignature(pane: string, nowMs?: number): string | null {
+  if (!pane || !pane.trim()) return null
+  if (isActivelyWorking(pane)) return null
+  if (detectsUsageLimitMenu(pane, nowMs)) return null
+  const box = liveInputBox(pane)
+  if (box == null) return null
+  if (!PENDING_PASTE_RX.test(box)) return null
   const sig = box.replace(/\s+/g, ' ').trim()
   return sig.length > 0 ? sig : null
 }

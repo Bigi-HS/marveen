@@ -4,9 +4,17 @@ dist/
 
 # Secrets & personal data
 .env
+.env.*
 store/
 workspace/
 agents/
+# Version-control ONLY per-agent agent-config.json (no secrets: model/team/
+# displayName/securityProfile/channelProvider/claudeConfigDir). Everything else
+# under agents/ (channel state, tokens, .mcp.json, credentials) stays ignored.
+!agents/
+agents/*/*
+!agents/*/
+!agents/*/agent-config.json
 reports/
 .claude/
 !.claude/settings.json
@@ -24,12 +32,18 @@ reports/
 # Test artifacts
 test-results/
 .playwright-mcp/
+coverage/
 
 # macOS
 .DS_Store
 
 # Generated from template (personal config)
 CLAUDE.md
+CLAUDE.md.bak-*
+
+# Python bytecode cache
+__pycache__/
+*.pyc
 
 # Custom MCP servers and config (user-specific)
 mcp-servers/
@@ -48,3 +62,9 @@ claudeclaw.log
 
 # Local backup archives from scripts/backup.sh
 backups/
+
+# Local tool binaries (installed via scripts/install-gitleaks.sh, not committed)
+scripts/bin/
+
+# also ignore a node_modules symlink FILE at repo root (not just the dir)
+/node_modules

@@ -1,0 +1,14 @@
+{
+  "model": "claude-opus-4-8",
+  "securityProfile": "researcher",
+  "displayName": "Grace",
+  "claudeConfigDir": "/home/domin/marveen/agents/radar/.claude-config",
+  "channelProvider": "telegram",
+  "team": {
+    "role": "member",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": []
+  }
+}

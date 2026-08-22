@@ -69,7 +69,13 @@ describe('isManagedSettingsReady (algorithm)', () => {
   })
 })
 
-describe('getManagedSettingsSudoCommand merge logic', () => {
+// macOS-only: getManagedSettingsSudoCommand builds a sudo command around the
+// platform-specific MANAGED_SETTINGS_PATH (the macOS `/Library/Application
+// Support/ClaudeCode/...` location) and runMerge parses that exact command shape.
+// On Linux/WSL the path + command differ, so these 4 cases cannot run here -- skip
+// them off-darwin instead of failing the suite (Thor T5). The merge ALGORITHM is
+// still exercised on macOS CI.
+describe.skipIf(process.platform !== 'darwin')('getManagedSettingsSudoCommand merge logic', () => {
   function runMerge(existingContent: string | null, targetPath: string): Record<string, unknown> {
     const cmd = getManagedSettingsSudoCommand()
     const pipeIdx = cmd.indexOf('|')

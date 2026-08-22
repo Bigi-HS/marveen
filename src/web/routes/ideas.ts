@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { listIdeas, createIdea, updateIdea, deleteIdea, listIdeaCategories, createKanbanCard, getDb } from '../../db.js'
+import { listIdeas, createIdea, updateIdea, deleteIdea, listIdeaCategories, getDb } from '../../db.js'
+import { createCard } from '../../noa-kanban.js'
 import { generateBreakdown } from '../llm-breakdown.js'
+import { parseScore } from '../idea-scoring.js'
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
@@ -35,8 +37,13 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
       description?: string
       category?: string
       source?: string
+      impact?: unknown
+      effort?: unknown
     }
     if (!data.title) { json(res, { error: 'title required' }, 400); return true }
+    const impact = parseScore(data.impact)
+    const effort = parseScore(data.effort)
+    if (!impact.ok || !effort.ok) { json(res, { error: 'impact/effort must be an integer 1-5 or null' }, 400); return true }
     const id = randomUUID().slice(0, 8)
     createIdea({
       id,
@@ -46,6 +53,8 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
       status: 'new',
       source: data.source ?? 'manual',
       kanban_id: null,
+      impact: impact.value,
+      effort: effort.value,
     })
     json(res, { ok: true, id })
     return true
@@ -56,7 +65,19 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
   if (ideaMatch && method === 'PUT') {
     const id = decodeURIComponent(ideaMatch[1])
     const body = await readBody(req)
-    const data = JSON.parse(body.toString())
+    const data = JSON.parse(body.toString()) as Record<string, unknown>
+    // Validate the scoring fields when present; only override the raw values once
+    // parsed so an out-of-range score is rejected rather than persisted.
+    if ('impact' in data) {
+      const p = parseScore(data.impact)
+      if (!p.ok) { json(res, { error: 'impact must be an integer 1-5 or null' }, 400); return true }
+      data.impact = p.value
+    }
+    if ('effort' in data) {
+      const p = parseScore(data.effort)
+      if (!p.ok) { json(res, { error: 'effort must be an integer 1-5 or null' }, 400); return true }
+      data.effort = p.value
+    }
     if (updateIdea(id, data)) { json(res, { ok: true }); return true }
     json(res, { error: 'Ötlet nem található' }, 404)
     return true
@@ -83,14 +104,14 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
     const cardId = randomUUID().slice(0, 8)
     const status = phase === 'plan' ? 'planned' : 'waiting'
     const title = phase === 'plan' ? idea.title : `[Részlet kidolgozás] ${idea.title}`
-    createKanbanCard({
+    createCard({
       id: cardId,
       title,
       description: idea.description ?? '',
       status,
       priority: 'normal',
       assignee: 'marveen',
-      project: 'Fejlesztési ötletek',
+      project: 'ENG', // canonical taxonomy (card cf0d1bfe); promoted ideas default to ENG, re-prefix via updateCard if they belong elsewhere
     })
     updateIdea(ideaId, { status: 'kanban', kanban_id: cardId })
     json(res, { ok: true, kanban_id: cardId })
@@ -130,27 +151,27 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
       return true
     }
     const parentId = randomUUID().slice(0, 8)
-    createKanbanCard({
+    createCard({
       id: parentId,
       title: idea.title,
       description: idea.description ?? '',
       status: 'planned',
       priority: 'normal',
       assignee: 'marveen',
-      project: 'Fejlesztési ötletek',
+      project: 'ENG', // canonical taxonomy (card cf0d1bfe); promoted ideas default to ENG, re-prefix via updateCard if they belong elsewhere
     })
     const childIds: string[] = []
     for (const st of subtasks) {
       if (!st.title) continue
       const childId = randomUUID().slice(0, 8)
-      createKanbanCard({
+      createCard({
         id: childId,
         title: String(st.title).slice(0, 120),
         description: (st.description ?? '').slice(0, 500),
         status: 'planned',
         priority: (st.priority && VALID_PRIORITIES.has(st.priority) ? st.priority : 'normal') as 'low' | 'normal' | 'high' | 'urgent',
         assignee: st.assignee || 'marveen',
-        project: 'Fejlesztési ötletek',
+        project: 'ENG', // canonical taxonomy (card cf0d1bfe); promoted ideas default to ENG, re-prefix via updateCard if they belong elsewhere
         parent_id: parentId,
       })
       childIds.push(childId)

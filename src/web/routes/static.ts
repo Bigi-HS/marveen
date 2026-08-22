@@ -9,6 +9,7 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
   if (path === '/' || path === '/index.html') { serveFile(res, join(webDir, 'index.html')); return true }
   if (path === '/style.css') { serveFile(res, join(webDir, 'style.css')); return true }
   if (path === '/app.js') { serveFile(res, join(webDir, 'app.js')); return true }
+  if (path === '/dashboard-events.js') { serveFile(res, join(webDir, 'dashboard-events.js')); return true }
 
   if (path.startsWith('/avatars/')) {
     const avatarFile = path.replace('/avatars/', '')

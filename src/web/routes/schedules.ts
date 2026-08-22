@@ -10,14 +10,30 @@ import { toPendingRetryView } from '../../pending-retries.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
 import { isValidCronShape } from '../cron.js'
 import { readBody, json, RequestBodyTooLargeError } from '../http-helpers.js'
-import { sanitizeScheduleName } from '../sanitize.js'
-import { listAgentNames } from '../agent-config.js'
+import { sanitizeScheduleName, safeScheduleName } from '../sanitize.js'
+import { listAgentNames, readAgentDisplayName } from '../agent-config.js'
 import { readFileOr } from '../agent-config.js'
 import {
   SCHEDULED_TASKS_DIR, MAX_SCHEDULED_TASK_PROMPT_LEN,
   listScheduledTasks, writeScheduledTask,
 } from '../scheduled-tasks-io.js'
+import { buildScheduledTaskPrompt } from '../schedule-runner.js'
+import { injectToSession, resolveSession } from '../action-trigger.js'
+import {
+  syncTaskToNoa, removeTaskFromNoa, updateTask, TaskNotFoundError,
+  recordTriggerFire, getTask,
+} from '../../noa-scheduler.js'
 import type { RouteContext } from './types.js'
+
+// Test seams: injectable so route unit tests can drive injectToSession / recordTriggerFire
+// return values without vi.mock-ing the entire dependency modules.
+let _inject: typeof injectToSession = injectToSession
+export function __setInjector(fn: typeof injectToSession): void { _inject = fn }
+export function __resetInjector(): void { _inject = injectToSession }
+
+let _recordFire: typeof recordTriggerFire = recordTriggerFire
+export function __setRecordFireFn(fn: typeof recordTriggerFire): void { _recordFire = fn }
+export function __resetRecordFireFn(): void { _recordFire = recordTriggerFire }
 
 export async function tryHandleSchedules(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method } = ctx
@@ -26,7 +42,7 @@ export async function tryHandleSchedules(ctx: RouteContext): Promise<boolean> {
     const agentNames = listAgentNames()
     const agents = [
       { name: MAIN_AGENT_ID, label: BOT_NAME, avatar: '/api/marveen/avatar' },
-      ...agentNames.map(n => ({ name: n, label: n, avatar: `/api/agents/${encodeURIComponent(n)}/avatar` }))
+      ...agentNames.map(n => ({ name: n, label: readAgentDisplayName(n), avatar: `/api/agents/${encodeURIComponent(n)}/avatar` }))
     ]
     json(res, agents)
     return true
@@ -127,6 +143,22 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     const dir = join(SCHEDULED_TASKS_DIR, name)
     if (existsSync(dir)) { json(res, { error: 'Schedule already exists' }, 409); return true }
 
+    // Dual-write to noa.db BEFORE file write; validation error -> 400, no file created
+    try {
+      syncTaskToNoa({
+        id: name,
+        agent: data.agent || MAIN_AGENT_ID,
+        type: (data.type || 'task') as 'task' | 'heartbeat',
+        prompt: data.prompt.trim(),
+        schedule: data.schedule.trim(),
+        description: data.description || '',
+        status: 'active',
+      })
+    } catch (err) {
+      json(res, { error: (err as Error).message }, 400)
+      return true
+    }
+
     writeScheduledTask(name, {
       description: data.description || '',
       prompt: data.prompt.trim(),
@@ -145,7 +177,8 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
 
   const scheduleUpdateMatch = path.match(/^\/api\/schedules\/([^/]+)$/)
   if (scheduleUpdateMatch && method === 'PUT') {
-    const name = decodeURIComponent(scheduleUpdateMatch[1])
+    const name = safeScheduleName(scheduleUpdateMatch[1])
+    if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
     const dir = join(SCHEDULED_TASKS_DIR, name)
     if (!existsSync(dir)) { json(res, { error: 'Schedule not found' }, 404); return true }
 
@@ -172,6 +205,37 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       json(res, { error: 'Invalid cron expression' }, 400)
       return true
     }
+    // Dual-write to noa.db; if task is file-only (not yet in noa.db) self-heal via syncTaskToNoa
+    const noaPatch = {
+      ...(data.description !== undefined ? { description: data.description } : {}),
+      ...(data.prompt !== undefined ? { prompt: data.prompt.trim() } : {}),
+      ...(data.schedule !== undefined ? { schedule: data.schedule.trim() } : {}),
+      ...(data.agent !== undefined ? { agent: data.agent } : {}),
+      ...(data.type !== undefined ? { type: data.type as 'task' | 'heartbeat' } : {}),
+      ...(data.enabled !== undefined ? { status: (data.enabled ? 'active' : 'paused') as 'active' | 'paused' } : {}),
+    }
+    try {
+      updateTask(name, noaPatch)
+    } catch (err) {
+      if (err instanceof TaskNotFoundError) {
+        // Legacy file-only task: read current file state and self-heal into noa.db
+        const fileTask = listScheduledTasks().find(t => t.name === name)
+        if (fileTask) {
+          syncTaskToNoa({
+            id: name,
+            agent: (data.agent ?? fileTask.agent) || MAIN_AGENT_ID,
+            type: ((data.type ?? fileTask.type) || 'task') as 'task' | 'heartbeat',
+            prompt: ((data.prompt ?? fileTask.prompt) || '').trim(),
+            schedule: ((data.schedule ?? fileTask.schedule) || '0 9 * * *').trim(),
+            description: data.description ?? fileTask.description ?? '',
+            status: data.enabled === undefined ? 'active' : (data.enabled ? 'active' : 'paused'),
+          })
+        }
+      } else {
+        throw err
+      }
+    }
+
     writeScheduledTask(name, data)
     logger.info({ name }, 'Scheduled task updated')
     json(res, { ok: true })
@@ -179,9 +243,11 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
   }
 
   if (scheduleUpdateMatch && method === 'DELETE') {
-    const name = decodeURIComponent(scheduleUpdateMatch[1])
+    const name = safeScheduleName(scheduleUpdateMatch[1])
+    if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
     const dir = join(SCHEDULED_TASKS_DIR, name)
     if (!existsSync(dir)) { json(res, { error: 'Schedule not found' }, 404); return true }
+    removeTaskFromNoa(name)  // tolerant: no-op if not yet in noa.db
     rmSync(dir, { recursive: true, force: true })
     logger.info({ name }, 'Scheduled task deleted')
     json(res, { ok: true })
@@ -190,7 +256,8 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
 
   const scheduleToggleMatch = path.match(/^\/api\/schedules\/([^/]+)\/toggle$/)
   if (scheduleToggleMatch && method === 'POST') {
-    const name = decodeURIComponent(scheduleToggleMatch[1])
+    const name = safeScheduleName(scheduleToggleMatch[1])
+    if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
     const dir = join(SCHEDULED_TASKS_DIR, name)
     if (!existsSync(dir)) { json(res, { error: 'Schedule not found' }, 404); return true }
 
@@ -198,6 +265,30 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     let config: Record<string, unknown> = {}
     try { config = JSON.parse(readFileOr(configPath, '{}')) } catch { /* use empty */ }
     const newEnabled = !(config.enabled !== false)
+
+    // Dual-write toggle to noa.db
+    try {
+      updateTask(name, { status: newEnabled ? 'active' : 'paused' })
+    } catch (err) {
+      if (err instanceof TaskNotFoundError) {
+        // Legacy file-only task: self-heal
+        const fileTask = listScheduledTasks().find(t => t.name === name)
+        if (fileTask) {
+          syncTaskToNoa({
+            id: name,
+            agent: fileTask.agent || MAIN_AGENT_ID,
+            type: (fileTask.type || 'task') as 'task' | 'heartbeat',
+            prompt: (fileTask.prompt || '').trim(),
+            schedule: (fileTask.schedule || '0 9 * * *').trim(),
+            description: fileTask.description ?? '',
+            status: newEnabled ? 'active' : 'paused',
+          })
+        }
+      } else {
+        throw err
+      }
+    }
+
     config.enabled = newEnabled
     atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
     logger.info({ name, enabled: newEnabled }, 'Scheduled task toggled')
@@ -205,9 +296,71 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     return true
   }
 
+  // Fire a scheduled task NOW, on operator demand or from an external trigger (n8n).
+  //
+  // mode: 'manual' (default) -- fires WITHOUT updating last_run/next_run so the
+  //   native cron runner still fires at its scheduled time. Use for operator/debug runs.
+  //
+  // mode: 'trigger' -- fires AND, ONLY on 'fired' success, rolls last_run/next_run
+  //   forward using the same formula as the native sweep tick. This makes the native
+  //   runner treat the task as "already fired" and skip its next poll -- converting
+  //   native into a true fallback.
+  //   LOST-INJECT safety: on 'offline' or 'busy', last_run/next_run are NOT advanced so
+  //   the native runner can fire as recovery. On 'busy' the prompt was not injected at
+  //   all; advancing would suppress the native retry with no actual execution.
+  //
+  // Narrow same-tick race: if the native poll query runs in the same second as this
+  // UPDATE commits, both may fire. The 409-busy response from the second inject is
+  // harmless (the agent ignores duplicate prompts while processing). This race window
+  // is ~1s and non-blocking by design; no additional coordination is required.
+  const scheduleRunMatch = path.match(/^\/api\/schedules\/([^/]+)\/run$/)
+  if (scheduleRunMatch && method === 'POST') {
+    const name = safeScheduleName(scheduleRunMatch[1])
+    if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
+    const fileTask = listScheduledTasks().find(t => t.name === name)
+    if (!fileTask) { json(res, { error: 'Schedule not found' }, 404); return true }
+
+    let force = false
+    let triggerMode = false
+    try {
+      const body = await readBody(req, { maxBytes: 4 * 1024 })
+      if (body.length) {
+        const parsed = JSON.parse(body.toString()) as { force?: boolean; mode?: string }
+        force = parsed.force === true
+        triggerMode = parsed.mode === 'trigger'
+      }
+    } catch { /* no/blank body -> defaults */ }
+
+    const agentName = fileTask.agent || MAIN_AGENT_ID
+    const session = fileTask.targetSession || resolveSession(agentName)
+    const prompt = buildScheduledTaskPrompt(fileTask, agentName)
+    const status = _inject(session, prompt, { force })
+
+    if (status === 'offline') {
+      json(res, { error: `Target session for "${name}" is not running`, status }, 503)
+      return true
+    }
+    if (status === 'busy') {
+      // Prompt was NOT injected; do NOT advance last_run/next_run -- native retries as recovery.
+      json(res, { error: `Target session for "${name}" is busy; retry or use force`, status }, 409)
+      return true
+    }
+
+    if (triggerMode) {
+      const dbTask = getTask(name)
+      if (dbTask) _recordFire(dbTask)
+    }
+    logger.info({ name, agent: agentName, session, force, triggerMode }, 'Scheduled task fired on operator demand')
+    json(res, { ok: true, status, agent: agentName })
+    return true
+  }
+
   if (path === '/api/schedules/pending' && method === 'GET') {
-    const now = Date.now()
-    const rows = listPendingTaskRetries().map(r => toPendingRetryView(r, now))
+    // SECONDS -- the sweep writes pending_task_retries in seconds. Passing
+    // Date.now() here made every row report an age of ~56 years and
+    // alertDue=true (see pending-retries.ts).
+    const nowS = Math.floor(Date.now() / 1000)
+    const rows = listPendingTaskRetries().map(r => toPendingRetryView(r, nowS))
     json(res, rows)
     return true
   }

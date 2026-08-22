@@ -1,0 +1,41 @@
+# Layer-2 fallback LLM providers -- TEMPLATE (card 92f07145).
+#
+# store/ is gitignored (host runtime state), so the live config is NOT in the
+# repo. Deploy step: copy this file to store/fallback-llm-providers.yaml on the
+# host and ensure the referenced env vars (GROQ_API_KEY, GEMINI_API_KEY) are set
+# in the process environment. scripts/fallback_llm_client.py reads
+# store/fallback-llm-providers.yaml by default (override with --providers-yaml).
+#
+# base_url MUST be on the script's hardcoded ALLOWED_BASE_URLS allowlist (AC-7):
+# an entry with any other base_url is silently dropped -- the YAML cannot widen
+# the allowlist. API keys are referenced by env-var NAME only (api_key_env); the
+# key value never appears here, on disk, in logs, or in the DB (AC-6).
+#
+# sensitive_ok: true  -> may serve "high"/"medium"/"low" sensitivity tasks
+# sensitive_ok: false -> "low" sensitivity ONLY (Gemini trains on free-tier input)
+#
+# Provider order is the fallback order within an eligible tier (Groq first).
+
+max_calls_per_outage: 50
+
+providers:
+  - name: groq-fast
+    base_url: "https://api.groq.com/openai/v1"
+    model: "llama-3.1-8b-instant"
+    api_key_env: "GROQ_API_KEY"
+    sensitive_ok: true
+    rpm_limit: 30
+
+  - name: groq-smart
+    base_url: "https://api.groq.com/openai/v1"
+    model: "llama-3.3-70b-versatile"
+    api_key_env: "GROQ_API_KEY"
+    sensitive_ok: true
+    rpm_limit: 30
+
+  - name: gemini-flash
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+    model: "gemini-2.5-flash"
+    api_key_env: "GEMINI_API_KEY"
+    sensitive_ok: false
+    rpm_limit: 15

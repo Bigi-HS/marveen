@@ -3,7 +3,7 @@ import {
   shouldSendAlert,
   toPendingRetryView,
   classifyTelegramSendError,
-  ALERT_THRESHOLD_MS,
+  ALERT_THRESHOLD_S,
 } from '../pending-retries.js'
 
 describe('shouldSendAlert', () => {
@@ -33,8 +33,8 @@ describe('shouldSendAlert', () => {
   })
 
   it('uses the default threshold (1 hour) when not supplied', () => {
-    expect(shouldSendAlert(firstAttempt + ALERT_THRESHOLD_MS + 1, firstAttempt, null)).toBe(true)
-    expect(shouldSendAlert(firstAttempt + ALERT_THRESHOLD_MS - 1, firstAttempt, null)).toBe(false)
+    expect(shouldSendAlert(firstAttempt + ALERT_THRESHOLD_S + 1, firstAttempt, null)).toBe(true)
+    expect(shouldSendAlert(firstAttempt + ALERT_THRESHOLD_S - 1, firstAttempt, null)).toBe(false)
   })
 
   it('returns false if firstAttempt is zero / non-positive (corrupt row)', () => {
@@ -78,21 +78,37 @@ describe('toPendingRetryView', () => {
     })
   })
 
-  it('derives ageMs as now - firstAttempt, clamped at zero', () => {
-    expect(toPendingRetryView(baseRow, 1_000_000 + 12345).ageMs).toBe(12345)
+  it('derives ageMs from SECOND-valued timestamps, clamped at zero', () => {
+    // The row and `now` are seconds (what the sweep writes); ageMs stays the
+    // millisecond response contract the dashboard renders. Reading the row as
+    // ms is what made the live API report 20649 days for every row.
+    expect(toPendingRetryView(baseRow, 1_000_000 + 12345).ageMs).toBe(12_345_000)
     // Negative age (clock skew): clamp to 0
     expect(toPendingRetryView(baseRow, 999_000).ageMs).toBe(0)
   })
 
+  it('normalises a legacy millisecond first_attempt instead of reading it as a future date', () => {
+    // Rows written before the sweep migration hold ms. Untreated, now - first
+    // is hugely negative -> clamps to 0 -> "not old enough" -> never alerts.
+    // That is a silent no-alert, the very failure this module guards.
+    const nowS = 1_800_000_000
+    const legacyMsRow = { ...baseRow, first_attempt: (nowS - 7200) * 1000 }
+
+    const view = toPendingRetryView(legacyMsRow, nowS)
+
+    expect(view.ageMs).toBe(7_200_000)
+    expect(view.alertDue).toBe(true)
+  })
+
   it('sets alertDue=true once past the threshold and no alert yet', () => {
-    const view = toPendingRetryView(baseRow, 1_000_000 + ALERT_THRESHOLD_MS + 1)
+    const view = toPendingRetryView(baseRow, 1_000_000 + ALERT_THRESHOLD_S + 1)
     expect(view.alertDue).toBe(true)
   })
 
   it('sets alertDue=false if an alert was already sent', () => {
     const view = toPendingRetryView(
-      { ...baseRow, alert_sent_at: 1_000_000 + ALERT_THRESHOLD_MS + 100 },
-      1_000_000 + 2 * ALERT_THRESHOLD_MS,
+      { ...baseRow, alert_sent_at: 1_000_000 + ALERT_THRESHOLD_S + 100 },
+      1_000_000 + 2 * ALERT_THRESHOLD_S,
     )
     expect(view.alertDue).toBe(false)
   })

@@ -1,7 +1,7 @@
 {
   "id": "marketer",
   "label": "Marketinges",
-  "description": "Email-vázlat, hírlevél, social tartalom. Mivel webes tartalmat olvas (prompt injection felület), szigorúan korlátozott: csak a saját mappájába írhat, SSH/AWS/.env tiltva, semmilyen Bash-pusztító parancs.",
+  "description": "Email-vázlat, hírlevél, social tartalom. Mivel webes tartalmat olvas (prompt injection felület), szigorúan korlátozott: csak a saját mappájába írhat, SSH/AWS/.env tiltva, semmilyen Bash-pusztító parancs, pkill és access.json hamisítás tiltva.",
   "permissionMode": "strict",
   "filesystem": {
     "allow": [
@@ -22,7 +22,15 @@
       "Read(**/.env)",
       "Bash(sudo:*)",
       "Bash(rm:*)",
-      "Bash(curl -X POST:*)"
+      "Bash(curl -X POST:*)",
+      "Bash(pkill:*)",
+      "Bash(killall:*)",
+      "Bash(npm publish:*)",
+      "Write(**/access.json)",
+      "Edit(**/access.json)",
+      "Read(**/.dashboard-token)",
+      "Read(**/.git-credentials)",
+      "Read(**/.claude.json)"
     ]
   }
 }

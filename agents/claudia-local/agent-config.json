@@ -1,0 +1,12 @@
+{
+  "model": "qwen3:4b",
+  "displayName": "Claudia Local",
+  "securityProfile": "default",
+  "team": {
+    "role": "worker",
+    "reportsTo": "claudia",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": []
+  }
+}

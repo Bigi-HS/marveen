@@ -5,7 +5,24 @@ import { execSync, execFileSync } from 'node:child_process'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, PROJECT_ROOT, RESPAWN_ENABLED } from '../config.js'
-import { agentDir, listAgentNames, readAgentChannelProvider } from './agent-config.js'
+import { agentDir, listAgentNames, readAgentChannelProviderSafe, readAgentModel, writeAgentModel } from './agent-config.js'
+import {
+  OPUS_FALLBACK_AGENTS,
+  SONNET_FALLBACK,
+  isOpusModel,
+  detectOpusCapReason,
+  decideOpusFallback,
+  readOpusFallbackState,
+  writeOpusFallbackState,
+} from './opus-fallback.js'
+import { markAgentCardsWaiting, OPUS_LIMIT_COMMENT } from './opus-fallback-kanban.js'
+import {
+  aggregateOpusBurn,
+  decideBurnAlerts,
+  readBurnAlertState,
+  writeBurnAlertState,
+} from './opus-burn-monitor.js'
+import { createAgentMessage } from '../db.js'
 import {
   agentHasChannel,
   agentSessionName,
@@ -49,7 +66,8 @@ function getProcessAgeMs(pid: number): number {
 }
 
 function resolveAgentProvider(name: string): ChannelProviderType {
-  const perAgent = readAgentChannelProvider(name)
+  // Fail-soft on an unreadable config (misconfigured secret pointer) -> default.
+  const perAgent = readAgentChannelProviderSafe(name).provider
   if (perAgent === 'slack' || perAgent === 'telegram' || perAgent === 'discord') return perAgent
   return CHANNEL_PROVIDER
 }
@@ -172,7 +190,12 @@ export function buildMainSessionRespawnCmd(opts: {
   ].join(' ')
 }
 
-function resumeMarveenSession(): boolean {
+// Exported so the standalone token-outage bridge can re-dispatch the queued
+// inbound after a usage-limit reset by reusing this proven context-preserving
+// --continue respawn (instead of duplicating the reap/modal/identity/unlock
+// dance). Cross-process double-respawn is guarded via the .channel-last-respawn
+// stamp file (see lastMainRespawnAt / fileRespawnStampMs).
+export function resumeMarveenSession(): boolean {
   const provider = getProvider(getMainAgentProvider())
   try {
     // Reap any orphan bun/node poller BEFORE we respawn. tmux respawn-pane -k
@@ -274,6 +297,25 @@ let marveenLastHardRestart = 0
 // shares the same post-respawn grace (single source of truth).
 export const MARVEEN_POST_RESPAWN_GRACE_MS = 360_000
 
+// Pure: the most recent main-session respawn time across all three writers --
+// the keepalive path (marveenLastKeepaliveRespawn), the hard-restart/inbound path
+// (marveenLastHardRestart) and the external file-stamp watchdog. This fold is what
+// mediates "which path defers to which": whoever stamped LAST wins, and the others
+// read it back via lastMainRespawnAt() and suppress. Extracted so the combined
+// two-path defer interaction is unit-testable (Thor T6).
+export function mostRecentRespawn(keepaliveAt: number, hardRestartAt: number, fileStampAtMs: number): number {
+  return Math.max(keepaliveAt, hardRestartAt, fileStampAtMs)
+}
+
+// Pure: should a recovery path DEFER its respawn because another path (or this
+// one) respawned recently? True only when there is a prior respawn (>0) and we
+// are still inside the grace window. Both the keepalive and hard-restart paths
+// gate on this via lastMainRespawnAt(), so a respawn from EITHER path suppresses
+// the other -- this is what stops the restart-on-restart stacking (2026-06-01).
+export function shouldDeferRespawn(now: number, lastRespawnAt: number, graceMs: number): boolean {
+  return lastRespawnAt > 0 && (now - lastRespawnAt) < graceMs
+}
+
 /**
  * B2 fix: shared cross-path grace accessor.
  * Returns the wall-clock time (ms since epoch) of the most recent main-session
@@ -282,7 +324,7 @@ export const MARVEEN_POST_RESPAWN_GRACE_MS = 360_000
  * KEEPALIVE_RESPAWN_GRACE_MS of each other.
  */
 export function lastMainRespawnAt(): number {
-  return Math.max(marveenLastKeepaliveRespawn, marveenLastHardRestart, fileRespawnStampMs())
+  return mostRecentRespawn(marveenLastKeepaliveRespawn, marveenLastHardRestart, fileRespawnStampMs())
 }
 
 // Cross-LAYER coordination with the independent systemd-timer watchdog
@@ -644,7 +686,7 @@ function handleMarveenDown(): void {
   // escalation. This is what stops the restart-on-restart stacking that caused
   // the 2026-06-01 480s outage (see MARVEEN_POST_RESPAWN_GRACE_MS).
   const lastRespawn = lastMainRespawnAt()
-  if (lastRespawn && now - lastRespawn < MARVEEN_POST_RESPAWN_GRACE_MS) {
+  if (shouldDeferRespawn(now, lastRespawn, MARVEEN_POST_RESPAWN_GRACE_MS)) {
     return
   }
   if (!marveenDownState) {
@@ -732,7 +774,7 @@ function handleMarveenDown(): void {
   }
   if (now - marveenDownState.lastAlertAt > PLUGIN_ALERT_DEDUP_MS) {
     marveenDownState.lastAlertAt = now
-    sendAlert(`🚨 Marveen ${providerLabel} plugin meg mindig halott. Nezd meg kezzel.`)
+    sendAlert(`🚨 NoA ${providerLabel} plugin meg mindig halott. Nezd meg kezzel.`)
   }
 }
 
@@ -744,7 +786,7 @@ function handleMarveenUp(): void {
     const providerLabel = getMainAgentProvider()
     logger.info({ stage, downedFor, provider: providerLabel }, 'Marveen channel plugin recovered')
     if (stage !== 'soft' && stage !== 'save' && stage !== 'resume') {
-      sendAlert(`✅ Marveen ${providerLabel} plugin helyrealt (${stage} utan, ${downedFor}s kieses).`)
+      sendAlert(`✅ NoA ${providerLabel} plugin helyrealt (${stage} utan, ${downedFor}s kieses).`)
     }
     marveenDownState = null
   }
@@ -757,6 +799,36 @@ function shouldEscalateMarveenDown(): boolean {
     return false
   }
   return now - marveenSuspectFirstSeen >= MARVEEN_DOWN_CONFIRM_MS
+}
+
+// Opus burn early-warning (card 1584cad7). Called every 30 min from
+// startChannelPluginMonitor. Sends inter-agent messages to marveen at
+// 70% / 90% of the weekly Opus credit limit (deduped per week via file state).
+function checkOpusBurnThresholds(): void {
+  try {
+    const result = aggregateOpusBurn(Date.now())
+    const state = readBurnAlertState()
+    const alerts = decideBurnAlerts(result, state)
+    for (const alert of alerts) {
+      logger.warn(
+        { level: alert.level, burnPct: result.burnPct.toFixed(1), totalBurnTokens: result.totalBurnTokens },
+        `[opus-burn] ${alert.level} threshold crossed`,
+      )
+      let sent = false
+      try {
+        createAgentMessage('server', MAIN_AGENT_ID, alert.message, false, alert.priority)
+        sent = true
+      } catch (err) {
+        logger.warn({ err }, '[opus-burn] failed to send alert message -- will retry next tick')
+      }
+      // Only persist dedup state if the message actually went out.
+      // If the DB insert failed, the next 30-min check will retry rather than
+      // silently marking the alert as sent.
+      if (sent) writeBurnAlertState(alert.nextState)
+    }
+  } catch (err) {
+    logger.warn({ err }, '[opus-burn] threshold check failed -- non-fatal')
+  }
 }
 
 export function startChannelPluginMonitor(): NodeJS.Timeout | null {
@@ -813,6 +885,51 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         const label = t.isMarveen ? BOT_NAME : (t.agentName ?? t.session)
         logger.error({ session: t.session, agent: label }, 'Agent wedged on thinking-block API error -- manual reset needed')
         sendAlert(`🚨 A(z) ${label} agens elakadt egy thinking-block API hibaban (a session-history korrupt, minden uj prompt ugyanazt a 400-at adja). Kezi reset kell: allitsd le es inditsd ujra, friss session indul. Reszletek: tmux attach -t ${t.session}`)
+      }
+
+      // Opus weekly-cap fallback (card 339d0a36): if the pane shows a usage-
+      // limit banner AND the agent currently runs Opus, switch it to Sonnet and
+      // stop the process (watchdog restarts it from the updated agent-config.json).
+      // On Sunday >= 10:00 UTC (Anthropic weekly reset) the original Opus model
+      // is restored the same way. Only the agents in OPUS_FALLBACK_AGENTS are
+      // checked; all others already run Sonnet by default.
+      if (!t.isMarveen && t.agentName && OPUS_FALLBACK_AGENTS.includes(t.agentName)) {
+        const capReason = pane != null ? detectOpusCapReason(pane) : null
+        const capSignal = capReason !== null
+        const allFallbackState = readOpusFallbackState()
+        const agentFallbackState = allFallbackState[t.agentName] ?? { fallbackActive: false, originalModel: null, activeSince: null }
+        const currentModel = readAgentModel(t.agentName)
+        const nowMs = Date.now()
+        const fallbackDecision = decideOpusFallback({ paneHasCapSignal: capSignal, currentModel, state: agentFallbackState, nowMs })
+        if (fallbackDecision.action === 'activate') {
+          // Write-order fix (card 4c800b62 #3): model write first, state second.
+          // If writeAgentModel throws, fallback state stays inactive -> re-detect on next tick.
+          writeAgentModel(t.agentName, SONNET_FALLBACK)
+          writeOpusFallbackState({ ...allFallbackState, [t.agentName]: { fallbackActive: true, originalModel: currentModel, activeSince: nowMs, activationReason: capReason ?? 'weekly-cap', deactivatedAt: null } })
+          // Graceful degradation (card 75a5ecc3): move in_progress cards to
+          // waiting so they are not silently stuck while the agent is offline.
+          // Wrapped in try-catch so a SQLite error never prevents stopAgentProcess
+          // (Thor MINOR: if markAgentCardsWaiting throws, the agent would stay on
+          // Opus while state says fallback=true -> zombie state).
+          let moved = 0
+          try {
+            moved = markAgentCardsWaiting(t.agentName, OPUS_LIMIT_COMMENT)
+          } catch (err) {
+            logger.warn({ err, agent: t.agentName }, '[opus-fallback] markAgentCardsWaiting failed (non-fatal, continuing to stopAgentProcess)')
+          }
+          logger.warn({ agent: t.agentName, originalModel: currentModel, cardsMovedToWaiting: moved, capReason }, '[opus-fallback] cap detected -- switched to Sonnet, watchdog will restart')
+          sendAlert(`⚠️ ${t.agentName}: Opus cap detektálva (${capReason ?? 'unknown'}). Sonnet-fallbackre váltva (${SONNET_FALLBACK}). ${moved > 0 ? `${moved} kártya waiting-re állítva. ` : ''}Reset után automatikusan visszaáll.`)
+          stopAgentProcess(t.agentName)
+        } else if (fallbackDecision.action === 'deactivate') {
+          const rawOrig = fallbackDecision.originalModel
+          const origModel = (rawOrig && isOpusModel(rawOrig)) ? rawOrig : 'claude-opus-4-8'
+          // Write-order fix (card 4c800b62 #3): model write first, state second.
+          writeAgentModel(t.agentName, origModel)
+          writeOpusFallbackState({ ...allFallbackState, [t.agentName]: { fallbackActive: false, originalModel: null, activeSince: null, activationReason: null, deactivatedAt: nowMs } })
+          logger.info({ agent: t.agentName, model: origModel }, '[opus-fallback] reset -- restoring Opus model, watchdog will restart')
+          sendAlert(`✅ ${t.agentName}: Reset -- visszaállítva erre: ${origModel}.`)
+          stopAgentProcess(t.agentName)
+        }
       }
     }
 
@@ -889,6 +1006,13 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     void reconcileDesiredAgents()
   }
   setTimeout(check, 30000)
+  // Opus burn early-warning: check every 30 min (independent of 60s pane loop).
+  // First check at startup after 5 min to let token_usage writer catch up.
+  const BURN_CHECK_INTERVAL_MS = 30 * 60 * 1000
+  setTimeout(() => {
+    checkOpusBurnThresholds()
+    setInterval(checkOpusBurnThresholds, BURN_CHECK_INTERVAL_MS)
+  }, 5 * 60 * 1000)
   return setInterval(check, 60000)
 }
 

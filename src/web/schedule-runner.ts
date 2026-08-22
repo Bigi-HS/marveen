@@ -2,7 +2,6 @@ import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { execSync, execFileSync } from 'node:child_process'
 import { resolveFromPath } from '../platform.js'
-import { atomicWriteFileSync } from './atomic-write.js'
 import { logger } from '../logger.js'
 import {
   PROJECT_ROOT,
@@ -23,9 +22,12 @@ import {
   UNTRUSTED_PREAMBLE,
   wrapUntrusted,
 } from '../prompt-safety.js'
+import { resolveNoaDbPath } from '../db-path.js'
 import { cronMatchesNow } from './cron.js'
+import { shouldHoldProactiveWork } from './fleet-pause-enforcer.js'
 import {
   listScheduledTasks,
+  SCHEDULED_TASKS_DIR,
   type ScheduledTask,
 } from './scheduled-tasks-io.js'
 import { listAgentNames, readFileOr } from './agent-config.js'
@@ -37,8 +39,182 @@ import {
 } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { sendTelegramMessage } from './telegram.js'
+import { evaluateEmergencyRouting } from './emergency-routing-policy.js'
 
 const TMUX = resolveFromPath('tmux')
+const PYTHON = resolveFromPath('python3')
+
+// --- Token-outage direct-send bypass (card 92f07145) ---
+// When the shared Claude account is usage-limited, every agent freezes and the
+// normal tmux-inject path delivers nothing. A task marked directSend:true is
+// instead delivered by the model-free scripts/direct-send.py, which sends the
+// task's pre-written `## Direct Message` over the Telegram Bot API. The trigger
+// is read from the single authoritative source maintained by the
+// token-outage-bridge (spec 4.3); no pane-capture fallback.
+const TOKEN_OUTAGE_STATE_PATH = join(PROJECT_ROOT, 'store', 'token-outage-state.json')
+// Post-retire default (card 57480c07): the fallback is the LIVE noa.db, so a
+// scheduled send with NOA_DB_PATH unset can no longer write into the frozen
+// legacy claudeclaw.db.
+const DEFAULT_LIVE_DB = join(PROJECT_ROOT, 'store', 'noa.db')
+const DIRECT_SEND_SCRIPT = join(PROJECT_ROOT, 'scripts', 'direct-send.py')
+const FALLBACK_LLM_SCRIPT = join(PROJECT_ROOT, 'scripts', 'fallback_llm_client.py')
+const FALLBACK_LLM_PROVIDERS = join(PROJECT_ROOT, 'store', 'fallback-llm-providers.yaml')
+
+// Read the outage state file. Absent, unreadable, or malformed -> null, which
+// shouldDirectSend treats as "not limited" so the normal path fires (spec 4.3).
+export function readTokenOutageState(path: string = TOKEN_OUTAGE_STATE_PATH): { limited: boolean } | null {
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf-8'))
+    if (raw && typeof raw === 'object' && typeof raw.limited === 'boolean') {
+      return { limited: raw.limited }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+// Resolve the LIVE fleet DB for the model-free child scripts (direct-send.py /
+// fallback_llm_client.py). The noa.db cutover points NOA_DB_PATH at the migrated
+// database; hardcoding claudeclaw.db made a scheduled token-outage send write its
+// direct_send_log / layer2_call_log rows AND its kanban card updates/inserts into
+// the FROZEN legacy DB, invisible to the live board (card b793b2d8, latent
+// split-brain bug). Reuse the canonical resolver (same guard as the app's own DB
+// handle); fall back to the live noa.db when NOA_DB_PATH is unset (card 57480c07).
+export function scheduledDbPath(env: NodeJS.ProcessEnv = process.env): string {
+  return resolveNoaDbPath(env.NOA_DB_PATH, PROJECT_ROOT, DEFAULT_LIVE_DB)
+}
+
+// Pure trigger predicate (AC-1): direct-send fires iff the task opts in AND the
+// agent is in a limit state. Everything else falls through to the normal path.
+export function shouldDirectSend(
+  task: Pick<ScheduledTask, 'directSend'>,
+  state: { limited: boolean } | null,
+): boolean {
+  return task.directSend === true && state?.limited === true
+}
+
+// Invoke direct-send.py as a child process (argv only, no shell -- AC-8) and
+// return its exit code: 0=sent, 1=config error, 2=delivery failure. A spawn
+// failure (e.g. python missing) is treated as a delivery failure (2).
+function runDirectSend(task: ScheduledTask): number {
+  const taskDir = join(SCHEDULED_TASKS_DIR, task.name)
+  const args = [
+    DIRECT_SEND_SCRIPT,
+    '--task-dir', taskDir,
+    '--env-file', join(PROJECT_ROOT, '.env'),
+    '--db-path', scheduledDbPath(),
+  ]
+  try {
+    execFileSync(PYTHON, args, { timeout: 20000, stdio: 'pipe' })
+    return 0
+  } catch (err) {
+    const status = (err as { status?: number }).status
+    if (typeof status === 'number') return status
+    logger.warn({ err, task: task.name }, 'direct-send: spawn failed (treated as delivery failure)')
+    return 2
+  }
+}
+
+// Pure trigger predicate (AC-1, Layer 2): the fallback-LLM client fires iff the
+// task opts into layer2 AND the agent is usage-limited AND Layer 1 did NOT run
+// for this task. Layer 1 runs when directSend === true, so Layer 2 requires
+// directSend !== true -- a directSend task is handled (or skipped) by Layer 1
+// and never double-fires here (AC-1c). The per-task layer2_task_type +
+// sensitivity are read by the Python client from task-config.json.
+export function shouldFallbackLLM(
+  task: Pick<ScheduledTask, 'layer2' | 'directSend'>,
+  state: { limited: boolean } | null,
+): boolean {
+  return task.layer2 === true && task.directSend !== true && state?.limited === true
+}
+
+// Read the per-task Layer-2 routing fields from task-config.json. The python
+// client reads these directly; the node-side policy gate (card d1ccf1d9) needs
+// them too, to apply the per-agent emergency-routing policy BEFORE any egress.
+// Absent/unreadable/malformed -> empty fields, which the gate treats fail-safe
+// (unknown_task_type / high sensitivity -> deny).
+export function readLayer2TaskConfig(
+  taskName: string,
+  baseDir: string = SCHEDULED_TASKS_DIR,
+): { taskType?: string; sensitivity?: string } {
+  const configPath = join(baseDir, taskName, 'task-config.json')
+  try {
+    const cfg = JSON.parse(readFileSync(configPath, 'utf-8')) as {
+      layer2_task_type?: unknown
+      sensitivity?: unknown
+    }
+    return {
+      taskType: typeof cfg.layer2_task_type === 'string' ? cfg.layer2_task_type : undefined,
+      sensitivity: typeof cfg.sensitivity === 'string' ? cfg.sensitivity : undefined,
+    }
+  } catch {
+    return {}
+  }
+}
+
+// Per-agent emergency-routing egress decision (card d1ccf1d9). The SINGLE
+// chokepoint that decides whether a Layer-2 task may egress to an external LLM.
+// It is FAIL-CLOSED: if reading the task config or evaluating the policy throws
+// (import/IO error), the egress is BLOCKED (reason 'policy_error_failclosed'),
+// never silent-passed -- a broken policy layer must not open an egress path.
+// The config reader is injectable so the fail-closed branch is unit-testable.
+export function fallbackEgressDecision(
+  agentName: string,
+  taskName: string,
+  readConfig: (n: string, d?: string) => { taskType?: string; sensitivity?: string } = readLayer2TaskConfig,
+): { allowed: boolean; reason: string } {
+  try {
+    const { taskType, sensitivity } = readConfig(taskName)
+    return evaluateEmergencyRouting(agentName, taskType ?? '', sensitivity)
+  } catch (err) {
+    logger.warn(
+      { err, agent: agentName, task: taskName },
+      'Fallback-LLM policy evaluation threw -- failing closed (no egress)',
+    )
+    return { allowed: false, reason: 'policy_error_failclosed' }
+  }
+}
+
+// Invoke fallback_llm_client.py (argv only, no shell). Exit codes mirror the
+// script: 0=produced output, 1=config error / non-retryable skip, 2=transient
+// delivery failure. A cloud completion can take a while, so the timeout is more
+// generous than direct-send's. A spawn failure is treated as transient (2).
+function runFallbackLLM(task: ScheduledTask, agentName: string): number {
+  // SECURITY (card d1ccf1d9): the per-agent emergency-routing policy gate is the
+  // FIRST step here -- inside the egress function, NOT the caller's job -- so no
+  // call path can bypass it. PII-local agents (hibiki, claudia) and out-of-policy
+  // task-types/sensitivities are blocked before any external request is made.
+  // This is a SECOND, independent layer over the python client's own sensitivity
+  // routing; it can only ever be stricter, never looser.
+  const gate = fallbackEgressDecision(agentName, task.name)
+  if (!gate.allowed) {
+    logger.warn(
+      { task: task.name, agent: agentName, reason: gate.reason },
+      'Fallback-LLM blocked by per-agent emergency-routing policy (no egress)',
+    )
+    return 1 // non-retryable skip: tick consumed, nothing egressed
+  }
+
+  const taskDir = join(SCHEDULED_TASKS_DIR, task.name)
+  const args = [
+    FALLBACK_LLM_SCRIPT,
+    '--task-dir', taskDir,
+    '--providers-yaml', FALLBACK_LLM_PROVIDERS,
+    '--db-path', scheduledDbPath(),
+    '--state-file', TOKEN_OUTAGE_STATE_PATH,
+    '--env-file', join(PROJECT_ROOT, '.env'),
+  ]
+  try {
+    execFileSync(PYTHON, args, { timeout: 60000, stdio: 'pipe' })
+    return 0
+  } catch (err) {
+    const status = (err as { status?: number }).status
+    if (typeof status === 'number') return status
+    logger.warn({ err, task: task.name }, 'fallback-llm: spawn failed (treated as delivery failure)')
+    return 2
+  }
+}
 
 // --- Schedule Runner ---
 // Checks every minute if any scheduled task is due and injects the prompt
@@ -54,38 +230,118 @@ const TMUX = resolveFromPath('tmux')
 // before each Telegram send and clears the stamp on delivery failure,
 // giving exactly-one stamp per attempt and at-least-once delivery until
 // success. See sendPendingRetryAlert below.
+//
+// skipIfBusy re-queue (card 92f763a2): short-cadence tasks that were
+// previously silently dropped when the target was busy now get a bounded
+// retry: up to SKIP_IF_BUSY_MAX_RETRIES attempts, one per
+// SKIP_IF_BUSY_RETRY_INTERVAL_MS. If all retries are exhausted without
+// the session freeing up, an out-of-band HTTPS alert goes to the operator
+// (same dead-pipe-proof path as the delivery-sentinel) so the 10h silence
+// gap is bounded to ~30 minutes.
+export const SKIP_IF_BUSY_MAX_RETRIES = 3
+export const SKIP_IF_BUSY_RETRY_INTERVAL_MS = 10 * 60 * 1000 // 10 min
 
 // When a task fires we record its time here so the catch-up window (30 min on
 // the first tick after a restart) does not re-run it. This map is in-memory, so
-// a dashboard restart that lands inside a task's catch-up window used to re-fire
-// an already-run task (observed: a restart re-sent a second vmd-report). Persist
-// it to disk and reload on startup so the skip-check survives restarts.
-const SCHEDULE_LAST_RUN_PATH = join(PROJECT_ROOT, 'store', 'schedule-last-run.json')
-const scheduleLastRun: Map<string, number> = new Map()
-
-function loadScheduleLastRun(): void {
-  try {
-    const raw = JSON.parse(readFileSync(SCHEDULE_LAST_RUN_PATH, 'utf-8'))
-    if (raw && typeof raw === 'object') {
-      for (const [name, ts] of Object.entries(raw)) {
-        if (typeof ts === 'number' && Number.isFinite(ts)) scheduleLastRun.set(name, ts)
-      }
-    }
-  } catch { /* no file yet / unreadable -- start empty */ }
-}
-
-function persistScheduleLastRun(): void {
-  try {
-    atomicWriteFileSync(SCHEDULE_LAST_RUN_PATH, JSON.stringify(Object.fromEntries(scheduleLastRun), null, 2))
-  } catch (err) {
-    logger.warn({ err }, 'schedule-runner: failed to persist last-run map')
-  }
-}
+// scheduleLastRun Map removed (A4): noa.db last_run is the single source of truth (AC-8).
 
 // Try to fire a task at a single target agent. Returns the outcome so the
 // caller can decide whether to queue a retry. Splitting this out means the
+// Build the full prompt injected into the agent's session for a scheduled
+// task. Extracted so the cron loop (attemptFireTask) and the on-demand
+// "run now" dashboard trigger compose the prompt identically -- one source of
+// truth for the type-specific prefix + the untrusted-wrap of the user-editable
+// task body. Pure: no IO, no bookkeeping.
+export function buildScheduledTaskPrompt(task: ScheduledTask, agentName: string): string {
+  let prefix: string
+  if (task.type === 'heartbeat') {
+    // Channel-less heartbeat agents (today: only `heartbeat`) MUST NOT
+    // receive the Telegram-keepalive directive -- their CLAUDE.md is
+    // explicit that all output goes to Marveen via inter-agent message
+    // (Marveen 2026-06-02 PR #257 review block). The historical prefix
+    // was Marveen-specific scaffolding ("keep the bun-poller stdio
+    // alive, only Telegram-reply if urgent") and would create a direct
+    // contradiction with the agent's own contract; worse, if the
+    // channel-plugin disable ever leaks through from the user-scope
+    // settings (which it has done before in this fleet -- the very
+    // motivation for this whole rearchitecture), the leftover Telegram
+    // tool would receive an explicit instruction to use chat_id
+    // ALLOWED_CHAT_ID. So: emit a minimal heartbeat tag for the
+    // resubmit-marker code below to match, and let the agent's own
+    // CLAUDE.md + SKILL.md drive behaviour.
+    if (agentName === 'heartbeat') {
+      prefix = `[Heartbeat: ${task.name}] `
+    } else {
+      prefix = `[Heartbeat: ${task.name}] *** KOTELEZO ELSO TEENDO MIELOTT BARMIT IRSZ: hivj meg pontosan EGY local-only tool-t (peldaul Bash 'echo keepalive >> /tmp/marveen-keepalive.log' VAGY Read tool egy meglevo fajlra mint ${join(PROJECT_ROOT, 'HEARTBEAT.md')}). NE Telegram-tool-t -- az zajt eredmenyezne. Ezt a Telegram-bun MCP-stdio-pipe keep-alive-ehez kell, ha kihagyod, a Telegram-conn 30 percen belul disconnect-el. *** Aztan: ez egy csendes ellenorzes. CSAK AKKOR irj Telegramon (chat_id: ${ALLOWED_CHAT_ID}), ha tenyleg fontos/surgos dolgot talalsz. Ha minden rendben, NE kuldj Telegram uzenetet -- a kotelezo no-op tool-call mar megfelelo aktivitas. Egy rovid 'csendes heartbeat' sor a transzkriptbe + a tool-call elég. `
+    }
+  } else {
+    prefix = `[Utemezett feladat: ${task.name}] Az eredmenyt kuldd el Telegramon (chat_id: ${ALLOWED_CHAT_ID}, reply tool). `
+  }
+  // Task prompts are editable via /api/schedules (bearer-gated), which means
+  // they can carry injection payloads just like inter-agent messages. Wrap
+  // the user-editable part and prepend the preamble so the receiving agent
+  // treats it as data, not an instruction override.
+  return (
+    UNTRUSTED_PREAMBLE + '\n' +
+    prefix.trimEnd() + '\n\n' +
+    wrapUntrusted(`scheduled-task:${task.name}`, task.prompt)
+  )
+}
+
 // pendingTaskRetries loop and the normal cron loop share one code path.
-function attemptFireTask(task: ScheduledTask, agentName: string, now: number): 'fired' | 'busy' | 'missing' | 'error' {
+function attemptFireTask(task: ScheduledTask, agentName: string, now: number): 'fired' | 'busy' | 'missing' | 'error' | 'paused' {
+  // Token-outage bypass (card 92f07145): when the agent is usage-limited and
+  // the task opts into directSend, deliver the pre-written reminder model-free
+  // instead of injecting into the frozen Claude session. AC-7: when not limited
+  // or not directSend, fall through to the unchanged normal path below.
+  const outageState = readTokenOutageState()
+  if (shouldDirectSend(task, outageState)) {
+    const code = runDirectSend(task)
+    if (code === 0) {
+      appendTaskRun(task.name, agentName)
+      logger.info({ task: task.name, agent: agentName }, 'Direct-send fired (token-outage bypass)')
+      return 'fired'
+    }
+    if (code === 1) {
+      // Permanent config error (no template / no token / invalid chat_id):
+      // consume the tick so we do not spin, but record no task run -- nothing
+      // was sent. The DB direct_send_log row carries the diagnostic.
+      logger.warn({ task: task.name, agent: agentName }, 'Direct-send config error (exit 1), tick consumed')
+      return 'fired'
+    }
+    // exit 2 = delivery failure (network / Telegram non-200). Leave last-run
+    // unset so a later tick in the same cron window can re-attempt; surface as
+    // an error for the caller's logging.
+    logger.warn({ task: task.name, agent: agentName, code }, 'Direct-send delivery failure (exit 2)')
+    return 'error'
+  }
+
+  // Token-outage bypass Layer 2 (card 92f07145): when usage-limited and the task
+  // opts into layer2 (and is not a Layer-1 directSend task), route it to the
+  // single-shot cloud fallback-LLM client instead of the frozen Claude session.
+  if (shouldFallbackLLM(task, outageState)) {
+    // The per-agent emergency-routing policy gate (card d1ccf1d9) lives INSIDE
+    // runFallbackLLM as its first step -- no call path can bypass it. A policy
+    // block returns exit code 1 (non-retryable skip), handled below.
+    const code = runFallbackLLM(task, agentName)
+    if (code === 0) {
+      appendTaskRun(task.name, agentName)
+      logger.info({ task: task.name, agent: agentName }, 'Fallback-LLM fired (token-outage Layer 2)')
+      return 'fired'
+    }
+    if (code === 1) {
+      // Non-retryable skip / config error (unknown task type, no usable
+      // provider, budget exhausted, invalid response): consume the tick, record
+      // no run. The layer2_call_log row carries the diagnostic.
+      logger.warn({ task: task.name, agent: agentName }, 'Fallback-LLM skip/config error (exit 1), tick consumed')
+      return 'fired'
+    }
+    // exit 2 = transient (provider/Telegram/DB). Leave last-run unset to allow a
+    // later tick in the same window to retry.
+    logger.warn({ task: task.name, agent: agentName, code }, 'Fallback-LLM transient failure (exit 2)')
+    return 'error'
+  }
+
   const isMainAgent = agentName === MAIN_AGENT_ID
   // Allow per-task session override via targetSession config field.
   // Falls back to the standard agent session name derivation.
@@ -104,6 +360,15 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
     return 'missing'
   }
 
+  // Fleet-pause gate (card fd30873b): when the rate-limit governor has paused the
+  // fleet AND enforcement is activated (FLEET_PAUSE_ENFORCE), hold off firing this
+  // task -- it is retried on a later cycle and fires once the pause self-clears.
+  // Checked BEFORE forceSend: a rate-limit pause must hold even forceSend tasks.
+  // Inert by default (mode=off => this returns false with zero overhead).
+  if (shouldHoldProactiveWork(`schedule:${task.name}@${agentName}`)) {
+    return 'paused'
+  }
+
   // When forceSend is true, skip the busy-state check entirely and inject
   // the prompt regardless. The Claude session queues it internally and
   // will process it at the next idle slot. This prevents the infinite
@@ -119,41 +384,8 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
   }
 
   try {
-    let prefix: string
-    if (task.type === 'heartbeat') {
-      // Channel-less heartbeat agents (today: only `heartbeat`) MUST NOT
-      // receive the Telegram-keepalive directive -- their CLAUDE.md is
-      // explicit that all output goes to Marveen via inter-agent message
-      // (Marveen 2026-06-02 PR #257 review block). The historical prefix
-      // was Marveen-specific scaffolding ("keep the bun-poller stdio
-      // alive, only Telegram-reply if urgent") and would create a direct
-      // contradiction with the agent's own contract; worse, if the
-      // channel-plugin disable ever leaks through from the user-scope
-      // settings (which it has done before in this fleet -- the very
-      // motivation for this whole rearchitecture), the leftover Telegram
-      // tool would receive an explicit instruction to use chat_id
-      // ALLOWED_CHAT_ID. So: emit a minimal heartbeat tag for the
-      // resubmit-marker code below to match, and let the agent's own
-      // CLAUDE.md + SKILL.md drive behaviour.
-      if (agentName === 'heartbeat') {
-        prefix = `[Heartbeat: ${task.name}] `
-      } else {
-        prefix = `[Heartbeat: ${task.name}] *** KOTELEZO ELSO TEENDO MIELOTT BARMIT IRSZ: hivj meg pontosan EGY local-only tool-t (peldaul Bash 'echo keepalive >> /tmp/marveen-keepalive.log' VAGY Read tool egy meglevo fajlra mint ${join(PROJECT_ROOT, 'HEARTBEAT.md')}). NE Telegram-tool-t -- az zajt eredmenyezne. Ezt a Telegram-bun MCP-stdio-pipe keep-alive-ehez kell, ha kihagyod, a Telegram-conn 30 percen belul disconnect-el. *** Aztan: ez egy csendes ellenorzes. CSAK AKKOR irj Telegramon (chat_id: ${ALLOWED_CHAT_ID}), ha tenyleg fontos/surgos dolgot talalsz. Ha minden rendben, NE kuldj Telegram uzenetet -- a kotelezo no-op tool-call mar megfelelo aktivitas. Egy rovid 'csendes heartbeat' sor a transzkriptbe + a tool-call elég. `
-      }
-    } else {
-      prefix = `[Utemezett feladat: ${task.name}] Az eredmenyt kuldd el Telegramon (chat_id: ${ALLOWED_CHAT_ID}, reply tool). `
-    }
-    // Task prompts are editable via /api/schedules (bearer-gated), which means
-    // they can carry injection payloads just like inter-agent messages. Wrap
-    // the user-editable part and prepend the preamble so the receiving agent
-    // treats it as data, not an instruction override.
-    const fullPrompt =
-      UNTRUSTED_PREAMBLE + '\n' +
-      prefix.trimEnd() + '\n\n' +
-      wrapUntrusted(`scheduled-task:${task.name}`, task.prompt)
+    const fullPrompt = buildScheduledTaskPrompt(task, agentName)
     sendPromptToSession(session, fullPrompt)
-    scheduleLastRun.set(task.name, now)
-    persistScheduleLastRun()
     appendTaskRun(task.name, agentName)
     logger.info({ task: task.name, agent: agentName, session }, 'Scheduled task fired')
 
@@ -189,174 +421,50 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
   }
 }
 
-// Fire a Telegram alert when a pending retry has been stuck past the
-// threshold. Stamps `alert_sent_at` BEFORE the network call so concurrent
-// ticks and crash-restarts cannot race into double-alerting on the same
-// attempt. If the send fails, the stamp is cleared so the next tick can
-// retry -- that way a transient Telegram outage or a bad token doesn't
-// silently suppress every future alert on this row. Net semantics:
-// exactly-one stamp per delivery attempt, at-least-once delivery with a
-// 60s retry cadence until success.
-function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
-  // Stamp first. If another tick raced us, markPendingTaskRetryAlert
-  // returns false (the WHERE alert_sent_at IS NULL guards it) and we
-  // skip the send entirely.
-  const claimed = markPendingTaskRetryAlert(view.taskName, view.agentName, nowMs)
-  if (!claimed) return
+// The pending-retry escalation used to live here. It now lives in
+// src/web/pending-retry-alert.ts and is called by the live sweep in
+// src/noa-scheduler.ts (card CORE/57cf5022). The copy in this file had zero
+// call sites after the A4 migration while still reading like live code --
+// which is why a stuck task could go 78 hours without telling anyone. Do not
+// reintroduce a second copy here: this module no longer owns the sweep.
+//
+// STILL DEAD below: sendSkipIfBusyExhaustedAlert and the SKIP_IF_BUSY_*
+// constants also lost their call sites in the same migration. They are left
+// in place rather than silently deleted because the bounded-retry policy they
+// encode has not been re-decided; tracked on the same card.
 
-  // Validate the delivery config BEFORE building/sending. A missing token
-  // or chat_id is a permanent configuration problem -- it will fail
-  // identically on every 60s tick. Earlier this path (token only) cleared
-  // the stamp on failure, so the alert re-fired every minute forever and
-  // spammed the log; and chat_id was never validated at all, so an empty
-  // ALLOWED_CHAT_ID guaranteed a 400 from Telegram on every attempt. Leave
-  // the stamp in place (it acts as the throttle) and log once so the
-  // operator sees the config gap without the spin. The scheduled task
-  // itself keeps retrying regardless -- only this alert is suppressed.
+// Send an out-of-band HTTPS alert when a skipIfBusy task has exhausted all
+// bounded retries without the target session freeing up (card 92f763a2).
+// Uses the same direct HTTPS path as sendPendingRetryAlert so it is immune
+// to MCP-pipe death. Fire-and-forget with structured logging on failure --
+// the retry row is deleted regardless (the bounded contract is fulfilled).
+function sendSkipIfBusyExhaustedAlert(taskName: string, agentName: string, firstAttemptMs: number): void {
   const envPath = join(PROJECT_ROOT, '.env')
   const envContent = readFileOr(envPath, '')
   const tokenMatch = envContent.match(/TELEGRAM_BOT_TOKEN=(.+)/)
   const token = tokenMatch?.[1]?.trim()
   if (!token) {
-    logger.warn({ task: view.taskName, agent: view.agentName }, 'Pending-retry alert suppressed: no TELEGRAM_BOT_TOKEN (config error, stamp kept to avoid 60s spin)')
+    logger.warn({ task: taskName, agent: agentName }, 'skipIfBusy exhausted alert suppressed: no TELEGRAM_BOT_TOKEN')
     return
   }
   if (!ALLOWED_CHAT_ID.trim()) {
-    logger.warn({ task: view.taskName, agent: view.agentName }, 'Pending-retry alert suppressed: empty ALLOWED_CHAT_ID (config error, stamp kept to avoid 60s spin)')
+    logger.warn({ task: taskName, agent: agentName }, 'skipIfBusy exhausted alert suppressed: empty ALLOWED_CHAT_ID')
     return
   }
-
-  const ageMinutes = Math.floor(view.ageMs / 60000)
-  const firstAttempt = new Date(view.firstAttempt).toLocaleString('hu-HU')
+  const ageMin = Math.floor((Date.now() - firstAttemptMs) / 60000)
   const text = [
-    `[Marveen scheduler] A(z) "${view.taskName}" (${view.agentName}) utemezett feladat ${ageMinutes} perce varakozik.`,
-    `Elso probalkozas: ${firstAttempt}.`,
-    'A rendszer tovabb probalkozik; a dashboard /Utemezesek oldalan visszavonhato.',
+    `[Marveen scheduler] A(z) "${taskName}" (${agentName}) heartbeat ${SKIP_IF_BUSY_MAX_RETRIES}x@10min utan sem tudott befutni -- a session ${ageMin} perce foglalt/nem valaszol.`,
+    'A task torolve a varakozosi listarol. Ellenorizd a sessiont (tmux capture-pane), majd indits manualis heartbeatet ha szukseges.',
   ].join('\n')
   ;(async () => {
     try {
       await sendTelegramMessage(token, ALLOWED_CHAT_ID, text)
-      logger.info({ task: view.taskName, agent: view.agentName, ageMinutes }, 'Pending-retry Telegram alert sent')
+      logger.info({ task: taskName, agent: agentName, ageMin }, 'skipIfBusy exhausted: HTTPS fallback alert sent')
     } catch (err) {
-      // Distinguish a transient failure (network blip, 429, 5xx) from a
-      // permanent one (4xx: bad chat_id / revoked token). Transient ->
-      // clear the per-attempt stamp so the next tick retries. Permanent
-      // -> KEEP the stamp; retrying every 60s would just repeat the same
-      // rejection and spam the log until the config is fixed.
-      const kind = classifyTelegramSendError(err instanceof Error ? err.message : String(err))
-      if (kind === 'transient') {
-        logger.warn({ err, task: view.taskName, agent: view.agentName }, 'Pending-retry alert delivery failed (transient), clearing stamp for retry')
-        clearPendingTaskRetryAlert(view.taskName, view.agentName)
-      } else {
-        logger.warn({ err, task: view.taskName, agent: view.agentName }, 'Pending-retry alert delivery failed (permanent), stamp kept to avoid 60s spin')
-      }
+      logger.warn({ err, task: taskName, agent: agentName }, 'skipIfBusy exhausted: HTTPS fallback alert failed')
     }
   })()
 }
 
-export function startScheduleRunner(): NodeJS.Timeout {
-  // Reload the persisted last-run times so a restart inside a task's catch-up
-  // window does not re-fire an already-run task.
-  loadScheduleLastRun()
-  let firstRun = true
-
-  function runCheck() {
-    const tasks = listScheduledTasks()
-    const now = Date.now()
-    // On first run after restart, catch up missed tasks from last 30 min
-    const catchUp = firstRun ? 30 * 60000 : 60000
-    firstRun = false
-
-    // Retry tasks that were busy-skipped on earlier ticks (persisted in
-    // pending_task_retries so they survive dashboard restart). cronMatchesNow
-    // only fires on an exact minute boundary, so without this the noon
-    // check skipped because the session was busy at 12:00:50 would never
-    // run that day. We NEVER abandon -- the operator can cancel from the
-    // UI if a retry has become obsolete.
-    const pendingRows = listPendingTaskRetries()
-    const pendingKeys = new Set<string>()
-    for (const row of pendingRows) {
-      // Locate the task definition. If it was deleted meanwhile, drop the
-      // retry silently -- nothing to fire.
-      const taskDef = tasks.find(t => t.name === row.task_name)
-      if (!taskDef) {
-        deletePendingTaskRetry(row.task_name, row.agent_name)
-        continue
-      }
-      // Honor the operator's disable action: if the task was toggled off
-      // while the retry sat in the queue, drop the retry so a long-stuck
-      // task doesn't surprise-fire the moment the session frees up.
-      if (!taskDef.enabled) {
-        deletePendingTaskRetry(row.task_name, row.agent_name)
-        continue
-      }
-
-      // Register the key only once we know the retry is live, so the cron
-      // loop below doesn't treat a dead row as a reason to skip.
-      const key = `${row.task_name}@${row.agent_name}`
-      pendingKeys.add(key)
-
-      const view = toPendingRetryView(row, now)
-      const result = attemptFireTask(taskDef, row.agent_name, now)
-      if (result === 'fired' || result === 'missing') {
-        deletePendingTaskRetry(row.task_name, row.agent_name)
-        continue
-      }
-      // Still busy or errored: refresh the retry row and alert ONCE if
-      // the age crossed the threshold. `updatePendingTaskRetry` returns
-      // false when the row has been cancelled between load and now --
-      // in that case, do not re-insert (the operator's cancel wins) and
-      // do not alert.
-      const stillPresent = updatePendingTaskRetry(row.task_name, row.agent_name, now, result)
-      if (stillPresent && view.alertDue) sendPendingRetryAlert(view, now)
-    }
-
-    for (const task of tasks) {
-      if (!task.enabled) continue
-      if (!cronMatchesNow(task.schedule, catchUp)) continue
-
-      // Prevent double-firing: skip if already ran within the catch-up window
-      const lastRun = scheduleLastRun.get(task.name) || 0
-      if (now - lastRun < catchUp) continue
-
-      let targetAgents: string[]
-
-      if (task.agent === 'all') {
-        // Broadcast to all running agents + main
-        const running = listAgentNames().filter(a => isAgentRunning(a))
-        targetAgents = [MAIN_AGENT_ID, ...running]
-      } else {
-        targetAgents = [task.agent || MAIN_AGENT_ID]
-      }
-
-      for (const agentName of targetAgents) {
-        const key = `${task.name}@${agentName}`
-        // If already queued for retry from an earlier tick, leave it to
-        // the retry handler -- don't re-queue or double-fire.
-        if (pendingKeys.has(key)) continue
-        const result = attemptFireTask(task, agentName, now)
-        if (result === 'busy') {
-          if (task.skipIfBusy) {
-            // Opt-in skip for short-cadence tasks (e.g. 30-min heartbeats):
-            // a single missed tick is harmless because the next one is
-            // already on the way, and queueing them produces spurious
-            // "60 perce varakozik" Telegram alerts whenever the operator
-            // is having an active conversation in the channels session.
-            // Daily/weekly schedules keep skipIfBusy=false so the queue
-            // + alert path catches a long-running busy state.
-            logger.info({ task: task.name, agent: agentName }, 'Schedule busy, skipIfBusy=true: dropping tick silently')
-            continue
-          }
-          // First encounter -- insert a new pending row. If somehow a
-          // row already exists (race with a just-cancelled retry), do
-          // nothing so the cancel wins the tiebreak.
-          insertPendingTaskRetryIfNew(task.name, agentName, now, 'busy')
-        }
-      }
-    }
-  }
-
-  // Run immediately on start (catches missed tasks)
-  setTimeout(runCheck, 5000)
-  return setInterval(runCheck, 60000)
-}
+// Sweep entrypoint moved to noa-scheduler.ts (A4). Re-export so callers are unaffected.
+export { startScheduleRunner } from '../noa-scheduler.js'

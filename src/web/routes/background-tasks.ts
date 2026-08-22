@@ -40,7 +40,7 @@ function captureSession(session: string): string | null {
 
 function killSession(session: string): void {
   try {
-    execFileSync(TMUX, ['kill-session', '-t', session], { timeout: 3000 })
+    execFileSync(TMUX, ['kill-session', '-t', `=${session}`], { timeout: 3000 })
   } catch { /* already dead */ }
 }
 

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Optional git post-merge hook for the deploy-delta tracker.
+#
+# Fires after a local `git merge` / `git pull` completes. When develop has
+# advanced past the recorded deployed tip, it surfaces the merged-but-undeployed
+# delta to Genesis (inter-agent), so a sync that pulls in new PRs never goes
+# unnoticed. Pure visibility -- it NEVER deploys.
+#
+# This is OPTIONAL. Fleet merges land via the GitHub API (no local merge fires
+# this), so the primary integration is:
+#   - `deploy-delta record` run as part of a deploy (records the activated tip)
+#   - `deploy-delta report` run at GO-request time (enumerates the delta)
+# The hook only helps local pull-based sync workflows.
+#
+# Install:
+#   ln -sf ../../scripts/hooks/post-merge .git/hooks/post-merge
+#   chmod +x scripts/hooks/post-merge
+#
+# Requires the built CLI (npm run build) at dist/web/deploy-delta-cli.js.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CLI="$ROOT/dist/web/deploy-delta-cli.js"
+NODE="$(command -v node || true)"
+
+[ -n "$NODE" ] && [ -f "$CLI" ] || exit 0  # no-op if unbuilt / node missing
+
+"$NODE" "$CLI" report --notify >> "$ROOT/store/deploy-delta-hook.log" 2>&1 || true
+exit 0

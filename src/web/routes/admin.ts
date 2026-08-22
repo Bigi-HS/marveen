@@ -1,0 +1,78 @@
+import { rotateDashboardToken, rotateSessionSecret } from '../dashboard-auth.js'
+import { logger } from '../../logger.js'
+import { json } from '../http-helpers.js'
+import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
+import type { RouteContext } from './types.js'
+
+// Admin endpoints for operating the dashboard at runtime. Every route here is
+// reached only AFTER the global /api/* bearer-token auth gate in web.ts has
+// validated the request. Since b1ce5118 introduced per-agent tokens, the global
+// gate accepts any valid token -- operator OR per-agent. Admin operations (token
+// rotation, session revocation) must be restricted to the operator/admin scope
+// so a compromised per-agent token cannot rotate the root dashboard credential.
+export async function tryHandleAdmin(ctx: RouteContext): Promise<boolean> {
+  const { res, path, method, identity } = ctx
+
+  // This handler owns ONLY /api/admin/* routes. Every other request (static UI
+  // assets, the login page, any non-admin /api route) merely passes THROUGH on
+  // its way down the dispatch chain and MUST fall through untouched. The scope
+  // guard below therefore applies ONLY to admin paths -- placing it before this
+  // check (regression fe2dc87) made every non-admin path carrying a non-admin
+  // or anonymous identity (the empty placeholder identity on non-/api requests,
+  // which skip the auth gate) get a misleading "admin scope required" 403
+  // instead of being served, taking the whole browser UI down.
+  if (!path.startsWith('/api/admin/')) return false
+
+  // Absent identity = no auth middleware (test/internal calls) -> allow. Present
+  // identity without ADMIN_SCOPE = per-agent token -> 403 (Chad sec-block fix).
+  if (identity && !hasScope(identity.scopes, ADMIN_SCOPE)) {
+    logger.warn({ agentId: identity.agentId }, 'Admin endpoint rejected: missing admin:* scope')
+    json(res, { error: 'admin scope required' }, 403)
+    return true
+  }
+
+  // Rotate the dashboard bearer token without a server restart. Generates a
+  // fresh token, persists it to store/.dashboard-token (atomic, 0600) and swaps
+  // the in-memory value the auth middleware checks, so the new token is valid
+  // immediately and the old one stops working on the very next request.
+  // SECURITY: returning the token in the body is intentional -- the caller just
+  // proved possession of the current root-equivalent token, and the new token
+  // has to reach the operator somehow. It is never logged.
+  if (path === '/api/admin/rotate-token' && method === 'POST') {
+    const fresh = rotateDashboardToken()
+    logger.warn('Dashboard token rotated via admin API')
+    json(res, { ok: true, token: fresh })
+    return true
+  }
+
+  // Log EVERY active session out in one call. Rotates the server-side session
+  // signing secret, which immediately fails the signature check on every cookie
+  // that was issued under the old secret -- the clean, one-click equivalent of
+  // the old manual "rm store/.dashboard-session-secret + restart" recovery.
+  // Sessions now have a 1-year TTL (PR #114), so this is the only fast way to
+  // mass-revoke (e.g. a leaked-cookie incident). The operator who calls this
+  // (themselves authenticated by the current bearer token) keeps API access; only
+  // browser SESSION cookies are invalidated, so the next UI request re-prompts
+  // for the token. No token is returned -- nothing secret to surface.
+  if (path === '/api/admin/logout-all' && method === 'POST') {
+    rotateSessionSecret()
+    logger.warn('All dashboard sessions revoked via admin API (session secret rotated)')
+    json(res, { ok: true })
+    return true
+  }
+
+  // Incident-response one-call (card 456293c4): rotates BOTH the bearer token
+  // AND the session secret in a single request. Composes the two existing
+  // primitives so an operator can fully lock down the dashboard during an
+  // incident without a two-step dance. Returns the new bearer token (same as
+  // /rotate-token) -- the caller must persist it to regain API access.
+  if (path === '/api/admin/incident-response' && method === 'POST') {
+    const fresh = rotateDashboardToken()
+    rotateSessionSecret()
+    logger.warn('Incident response: dashboard token rotated + all sessions revoked (card 456293c4)')
+    json(res, { ok: true, token: fresh })
+    return true
+  }
+
+  return false
+}

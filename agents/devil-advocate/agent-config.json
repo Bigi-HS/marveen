@@ -1,0 +1,13 @@
+{
+  "model": "claude-sonnet-4-6",
+  "securityProfile": "researcher",
+  "displayName": "Ördög Ügyvédje",
+  "team": {
+    "role": "member",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": []
+  },
+  "claudeConfigDir": "/home/domin/marveen/agents/devil-advocate/.claude-config"
+}

@@ -1,3 +1,7 @@
+// MUST stay first: loads <root>/.env into process.env before any module reads an
+// env var at import time (config.ts, db.ts, noa-memory.ts -> NOA_DB_PATH). See
+// env-boot.ts / load-env.ts (card 46b3bd75).
+import './env-boot.js'
 import {
   readFileSync,
   unlinkSync,
@@ -9,9 +13,12 @@ import {
 import { join } from 'node:path'
 import { execFileSync, execSync } from 'node:child_process'
 import type { Server as HttpServer } from 'node:http'
-import { STORE_DIR, PID_FILENAME, WEB_PORT, ALLOWED_CHAT_ID, MAIN_AGENT_ID, RESPAWN_ENABLED } from './config.js'
-import { initDatabase } from './db.js'
-import { runDecaySweep, runDailyDigest } from './memory.js'
+import { STORE_DIR, PID_FILENAME, WEB_PORT, MAIN_AGENT_ID, RESPAWN_ENABLED } from './config.js'
+import { initDatabase, deleteOldMessages, deleteOldGuardEvents } from './db.js'
+import { initCodetreeDatabase } from './web/codetree-db.js'
+import { startMessageRetentionSweep } from './web/message-retention.js'
+import { runTierDemotionSweep } from './noa-memory.js'
+import { runDailyDigest } from './memory.js'
 import { initHeartbeat, stopHeartbeat } from './heartbeat.js'
 import { ensureHeartbeatAgent, HEARTBEAT_AGENT_NAME } from './web/heartbeat-agent-scaffold.js'
 import { startAgentProcess } from './web/agent-process.js'
@@ -28,6 +35,7 @@ import {
   DeferToPeerError,
   type ProcessLockContext,
   type PidfileLockContext,
+  parseLsofListeningPorts,
 } from './process-lock.js'
 
 const BANNER = `
@@ -138,6 +146,29 @@ function buildProcessLockContext(): ProcessLockContext {
       info: (obj, msg) => logger.info(obj, msg),
       warn: (obj, msg) => logger.warn(obj, msg),
       error: (obj, msg) => logger.error(obj, msg),
+    },
+    listeningPortsOf(pid: number): number[] | null {
+      // LISTEN-only lsof probe (AC-3, C-4): `lsof -aPp <pid> -iTCP -sTCP:LISTEN`.
+      // This is DIFFERENT from listPortHolders's `lsof -ti :PORT` form (which
+      // matches ESTABLISHED too and is keyed by port, not pid).
+      // lsof exits 1 when no matching sockets found (definitive empty = []).
+      // Other errors (ENOENT, timeout, EPERM) = probe failure = null (AC-7 SPARE).
+      try {
+        const raw = execFileSync('lsof', ['-aPp', String(pid), '-iTCP', '-sTCP:LISTEN'], {
+          timeout: 3000,
+          encoding: 'utf-8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        })
+        return parseLsofListeningPorts(raw)
+      } catch (err) {
+        const e = err as { status?: number; stdout?: string }
+        if (e.status === 1) {
+          // lsof exit 1 = no matching files found = no LISTEN ports = zombie
+          return parseLsofListeningPorts(e.stdout ?? '')
+        }
+        // Real probe failure (lsof not found, timeout, EPERM) -> spare (AC-7)
+        return null
+      }
     },
   }
 }
@@ -332,6 +363,8 @@ function releaseLock(): void {
 // acquireLock wrote the pidfile -- we still need to drop the heartbeat /
 // digest timers and release the pidfile on the way out).
 let decayInterval: NodeJS.Timeout | null = null
+let messageRetentionInterval: NodeJS.Timeout | null = null
+let guardEventRetentionInterval: NodeJS.Timeout | null = null
 let digestTimer: NodeJS.Timeout | null = null
 let digestInterval: NodeJS.Timeout | null = null
 let heartbeatStarted = false
@@ -350,6 +383,8 @@ const shutdown = (): void => {
     try { stopInviteMonitor() } catch (err) { logger.warn({ err }, 'stopInviteMonitor threw during shutdown') }
     try { stopChannelRequestWatcher() } catch (err) { logger.warn({ err }, 'stopChannelRequestWatcher threw during shutdown') }
     if (decayInterval) clearInterval(decayInterval)
+    if (messageRetentionInterval) clearInterval(messageRetentionInterval)
+    if (guardEventRetentionInterval) clearInterval(guardEventRetentionInterval)
     if (digestTimer) clearTimeout(digestTimer)
     if (digestInterval) clearInterval(digestInterval)
 
@@ -399,16 +434,68 @@ async function main(): Promise<void> {
     logger.error({ err: reason }, 'unhandledRejection')
   })
 
+  // W5 cutover dry-run: a SAFE non-live boot smoke. When NOA_BOOT_SMOKE=<port> is
+  // set, boot ONLY the database + web listener on that exact port and skip
+  // everything with live side effects. Crucially it NEVER calls acquireLock()
+  // (whose startup race-guard SIGTERMs the process holding :3420 -- that is what
+  // killed the live dashboard on the first dry-run attempt), and starts NO
+  // scheduler / heartbeat / agent-spawn / daily-digest / watchers. Used by
+  // scripts/_noa-cutover-dryrun.sh to prove the build boots + writes against a
+  // freshly-migrated noa.db COPY without ever touching the live fleet.
+  // NOTE: read from process.env directly -- config.ts WEB_PORT is sourced from the
+  // .env FILE (readEnvFile), not process.env, so it cannot repoint the port here.
+  const bootSmokePort = parseInt(process.env['NOA_BOOT_SMOKE'] ?? '', 10)
+  if (Number.isFinite(bootSmokePort) && bootSmokePort > 0) {
+    logger.info({ port: bootSmokePort }, 'BOOT SMOKE: db + web only (no peer-kill, no schedulers/agents/watchers)')
+    initDatabase()
+    initCodetreeDatabase()
+    webServer = startWebServer(bootSmokePort)
+    logger.info(`BOOT SMOKE listening on http://localhost:${bootSmokePort}`)
+    return
+  }
+
   await acquireLock()
 
   // Database
   initDatabase()
+  initCodetreeDatabase()
   logger.info('Adatbazis inicializalva')
 
-  // Memory decay (24h cycle)
-  runDecaySweep()
-  decayInterval = setInterval(runDecaySweep, 24 * 60 * 60 * 1000)
-  logger.info('Memoria leepulesi ciklus beallitva (24 oras)')
+  // Memory tier demotion (24h cycle): hot -> warm -> cold on the slim noa.db
+  // schema (replaces the legacy salience-based decayMemories sweep, retired in W5).
+  runTierDemotionSweep()
+  decayInterval = setInterval(runTierDemotionSweep, 24 * 60 * 60 * 1000)
+  logger.info('Memoria tier-demotion ciklus beallitva (24 oras)')
+
+  // agent_messages retention sweep (card f1ea52c0): prune rows past the
+  // retention window so the table cannot grow without bound. Runs once now,
+  // then daily. The boot prune is guarded so a sweep error can never abort
+  // startup (the interval already swallows its own tick errors).
+  try {
+    deleteOldMessages(Math.floor(Date.now() / 1000))
+  } catch (err) {
+    logger.warn({ err }, 'message-retention: boot prune failed (non-fatal)')
+  }
+  messageRetentionInterval = startMessageRetentionSweep()
+  logger.info('Agent-message retention sweep beallitva (24 oras)')
+
+  // guard_events retention sweep (card SEC-030). Same shape as the
+  // agent_messages sweep above: without a call site the table grows without
+  // bound as soon as the recorder is live. Boot prune is guarded so a sweep
+  // error can never abort startup; the interval swallows its own tick errors.
+  const pruneGuardEvents = (): void => {
+    try {
+      const removed = deleteOldGuardEvents(Math.floor(Date.now() / 1000))
+      if (removed > 0) {
+        logger.info({ removed }, 'guard-events-retention: pruned aged guard_events rows')
+      }
+    } catch (err) {
+      logger.warn({ err }, 'guard-events-retention: sweep failed (non-fatal)')
+    }
+  }
+  pruneGuardEvents()
+  guardEventRetentionInterval = setInterval(pruneGuardEvents, 24 * 60 * 60 * 1000)
+  logger.info('Guard-event retention sweep beallitva (24 oras)')
 
   // Daily digest at 23:00. Timer handles kept so shutdown can drop them.
   function scheduleDailyDigest() {
@@ -418,11 +505,11 @@ async function main(): Promise<void> {
     if (target <= now) target.setDate(target.getDate() + 1)
     const msUntil = target.getTime() - now.getTime()
     digestTimer = setTimeout(() => {
-      runDailyDigest(ALLOWED_CHAT_ID).catch((err) =>
+      runDailyDigest().catch((err) =>
         logger.error({ err }, 'Napi naplo hiba')
       )
       digestInterval = setInterval(() => {
-        runDailyDigest(ALLOWED_CHAT_ID).catch((err) =>
+        runDailyDigest().catch((err) =>
           logger.error({ err }, 'Napi naplo hiba')
         )
       }, 24 * 60 * 60 * 1000)

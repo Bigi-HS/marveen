@@ -24,13 +24,13 @@ Ha a config hiányzik vagy a kulcs nincs benne → default level 3 (régi viselk
 
 2. **Tisztítás**: 7+ napos done kártyák archiválása:
    ```bash
-   sqlite3 {{INSTALL_DIR}}/store/claudeclaw.db "UPDATE kanban_cards SET archived_at=unixepoch() WHERE status='done' AND archived_at IS NULL AND updated_at < strftime('%s','now','-7 days')"
+   sqlite3 {{INSTALL_DIR}}/store/noa.db "UPDATE kanban_cards SET archived_at=unixepoch() WHERE status='done' AND archived_at IS NULL AND updated_at < strftime('%s','now','-7 days')"
    ```
 
 3. **Beakadt task detection** (előző audit óta nem mozdult): in_progress kártyák amik `updated_at < last_audit_at`:
    ```bash
    LAST=$(jq -r .last_audit_at store/kanban-audit-state.json 2>/dev/null || echo 0)
-   sqlite3 store/claudeclaw.db "SELECT id, title, assignee, ROUND((strftime('%s','now')-updated_at)/3600.0,1) as hours_stale FROM kanban_cards WHERE status='in_progress' AND archived_at IS NULL AND updated_at < $LAST ORDER BY hours_stale DESC"
+   sqlite3 store/noa.db "SELECT id, title, assignee, ROUND((strftime('%s','now')-updated_at)/3600.0,1) as hours_stale FROM kanban_cards WHERE status='in_progress' AND archived_at IS NULL AND updated_at < $LAST ORDER BY hours_stale DESC"
    ```
 
 4. **Beakadt task -> ping**: minden beakadt kártyához küldj inter-agent message-t az assignee-nek (kivéve {{MAIN_AGENT_ID}}-nek és üres assignee-nek):

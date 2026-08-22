@@ -1,28 +1,46 @@
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
-import { OLLAMA_URL } from '../config.js'
+import { OLLAMA_URL, PROJECT_ROOT } from '../config.js'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import {
   detectPaneState,
   decideSubmitFollowup,
   shouldClearTruncatedPreamble,
+  isQuiescentlyIdle,
+  type QuiescenceSample,
 } from '../pane-state.js'
-import { agentDir, readAgentModel, readAgentSecurityProfile, readAgentClaudeConfigDir, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName } from './agent-config.js'
+import { agentDir, readAgentModel, readAgentSecurityProfile, readAgentClaudeConfigDir, readAgentChannelProviderSafe, readAgentAuthMode, readAgentDisplayName } from './agent-config.js'
 import { ensureAgentConfigDir } from './agent-config-dir.js'
 import { parseTelegramToken } from './telegram.js'
 import { getProvider, getProviderType, channelStateDir, readChannelToken, channelIntentFromEnabledPlugins, type ChannelProviderType } from '../channel-provider.js'
 import { CHANNEL_PROVIDER } from '../config.js'
-import { loadProfileTemplate } from './profiles.js'
+import { computeSkipFlag, loadProfileTemplate } from './profiles.js'
 import { writeAgentSettingsFromProfile } from './agent-scaffold.js'
 import { getSecret } from './vault.js'
 import { backupChannelEnv, restoreChannelEnv } from './channel-token-durability.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { runPreflight, logPreflightFindings, summarizePreflightErrors } from './agent-preflight.js'
+import { provisionAgentToken } from './agent-token-provision.js'
+import { getDb } from '../db.js'
 
 const TMUX = resolveFromPath('tmux')
 const CLAUDE = resolveFromPath('claude')
+
+// Canonical fleet OAuth helper (PR #85). Sourcing it exports
+// CLAUDE_CODE_OAUTH_TOKEN from the static setup-token into the launched
+// agent's environ, overriding a stale symlinked .credentials.json. The bash
+// watchdogs already source it; this path covers the DASHBOARD launch (restart
+// button, chameleon sandbox, scaffold) that the bash migration could not reach.
+const FLEET_OAUTH_HELPER = join(PROJECT_ROOT, 'scripts', 'lib', 'fleet-oauth-env.sh')
+
+// Per-agent dashboard-token helper (card b1ce5118). Sourcing it exports
+// GENESIS_AGENT_TOKEN -- the launched agent's OWN dashboard bearer -- so its
+// /api calls authenticate as itself and the server derives its identity from
+// the credential. Mirrors the OAuth helper exactly (env-only, never logged,
+// no-op fallback). Inert until the fleet-ops recipe flips to it (C-BIND).
+const AGENT_TOKEN_HELPER = join(PROJECT_ROOT, 'scripts', 'lib', 'agent-token-env.sh')
 
 // How many times startAgentProcess will (re)spawn the tmux session when the
 // inner claude dies inside the liveness window. Two total attempts: the
@@ -72,7 +90,10 @@ export function shouldContinueSession(hasPriorSession: boolean, attempt: number)
 }
 
 function resolveAgentProvider(name: string): ChannelProviderType {
-  const perAgent = readAgentChannelProvider(name)
+  // Fail-soft: a misconfigured secret pointer must not crash the launch path
+  // (agentHasChannel / isAgentChannelIntentionallyEnabled both route through
+  // here) -- fall back to the default provider on an unreadable config.
+  const perAgent = readAgentChannelProviderSafe(name).provider
   if (perAgent === 'slack' || perAgent === 'telegram' || perAgent === 'discord') return perAgent
   return CHANNEL_PROVIDER
 }
@@ -85,6 +106,19 @@ export function isAgentRunning(name: string): boolean {
   try {
     const output = execSync(`${TMUX} list-sessions -F "#{session_name}"`, { timeout: 3000, encoding: 'utf-8' })
     return output.split('\n').some(line => line.trim() === agentSessionName(name))
+  } catch {
+    return false
+  }
+}
+
+// True if a tmux session with the EXACT given name is alive. Addresses sessions
+// the `agent-<name>` template does not cover -- notably the main orchestrator's
+// `${id}-channels` session (MAIN_CHANNELS_SESSION), which is why isAgentRunning
+// (template-only) cannot be used to gate work on the main agent.
+export function isTmuxSessionAlive(session: string): boolean {
+  try {
+    execFileSync(TMUX, ['has-session', '-t', `=${session}`], { timeout: 3000, stdio: 'ignore' })
+    return true
   } catch {
     return false
   }
@@ -198,7 +232,7 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
 
   try {
     try {
-      execSync(`${TMUX} kill-session -t ${session} 2>/dev/null`, { timeout: 3000 })
+      execSync(`${TMUX} kill-session -t "=${session}" 2>/dev/null`, { timeout: 3000 })
       execSync('sleep 3', { timeout: 5000 })
     } catch { /* ok */ }
 
@@ -247,9 +281,10 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
         apiKeyEnv = `export ANTHROPIC_API_KEY="${agentApiKey}" && `
       }
     }
-    // Apply security profile: write allow/deny list into settings.json, and
-    // skip the dangerously-skip-permissions flag for strict profiles so
-    // Claude Code enforces the list rather than bypassing it.
+    // Apply security profile: write allow/deny list into settings.json. For a
+    // strict, channel-less profile we also drop --dangerously-skip-permissions
+    // so Claude Code enforces the list rather than bypassing it (see the
+    // skipFlag computation below for the channel-agent exception).
     const profile = loadProfileTemplate(readAgentSecurityProfile(name))
     writeAgentSettingsFromProfile(name, profile)
     // Channel-less agents must not load the global channel plugins from
@@ -271,7 +306,11 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
         logger.warn({ err, name }, 'Could not disable channel plugins for channel-less agent')
       }
     }
-    const skipFlag = profile.permissionMode === 'strict' ? '' : '--dangerously-skip-permissions '
+    // A strict profile drops the bypass so Claude Code enforces the allow/deny
+    // list -- EXCEPT for a channel agent, which must keep it: a permission prompt
+    // has no answerable surface on Telegram/Slack and leaks into the chat on
+    // restart while the callback stalls (card b407711f). See computeSkipFlag.
+    const skipFlag = computeSkipFlag(profile.permissionMode, hasChannel)
     // Per-agent CLAUDE_CONFIG_DIR. Every sub-agent gets an ISOLATED config dir
     // so it reads/writes its OWN .claude.json instead of contending on the
     // single shared ~/.claude.json file lock -- the WSL launch bug where the
@@ -292,6 +331,33 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
       claudeConfigDir = ensureAgentConfigDir(name)
     }
     const claudeConfigEnv = `export CLAUDE_CONFIG_DIR="${claudeConfigDir}" && `
+    // Fleet OAuth migration (PR #85 follow-up): shared-auth Claude agents
+    // launched through the dashboard SOURCE the audited helper so the static
+    // setup-token is exported as CLAUDE_CODE_OAUTH_TOKEN, which overrides a
+    // stale symlinked .credentials.json -- closing the drift-discard / re-auth
+    // outage class on the dashboard-launch path the bash watchdogs don't touch.
+    // The token lands ONLY in the spawned shell's environ: it never enters this
+    // process, the launch argv, or any log. Additive -- no-op when the helper or
+    // token file is absent. own_team / api agents are excluded: they
+    // authenticate off their own login or ANTHROPIC_API_KEY, not the shared token.
+    const fleetOauthEnv =
+      isClaude && authMode === 'shared' && existsSync(FLEET_OAUTH_HELPER)
+        ? `export FLEET_ROOT="${PROJECT_ROOT}" && . "${FLEET_OAUTH_HELPER}" && `
+        : ''
+    // Per-agent dashboard token (card b1ce5118). Mint+persist this agent's token
+    // file, then source the helper to export GENESIS_AGENT_TOKEN. Provisioning is
+    // best-effort: a failure (DB/disk) must NEVER break a launch -- the agent
+    // simply falls back to the shared bearer (fail-open for availability). The
+    // raw token never enters this process; it is written 0600 and read only by
+    // the sourced helper in the spawned shell.
+    try {
+      provisionAgentToken(getDb(), name, join(agentDir(name), '.genesis-token'))
+    } catch (err) {
+      logger.warn({ err, name }, 'Per-agent token provisioning failed; agent will use the shared bearer')
+    }
+    const agentTokenEnv = existsSync(AGENT_TOKEN_HELPER)
+      ? `export FLEET_ROOT="${PROJECT_ROOT}" && export GENESIS_AGENT_ID="${name}" && . "${AGENT_TOKEN_HELPER}" && `
+      : ''
     // `--continue` requires an existing session; on a brand-new agent the
     // Claude Code projects directory does not yet exist and `claude` exits
     // immediately with an obscure "No deferred tool marker found" error
@@ -318,7 +384,7 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     // `continueFlag` is decided per-attempt (see shouldContinueSession): the
     // first attempt resumes, a liveness-window death falls back to a fresh boot.
     const buildLaunchCmd = (continueFlag: string): string =>
-      `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${channelSetup}${apiKeyEnv}${claudeConfigEnv}${ollamaEnv}${deepseekEnv}cd "${dir}" && ${CLAUDE} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
+      `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${channelSetup}${apiKeyEnv}${claudeConfigEnv}${fleetOauthEnv}${agentTokenEnv}${ollamaEnv}${deepseekEnv}cd "${dir}" && ${CLAUDE} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
 
     // `tmux new-session -d "cmd"` returns as soon as the SESSION exists, not
     // when the inner claude is up: if claude exits within ~1s (the silent
@@ -362,7 +428,7 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
         { name, session, attempt, usedContinue: useContinue, nextIsFreshSession: useContinue },
         'Agent session died within liveness window, retrying launch (fresh session if --continue was used)',
       )
-      try { execSync(`${TMUX} kill-session -t ${session} 2>/dev/null`, { timeout: 3000 }) } catch { /* ok */ }
+      try { execSync(`${TMUX} kill-session -t "=${session}" 2>/dev/null`, { timeout: 3000 }) } catch { /* ok */ }
       // Let the dead process release the config-dir lock before relaunching, so
       // the fallback launch does not lose the same lock race and silently die.
       try { execSync(`sleep ${LAUNCH_RETRY_SETTLE_S}`, { timeout: 5000 }) } catch { /* best effort */ }
@@ -399,7 +465,7 @@ export function stopAgentProcess(name: string): { ok: boolean; error?: string } 
   if (!isAgentRunning(name)) return { ok: false, error: 'Agent is not running' }
 
   try {
-    execSync(`${TMUX} kill-session -t ${session}`, { timeout: 5000 })
+    execSync(`${TMUX} kill-session -t "=${session}"`, { timeout: 5000 })
     execSync('sleep 2', { timeout: 4000 })
     // Reap any orphaned plugin grandchild that tmux did not tear down.
     // See channel-poller-reap.ts - the old pkill-by-env-var-on-cmdline did
@@ -447,7 +513,7 @@ const SURVEY_MODAL_RX = /How is Claude doing this session/
 
 function dismissSurveyModalIfPresent(session: string): void {
   try {
-    const pane = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
+    const pane = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
     if (!SURVEY_MODAL_RX.test(pane)) return
     execFileSync(TMUX, ['send-keys', '-t', session, '0'], { timeout: 5000 })
     // Modal close is one frame; settle window so the next send-keys lands in
@@ -469,7 +535,7 @@ const RESUME_SUMMARY_MODAL_RX = /Resume from summary/
 
 export function dismissResumeSummaryModalIfPresent(session: string): void {
   try {
-    const pane = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
+    const pane = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
     if (!RESUME_SUMMARY_MODAL_RX.test(pane)) return
     execFileSync(TMUX, ['send-keys', '-t', session, '1'], { timeout: 5000 })
     execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
@@ -560,6 +626,63 @@ export function identitySlashCommands(displayName: string): string[] {
 // reliably ready ~5s after that.
 const MODAL_DISMISS_DELAY_MS = 8000
 const IDENTITY_SEND_DELAY_MS = 5000
+// Resume-menu poll cadence (A6): a large/old session can render the "Resume from
+// summary" modal seconds AFTER launch -- well past the fixed MODAL_DISMISS_DELAY_MS
+// one-shot, which then missed it and left the session wedged behind the modal.
+// We poll (mirroring the watchdog answer_resume_prompt loop, now first-class in the
+// launcher) until the modal is answered or the active prompt is up.
+const RESUME_POLL_INTERVAL_MS = 2000
+const RESUME_POLL_MAX_ATTEMPTS = 20 // ~40s window, matches the watchdog
+
+// Pure: decide what the resume-menu poller should do for a captured pane.
+//   'answer-resume' -- the "Resume from summary" modal is up; pick 1 + Enter
+//   'ready'         -- the active prompt footer is up (detectPaneState idle); done
+//   'wait'          -- neither yet; keep polling
+// Resume takes precedence: if the modal is up we must answer it even if a stale
+// footer is also visible in scrollback.
+export function classifyResumePane(pane: string): 'answer-resume' | 'ready' | 'wait' {
+  if (RESUME_SUMMARY_MODAL_RX.test(pane)) return 'answer-resume'
+  if (detectPaneState(pane) === 'idle') return 'ready'
+  return 'wait'
+}
+
+// Background, non-blocking, bounded poll that answers the resume-from-summary
+// modal whenever it renders and resolves once the prompt is ready. Fire-and-
+// forget (recursive setTimeout); errors are swallowed so a miss never tears down
+// the caller. onReady fires on the active prompt or after the attempt budget.
+function answerResumeMenuWhenReady(session: string, onReady: () => void, attempt = 0): void {
+  if (attempt >= RESUME_POLL_MAX_ATTEMPTS) {
+    logger.warn({ session, attempts: attempt }, 'resume-menu poll: neither modal nor active prompt within window; proceeding')
+    onReady()
+    return
+  }
+  let pane: string | null = null
+  try {
+    pane = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
+  } catch {
+    // session likely gone; nothing more to do
+    onReady()
+    return
+  }
+  const decision = classifyResumePane(pane)
+  if (decision === 'ready') {
+    if (attempt > 0) logger.info({ session, attempt }, 'resume-menu poll: active prompt ready')
+    onReady()
+    return
+  }
+  if (decision === 'answer-resume') {
+    try {
+      execFileSync(TMUX, ['send-keys', '-t', session, '1'], { timeout: 5000 })
+      execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
+      execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+      logger.info({ session, attempt }, 'resume-menu poll: answered Resume-from-summary (1)')
+    } catch (err) {
+      logger.warn({ err, session }, 'resume-menu poll: answer send failed')
+    }
+    // keep polling: the modal -> /compact -> prompt transition takes a beat.
+  }
+  setTimeout(() => answerResumeMenuWhenReady(session, onReady, attempt + 1), RESUME_POLL_INTERVAL_MS)
+}
 
 // Schedule the identity setup for a freshly (re)spawned session: once it has
 // had time to render, dismiss any first-run/resume modals, then send `/name`.
@@ -571,21 +694,25 @@ export function scheduleIdentitySetup(session: string, displayName: string): voi
   setTimeout(() => {
     try {
       dismissSurveyModalIfPresent(session)
-      dismissResumeSummaryModalIfPresent(session)
     } catch (err) {
-      logger.warn({ err, session }, 'Post-restart modal dismiss failed')
+      logger.warn({ err, session }, 'Post-restart survey-modal dismiss failed')
     }
-    setTimeout(() => {
-      try {
-        for (const cmd of identitySlashCommands(displayName)) {
-          execFileSync(TMUX, ['send-keys', '-t', session, cmd, 'Enter'], { timeout: 5000 })
-          execFileSync('/bin/sleep', ['1'], { timeout: 2000 })
+    // A6: poll for the resume-from-summary menu (which can render late on a
+    // large/old session, past the old fixed one-shot) and answer it, then send
+    // identity once the prompt is actually ready -- not at a blind fixed delay.
+    answerResumeMenuWhenReady(session, () => {
+      setTimeout(() => {
+        try {
+          for (const cmd of identitySlashCommands(displayName)) {
+            execFileSync(TMUX, ['send-keys', '-t', session, cmd, 'Enter'], { timeout: 5000 })
+            execFileSync('/bin/sleep', ['1'], { timeout: 2000 })
+          }
+          logger.info({ session, displayName }, 'Set session /name')
+        } catch (err) {
+          logger.warn({ err, session, displayName }, 'Failed to set session /name')
         }
-        logger.info({ session, displayName }, 'Set session /name')
-      } catch (err) {
-        logger.warn({ err, session, displayName }, 'Failed to set session /name')
-      }
-    }, IDENTITY_SEND_DELAY_MS)
+      }, IDENTITY_SEND_DELAY_MS)
+    })
   }, MODAL_DISMISS_DELAY_MS)
 }
 
@@ -604,11 +731,22 @@ const SUBMIT_RETRY_MAX_ATTEMPTS = 2
 const SUBMIT_RETRY_POLL_MS = '0.3'
 
 // Buffer-clear (Ctrl-U) used pre-flight when shouldClearTruncatedPreamble
-// flags a stale preamble. Sent as a single key name (no `-l` literal
-// flag) so tmux interprets it as the control sequence.
-function clearInputBuffer(session: string): void {
+// flags a stale preamble, and post-flight to take back a prompt whose
+// submit never landed. Sent as a single key name (no `-l` literal flag)
+// so tmux interprets it as the control sequence.
+//
+// Ctrl-U kills to the start of the line, so a composer holding a long
+// wrapped draft needs several presses to empty. The observed live wedge
+// (card CORE/57cf5022) took ~30 for a ~1.6k-char scheduled prompt, and
+// the residue is what poisons the pane -- a partial clear is no better
+// than none, so the repeat count is sized for the worst case we send.
+const CLEAR_BUFFER_PRESSES = 40
+
+function clearInputBuffer(session: string, presses = 1): void {
   try {
-    execFileSync(TMUX, ['send-keys', '-t', session, 'C-u'], { timeout: 5000 })
+    for (let i = 0; i < presses; i++) {
+      execFileSync(TMUX, ['send-keys', '-t', session, 'C-u'], { timeout: 5000 })
+    }
     // Settle briefly so the next send-keys lands in the freshly cleared
     // buffer rather than racing the Ctrl-U.
     execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
@@ -616,6 +754,25 @@ function clearInputBuffer(session: string): void {
     logger.warn({ err, session }, 'Failed to clear pane input buffer before send')
   }
 }
+
+/**
+ * Outcome of a sendPromptToSession call.
+ *
+ *   - 'submitted' -- the composer is clear after the trailing Enter: the
+ *                    prompt started a turn.
+ *   - 'parked'    -- MEASURED failure. The prompt is still sitting in the
+ *                    composer after the whole retry budget. The residue is
+ *                    cleared before returning, because an un-submitted
+ *                    draft keeps the pane non-idle and therefore blocks
+ *                    every later send to this agent.
+ *   - 'unknown'   -- the pane could not be captured (or the retry-Enter
+ *                    itself failed), so neither outcome is proven. Callers
+ *                    must NOT treat this as a failure: re-running on an
+ *                    unknown risks double-executing a task that did land.
+ *                    Nothing is cleared -- a live draft must not be
+ *                    destroyed on a guess.
+ */
+export type SubmitVerdict = 'submitted' | 'parked' | 'unknown'
 
 // Send text to a tmux session as if typed at the prompt.
 // Uses execFileSync so callers can pass raw text -- tmux send-keys -l treats
@@ -636,7 +793,12 @@ function clearInputBuffer(session: string): void {
 // still reports stuck, send up to SUBMIT_RETRY_MAX_ATTEMPTS extra
 // Enters. The retry budget bounds the loop so a pathologically stuck
 // pane gives up rather than spinning.
-export function sendPromptToSession(session: string, text: string): void {
+//
+// The give-up used to be a log line and nothing else, so callers could
+// not tell a delivered prompt from one still sitting in the composer --
+// and the residue silently blocked every subsequent send to that agent
+// (card CORE/57cf5022). The outcome is now returned; see SubmitVerdict.
+export function sendPromptToSession(session: string, text: string): SubmitVerdict {
   dismissSurveyModalIfPresent(session)
   dismissResumeSummaryModalIfPresent(session)
 
@@ -645,7 +807,7 @@ export function sendPromptToSession(session: string, text: string): void {
   // prove the buffer is clean, but proceeding without the clear is no
   // worse than the pre-fix status quo.
   try {
-    const preCapture = execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
+    const preCapture = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
     if (shouldClearTruncatedPreamble(preCapture)) {
       logger.info({ session }, 'Cleared stale preamble from input buffer before sending prompt')
       clearInputBuffer(session)
@@ -687,17 +849,28 @@ export function sendPromptToSession(session: string, text: string): void {
     try { execFileSync('/bin/sleep', [SUBMIT_RETRY_POLL_MS], { timeout: 2000 }) } catch { /* best effort */ }
     const pane = capturePane(session)
     const action = decideSubmitFollowup(pane, payloadHint, attempt, SUBMIT_RETRY_MAX_ATTEMPTS)
-    if (action === 'done') break
+    if (action === 'done') return 'submitted'
     if (action === 'give-up') {
-      logger.warn({ session, attempt }, 'sendPromptToSession: prompt still parked after retries')
-      break
+      // decideSubmitFollowup gives up for two different reasons. A null
+      // pane means the capture failed -- we measured nothing, so we may
+      // not claim failure and must not clear (the prompt may have
+      // landed, and the composer may hold someone else's draft).
+      if (pane == null) {
+        logger.warn({ session, attempt }, 'sendPromptToSession: submit unconfirmable (capture-pane failed)')
+        return 'unknown'
+      }
+      logger.warn({ session, attempt }, 'sendPromptToSession: prompt still parked after retries, clearing residue')
+      clearInputBuffer(session, CLEAR_BUFFER_PRESSES)
+      return 'parked'
     }
     // action === 'retry-enter'
     try {
       execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
     } catch (err) {
+      // The retry-Enter itself failed (tmux gone, timeout). We know the
+      // pane was stuck, but not whether this Enter landed -- unknown.
       logger.warn({ err, session, attempt }, 'Retry-Enter send failed')
-      break
+      return 'unknown'
     }
   }
 }
@@ -707,6 +880,17 @@ export function sendPromptToSession(session: string, text: string): void {
 // to interrupt`" line for ~1 frame after a turn submits before the
 // spinner lands; a quarter-second settle window is well past that.
 const PANE_READY_CONFIRM_DELAY_S = '0.25'
+
+// L2 delivery backstop (card d4aa1d14). The quiescence proof samples the pane
+// several times over a short window to confirm "nothing is happening". A live
+// turn mutates the pane many times a second (spinner frames, token counter,
+// stream), and its busy indicator is present regardless of motion, so 3 samples
+// ~0.6 s apart (a ~1.2 s window) reliably distinguishes a finished turn from an
+// active one. This is the slow path: it runs only for a message the normal gate
+// has already stranded past QUIESCENT_REDELIVER_AFTER_MS, throttled to once per
+// message per minute in the router.
+const QUIESCENCE_SAMPLES = 3
+const QUIESCENCE_SAMPLE_GAP_S = '0.6'
 
 // Send a bare Enter to a session. Used by the stuck-input watcher to
 // re-submit a prompt whose trailing Enter was swallowed on the channel-
@@ -723,11 +907,50 @@ export function sendEnterToSession(session: string): boolean {
   }
 }
 
-// Capture a pane snapshot with an execSync timeout. Null on any error so
+// Send a bare Escape to a session: the soft-interrupt primitive behind the
+// dashboard "interrupt this agent" action. Escape is Claude Code's cancel-the-
+// current-turn key, the gentle rung between an operator nudge and a kill+restart
+// (card b83e7c92). No text is typed -- this only sends the control key -- so
+// there is nothing operator-supplied to sanitise. Best-effort: a tmux failure
+// is logged and swallowed, mirroring sendEnterToSession.
+export function sendEscapeToSession(session: string): boolean {
+  try {
+    execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 5000 })
+    return true
+  } catch (err) {
+    logger.warn({ err, session }, 'sendEscapeToSession: failed to send interrupt Escape')
+    return false
+  }
+}
+
+// Capture a pane snapshot with an execFileSync timeout. Null on any error so
 // the caller can treat "capture failed" as "not ready".
 export function capturePane(session: string): string | null {
   try {
-    return execSync(`${TMUX} capture-pane -t ${session} -p`, { timeout: 3000, encoding: 'utf-8' })
+    return execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
+  } catch {
+    return null
+  }
+}
+
+// Read the pane cursor position (0-indexed column,row) for ghost/autosuggestion
+// discrimination (card c8d13cc0). The TUI draws a dim autosuggestion into an
+// EMPTY composer to the right of the cursor; `capture-pane -p` strips the dim
+// attribute, so the cursor column is what tells a real draft (text LEFT of the
+// cursor) from a suggestion (text RIGHT of it). cursor_x/cursor_y share the
+// visible-pane origin with capture-pane -p, so cursor.y indexes the captured
+// lines directly. Returns null on any failure -> detectPaneState falls back to
+// its safe content-only heuristic (no regression).
+export function captureCursor(session: string): { x: number; y: number } | null {
+  try {
+    const raw = execFileSync(
+      TMUX,
+      ['display-message', '-p', '-t', session, '#{cursor_x},#{cursor_y}'],
+      { timeout: 3000, encoding: 'utf-8' },
+    ).trim()
+    const m = /^(\d+),(\d+)$/.exec(raw)
+    if (!m) return null
+    return { x: Number(m[1]), y: Number(m[2]) }
   } catch {
     return null
   }
@@ -754,12 +977,40 @@ export function capturePane(session: string): string | null {
 export function isSessionReadyForPrompt(session: string): boolean {
   const first = capturePane(session)
   if (first == null) return false
-  if (detectPaneState(first) !== 'idle') return false
+  // Pass the cursor so an empty composer showing only a dim ghost/autosuggestion
+  // reads as idle (promptable), not as a parked draft (card c8d13cc0). Cursor
+  // capture failure -> undefined -> safe content-only heuristic.
+  if (detectPaneState(first, { cursor: captureCursor(session) ?? undefined }) !== 'idle') return false
 
   try { execFileSync('/bin/sleep', [PANE_READY_CONFIRM_DELAY_S], { timeout: 2000 }) } catch { /* best effort */ }
 
   const second = capturePane(session)
   if (second == null) return false
-  return detectPaneState(second) === 'idle'
+  return detectPaneState(second, { cursor: captureCursor(session) ?? undefined }) === 'idle'
+}
+
+// L2 delivery backstop (card d4aa1d14): prove a pane is idle by an ORTHOGONAL
+// signal so a PERSISTENT false-not-ready (which isSessionReadyForPrompt would
+// keep returning, since detectPaneState is recomputed fresh and gives the same
+// wrong answer every poll) self-heals instead of stranding the recipient until
+// restart. Captures QUIESCENCE_SAMPLES snapshots (+cursor) over a short window
+// and defers the verdict to the pure isQuiescentlyIdle: true ONLY when no busy
+// signal is present, the composer is empty/ghost (never a real draft), and the
+// at-or-above-box region is byte-stable across all samples. A failed capture
+// aborts to false (cannot prove idle -> do not override the gate). The proven
+// idle state preserves the router's idle-only-inject ACK invariant: the pane is
+// genuinely idle at inject, so a later busy turn is still correctly read as
+// receipt of our message.
+export function proveQuiescentlyIdle(session: string): boolean {
+  const samples: QuiescenceSample[] = []
+  for (let i = 0; i < QUIESCENCE_SAMPLES; i++) {
+    if (i > 0) {
+      try { execFileSync('/bin/sleep', [QUIESCENCE_SAMPLE_GAP_S], { timeout: 2000 }) } catch { /* best effort */ }
+    }
+    const pane = capturePane(session)
+    if (pane == null) return false
+    samples.push({ pane, cursor: captureCursor(session) ?? undefined })
+  }
+  return isQuiescentlyIdle(samples)
 }
 

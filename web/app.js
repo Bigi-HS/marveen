@@ -1,47 +1,145 @@
 // === Dashboard auth bootstrap ===
-// The server prints an URL like http://127.0.0.1:3420/?token=XXX on startup.
-// On first visit we pluck the token out of the URL, store it in localStorage,
-// strip it from the visible URL, and then inject it into every /api/* fetch
-// as a Bearer header so the server lets us through.
+// The server prints a TOKENLESS URL plus the access token on its own line. The
+// operator pastes that token ONCE: we POST it to /api/auth/login, which sets an
+// HttpOnly session cookie. After that, same-origin requests carry the cookie
+// automatically -- the raw token is never stored in localStorage. On a 401 we
+// re-prompt for the token and re-login. A legacy ?token=XXX URL is still honored
+// for backward compat: we log in with it, then strip it from the visible URL.
 (() => {
-  const TOKEN_KEY = 'marveen-dashboard-token'
-  const urlParams = new URLSearchParams(window.location.search)
-  const urlToken = urlParams.get('token')
-  if (urlToken) {
-    localStorage.setItem(TOKEN_KEY, urlToken)
-    urlParams.delete('token')
-    const clean = window.location.pathname + (urlParams.toString() ? '?' + urlParams : '') + window.location.hash
-    window.history.replaceState({}, '', clean)
+  const originalFetch = window.fetch.bind(window)
+
+  // POST a credential set to the login endpoint. `creds` is either
+  // { token } (bearer/recovery) or { username, password } (operator login).
+  async function login(creds) {
+    try {
+      const res = await originalFetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify(creds),
+      })
+      return res.ok
+    } catch { return false }
   }
 
-  const originalFetch = window.fetch.bind(window)
+  // Ask the server which login form to present: username+password (when
+  // credentials are configured) or the legacy token paste. Fail safe to token.
+  async function passwordLoginEnabled() {
+    try {
+      const res = await originalFetch('/api/auth/status', { credentials: 'same-origin' })
+      if (!res.ok) return false
+      const body = await res.json()
+      return body && body.passwordLogin === true
+    } catch { return false }
+  }
+
+  // Render a full-screen login overlay and resolve true once a login succeeds.
+  // Replaces the old window.prompt so the dashboard is usable from a phone and
+  // supports username+password. Only one overlay is ever mounted at a time.
+  function showLoginOverlay() {
+    if (window.__marveenLoginPromise) return window.__marveenLoginPromise
+    window.__marveenLoginPromise = (async () => {
+      const usePassword = await passwordLoginEnabled()
+      return await new Promise((resolve) => {
+        const backdrop = document.createElement('div')
+        backdrop.setAttribute('role', 'dialog')
+        backdrop.setAttribute('aria-modal', 'true')
+        backdrop.style.cssText =
+          'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;' +
+          'background:rgba(9,14,22,0.82);backdrop-filter:blur(3px);padding:16px'
+        backdrop.innerHTML =
+          '<form id="mvLoginForm" style="width:100%;max-width:360px;background:#141b26;color:#e8edf4;' +
+          'border:1px solid #2a3646;border-radius:14px;padding:24px 22px;box-shadow:0 12px 40px rgba(0,0,0,0.5);' +
+          'font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">' +
+          '<div style="font-size:18px;font-weight:600;margin-bottom:4px">NoA Dashboard</div>' +
+          '<div style="font-size:13px;color:#9fb0c3;margin-bottom:18px">Belépés a folytatáshoz</div>' +
+          (usePassword
+            ? '<label style="display:block;font-size:12px;color:#9fb0c3;margin-bottom:4px">Felhasználónév</label>' +
+              '<input id="mvUser" autocomplete="username" autocapitalize="none" autocorrect="off" ' +
+              'style="width:100%;box-sizing:border-box;padding:11px 12px;margin-bottom:12px;border-radius:9px;' +
+              'border:1px solid #2a3646;background:#0d131c;color:#e8edf4;font-size:15px">' +
+              '<label style="display:block;font-size:12px;color:#9fb0c3;margin-bottom:4px">Jelszó</label>' +
+              '<input id="mvPass" type="password" autocomplete="current-password" ' +
+              'style="width:100%;box-sizing:border-box;padding:11px 12px;margin-bottom:6px;border-radius:9px;' +
+              'border:1px solid #2a3646;background:#0d131c;color:#e8edf4;font-size:15px">'
+            : '<label style="display:block;font-size:12px;color:#9fb0c3;margin-bottom:4px">Hozzáférési token</label>' +
+              '<input id="mvToken" type="password" autocomplete="off" ' +
+              'style="width:100%;box-sizing:border-box;padding:11px 12px;margin-bottom:6px;border-radius:9px;' +
+              'border:1px solid #2a3646;background:#0d131c;color:#e8edf4;font-size:15px">') +
+          '<div id="mvLoginErr" style="min-height:18px;font-size:12px;color:#ff8080;margin:2px 0 10px"></div>' +
+          '<button type="submit" id="mvLoginBtn" ' +
+          'style="width:100%;padding:12px;border:none;border-radius:9px;background:#3b82f6;color:#fff;' +
+          'font-size:15px;font-weight:600;cursor:pointer">Belépés</button>' +
+          '</form>'
+        document.body.appendChild(backdrop)
+        const form = backdrop.querySelector('#mvLoginForm')
+        const err = backdrop.querySelector('#mvLoginErr')
+        const btn = backdrop.querySelector('#mvLoginBtn')
+        const first = backdrop.querySelector('#mvUser') || backdrop.querySelector('#mvToken')
+        if (first) first.focus()
+        form.addEventListener('submit', async (e) => {
+          e.preventDefault()
+          err.textContent = ''
+          btn.disabled = true
+          btn.textContent = 'Belépés...'
+          let creds
+          if (usePassword) {
+            const u = backdrop.querySelector('#mvUser').value.trim()
+            const p = backdrop.querySelector('#mvPass').value
+            if (!u || !p) { err.textContent = 'Add meg a felhasználónevet és a jelszót.'; btn.disabled = false; btn.textContent = 'Belépés'; return }
+            creds = { username: u, password: p }
+          } else {
+            const t = backdrop.querySelector('#mvToken').value.trim()
+            if (!t) { err.textContent = 'Add meg a tokent.'; btn.disabled = false; btn.textContent = 'Belépés'; return }
+            creds = { token: t }
+          }
+          const ok = await login(creds)
+          if (ok) {
+            backdrop.remove()
+            resolve(true)
+          } else {
+            err.textContent = 'Hibás belépési adatok.'
+            btn.disabled = false
+            btn.textContent = 'Belépés'
+          }
+        })
+      })
+    })()
+    return window.__marveenLoginPromise
+  }
+
+  // Bootstrap from a legacy ?token= URL (logs in, then scrubs the URL).
+  const bootstrapLogin = (async () => {
+    const urlParams = new URLSearchParams(window.location.search)
+    const urlToken = urlParams.get('token')
+    if (urlToken) {
+      await login({ token: urlToken.trim() })
+      urlParams.delete('token')
+      const clean = window.location.pathname + (urlParams.toString() ? '?' + urlParams : '') + window.location.hash
+      window.history.replaceState({}, '', clean)
+    }
+  })()
+
   window.fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input))
-    // Only attach the token to same-origin API calls. Relative paths always
-    // resolve to same-origin; absolute URLs must match the current origin.
     const isSameOriginApi =
       url.startsWith('/api/') ||
       (url.startsWith(window.location.origin + '/api/'))
     if (isSameOriginApi) {
-      const token = localStorage.getItem(TOKEN_KEY)
-      if (token) {
-        init = init || {}
-        const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined))
-        headers.set('Authorization', 'Bearer ' + token)
-        init.headers = headers
+      await bootstrapLogin
+      // Ensure the session cookie rides along on same-origin API calls.
+      init = init || {}
+      if (input instanceof Request ? input.credentials === undefined : init.credentials === undefined) {
+        init.credentials = 'same-origin'
       }
     }
-    const res = await originalFetch(input, init)
-    if (res.status === 401 && isSameOriginApi) {
-      // Token missing, wrong, or revoked. Wipe and prompt once per page load.
-      localStorage.removeItem(TOKEN_KEY)
-      if (!window.__marveenAuthPrompted) {
-        window.__marveenAuthPrompted = true
-        alert(
-          'Dashboard authentication failed. Check the server log for the access URL ' +
-          '(look for "Dashboard access URL" with ?token=...), then reopen it in your browser.'
-        )
-      }
+    let res = await originalFetch(input, init)
+    if (res.status === 401 && isSameOriginApi && !url.startsWith('/api/auth/')) {
+      // Session missing, expired, or revoked. Show the login overlay once and
+      // re-login; on success, replay the original request transparently.
+      const ok = await showLoginOverlay()
+      window.__marveenLoginPromise = null
+      if (ok) res = await originalFetch(input, init)
     }
     return res
   }
@@ -81,6 +179,7 @@ function switchPage(pageId) {
   if (pageId === 'connectors') loadConnectors()
   if (pageId === 'migrate') loadMigrateAgents()
   if (pageId === 'status') loadStatus()
+  if (pageId === 'gate') loadGateBoard()
   if (pageId === 'recall') loadRecallPage()
   if (pageId === 'bgTasks') loadBgTasksPage()
   if (pageId === 'vault') loadVaultPage()
@@ -89,6 +188,7 @@ function switchPage(pageId) {
   if (pageId === 'team') { loadTeamGraph() }
   if (pageId === 'messages') loadMessagesPage()
   if (pageId === 'tokenUsage') loadTokenUsage()
+  if (pageId === 'toolLog') loadToolLog()
   if (pageId === 'ideas') loadIdeasPage()
 }
 
@@ -199,6 +299,7 @@ let kanbanProjectFilter = ''
 // Matched case-insensitively against card.assignee so a casing mismatch
 // (e.g. card "gorcsevivan" vs list "GorcsevIvan") still filters correctly.
 let kanbanAssigneeFilter = ''
+let kanbanPriorityFilter = ''
 
 const cardModalOverlay = document.getElementById('cardModalOverlay')
 const cardDetailOverlay = document.getElementById('cardDetailOverlay')
@@ -270,6 +371,62 @@ document.getElementById('kanbanProjectFilter').addEventListener('change', (e) =>
   renderKanban()
 })
 
+// === Archive view ===
+// The "Kész" column shows only today's completions (the backend auto-archives
+// done cards last touched before today). Older done cards live here, read-only.
+const kanbanArchiveOverlay = document.getElementById('kanbanArchiveOverlay')
+document.getElementById('kanbanArchiveBtn').addEventListener('click', openArchiveModal)
+document.getElementById('kanbanArchiveClose').addEventListener('click', () => closeModal(kanbanArchiveOverlay))
+kanbanArchiveOverlay.addEventListener('click', (e) => { if (e.target === kanbanArchiveOverlay) closeModal(kanbanArchiveOverlay) })
+
+async function openArchiveModal() {
+  const body = document.getElementById('kanbanArchiveBody')
+  body.innerHTML = '<div style="color:var(--muted);padding:8px;">Betöltés…</div>'
+  openModal(kanbanArchiveOverlay)
+  try {
+    const res = await fetch('/api/kanban/archived')
+    const cards = await res.json()
+    renderArchiveList(cards)
+  } catch (err) {
+    console.error('Archívum betöltés hiba:', err)
+    body.innerHTML = '<div style="color:var(--danger,#e66);padding:8px;">Nem sikerült betölteni az archívumot.</div>'
+  }
+}
+
+function renderArchiveList(cards) {
+  const body = document.getElementById('kanbanArchiveBody')
+  body.innerHTML = ''
+  if (!cards.length) {
+    body.innerHTML = '<div style="color:var(--muted);padding:8px;">Az archívum üres.</div>'
+    return
+  }
+  for (const card of cards) {
+    const row = document.createElement('div')
+    row.style.cssText = 'padding:8px 10px;border:1px solid var(--border);border-radius:8px;cursor:pointer;display:flex;flex-direction:column;gap:3px;'
+    const seq = card.seq != null ? `<span style="font-family:monospace;font-size:11px;color:var(--muted);margin-right:5px">#${card.seq}</span>` : ''
+    const archived = card.archived_at
+      ? new Date(card.archived_at * 1000).toLocaleDateString('hu-HU', { year: 'numeric', month: 'short', day: 'numeric' })
+      : ''
+    const project = card.project ? `<span class="kanban-card-project">${escapeHtml(card.project)}</span>` : ''
+    // Resolve the assignee id to its Boss display name (falling back to the raw
+    // id when the list has no match), mirroring the live-board chip so archived
+    // cards show "Dampier"/"Grace"/"NoA", never the internal agent id.
+    const rawArchAssignee = card.assignee ? String(card.assignee).trim() : ''
+    const archAssigneeMatch = rawArchAssignee
+      ? kanbanAssignees.find((a) => a.name.toLowerCase() === rawArchAssignee.toLowerCase())
+      : null
+    const archAssigneeLabel = archAssigneeMatch ? (archAssigneeMatch.displayName || archAssigneeMatch.name) : rawArchAssignee
+    const assignee = archAssigneeLabel ? `<span style="color:var(--muted)">${escapeHtml(archAssigneeLabel)}</span>` : ''
+    row.innerHTML = `
+      <div style="font-weight:500">${seq}${escapeHtml(card.title)}</div>
+      <div style="font-size:12px;color:var(--muted);display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        ${project}${assignee}<span>archiválva: ${archived}</span>
+      </div>`
+    row.addEventListener('click', () => { closeModal(kanbanArchiveOverlay); showCardDetail(card) })
+    body.appendChild(row)
+  }
+}
+
 // The kanban "owner" is the assignee whose type is 'owner' -- the person the
 // board is primarily run for, on any deployment. Identified by type, never by
 // a hard-coded display name, so the quick "show what's on me" view is generic.
@@ -338,6 +495,25 @@ function setupAssigneeFilter() {
     toolbar.appendChild(label)
     toolbar.appendChild(sel)
     toolbar.appendChild(ownerBtn)
+
+    // Priority filter (card ba512371 #4). Fixed enum, so built once alongside the
+    // assignee control rather than repopulated from the data.
+    const prLabel = document.createElement('label')
+    prLabel.setAttribute('for', 'kanbanPriorityFilter')
+    prLabel.textContent = 'Prioritás:'
+    prLabel.style.cssText = 'font-size:13px;color:var(--muted);white-space:nowrap;margin-left:8px;'
+    const prSel = document.createElement('select')
+    prSel.id = 'kanbanPriorityFilter'
+    prSel.style.cssText = 'font-size:13px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg);min-width:110px;'
+    prSel.innerHTML = '<option value="">Mind</option>'
+      + '<option value="urgent">Sürgős</option>'
+      + '<option value="high">Magas</option>'
+      + '<option value="normal">Normál</option>'
+      + '<option value="low">Alacsony</option>'
+    prSel.value = kanbanPriorityFilter
+    prSel.addEventListener('change', (e) => { kanbanPriorityFilter = e.target.value; renderKanban() })
+    toolbar.appendChild(prLabel)
+    toolbar.appendChild(prSel)
   }
 
   // (Re)populate options from the current assignee list, preserving selection.
@@ -358,19 +534,23 @@ function setupAssigneeFilter() {
 }
 
 function renderKanban() {
-  const grouped = { planned: [], in_progress: [], waiting: [], done: [] }
+  const grouped = { planned: [], in_progress: [], waiting: [], done: [], icebox: [] }
   const assigneeFilter = kanbanAssigneeFilter.toLowerCase()
   for (const card of kanbanCards) {
     if (kanbanProjectFilter && (card.project || '') !== kanbanProjectFilter) continue
     // Assignee filter (case-insensitive). Empty = no filter.
     if (assigneeFilter && String(card.assignee || '').trim().toLowerCase() !== assigneeFilter) continue
+    // Priority filter (fixed enum, default 'normal' when a card carries none).
+    if (kanbanPriorityFilter && (card.priority || 'normal') !== kanbanPriorityFilter) continue
     if (grouped[card.status]) grouped[card.status].push(card)
   }
 
   for (const [status, cards] of Object.entries(grouped)) {
     const col = document.querySelector(`.kanban-col-body[data-status="${status}"]`)
     col.innerHTML = ''
-    cards.sort((a, b) => a.sort_order - b.sort_order)
+    // Attention order (card 65afc67e): lowest priority_score first (1 = top);
+    // unscored (parked/legacy) cards fall back to sort_order.
+    cards.sort((a, b) => (a.priority_score ?? 99) - (b.priority_score ?? 99) || a.sort_order - b.sort_order)
 
     for (const card of cards) {
       col.appendChild(createCardEl(card))
@@ -382,6 +562,7 @@ function renderKanban() {
   document.getElementById('countInProgress').textContent = grouped.in_progress.length
   document.getElementById('countWaiting').textContent = grouped.waiting.length
   document.getElementById('countDone').textContent = grouped.done.length
+  document.getElementById('countIcebox').textContent = grouped.icebox.length
 
   // Async parent-badge: fetch children count per card, show badge if any
   loadSubtaskBadges()
@@ -412,6 +593,14 @@ async function loadSubtaskBadges() {
   }))
 }
 
+// Urgency-band colour for a 1-10 priority_score badge (card 65afc67e).
+function priorityScoreStyle(score) {
+  if (score <= 2) return 'background:#4a1d1d;color:#ff7a7a;border:1px solid #ff7a7a55'   // SEV1 / urgent
+  if (score <= 4) return 'background:#4a341d;color:#ffb259;border:1px solid #ffb25955'   // high
+  if (score <= 7) return 'background:var(--border);color:var(--fg)'                       // normal
+  return 'background:transparent;color:var(--muted);opacity:.65;border:1px solid var(--border)' // low
+}
+
 function createCardEl(card) {
   const el = document.createElement('div')
   el.className = 'kanban-card'
@@ -431,8 +620,16 @@ function createCardEl(card) {
   // Display the persona displayName (falling back to the id) per #216, while
   // keeping the robust match above and the raw-name fallback chip below.
   const assigneeLabel = assignee ? (assignee.displayName || assignee.name) : ''
+  // Render the real agent avatar in the chip when one exists; fall back to the
+  // letter dot otherwise (avatarUrl is backend-built + URL-encoded, hasImage
+  // guards against the per-agent avatar endpoint's 404-on-missing). #6de93bd6.
+  const assigneeDot = assignee && assignee.hasImage && assignee.avatarUrl
+    ? `<span class="assignee-dot ${assignee.type} has-img"><img src="${assignee.avatarUrl}" alt="${escapeHtml(assigneeLabel)}" loading="lazy"></span>`
+    : assignee
+      ? `<span class="assignee-dot ${assignee.type}">${escapeHtml(assigneeLabel[0] || '')}</span>`
+      : ''
   const assigneeHtml = assignee
-    ? `<span class="kanban-card-assignee"><span class="assignee-dot ${assignee.type}">${escapeHtml(assigneeLabel[0])}</span>${escapeHtml(assigneeLabel)}</span>`
+    ? `<span class="kanban-card-assignee">${assigneeDot}${escapeHtml(assigneeLabel)}</span>`
     : rawAssignee
       ? `<span class="kanban-card-assignee"><span class="assignee-dot unknown">${escapeHtml(rawAssignee[0])}</span>${escapeHtml(rawAssignee)}</span>`
       : ''
@@ -454,10 +651,16 @@ function createCardEl(card) {
     ? `<span class="kanban-card-seq" style="font-family:monospace;font-size:11px;color:var(--muted);margin-right:5px">#${card.seq}</span>`
     : ''
 
+  // priority_score digit badge (card 65afc67e): 1 = top attention. Urgency bands
+  // 1-2 red / 3-4 orange / 5-7 neutral / 8-10 faint. Parked (NULL) shows nothing.
+  const scoreHtml = card.priority_score != null
+    ? `<span class="kanban-card-score" title="Prioritás ${card.priority_score}/10" style="${priorityScoreStyle(card.priority_score)};font-family:monospace;font-size:11px;font-weight:600;min-width:16px;text-align:center;border-radius:4px;padding:1px 4px;margin-right:5px">${card.priority_score}</span>`
+    : ''
+
   el.innerHTML = `
     ${projectHtml}
     <div class="kanban-card-title">${seqHtml}${escapeHtml(card.title)}</div>
-    <div class="kanban-card-footer">${assigneeHtml}${dueHtml}</div>
+    <div class="kanban-card-footer">${scoreHtml}${assigneeHtml}${dueHtml}</div>
     <div class="kanban-card-actions">
       <button class="card-breakdown-btn" title="AI szétbont" aria-label="AI szétbont">⚡</button>
     </div>
@@ -632,7 +835,7 @@ async function showCardDetail(card) {
     : null
   const assigneeDisplay = assignee ? (assignee.displayName || assignee.name) : (rawDetailAssignee || '-- nincs --')
   const priorityLabels = { low: 'Alacsony', normal: 'Normál', high: 'Magas', urgent: 'Sürgős' }
-  const statusLabels = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Várakozik', done: 'Kész' }
+  const statusLabels = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Várakozik', done: 'Kész', icebox: 'Jegelve' }
 
   const meta = document.getElementById('cardDetailMeta')
   const idLabel = (card.seq != null ? `#${card.seq} · ` : '') + card.id
@@ -821,7 +1024,7 @@ async function showCardDetail(card) {
     if (children.length > 0) {
       section.style.display = ''
       list.innerHTML = ''
-      const statusLabelsShort = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Vár', done: 'Kész' }
+      const statusLabelsShort = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Vár', done: 'Kész', icebox: 'Jegelve' }
       for (const ch of children) {
         const div = document.createElement('div')
         div.className = 'comment-item'
@@ -972,6 +1175,18 @@ document.getElementById('breakdownClose').addEventListener('click', () => closeM
 // === Elements: Agents ===
 const agentsGrid = document.getElementById('agentsGrid')
 const addBtn = document.getElementById('addAgentBtn')
+
+// Fleet-grid search filter (card ba512371 #3). Matches name/displayName/desc/
+// model/archetype + a running-state synonym so "offline"/"fut" narrow the grid.
+let agentSearchQuery = ''
+function agentMatchesSearch(agent) {
+  const q = agentSearchQuery.trim().toLowerCase()
+  if (!q) return true
+  const stateWords = agent.running ? 'fut running online aktiv' : 'leallva stopped offline'
+  const hay = [agent.name, agent.displayName, agent.description, agent.model, agent.archetype, stateWords]
+    .filter(Boolean).join(' ').toLowerCase()
+  return hay.includes(q)
+}
 const agentWizardOverlay = document.getElementById('agentWizardOverlay')
 const agentDetailOverlay = document.getElementById('agentDetailOverlay')
 const skillModalOverlay = document.getElementById('skillModalOverlay')
@@ -990,6 +1205,9 @@ const AVATARS = [
 
 let selectedAvatar = null
 let agents = []
+// Category map { "Category": ["agent_name", ...] } fetched at runtime from
+// /api/agent-categories (kanban 78ba4672). Used only by the tree view.
+let agentCategories = {}
 let currentAgent = null
 // API-safe agent id for the currently open detail modal. Sub-agents key off
 // their name; the main agent's detail object carries name:'marveen' for legacy
@@ -1262,6 +1480,12 @@ async function loadAgents() {
       fetch('/api/marveen'),
     ])
     agents = await agentsRes.json()
+    // Category map for the tree view; non-fatal if it fails (tree degrades to
+    // an all-Uncategorized list, the flat view is unaffected).
+    try {
+      const catRes = await fetch('/api/agent-categories')
+      if (catRes.ok) agentCategories = await catRes.json()
+    } catch { /* keep last-known categories */ }
     if (marveenRes.ok) {
       window._marveen = await marveenRes.json()
       // A backend CHANNEL_PROVIDER-éhez igazitsuk a kliens-default-ot,
@@ -1273,7 +1497,7 @@ async function loadAgents() {
         if (typeof updateProviderUI === 'function') updateProviderUI()
       }
     }
-    renderAgents()
+    renderActiveAgentsView()
   } catch (err) {
     console.error('Betöltés hiba:', err)
   }
@@ -1285,6 +1509,17 @@ function formatContextTokens(n) {
   if (n < 1000) return `${n} token`
   const k = n / 1000
   return `≈${k < 10 ? k.toFixed(1) : Math.round(k)}k token`
+}
+
+// Per-agent context-window % badge for the agent card. Green/amber/red mirrors
+// the watchdog's high-water mark (>=80% = the balloon early-warning); only shown
+// for a running agent with a real reading.
+function contextBadgeHtml(agent) {
+  if (!agent || !agent.running || typeof agent.contextPercent !== 'number') return ''
+  const p = agent.contextPercent
+  const color = p >= 80 ? '#e5484d' : p >= 50 ? '#f5a623' : '#3fb950'
+  return `<span class="agent-ctx-badge" title="Kontextus-ablak kihasználtság: ${p}%" ` +
+    `style="font-size:11px;font-weight:600;color:${color};border:1px solid ${color}55;border-radius:6px;padding:1px 6px">${p}%</span>`
 }
 
 // Populate the auto-restart controls + context display from an agent payload.
@@ -1333,7 +1568,7 @@ async function openMarveenDetail() {
   currentAgent = { ...m, name: 'marveen', claudeMd: '', soulMd: '', mcpJson: '', skills: [] }
   setupAutoRestartUI(currentAgent)
 
-  const displayName = m.name || 'Marveen'
+  const displayName = m.name || 'NoA'
   document.getElementById('agentDetailTitle').textContent = displayName
   const avatar = document.getElementById('agentDetailAvatar')
   avatar.className = 'detail-avatar gradient-1'
@@ -1451,10 +1686,14 @@ function channelTip(isConnected) {
 function renderAgents() {
   agentsGrid.querySelectorAll('.agent-card:not(.add-card)').forEach((el) => el.remove())
 
-  // Marveen card (always first)
-  if (window._marveen) {
+  // Marveen card (always first). Honour the search filter so it hides when the
+  // query does not match the main assistant.
+  const marveenMatches = window._marveen && agentMatchesSearch({
+    name: 'marveen', displayName: window._marveen.name, description: window._marveen.description, running: true,
+  })
+  if (marveenMatches) {
     const m = window._marveen
-    const displayName = m.name || 'Marveen'
+    const displayName = m.name || 'NoA'
     const mCard = document.createElement('div')
     mCard.className = 'agent-card marveen-card'
     mCard.innerHTML = `
@@ -1485,6 +1724,7 @@ function renderAgents() {
   }
 
   for (const agent of agents) {
+    if (!agentMatchesSearch(agent)) continue
     // agent.name is the sanitized id (API/filesystem); displayName keeps the
     // original accented/cased input the user typed.
     const label = agent.displayName || agent.name
@@ -1500,8 +1740,14 @@ function renderAgents() {
     const modelClass = agent.model && agent.model !== 'inherit' ? agent.model : ''
     const modelLabel = agent.model || 'inherit'
     const chConnected = agentIsConnected(agent)
-    const chDotClass = chConnected ? 'connected' : 'disconnected'
-    const chLabel = chConnected ? 'Online' : 'Offline'
+    // Channel-health warning (card ba512371 #6): a running agent whose token is
+    // present (so it reads "Online") but whose channel the monitor flagged as
+    // dropped. This is the Györe-drop shape -- surface it inline instead of
+    // letting it look healthy. NB: only monitor-DETECTED (plugin-pane) drops set
+    // channelHealthy=false; a silent client-drop can still read healthy.
+    const chUnhealthy = agent.running && agent.channelHealthy === false
+    const chDotClass = chUnhealthy ? 'warning' : (chConnected ? 'connected' : 'disconnected')
+    const chLabel = chUnhealthy ? 'Csatorna hiba' : (chConnected ? 'Online' : 'Offline')
     const isRunning = agent.running || false
     const runDotClass = isRunning ? 'running' : 'stopped'
     const runLabel = isRunning ? 'Fut' : 'Leállva'
@@ -1516,13 +1762,19 @@ function renderAgents() {
       </div>
       <div class="agent-card-footer">
         <span class="agent-model-badge ${escapeHtml(modelClass)}">${escapeHtml(modelLabel)}</span>
+        ${contextBadgeHtml(agent)}
         <span class="process-indicator" title="${escapeHtml(processTip(isRunning))}"><span class="process-dot ${runDotClass}"></span>${runLabel}</span>
-        <span class="tg-status" title="${escapeHtml(channelTip(chConnected))}"><span class="tg-dot ${chDotClass}"></span>${chLabel}</span>
+        <span class="tg-status" title="${escapeHtml(chUnhealthy ? 'A csatorna-monitor csatorna-leszakadást észlelt. Az újracsatlakozás megpróbálja helyreállítani.' : channelTip(chConnected))}"><span class="tg-dot ${chDotClass}"></span>${chLabel}</span>
       </div>
       ${agent.needsReauth ? `
         <div class="agent-reauth-banner">
           <span class="agent-reauth-reason">${escapeHtml(agent.reauthReason || 'Újrabejelentkezés szükséges')}</span>
           <button class="btn-danger btn-compact agent-login-btn" data-phase="start">Bejelentkezés</button>
+        </div>` : ''}
+      ${chUnhealthy ? `
+        <div class="agent-channel-banner">
+          <span class="agent-channel-warn">Csatorna leszakadt${agent.channelReconnectAttempts ? ` (${agent.channelReconnectAttempts} újrapróba)` : ''}</span>
+          <button class="btn-secondary btn-compact agent-reconnect-btn">Újracsatlakozás</button>
         </div>` : ''}
       <div class="agent-card-actions">
         <button class="btn-secondary btn-compact agent-terminal-btn" title="Terminal">
@@ -1538,6 +1790,21 @@ function renderAgents() {
     // Terminal button
     card.querySelector('.agent-terminal-btn')?.addEventListener('click', (e) => {
       e.stopPropagation(); openTerminalModal(agent.name)
+    })
+    // Channel reconnect button (card ba512371 #6): fire the existing MCP-reconnect
+    // endpoint, then refresh so the warning clears if it recovered.
+    card.querySelector('.agent-reconnect-btn')?.addEventListener('click', async (e) => {
+      e.stopPropagation()
+      const btn = e.currentTarget
+      btn.disabled = true
+      try {
+        const res = await fetch(`/api/agents/${encodeURIComponent(agent.name)}/channel/reconnect`, { method: 'POST' })
+        showToast(res.ok ? `${label}: újracsatlakozás elindítva` : `${label}: az újracsatlakozás nem sikerült`)
+      } catch {
+        showToast(`${label}: az újracsatlakozás nem sikerült`)
+      } finally {
+        loadAgents()
+      }
     })
     card.addEventListener('click', () => openAgentDetail(agent.name))
     agentsGrid.insertBefore(card, addBtn)
@@ -1793,7 +2060,7 @@ function updateProcessControl(agent) {
 }
 
 document.getElementById('marveenRestartBtn').addEventListener('click', async () => {
-  if (!confirm('Hard restart a marveen-channels session-ön. A folyamatban lévő Marveen beszélgetés elveszik (memória megmarad). Folytatod?')) return
+  if (!confirm('Hard restart a marveen-channels session-ön. A folyamatban lévő NoA beszélgetés elveszik (memória megmarad). Folytatod?')) return
   const btn = document.getElementById('marveenRestartBtn')
   btn.disabled = true
   try {
@@ -1802,7 +2069,7 @@ document.getElementById('marveenRestartBtn').addEventListener('click', async () 
       const err = await res.json().catch(() => ({}))
       throw new Error(err.error || 'Restart sikertelen')
     }
-    showToast('Marveen channels újraindítva')
+    showToast('NoA channels újraindítva')
   } catch (err) {
     showToast(`Hiba: ${err.message}`)
   } finally {
@@ -1860,6 +2127,54 @@ document.getElementById('agentStopBtn').addEventListener('click', async () => {
   } catch (err) {
     showToast(`Hiba: ${err.message}`)
   }
+})
+
+// === Operator action layer (card d3fc67f2): nudge + run-skill on the open agent ===
+document.getElementById('agentNudgeBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const ta = document.getElementById('agentNudgeText')
+  const text = ta.value.trim()
+  if (!text) { showToast('Írj egy nudge üzenetet'); return }
+  const btn = document.getElementById('agentNudgeBtn')
+  btn.disabled = true
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/nudge`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (res.ok) { showToast(`Nudge elküldve: ${escapeHtml(currentAgent.name)}`); ta.value = '' }
+    else showToast(data.error || 'Nudge sikertelen')
+  } catch { showToast('Hiba a nudge során') } finally { btn.disabled = false }
+})
+
+document.getElementById('agentRunSkillBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const skill = document.getElementById('agentSkillSelect').value
+  if (!skill) { showToast('Nincs választható skill'); return }
+  const btn = document.getElementById('agentRunSkillBtn')
+  btn.disabled = true
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/run-skill`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ skill }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (res.ok) showToast(`Skill elindítva: ${escapeHtml(skill)}`)
+    else showToast(data.error || 'Skill futtatás sikertelen')
+  } catch { showToast('Hiba a skill futtatása során') } finally { btn.disabled = false }
+})
+
+document.getElementById('agentInterruptBtn').addEventListener('click', async () => {
+  if (!currentAgent) return
+  const btn = document.getElementById('agentInterruptBtn')
+  btn.disabled = true
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/interrupt`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    })
+    const data = await res.json().catch(() => ({}))
+    if (res.ok) showToast(`Megszakítás elküldve: ${escapeHtml(currentAgent.name)}`)
+    else showToast(data.error || 'Megszakítás sikertelen')
+  } catch { showToast('Hiba a megszakítás során') } finally { btn.disabled = false }
 })
 
 // === Tab switching ===
@@ -2988,9 +3303,19 @@ async function loadSkills(agentName) {
       }
       listEl.appendChild(item)
     }
+
+    // Populate the action-layer run-skill dropdown from the same list (card d3fc67f2).
+    const sel = document.getElementById('agentSkillSelect')
+    if (sel) {
+      sel.innerHTML = skills.length
+        ? skills.map(s => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}</option>`).join('')
+        : '<option value="">(nincs skill)</option>'
+    }
   } catch {
     emptyEl.hidden = false
     document.getElementById('agentDetailSkillCount').textContent = '0'
+    const sel = document.getElementById('agentSkillSelect')
+    if (sel) sel.innerHTML = '<option value="">(nincs skill)</option>'
   }
 }
 
@@ -3493,6 +3818,9 @@ function renderScheduleList(tasks) {
         </div>
       </div>
       <div class="schedule-actions">
+        <button class="btn-icon" data-action="run" title="Futtatás most">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        </button>
         <button class="btn-icon" data-action="toggle" title="${task.enabled ? 'Szüneteltetés' : 'Folytatás'}">
           ${task.enabled ? pauseIcon() : playIcon()}
         </button>
@@ -3509,6 +3837,20 @@ function renderScheduleList(tasks) {
     })
 
     // Action buttons
+    row.querySelector('[data-action="run"]').addEventListener('click', async (e) => {
+      e.stopPropagation()
+      const btn = e.currentTarget
+      btn.disabled = true
+      try {
+        const res = await fetch(`/api/schedules/${encodeURIComponent(task.name)}/run`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        })
+        const data = await res.json().catch(() => ({}))
+        if (res.ok) showToast(`Feladat elindítva: ${escapeHtml(task.name)}`)
+        else showToast(data.error || 'Nem sikerült elindítani')
+      } catch { showToast('Hiba a futtatás során') } finally { btn.disabled = false }
+    })
+
     row.querySelector('[data-action="toggle"]').addEventListener('click', async (e) => {
       e.stopPropagation()
       try {
@@ -5356,7 +5698,7 @@ const BUILTIN_MCPS = [
     label: 'Computer Use',
     desc: 'Képernyő vezérlés, kattintás, gépelés',
     detailHtml: `
-      <p>A Computer Use egy natív Claude képesség, amit nem a Marveen kezel, hanem maga a Claude Code CLI / Claude alkalmazás.
+      <p>A Computer Use egy natív Claude képesség, amit nem a NoA kezel, hanem maga a Claude Code CLI / Claude alkalmazás.
       Nem jelenik meg a <code>claude mcp list</code> kimenetében, ezért a dashboard sem tudja automatikusan detektálni.</p>
       <p><strong>Bekapcsolás:</strong> a pontos folyamat a Claude verziójától függ és változhat verziók között.
       Kövesd az Anthropic hivatalos dokumentációját és a Claude Code changelogot.
@@ -5373,7 +5715,7 @@ const BUILTIN_MCPS = [
       Ezért nem jelenik meg a <code>claude mcp list</code> kimenetében, és a dashboard sem tudja automatikusan detektálni.</p>
       <p><strong>Bekapcsolás:</strong> indítsd a Claude-ot a <code>--chrome</code> flaggel:</p>
       <pre style="background:var(--bg-input);padding:8px 12px;border-radius:4px;font-size:12px;overflow-x:auto">claude --chrome</pre>
-      <p style="color:var(--text-muted)">A Chrome integráció lehetővé teszi a böngészőautomatizálást. A Marveen sub-agentek indítása jelenleg nem adja át ezt a flaget, így csak a manuálisan indított fő session használhatja.</p>
+      <p style="color:var(--text-muted)">A Chrome integráció lehetővé teszi a böngészőautomatizálást. A NoA sub-agentek indítása jelenleg nem adja át ezt a flaget, így csak a manuálisan indított fő session használhatja.</p>
     `,
   },
 ]
@@ -6498,6 +6840,144 @@ const STATUS_COMPONENT_LABELS = {
 }
 
 document.getElementById('refreshStatusBtn').addEventListener('click', loadStatus)
+document.getElementById('refreshGateBtn')?.addEventListener('click', loadGateBoard)
+
+// === Gate / approval queue (card ba512371 #8) ===
+// Read-only view over GET /api/gate/board -- the DB-only merge-gate aggregation
+// (per-PR thor/dave/chad seats + ci + merge-ready). Non-authoritative by design:
+// the board never merges; the merge path re-checks the gate authoritatively.
+const GATE_REPO_URL = 'https://github.com/Bigi-HS/marveen/pull/'
+const GATE_SEAT_META = {
+  approved: { cls: 'ok', sym: '✓', label: 'jóváhagyva' },
+  blocked: { cls: 'bad', sym: '✕', label: 'blokkolva' },
+  none: { cls: 'pending', sym: '·', label: 'nincs' },
+}
+const GATE_CI_LABELS = { pass: 'CI zöld', fail: 'CI piros', none: 'nincs CI', pending: 'CI fut' }
+
+function gateAgoText(epochS) {
+  if (!epochS) return ''
+  const mins = Math.max(0, Math.floor(Date.now() / 1000 - epochS) / 60)
+  if (mins < 60) return `${Math.round(mins)} perce`
+  const hrs = mins / 60
+  if (hrs < 24) return `${Math.round(hrs)} órája`
+  return `${Math.round(hrs / 24)} napja`
+}
+
+function gateSeatCell(reviewer, seat, chadReviewed) {
+  // Chad seat carries the board's one honest uncertainty: when chad has not
+  // reviewed, the DB cannot tell whether the PR is security-sensitive, so the
+  // merge path may still require chad. Surface that instead of a false "not needed".
+  if (reviewer === 'chad' && !chadReviewed) {
+    return `<td class="gate-seat pending" title="Chad még nem nézte -- a merge-út dönti el, kell-e (security-sensitive fájloknál igen)">?</td>`
+  }
+  const m = GATE_SEAT_META[seat] || GATE_SEAT_META.none
+  return `<td class="gate-seat ${m.cls}" title="${reviewer}: ${m.label}">${m.sym}</td>`
+}
+
+function renderGateBoard(board) {
+  const wrap = document.getElementById('gateBoard')
+  const meta = document.getElementById('gateBoardMeta')
+  if (!wrap) return
+  const prs = Array.isArray(board?.prs) ? board.prs : []
+  if (meta) {
+    meta.textContent = prs.length
+      ? `${prs.length} PR az elmúlt ${board.window_days} napból · frissítve ${gateAgoText(board.generated_at)}`
+      : ''
+  }
+  if (!prs.length) {
+    wrap.innerHTML = '<div class="gate-empty">Nincs gate-aktivitás a megadott ablakban.</div>'
+    updateGateNavBadge(0)
+    return
+  }
+  const rows = prs.map((pr) => {
+    const ready = pr.override_active
+      ? '<span class="gate-badge override" title="Aktív override">override</span>'
+      : pr.merge_ready
+        ? '<span class="gate-badge ready">merge-kész</span>'
+        : '<span class="gate-badge blocked">függőben</span>'
+    const ci = pr.ci_required
+      ? `<span class="gate-ci ${pr.ci_status}">${escapeHtml(GATE_CI_LABELS[pr.ci_status] || pr.ci_status)}</span>`
+      : '<span class="gate-ci off">—</span>'
+    return `
+      <tr>
+        <td class="gate-pr"><a href="${GATE_REPO_URL}${pr.pr_number}" target="_blank" rel="noopener">#${pr.pr_number}</a></td>
+        <td class="gate-author">${escapeHtml(pr.author || '—')}</td>
+        ${gateSeatCell('thor', pr.seats?.thor, true)}
+        ${gateSeatCell('dave', pr.seats?.dave, true)}
+        ${gateSeatCell('chad', pr.seats?.chad, pr.chad_reviewed)}
+        <td class="gate-ci-cell">${ci}</td>
+        <td class="gate-ready-cell">${ready}</td>
+        <td class="gate-activity">${gateAgoText(pr.last_activity)}</td>
+      </tr>`
+  }).join('')
+  wrap.innerHTML = `
+    <table class="gate-table">
+      <thead><tr>
+        <th>PR</th><th>Szerző</th><th title="Thor">Thor</th><th title="Dave">Dave</th>
+        <th title="Chad (csak security-sensitive PR-nél kötelező)">Chad</th><th>CI</th><th>Állapot</th><th>Aktivitás</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p class="gate-note">Áttekintő nézet, nem maga a kapu: a tényleges merge újra-ellenőrzi a gate-et a GitHub fájllistával, így egy security-sensitive PR akkor is Chadre várhat, ha itt „merge-kész”.</p>`
+  updateGateNavBadge(prs.filter((p) => p.merge_ready).length)
+}
+
+function updateGateNavBadge(readyCount) {
+  const badge = document.getElementById('gateNavBadge')
+  if (!badge) return
+  if (readyCount > 0) { badge.textContent = String(readyCount); badge.hidden = false }
+  else { badge.hidden = true }
+}
+
+async function loadGateBoard() {
+  const wrap = document.getElementById('gateBoard')
+  if (wrap) wrap.innerHTML = '<div class="gate-loading">Betöltés…</div>'
+  try {
+    const res = await fetch('/api/gate/board')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    renderGateBoard(await res.json())
+  } catch (err) {
+    if (wrap) wrap.innerHTML = `<div class="gate-empty">Nem sikerült betölteni a gate-táblát (${escapeHtml(String(err.message || err))}).</div>`
+  }
+}
+
+// Lightweight nav-badge poll so the merge-ready count shows without opening the
+// page. The board is server-cached (30s), so a 60s cadence is cheap.
+async function pollGateNavBadge() {
+  try {
+    const res = await fetch('/api/gate/board')
+    if (!res.ok) return
+    const board = await res.json()
+    updateGateNavBadge((board.prs || []).filter((p) => p.merge_ready).length)
+  } catch { /* transient */ }
+}
+
+// Header status banner (card ba512371 #5): a thin always-visible strip that
+// appears only when the Claude API has an active incident, so an outage is
+// noticed without opening the status page. Fed either by its own poll or by the
+// full status-page load (shared payload, no double fetch).
+function updateStatusBanner(data) {
+  const banner = document.getElementById('apiStatusBanner')
+  const textEl = document.getElementById('apiStatusText')
+  if (!banner || !textEl) return
+  const operational = !data || data.overall === 'operational'
+  if (operational) { banner.hidden = true; return }
+  const active = Array.isArray(data.incidents) ? data.incidents.filter((i) => i.status !== 'resolved') : []
+  const latest = active[0]
+  banner.classList.toggle('unknown', data.overall === 'unknown')
+  textEl.textContent = data.overall === 'unknown'
+    ? 'Claude API státusz nem elérhető'
+    : `Claude API incidens${active.length > 1 ? ` (${active.length})` : ''}${latest ? ': ' + latest.title : ''}`
+  banner.hidden = false
+}
+
+async function refreshStatusBanner() {
+  try {
+    const res = await fetch('/api/status')
+    if (!res.ok) return
+    updateStatusBanner(await res.json())
+  } catch { /* transient; keep last-known banner state */ }
+}
 
 async function loadStatus() {
   const overallEl = document.getElementById('statusOverall')
@@ -6512,6 +6992,7 @@ async function loadStatus() {
   try {
     const res = await fetch('/api/status')
     const data = await res.json()
+    updateStatusBanner(data)
 
     // Overall status
     const overallLabels = {
@@ -7605,6 +8086,48 @@ function formatRelative(ts) {
   return `${day}n`
 }
 
+// Per-message status/priority cues for the overview ActivityFeed. Only the
+// inter-agent-message rows carry these (memory rows do not), so both are
+// optional and the badge row collapses to empty when absent. Colours reuse the
+// design tokens (success/info/accent/danger/text-muted) -- no raw hex.
+const ACTIVITY_STATUS_META = {
+  pending: { label: 'függőben', color: 'var(--text-muted)' },
+  delivered: { label: 'kézbesítve', color: 'var(--info, #6a9bcc)' },
+  done: { label: 'kész', color: 'var(--success)' },
+  failed: { label: 'sikertelen', color: 'var(--danger)' },
+}
+const ACTIVITY_PRIORITY_META = {
+  low: { label: 'alacsony', color: 'var(--text-muted)' },
+  normal: { label: 'normál', color: 'var(--text-muted)' },
+  high: { label: 'magas', color: 'var(--accent)' },
+  urgent: { label: 'sürgős', color: 'var(--danger)' },
+}
+function renderActivityMeta(a) {
+  const parts = []
+  const st = a.status && ACTIVITY_STATUS_META[a.status]
+  if (st) {
+    parts.push(
+      '<span class="activity-meta-badge" title="státusz: ' + escapeHtml(a.status) + '">' +
+        '<span class="activity-meta-dot" style="background:' + st.color + '"></span>' +
+        escapeHtml(st.label) +
+      '</span>'
+    )
+  }
+  // Only surface priority when it is above the noisy "normal" default so the
+  // feed stays quiet for routine messages.
+  const pr = a.priority && ACTIVITY_PRIORITY_META[a.priority]
+  if (pr && (a.priority === 'high' || a.priority === 'urgent')) {
+    parts.push(
+      '<span class="activity-meta-badge activity-meta-prio" title="prioritás: ' + escapeHtml(a.priority) + '"' +
+        ' style="color:' + pr.color + ';border-color:' + pr.color + '">' +
+        escapeHtml(pr.label) +
+      '</span>'
+    )
+  }
+  if (parts.length === 0) return ''
+  return '<div class="overview-activity-meta">' + parts.join('') + '</div>'
+}
+
 async function loadOverview() {
   try {
     const res = await fetch('/api/overview')
@@ -7645,6 +8168,7 @@ async function loadOverview() {
           <div class="overview-activity-icon">${icon}</div>
           <div class="overview-activity-body">
             <div class="overview-activity-title">${escapeHtml(a.text)}</div>
+            ${renderActivityMeta(a)}
             <div class="overview-activity-time">${formatRelative(a.at)}</div>
           </div>
         `
@@ -7654,6 +8178,331 @@ async function loadOverview() {
   } catch (err) {
     document.getElementById('overviewActivity').innerHTML = `<div style="color:var(--text-muted);font-size:13px">Hiba: ${err.message || err}</div>`
   }
+  // The To-Do widget lives on the overview page; refresh it alongside.
+  loadTodos()
+}
+
+// ===== To-Do widget (Claudia + Hibiki + Bond) =====
+
+const TODO_OWNERS = [
+  { key: 'claudia', label: 'Claudia', sub: 'teendők + tanulás' },
+  { key: 'hibiki', label: 'Hibiki', sub: 'fitnesz' },
+  { key: 'bond', label: 'Bond', sub: 'napi tanulás' },
+]
+
+async function loadTodos() {
+  try {
+    const res = await fetch('/api/todos')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const data = await res.json()
+    for (const o of TODO_OWNERS) {
+      const col = document.getElementById('todoCol-' + o.key)
+      if (col) renderTodoColumn(col, o, data[o.key] || emptyTodoView(), (data.freshness || {})[o.key])
+    }
+  } catch (err) {
+    for (const o of TODO_OWNERS) {
+      const col = document.getElementById('todoCol-' + o.key)
+      if (col) col.innerHTML = `<div class="todo-error">Hiba: ${escapeHtml(String(err.message || err))}</div>`
+    }
+  }
+}
+
+function emptyTodoView() {
+  return { today: [], carried: [], folyamatban: [], doneToday: [], capCount: 0 }
+}
+
+function todoNowEpoch() { return Math.floor(Date.now() / 1000) }
+
+// Freshness label: "Xp" / "X ó"; amber past 25h; null -> "Nem volt írás" (FS-AC2/3).
+function renderFreshness(fresh) {
+  const span = document.createElement('span')
+  span.className = 'todo-fresh'
+  const ago = fresh ? fresh.last_write_ago_seconds : null
+  if (ago == null) { span.textContent = 'Nem volt írás'; return span }
+  if (ago > 90000) span.classList.add('todo-fresh-amber') // 25h
+  span.textContent = ago < 3600 ? `${Math.max(0, Math.floor(ago / 60))}p` : `${Math.floor(ago / 3600)} ó`
+  return span
+}
+
+function calorieChipClass(actual, target) {
+  if (actual == null || target == null) return 'todo-chip-grey'
+  const diff = actual - target
+  if (Math.abs(diff) <= 150) return 'todo-chip-green'
+  if (diff < 0) return 'todo-chip-green' // under target is never flagged
+  if (diff <= 400) return 'todo-chip-yellow'
+  return 'todo-chip-red'
+}
+
+function trainingChipClass(status) {
+  if (status === 'done') return 'todo-chip-green'
+  if (status === 'skipped') return 'todo-chip-yellow'
+  return 'todo-chip-grey' // rest or unset: never a failure color
+}
+
+function trainingLabel(status) {
+  return status === 'done' ? 'Edzés kész' : status === 'skipped' ? 'Edzés kihagyva' : status === 'rest' ? 'Pihenőnap' : 'Edzés'
+}
+
+// A task item with an instant-feedback checkbox (CO-AC1).
+function renderTaskItem(item) {
+  const row = document.createElement('div')
+  row.className = 'todo-item'
+  row.dataset.id = item.id
+  const box = document.createElement('span')
+  box.className = 'todo-check'
+  box.setAttribute('role', 'checkbox')
+  box.setAttribute('tabindex', '0')
+  box.setAttribute('aria-checked', 'false')
+  const body = document.createElement('div')
+  body.className = 'todo-item-body'
+  const t = document.createElement('div')
+  t.className = 'todo-item-title'
+  t.textContent = item.title
+  body.appendChild(t)
+  if (item.detail) {
+    const d = document.createElement('div')
+    d.className = 'todo-item-detail'
+    d.textContent = item.detail
+    body.appendChild(d)
+  }
+  const check = () => {
+    if (row.classList.contains('todo-item-done')) return
+    row.classList.add('todo-item-done') // instant grey, before the network call
+    box.setAttribute('aria-checked', 'true')
+    fetch(`/api/todos/${encodeURIComponent(item.id)}/done`, { method: 'POST' })
+      .then(() => loadTodos())
+      .catch(() => { showToast('Hiba a pipálásnál'); loadTodos() })
+  }
+  box.addEventListener('click', check)
+  box.addEventListener('keydown', (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); check() } })
+  row.appendChild(box)
+  row.appendChild(body)
+  return row
+}
+
+// A fitness chip (read-only): training 3-state or calorie tri-state (FIT-AC1/2/3).
+function renderFitnessItem(item) {
+  const row = document.createElement('div')
+  row.className = 'todo-item todo-item-fitness'
+  const chip = document.createElement('span')
+  chip.className = 'todo-chip'
+  if (item.kind === 'metric') {
+    chip.classList.add(calorieChipClass(item.actual_val, item.target_val))
+    let txt = item.title || 'Kalória'
+    if (item.actual_val != null && item.target_val != null) {
+      const diff = Math.round(item.actual_val - item.target_val)
+      txt += `  ${diff >= 0 ? '+' : ''}${diff} kcal`
+    }
+    chip.textContent = txt
+  } else {
+    // habit (training)
+    chip.classList.add(trainingChipClass(item.status))
+    chip.textContent = item.title && item.title !== 'training' ? item.title : trainingLabel(item.status)
+  }
+  row.appendChild(chip)
+  return row
+}
+
+// A progress item in "Folyamatban": persistent, never red, with a tick button (LP-AC2/3).
+function renderProgressItem(item) {
+  const row = document.createElement('div')
+  row.className = 'todo-item todo-item-progress'
+  const body = document.createElement('div')
+  body.className = 'todo-item-body'
+  const t = document.createElement('div')
+  t.className = 'todo-item-title'
+  t.textContent = item.title
+  body.appendChild(t)
+  const meta = document.createElement('div')
+  meta.className = 'todo-item-detail'
+  meta.textContent = item.last_progress_at
+    ? `Legutóbb haladtál: ${formatTodoDate(item.last_progress_at)}` + (item.progress_note ? ` — ${item.progress_note}` : '')
+    : 'Még nem indult'
+  body.appendChild(meta)
+  row.appendChild(body)
+  const tick = document.createElement('button')
+  tick.className = 'todo-tick-btn'
+  tick.textContent = '+ haladás'
+  tick.addEventListener('click', () => {
+    const note = prompt('Haladás megjegyzés (opcionális):') // simple v1 tick; NLP not in scope
+    if (note === null) return
+    fetch(`/api/todos/${encodeURIComponent(item.id)}/progress`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ progress_note: note }),
+    }).then(() => loadTodos()).catch(() => showToast('Hiba a haladás rögzítésénél'))
+  })
+  row.appendChild(tick)
+  return row
+}
+
+// A carried-over task: muted, "N napja" neutral chip, dismiss-with-confirm (CAR-AC2/3/4).
+function renderCarriedItem(item) {
+  const row = document.createElement('div')
+  row.className = 'todo-item todo-item-carried'
+  row.dataset.id = item.id
+  const box = document.createElement('span')
+  box.className = 'todo-check'
+  box.setAttribute('role', 'checkbox')
+  box.setAttribute('tabindex', '0')
+  box.addEventListener('click', () => {
+    row.classList.add('todo-item-done')
+    fetch(`/api/todos/${encodeURIComponent(item.id)}/done`, { method: 'POST' })
+      .then(() => loadTodos()).catch(() => { showToast('Hiba a pipálásnál'); loadTodos() })
+  })
+  const body = document.createElement('div')
+  body.className = 'todo-item-body'
+  const t = document.createElement('div')
+  t.className = 'todo-item-title'
+  t.textContent = item.title
+  body.appendChild(t)
+  const days = Math.floor((todoNowEpoch() - item.created_at) / 86400)
+  const ago = document.createElement('span')
+  ago.className = 'todo-ago'
+  ago.textContent = `${days} napja`
+  body.appendChild(ago)
+
+  const actions = document.createElement('div')
+  actions.className = 'todo-carried-actions'
+  const dismiss = document.createElement('button')
+  dismiss.className = 'todo-dismiss-btn'
+  dismiss.textContent = 'Elvet'
+  dismiss.title = 'Végleges törlés'
+  dismiss.addEventListener('click', () => {
+    // Replace the button with a two-click confirmation (CAR-AC4 / M2).
+    actions.innerHTML = ''
+    const q = document.createElement('span')
+    q.className = 'todo-confirm-q'
+    q.textContent = 'Biztosan törlöd?'
+    const yes = document.createElement('button')
+    yes.className = 'todo-confirm-yes'
+    yes.textContent = 'Igen'
+    yes.addEventListener('click', () => {
+      fetch(`/api/todos/${encodeURIComponent(item.id)}`, { method: 'DELETE' })
+        .then(() => loadTodos()).catch(() => showToast('Hiba a törlésnél'))
+    })
+    const no = document.createElement('button')
+    no.className = 'todo-confirm-no'
+    no.textContent = 'Mégsem'
+    no.addEventListener('click', () => { actions.innerHTML = ''; actions.appendChild(dismiss) })
+    // Safe option ('Mégsem') takes the slot 'Elvet' just occupied; the
+    // destructive 'Igen' is pushed to the far end so a fast double-click on the
+    // original button position cannot accidentally confirm the hard delete.
+    actions.appendChild(q); actions.appendChild(no); actions.appendChild(yes)
+  })
+  actions.appendChild(dismiss)
+
+  row.appendChild(box)
+  row.appendChild(body)
+  row.appendChild(actions)
+  return row
+}
+
+function todoSubHeader(text, count) {
+  const h = document.createElement('div')
+  h.className = 'todo-subhead'
+  h.textContent = count == null ? text : `${text} (${count})`
+  return h
+}
+
+function renderTodoColumn(col, owner, view, fresh) {
+  col.innerHTML = ''
+
+  // Header: owner + freshness + adherence (hibiki) + cap cue.
+  const head = document.createElement('div')
+  head.className = 'todo-col-head'
+  const title = document.createElement('div')
+  title.className = 'todo-col-title'
+  title.textContent = owner.label
+  const meta = document.createElement('div')
+  meta.className = 'todo-col-meta'
+  meta.appendChild(renderFreshness(fresh))
+  if (owner.key === 'hibiki' && view.adherence) {
+    const badge = document.createElement('span')
+    badge.className = 'todo-adherence'
+    badge.textContent = `${view.adherence.active}/${view.adherence.total} aktív`
+    meta.appendChild(badge)
+  }
+  head.appendChild(title)
+  head.appendChild(meta)
+  col.appendChild(head)
+
+  // TODAY
+  const todayHead = document.createElement('div')
+  todayHead.className = 'todo-subhead todo-subhead-today'
+  todayHead.innerHTML = `<span>Ma</span><span class="todo-cap${view.capCount > 7 ? ' todo-cap-over' : ''}">${view.capCount}/7 ma</span>`
+  col.appendChild(todayHead)
+  if (view.today.length === 0) {
+    col.appendChild(todoEmpty('Nincs mai tétel'))
+  } else {
+    for (const it of view.today) {
+      if (it.section === 'fitness' || it.kind === 'habit' || it.kind === 'metric') col.appendChild(renderFitnessItem(it))
+      else col.appendChild(renderTaskItem(it))
+    }
+  }
+
+  // FOLYAMATBAN (progress)
+  if (view.folyamatban.length > 0) {
+    col.appendChild(todoSubHeader('Folyamatban', view.folyamatban.length))
+    for (const it of view.folyamatban) col.appendChild(renderProgressItem(it))
+  }
+
+  // CARRIED-OVER — collapsible at 3+, hidden at 0 (CAR-AC1).
+  if (view.carried.length > 0) {
+    const wrap = document.createElement('div')
+    wrap.className = 'todo-carried-wrap'
+    const collapsed = view.carried.length >= 3
+    const toggle = document.createElement('button')
+    toggle.className = 'todo-carried-toggle'
+    const arrow = () => (wrap.classList.contains('collapsed') ? '▸' : '▾')
+    const setLabel = () => { toggle.textContent = `Áthozott (${view.carried.length}) ${arrow()}` }
+    if (collapsed) wrap.classList.add('collapsed')
+    setLabel()
+    toggle.addEventListener('click', () => { wrap.classList.toggle('collapsed'); setLabel() })
+    const list = document.createElement('div')
+    list.className = 'todo-carried-list'
+    for (const it of view.carried) list.appendChild(renderCarriedItem(it))
+    wrap.appendChild(toggle)
+    wrap.appendChild(list)
+    col.appendChild(wrap)
+  }
+
+  // KÉSZ MA tail — collapsed, expandable (CO-AC3).
+  if (view.doneToday.length > 0) {
+    const wrap = document.createElement('div')
+    wrap.className = 'todo-done-wrap collapsed'
+    const toggle = document.createElement('button')
+    toggle.className = 'todo-done-toggle'
+    const setLabel = () => { toggle.textContent = `Kész ma (${view.doneToday.length}) ${wrap.classList.contains('collapsed') ? '▸' : '▾'}` }
+    setLabel()
+    toggle.addEventListener('click', () => { wrap.classList.toggle('collapsed'); setLabel() })
+    const list = document.createElement('div')
+    list.className = 'todo-done-list'
+    for (const it of view.doneToday) {
+      const r = document.createElement('div')
+      r.className = 'todo-item todo-item-done'
+      const t = document.createElement('div')
+      t.className = 'todo-item-title'
+      t.textContent = it.title
+      r.appendChild(t)
+      list.appendChild(r)
+    }
+    wrap.appendChild(toggle)
+    wrap.appendChild(list)
+    col.appendChild(wrap)
+  }
+}
+
+function todoEmpty(text) {
+  const d = document.createElement('div')
+  d.className = 'todo-empty'
+  d.textContent = text
+  return d
+}
+
+function formatTodoDate(epoch) {
+  try {
+    return new Date(epoch * 1000).toLocaleDateString('hu-HU', { month: 'short', day: 'numeric' })
+  } catch { return '' }
 }
 
 // Brand mark: use main agent's avatar if available
@@ -7803,6 +8652,17 @@ document.getElementById('updatesApplyBtn').addEventListener('click', async () =>
 // the cached status even on tabs other than the Updates page.
 pollUpdatesBadge()
 setInterval(pollUpdatesBadge, 5 * 60_000)
+
+// Status banner: poll independently of the status page so an incident surfaces
+// on any view. The RSS/components fetch is cached server-side, so a 5-min cadence
+// is cheap. The "Részletek" link jumps to the full status page.
+document.getElementById('apiStatusLink')?.addEventListener('click', (e) => { e.preventDefault(); switchPage('status') })
+refreshStatusBanner()
+setInterval(refreshStatusBanner, 5 * 60_000)
+
+// Gate merge-ready badge poll (card ba512371 #8). Server board is 30s-cached.
+pollGateNavBadge()
+setInterval(pollGateNavBadge, 60_000)
 
 // === Init ===
 populateAvatarGrid()
@@ -8343,111 +9203,6 @@ async function setAutonomyLevel(key, level) {
   }
 }
 
-// === connectors.hu install banner ===
-;(function () {
-  const DISMISSED_KEY = 'cxhu_banner_dismissed'
-  const banner = document.getElementById('cxhuBanner')
-  const closeBtn = document.getElementById('cxhuBannerClose')
-  if (!banner || !closeBtn) return
-  if (localStorage.getItem(DISMISSED_KEY) === '1') { banner.hidden = true; return }
-
-  // dismiss with animation
-  closeBtn.addEventListener('click', () => {
-    banner.style.transition = 'opacity 0.2s ease, max-height 0.3s ease'
-    banner.style.overflow = 'hidden'
-    banner.style.opacity = '0'
-    banner.style.maxHeight = banner.offsetHeight + 'px'
-    requestAnimationFrame(() => { banner.style.maxHeight = '0' })
-    setTimeout(() => { banner.hidden = true }, 300)
-    localStorage.setItem(DISMISSED_KEY, '1')
-  })
-
-  // --- state machine ---
-  const states = ['Loading','Done','Install','Installing','Token','Configuring','Error']
-  function showState(name) {
-    states.forEach(s => {
-      const el = document.getElementById('cxhuState' + s)
-      if (el) el.hidden = (s !== name)
-    })
-  }
-
-  let lastError = null
-
-  async function checkStatus() {
-    showState('Loading')
-    try {
-      const res = await fetch('/api/connectors-hu/status')
-      if (!res.ok) throw new Error('HTTP ' + res.status)
-      const data = await res.json()
-      if (data.installed && data.configured) {
-        showState('Done')
-      } else if (data.installed) {
-        showState('Token')
-      } else {
-        showState('Install')
-      }
-    } catch (e) {
-      showError(e.message || 'Hiba a státusz lekérésnél', checkStatus)
-    }
-  }
-
-  function showError(msg, retryFn) {
-    document.getElementById('cxhuErrorMsg').textContent = msg
-    showState('Error')
-    const retryBtn = document.getElementById('cxhuRetryBtn')
-    retryBtn.onclick = retryFn || checkStatus
-  }
-
-  // Telepítés gomb
-  const installBtn = document.getElementById('cxhuInstallBtn')
-  if (installBtn) {
-    installBtn.addEventListener('click', async () => {
-      showState('Installing')
-      try {
-        const res = await fetch('/api/connectors-hu/install', { method: 'POST' })
-        const data = await res.json().catch(() => ({}))
-        if (!res.ok || !data.ok) throw new Error(data.error || 'Telepítés sikertelen')
-        showState('Token')
-      } catch (e) {
-        showError(e.message, () => { showState('Install') })
-      }
-    })
-  }
-
-  // Mentés és szinkron gomb
-  const configureBtn = document.getElementById('cxhuConfigureBtn')
-  if (configureBtn) {
-    configureBtn.addEventListener('click', async () => {
-      const token = (document.getElementById('cxhuTokenInput') || {}).value || ''
-      if (!token.trim()) {
-        document.getElementById('cxhuTokenInput').focus()
-        return
-      }
-      showState('Configuring')
-      try {
-        const res = await fetch('/api/connectors-hu/configure', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: token.trim() }),
-        })
-        const data = await res.json().catch(() => ({}))
-        if (!res.ok || !data.ok) throw new Error(data.error || 'Konfiguráció sikertelen')
-        showState('Done')
-      } catch (e) {
-        showError(e.message, () => { showState('Token') })
-      }
-    })
-  }
-
-  // Enter key a token inputban
-  const tokenInput = document.getElementById('cxhuTokenInput')
-  if (tokenInput) {
-    tokenInput.addEventListener('keydown', e => { if (e.key === 'Enter') configureBtn && configureBtn.click() })
-  }
-
-  checkStatus()
-})()
-
 // === Token Usage Monitor ===
 const TU_COLORS = {
   marveen: '#6366f1',
@@ -8472,6 +9227,21 @@ function tuFormatTokens(n) {
   return String(n)
 }
 
+// USD from the server-side cost fields (totalCostUsd / costUsd / childCostUsd),
+// priced at real Anthropic list prices per model in src/web/agent-config.ts. The
+// frontend never invents a price; it only formats what the backend computed.
+function tuFormatUsd(n) {
+  if (n == null || isNaN(n)) return '$0.00'
+  if (n >= 1000) return '$' + (n / 1000).toFixed(2) + 'k'
+  if (n >= 1) return '$' + n.toFixed(2)
+  if (n > 0) return '$' + n.toFixed(3)
+  return '$0.00'
+}
+
+// Chart metric: 'tokens' (default, stacked token bars + quota lines) or 'usd'
+// (per-agent cost bars from the timeline costUsd field).
+let tuMetric = 'tokens'
+
 function tuGetTimeRange() {
   const period = document.getElementById('tuPeriod')?.value || '7d'
   const now = Math.floor(Date.now() / 1000)
@@ -8490,15 +9260,20 @@ async function loadTokenUsage() {
   if (from) params.set('from', from)
   if (to) params.set('to', to)
 
-  const summaryRes = await fetch('/api/token-usage/summary?' + params)
-  if (!summaryRes.ok) return
-  const summary = await summaryRes.json()
+  // The /cost endpoint returns { agents: [...totalCostUsd], lineage: [...childCostUsd] }.
+  // agents is exactly getTokenSummary (same shape as /summary) plus it is the
+  // canonical source of the server-computed per-agent USD, so use it directly.
+  const costRes = await fetch('/api/token-usage/cost?' + params)
+  if (!costRes.ok) return
+  const cost = await costRes.json()
+  const summary = cost.agents || []
   summary.sort((a, b) => {
     const aTotal = (a.totalInput || 0) + (a.totalCacheRead || 0) + (a.totalCacheCreation || 0)
     const bTotal = (b.totalInput || 0) + (b.totalCacheRead || 0) + (b.totalCacheCreation || 0)
     return bTotal - aTotal
   })
   renderTuSummary(summary)
+  renderTuLineage(cost.lineage || [], summary)
 
   const agentSelect = document.getElementById('tuAgent')
   if (agentSelect && agentSelect.options.length <= 1) {
@@ -8534,16 +9309,21 @@ function renderTuSummary(summary) {
     el.innerHTML = '<div class="overview-stat"><div class="overview-stat-label">Nincs adat</div><div class="overview-stat-value">0</div><div class="overview-stat-sub">Kattints a "Gyűjtés" gombra</div></div>'
     return
   }
+  const totalCost = summary.reduce((sum, s) => sum + (s.totalCostUsd || 0), 0)
+  const totalCostEl = document.getElementById('tuTotalCost')
+  if (totalCostEl) totalCostEl.textContent = tuFormatUsd(totalCost)
+
   el.innerHTML = summary.map(s => {
     const totalIn = (s.totalInput || 0) + (s.totalCacheRead || 0) + (s.totalCacheCreation || 0)
     const isActive = tuSelectedAgent === s.agent
     const dimmed = tuSelectedAgent && !isActive
+    const usd = tuFormatUsd(s.totalCostUsd || 0)
     return `
       <div class="overview-stat tu-agent-card${isActive ? ' tu-active' : ''}" data-agent="${escapeHtml(s.agent)}"
         style="border-left:3px solid ${tuGetColor(s.agent)};cursor:pointer;${dimmed ? 'opacity:0.4;' : ''}transition:opacity 0.2s">
         <div class="overview-stat-label">${escapeHtml(s.agent)}</div>
-        <div class="overview-stat-value">${tuFormatTokens(totalIn)}</div>
-        <div class="overview-stat-sub">${(s.totalCalls || 0).toLocaleString()} hívás, out: ${tuFormatTokens(s.totalOutput)}</div>
+        <div class="overview-stat-value">${usd}</div>
+        <div class="overview-stat-sub">${tuFormatTokens(totalIn)} token, ${(s.totalCalls || 0).toLocaleString()} hívás</div>
       </div>`
   }).join('')
 
@@ -8560,6 +9340,57 @@ function renderTuSummary(summary) {
       loadTokenUsage()
     })
   })
+}
+
+// Parent -> phantom-child (lineage) cost breakdown. `lineage` is getLineageRollup
+// from /cost: one row per orchestrating agent that spawned workflow phantoms,
+// with the total USD its children incurred (separable from the parent's own
+// spend). `summary` gives the parent's total so we can show the child share.
+function renderTuLineage(lineage, summary) {
+  const el = document.getElementById('tuLineageCard')
+  if (!el) return
+  if (!lineage || !lineage.length) {
+    el.hidden = true
+    return
+  }
+  el.hidden = false
+  const ownCostByAgent = {}
+  for (const s of summary || []) ownCostByAgent[s.agent] = s.totalCostUsd || 0
+
+  const rows = lineage.map(l => {
+    const childCost = l.childCostUsd || 0
+    const ownTotal = ownCostByAgent[l.parent] || 0
+    // ownTotal already includes phantom children's spend (they share the parent's
+    // discovered project dir), so the parent's own-session share is total - child.
+    const ownShare = Math.max(0, ownTotal - childCost)
+    const childPct = ownTotal > 0 ? Math.round((childCost / ownTotal) * 100) : 0
+    return `<tr>
+      <td><span style="color:${tuGetColor(l.parent)};font-weight:600">${escapeHtml(l.parent)}</span></td>
+      <td style="text-align:right;font-variant-numeric:tabular-nums;font-weight:600">${tuFormatUsd(childCost)}</td>
+      <td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-secondary)">${tuFormatUsd(ownShare)}</td>
+      <td style="text-align:right;font-variant-numeric:tabular-nums">${(l.childSessions || 0).toLocaleString()}</td>
+      <td style="text-align:right;font-variant-numeric:tabular-nums">${(l.childCalls || 0).toLocaleString()}</td>
+      <td style="min-width:90px">
+        <div style="height:8px;border-radius:4px;background:var(--bg-input);overflow:hidden">
+          <div style="height:100%;width:${childPct}%;background:${tuGetColor(l.parent)}"></div>
+        </div>
+        <span style="font-size:11px;color:var(--text-secondary)">${childPct}% phantom</span>
+      </td>
+    </tr>`
+  }).join('')
+
+  el.innerHTML = `<h3 style="margin:0 0 12px">Alügynök (phantom) költség-bontás</h3>
+    <div style="overflow-x:auto"><table class="mem-table" style="width:100%;min-width:560px">
+      <thead><tr>
+        <th>Szülő ügynök</th>
+        <th style="text-align:right">Gyerek USD</th>
+        <th style="text-align:right">Saját USD</th>
+        <th style="text-align:right">Munkamenet</th>
+        <th style="text-align:right">Hívás</th>
+        <th>Arány</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`
 }
 
 function tuGetResetLines(bucketStart, bucketEnd) {
@@ -8600,7 +9431,7 @@ function tuFillBuckets(data, bucketSeconds) {
   for (let b = minB; b <= maxB; b += bucketSeconds) {
     for (const agent of agents) {
       const key = b + ':' + agent
-      filled.push(bucketMap[key] || { bucket: b, agent, calls: 0, inputTokens: 0, outputTokens: 0 })
+      filled.push(bucketMap[key] || { bucket: b, agent, calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 })
     }
   }
   return filled
@@ -8689,10 +9520,15 @@ function renderTuTimeline(data, filterAgent) {
   const w = cssW - pad.left - pad.right
   const h = cssH - pad.top - pad.bottom
 
+  // In USD mode the bars/axes read the server-computed costUsd per bucket; in
+  // token mode they read the token volume. The quota (5h/weekly) lines stay a
+  // token concept, so they are hidden in USD mode below.
+  const isUsd = tuMetric === 'usd'
   const bucketMap = {}
   for (const d of filled) {
     if (!bucketMap[d.bucket]) bucketMap[d.bucket] = {}
-    bucketMap[d.bucket][d.agent] = (bucketMap[d.bucket][d.agent] || 0) + (d.inputTokens || 0)
+    const v = isUsd ? (d.costUsd || 0) : (d.inputTokens || 0)
+    bucketMap[d.bucket][d.agent] = (bucketMap[d.bucket][d.agent] || 0) + v
   }
 
   const bucketTotals = {}
@@ -8799,10 +9635,14 @@ function renderTuTimeline(data, filterAgent) {
     ctx.restore()
   }
 
+  // The cumulative quota lines are a token-budget concept (5h/weekly token
+  // ceilings) and do not translate to USD, so draw them only in token mode.
   const is5hActive = tuBudgetView === '5h'
   const isWeeklyActive = tuBudgetView === 'weekly'
-  drawCumLine(winWeekly, '#8b5cf6', 1.5, isWeeklyActive)
-  drawCumLine(win5h, '#06b6d4', 2, is5hActive)
+  if (!isUsd) {
+    drawCumLine(winWeekly, '#8b5cf6', 1.5, isWeeklyActive)
+    drawCumLine(win5h, '#06b6d4', 2, is5hActive)
+  }
 
   // X axis
   ctx.strokeStyle = borderColor
@@ -8823,23 +9663,26 @@ function renderTuTimeline(data, filterAgent) {
     ctx.fillText(tuFormatLocalShort(buckets[i]), x, pad.top + h + 18)
   }
 
-  // Left Y axis (per-bucket)
+  // Left Y axis (per-bucket) -- USD or tokens depending on the metric.
+  const fmtAxis = isUsd ? tuFormatUsd : tuFormatTokens
   ctx.textAlign = 'right'
   ctx.fillStyle = textSecondary
   ctx.font = '10px sans-serif'
   for (let i = 0; i <= 4; i++) {
     const val = (maxVal / 4) * i
     const y = pad.top + h - (i / 4) * h
-    ctx.fillText(tuFormatTokens(val), pad.left - 8, y + 4)
+    ctx.fillText(fmtAxis(val), pad.left - 8, y + 4)
   }
 
-  // Right Y axis (cumulative)
-  ctx.textAlign = 'left'
-  ctx.fillStyle = '#06b6d4'
-  for (let i = 0; i <= 4; i++) {
-    const val = (maxCum / 4) * i
-    const y = pad.top + h - (i / 4) * h
-    ctx.fillText(tuFormatTokens(val), pad.left + w + 6, y + 4)
+  // Right Y axis (cumulative token quota) -- only meaningful in token mode.
+  if (!isUsd) {
+    ctx.textAlign = 'left'
+    ctx.fillStyle = '#06b6d4'
+    for (let i = 0; i <= 4; i++) {
+      const val = (maxCum / 4) * i
+      const y = pad.top + h - (i / 4) * h
+      ctx.fillText(tuFormatTokens(val), pad.left + w + 6, y + 4)
+    }
   }
 
   // Legend: single dynamic row with wrapping
@@ -8861,13 +9704,15 @@ function renderTuTimeline(data, filterAgent) {
   }
 
   const legendHits = []
-  const lineItems = [
+  // The cumulative-quota legend entries are only meaningful in token mode.
+  const lineItems = (isUsd ? [] : [
     { label: '5h ablak', color: '#06b6d4', lw: 2, dash: [], id: '5h', active: is5hActive },
     { label: 'heti ablak', color: '#8b5cf6', lw: 1.5, dash: [], id: 'weekly', active: isWeeklyActive },
+  ]).concat([
     { label: '5h', color: '#3b82f680', lw: 1, dash: [3, 3] },
     { label: 'nap', color: '#f59e0b60', lw: 1, dash: [4, 4] },
     { label: 'hét', color: '#ef444480', lw: 1.5, dash: [6, 4] },
-  ]
+  ])
   for (const li of lineItems) {
     const tw = ctx.measureText(li.label).width + 34
     legWrap(tw)
@@ -8888,7 +9733,7 @@ function renderTuTimeline(data, filterAgent) {
   ctx.fillText('csúcsidő', legendX + 14, legendY + 2)
 
   // Store legend hit areas for click handling
-  tuChartState = { barRects, pad, h, cssW, cssH, maxVal, maxCum, win5h, winWeekly, legendHits }
+  tuChartState = { barRects, pad, h, cssW, cssH, maxVal, maxCum, win5h, winWeekly, legendHits, isUsd }
 }
 
 ;(function setupTuTooltip() {
@@ -8916,14 +9761,15 @@ function renderTuTimeline(data, filterAgent) {
 
     if (hit && my >= pad.top && my <= pad.top + h) {
       const isPeak = tuIsPeakHour(hit.bucket)
+      const fmt = tuChartState.isUsd ? tuFormatUsd : tuFormatTokens
       let html = `<div style="font-weight:600;margin-bottom:4px">${tuFormatLocalShort(hit.bucket)}${isPeak ? ' <span style="color:#ef4444;font-size:10px">CSÚCSIDŐ</span>' : ''}</div>`
       let total = 0
       for (const seg of hit.segments) {
-        html += `<div><span style="color:${tuGetColor(seg.agent)}">&#9632;</span> ${seg.agent}: ${tuFormatTokens(seg.val)}</div>`
+        html += `<div><span style="color:${tuGetColor(seg.agent)}">&#9632;</span> ${seg.agent}: ${fmt(seg.val)}</div>`
         total += seg.val
       }
-      if (hit.segments.length > 1) html += `<div style="border-top:1px solid rgba(255,255,255,0.2);margin-top:4px;padding-top:4px;font-weight:600">Összesen: ${tuFormatTokens(total)}</div>`
-      if (tuChartState.win5h || tuChartState.winWeekly) {
+      if (hit.segments.length > 1) html += `<div style="border-top:1px solid rgba(255,255,255,0.2);margin-top:4px;padding-top:4px;font-weight:600">Összesen: ${fmt(total)}</div>`
+      if (!tuChartState.isUsd && (tuChartState.win5h || tuChartState.winWeekly)) {
         const idx = barRects.indexOf(hit)
         if (idx >= 0) {
           const c5 = tuChartState.win5h?.[idx]
@@ -8966,6 +9812,10 @@ function renderTuTimeline(data, filterAgent) {
 function renderTuBudgetCards() {
   const el = document.getElementById('tuBudgetCards')
   if (!el || !tuChartState) return
+  // The 5h/weekly quota cards are token-budget concepts; hide them in USD mode
+  // (where the chart buckets hold cost, not tokens).
+  if (tuMetric === 'usd') { el.innerHTML = ''; el.hidden = true; return }
+  el.hidden = false
   const { win5h, winWeekly } = tuChartState
   const cur5h = win5h?.length ? win5h[win5h.length - 1].cumulative : 0
   const curWeekly = winWeekly?.length ? winWeekly[winWeekly.length - 1].cumulative : 0
@@ -9135,11 +9985,148 @@ document.getElementById('tuPeriod')?.addEventListener('change', () => { tuSelect
 document.getElementById('tuAgent')?.addEventListener('change', () => { tuSelectedAgent = document.getElementById('tuAgent').value; loadTokenUsage() })
 document.getElementById('tuMinTokens')?.addEventListener('change', () => tuFetchDetails())
 
+// Token <-> USD chart metric toggle. Switching metric re-renders the same
+// timeline data (which already carries costUsd) without a refetch.
+document.querySelectorAll('.btn-metric').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const metric = btn.dataset.metric
+    if (metric === tuMetric) return
+    tuMetric = metric
+    document.querySelectorAll('.btn-metric').forEach(b => {
+      const active = b.dataset.metric === tuMetric
+      b.classList.toggle('tu-active', active)
+      b.style.background = active ? 'var(--accent-soft)' : 'transparent'
+      b.style.color = active ? 'var(--text-primary)' : 'var(--text-secondary)'
+    })
+    tuBudgetView = ''
+    if (renderTuTimeline.__lastData) renderTuTimeline(renderTuTimeline.__lastData, renderTuTimeline.__lastAgent)
+    renderTuBudgetCards()
+  })
+})
+
 window.addEventListener('resize', () => {
   if (!document.getElementById('tokenUsagePage')?.hidden) {
     if (tuChartState && renderTuTimeline.__lastData) renderTuTimeline(renderTuTimeline.__lastData, renderTuTimeline.__lastAgent)
   }
 })
+
+// ============================================================
+// Tool-workflow automation candidates (Workflow-jelöltek)
+// ============================================================
+// Lists repeated tool-call sequences from GET /api/tool-log/analyze so a
+// recurring session workflow can be promoted into a scheduled task. The
+// analyze endpoint returns per-session chunks with shape:
+//   { session_id, tool_count, duration_minutes, start_ts, end_ts,
+//     tools: string[], steps_preview: [{ tool, description }] }
+// There is no agent-name field on the response (the log is keyed by
+// session_id only), so we surface the session id + tool set as the identity.
+
+let toolLogCandidates = []
+
+async function loadToolLog() {
+  const list = document.getElementById('toolLogList')
+  if (!list) return
+  const since = document.getElementById('tlWindow')?.value || '86400'
+  const minCalls = document.getElementById('tlMinCalls')?.value || '5'
+  const params = new URLSearchParams({ since, min_calls: minCalls })
+  list.innerHTML = '<p class="activity-empty">Betöltés…</p>'
+  try {
+    const res = await fetch('/api/tool-log/analyze?' + params)
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    toolLogCandidates = await res.json()
+    renderToolLog(toolLogCandidates)
+  } catch (e) {
+    list.innerHTML = '<p class="activity-empty">Nem sikerült lekérni a jelölteket: ' + escapeHtml(String(e.message || e)) + '</p>'
+  }
+}
+
+function renderToolLog(candidates) {
+  const list = document.getElementById('toolLogList')
+  if (!list) return
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    list.innerHTML = '<div class="overview-card"><p class="activity-empty">Nincs ismétlődő eszközhívás-sorozat a kiválasztott időablakban. Növeld az ablakot vagy csökkentsd a minimális lépésszámot.</p></div>'
+    return
+  }
+  // Longest / most active sequences first.
+  const sorted = candidates.slice().sort((a, b) => (b.tool_count || 0) - (a.tool_count || 0))
+  list.innerHTML = sorted.map((c, i) => {
+    const tools = Array.isArray(c.tools) ? c.tools : []
+    const toolChips = tools.map((t) => '<span class="tl-chip">' + escapeHtml(t) + '</span>').join('')
+    const steps = Array.isArray(c.steps_preview) ? c.steps_preview : []
+    const stepsHtml = steps.map((s, n) =>
+      '<li><span class="tl-step-tool">' + escapeHtml(s.tool || '') + '</span>' +
+      (s.description && s.description !== s.tool ? '<span class="tl-step-desc">' + escapeHtml(s.description) + '</span>' : '') +
+      '</li>'
+    ).join('')
+    const sid = c.session_id || '?'
+    const shortSid = sid.length > 12 ? sid.slice(0, 8) + '…' : sid
+    const started = c.start_ts ? new Date(c.start_ts * 1000).toLocaleString('hu-HU') : '?'
+    return (
+      '<div class="overview-card tl-card" data-idx="' + i + '">' +
+        '<div class="tl-card-head">' +
+          '<div>' +
+            '<h3 style="margin:0">Sorozat #' + (i + 1) + '</h3>' +
+            '<span class="tl-sub">session <code>' + escapeHtml(shortSid) + '</code> · ' + escapeHtml(started) + '</span>' +
+          '</div>' +
+          '<div class="tl-metrics">' +
+            '<span class="tl-metric"><strong>' + (c.tool_count || 0) + '</strong> hívás</span>' +
+            '<span class="tl-metric"><strong>' + (c.duration_minutes || 0) + '</strong> perc</span>' +
+            '<span class="tl-metric"><strong>' + tools.length + '</strong> eszköz</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="tl-chips">' + toolChips + '</div>' +
+        (stepsHtml ? '<ol class="tl-steps">' + stepsHtml + '</ol>' : '') +
+        '<div class="tl-actions">' +
+          '<button class="btn-primary btn-compact tl-promote" data-idx="' + i + '">Feladattá alakítás</button>' +
+        '</div>' +
+      '</div>'
+    )
+  }).join('')
+
+  list.querySelectorAll('.tl-promote').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.idx, 10)
+      promoteToolLogCandidate(sorted[idx])
+    })
+  })
+}
+
+// Build a human prompt from a candidate's step preview and open the existing
+// schedule-create modal prefilled. We deliberately reuse the proven create
+// path (resetScheduleForm + openModal) rather than POSTing a schedule
+// directly, so the user reviews agent + cron + prompt before it is saved.
+function promoteToolLogCandidate(cand) {
+  if (!cand) return
+  const tools = Array.isArray(cand.tools) ? cand.tools : []
+  const steps = Array.isArray(cand.steps_preview) ? cand.steps_preview : []
+  const stepLines = steps
+    .map((s, n) => (n + 1) + '. ' + (s.description && s.description !== s.tool ? s.description : (s.tool || '')))
+    .join('\n')
+  const prompt =
+    'Automatizáld az alábbi ismétlődő munkafolyamatot, amit korábban kézzel végeztél el ' +
+    '(' + (cand.tool_count || 0) + ' eszközhívás, ' + (cand.duration_minutes || 0) + ' perc).\n\n' +
+    'Használt eszközök: ' + (tools.join(', ') || '—') + '\n\n' +
+    'Lépések:\n' + (stepLines || '(nincs előnézet)') + '\n\n' +
+    'Futtasd le ezt a sorozatot, és ha bármi eltérést vagy hibát tapasztalsz, jelezd Telegramon.'
+
+  resetScheduleForm()
+  document.getElementById('scheduleModalTitle').textContent = 'Új ütemezett feladat (workflow-jelöltből)'
+  document.getElementById('scheduleName').disabled = false
+  const sidTag = (cand.session_id || 'session').replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || 'auto'
+  document.getElementById('scheduleName').value = 'workflow-' + sidTag
+  document.getElementById('scheduleDesc').value = 'Automatizált ismétlődő eszköz-sorozat (' + tools.slice(0, 4).join(', ') + ')'
+  document.getElementById('schedulePrompt').value = prompt
+  // Default to a daily run at 09:00; the user picks the real cadence/agent.
+  parseCronToForm('0 9 * * *')
+  openModal(scheduleModalOverlay)
+  loadScheduleAgents().then(() => {
+    setTimeout(() => document.getElementById('scheduleName').focus(), 200)
+  })
+}
+
+document.getElementById('tlRefreshBtn')?.addEventListener('click', loadToolLog)
+document.getElementById('tlWindow')?.addEventListener('change', loadToolLog)
+document.getElementById('tlMinCalls')?.addEventListener('change', loadToolLog)
 
 // ============================================================
 // Ideas (Ötletláda)
@@ -9190,11 +10177,32 @@ function renderIdeasList() {
     if (!byCategory[idea.category]) byCategory[idea.category] = []
     byCategory[idea.category].push(idea)
   }
+  // Within a category, surface the "quick wins" first: highest impact-minus-effort
+  // on top, scored ideas before unscored ones (which fall back to recency order).
+  const score = i => (i.impact == null && i.effort == null) ? null : (i.impact || 0) - (i.effort || 0)
+  for (const items of Object.values(byCategory)) {
+    items.sort((a, b) => {
+      const sa = score(a), sb = score(b)
+      if (sa == null && sb == null) return 0
+      if (sa == null) return 1
+      if (sb == null) return -1
+      return sb - sa
+    })
+  }
   el.innerHTML = Object.entries(byCategory).map(([cat, items]) => `
     <div style="margin-bottom:8px">
       <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);padding:4px 0 6px">${escapeHtml(cat)}</div>
       ${items.map(renderIdeaCard).join('')}
     </div>`).join('')
+}
+
+function ideaScoreBadges(idea) {
+  const badge = (label, val, color) => val == null ? '' :
+    `<span style="font-size:10px;color:${color};padding:1px 5px;border:1px solid ${color};border-radius:4px">${label} ${val}</span>`
+  const impact = badge('Impact', idea.impact, '#22c55e')
+  const effort = badge('Effort', idea.effort, '#f59e0b')
+  if (!impact && !effort) return ''
+  return `<span style="display:inline-flex;gap:4px;margin-left:4px">${impact}${effort}</span>`
 }
 
 function renderIdeaCard(idea) {
@@ -9207,6 +10215,7 @@ function renderIdeaCard(idea) {
         <div style="display:flex;align-items:center;gap:8px">
           <span style="font-weight:600;font-size:14px">${escapeHtml(idea.title)}</span>
           <span style="font-size:11px;color:${statusColor};padding:2px 6px;border:1px solid ${statusColor};border-radius:4px">${statusLabel}</span>
+          ${ideaScoreBadges(idea)}
         </div>
         ${desc}
       </div>
@@ -9227,6 +10236,8 @@ function openIdeaNew() {
   document.getElementById('ideaModalTitle').textContent = 'Új ötlet'
   document.getElementById('ideaTitleInput').value = ''
   document.getElementById('ideaDescInput').value = ''
+  document.getElementById('ideaImpactInput').value = ''
+  document.getElementById('ideaEffortInput').value = ''
   openModal(document.getElementById('ideaModalOverlay'))
 }
 
@@ -9238,13 +10249,24 @@ function openIdeaEdit(id) {
   document.getElementById('ideaTitleInput').value = idea.title
   document.getElementById('ideaDescInput').value = idea.description || ''
   document.getElementById('ideaCategoryInput').value = idea.category
+  document.getElementById('ideaImpactInput').value = idea.impact != null ? String(idea.impact) : ''
+  document.getElementById('ideaEffortInput').value = idea.effort != null ? String(idea.effort) : ''
   openModal(document.getElementById('ideaModalOverlay'))
 }
 
 async function saveIdea() {
   const title = document.getElementById('ideaTitleInput').value.trim()
   if (!title) { showToast('Cím kötelező', 'error'); return }
-  const body = { title, description: document.getElementById('ideaDescInput').value.trim() || undefined, category: document.getElementById('ideaCategoryInput').value, source: 'manual' }
+  const impactRaw = document.getElementById('ideaImpactInput').value
+  const effortRaw = document.getElementById('ideaEffortInput').value
+  const body = {
+    title,
+    description: document.getElementById('ideaDescInput').value.trim() || undefined,
+    category: document.getElementById('ideaCategoryInput').value,
+    source: 'manual',
+    impact: impactRaw === '' ? null : Number(impactRaw),
+    effort: effortRaw === '' ? null : Number(effortRaw),
+  }
   if (ideaEditId) {
     await fetch(`/api/ideas/${ideaEditId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   } else {
@@ -9391,9 +10413,10 @@ function openTerminalModal(agentName) {
   openModal(overlay)
   setTimeout(() => term.focus(), 50)
 
-  // SSE pane stream
-  const token = localStorage.getItem('marveen-dashboard-token') || ''
-  const sse = new EventSource(`/api/agents/${encodeURIComponent(agentName)}/pane/stream?token=${encodeURIComponent(token)}`)
+  // SSE pane stream. Same-origin EventSource sends the HttpOnly session cookie
+  // automatically (withCredentials), which is the sole auth for the stream --
+  // the legacy ?token= query fallback was removed server-side (card 32bcf962).
+  const sse = new EventSource(`/api/agents/${encodeURIComponent(agentName)}/pane/stream`, { withCredentials: true })
   sse.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data)
@@ -9449,4 +10472,165 @@ document.getElementById('terminalClose')?.addEventListener('click', () => {
   }
   window.addEventListener('hashchange', routeFromHash)
   routeFromHash()
+})()
+
+// Live dashboard updates over SSE (card 7c7ea226). Pushes from the server replace
+// the need to manually reload the kanban / messages views after another agent (or
+// a script) mutates them. AUGMENT model: refresh only the view the user is on,
+// coalesced so a write-burst is one fetch (NoA build-note #1). EventSource
+// auto-reconnects; the existing on-demand fetches remain the fallback.
+;(() => {
+  if (!window.DashboardEvents) return
+  const activePage = () => decodeURIComponent((location.hash || '').replace(/^#/, ''))
+  window.DashboardEvents.initDashboardEvents({
+    onKanban: () => { if (activePage() === 'kanban') loadKanban() },
+    onMessage: () => { if (activePage() === 'messages') loadMessagesPage() },
+  })
+})()
+
+// === Agents team-tree view (kanban 78ba4672) ===
+// A category-grouped tree alongside the existing flat card grid. Reads the
+// runtime category map (agentCategories) + the existing `agents` array; no new
+// agent data fields. View choice + collapse state persist in localStorage.
+
+function getAgentsViewMode() {
+  return localStorage.getItem('agents_view_mode') === 'list' ? 'list' : 'tree' // default: tree (AC5)
+}
+function setAgentsViewMode(m) {
+  localStorage.setItem('agents_view_mode', m === 'list' ? 'list' : 'tree')
+}
+function getCollapsedCategories() {
+  try {
+    const v = JSON.parse(localStorage.getItem('agents_tree_collapsed') || '[]')
+    return new Set(Array.isArray(v) ? v : [])
+  } catch { return new Set() }
+}
+function setCollapsedCategories(set) {
+  localStorage.setItem('agents_tree_collapsed', JSON.stringify([...set]))
+}
+
+// Show the active view (tree or list), toggle button state, and render it.
+function renderActiveAgentsView() {
+  const mode = getAgentsViewMode()
+  const grid = document.getElementById('agentsGrid')
+  const tree = document.getElementById('agentsTree')
+  const btnTree = document.getElementById('viewToggleTree')
+  const btnList = document.getElementById('viewToggleList')
+  if (btnTree) btnTree.classList.toggle('active', mode === 'tree')
+  if (btnList) btnList.classList.toggle('active', mode === 'list')
+  if (mode === 'tree') {
+    if (grid) grid.hidden = true
+    if (tree) tree.hidden = false
+    renderAgentsTree()
+  } else {
+    if (tree) tree.hidden = true
+    if (grid) grid.hidden = false
+    renderAgents()
+  }
+}
+
+function renderAgentsTree() {
+  const tree = document.getElementById('agentsTree')
+  if (!tree) return
+  tree.innerHTML = ''
+
+  // Combined dataset: the main agent (marveen) as a pseudo-agent + sub-agents.
+  const all = []
+  if (window._marveen && agentMatchesSearch({ name: 'marveen', displayName: window._marveen.name, description: window._marveen.description, running: true })) {
+    all.push({ name: 'marveen', displayName: window._marveen.name || 'NoA', running: true, team: { reportsTo: null }, _main: true })
+  }
+  for (const a of agents) if (agentMatchesSearch(a)) all.push(a)
+  const byName = new Map(all.map(a => [a.name, a]))
+
+  const collapsed = getCollapsedCategories()
+  const placed = new Set()
+  const cats = (agentCategories && typeof agentCategories === 'object') ? agentCategories : {}
+
+  const renderCategory = (catName, memberNames) => {
+    // Resolve to present agents; config entries not in the fleet are ignored
+    // silently (edge case: agent removed but still in config).
+    const members = memberNames.map((n) => byName.get(n)).filter(Boolean)
+    members.forEach((m) => placed.add(m.name))
+    if (members.length === 0) return // AC7: empty category hidden
+
+    const runningCount = members.filter((m) => m.running).length
+    const isCollapsed = collapsed.has(catName)
+
+    const cat = document.createElement('div')
+    cat.className = 'tree-category' + (isCollapsed ? ' collapsed' : '')
+
+    const header = document.createElement('div')
+    header.className = 'tree-category-header'
+    header.innerHTML = `
+      <span class="tree-caret">&#9660;</span>
+      <span class="tree-category-name">${escapeHtml(catName)}</span>
+      <span class="tree-category-summary">${runningCount}/${members.length} fut</span>
+    `
+    header.addEventListener('click', () => {
+      const set = getCollapsedCategories()
+      if (set.has(catName)) set.delete(catName); else set.add(catName)
+      setCollapsedCategories(set)
+      renderAgentsTree()
+    })
+    cat.appendChild(header)
+
+    const memWrap = document.createElement('div')
+    memWrap.className = 'tree-members'
+
+    // AC4: nest an agent under its supervisor when both are in THIS category.
+    // Decision (per spec edge-case): cross-category reportsTo does NOT draw a
+    // connecting line (it would span unrelated groups); instead the agent shows
+    // a muted "reports to X" annotation so the relationship stays visible.
+    const memberNameSet = new Set(members.map((m) => m.name))
+    const roots = members.filter((m) => !m.team?.reportsTo || !memberNameSet.has(m.team.reportsTo))
+    const childrenBySup = new Map()
+    for (const m of members) {
+      const sup = m.team?.reportsTo
+      if (sup && memberNameSet.has(sup)) {
+        if (!childrenBySup.has(sup)) childrenBySup.set(sup, [])
+        childrenBySup.get(sup).push(m)
+      }
+    }
+
+    const agentRow = (a, isChild) => {
+      const row = document.createElement('div')
+      row.className = 'tree-agent' + (isChild ? ' child' : '')
+      const dotClass = a.running ? 'running' : 'stopped' // AC3
+      const label = escapeHtml(a.displayName || a.name)
+      const sup = a.team?.reportsTo
+      const xcat = (sup && !memberNameSet.has(sup))
+        ? `<span class="tree-reports-xcat">&#8627; ${escapeHtml(sup)}</span>` : ''
+      row.innerHTML = `<span class="process-dot ${dotClass}"></span><span class="tree-agent-name">${label}</span>${xcat}`
+      row.addEventListener('click', () => {
+        if (a._main) { if (typeof openMarveenDetail === 'function') openMarveenDetail() }
+        else openAgentDetail(a.name)
+      })
+      return row
+    }
+
+    for (const r of roots) {
+      memWrap.appendChild(agentRow(r, false))
+      for (const child of (childrenBySup.get(r.name) || [])) {
+        memWrap.appendChild(agentRow(child, true))
+      }
+    }
+    cat.appendChild(memWrap)
+    tree.appendChild(cat)
+  }
+
+  for (const catName of Object.keys(cats)) renderCategory(catName, cats[catName] || [])
+
+  // AC1/AC7: agents in no category fall into "Uncategorized" (hidden if empty).
+  const uncategorized = all.filter((a) => !placed.has(a.name))
+  if (uncategorized.length > 0) renderCategory('Uncategorized', uncategorized.map((a) => a.name))
+}
+
+// Wire the view toggle (elements exist in the initial agents-page markup).
+;(() => {
+  const btnTree = document.getElementById('viewToggleTree')
+  const btnList = document.getElementById('viewToggleList')
+  btnTree?.addEventListener('click', () => { setAgentsViewMode('tree'); renderActiveAgentsView() })
+  btnList?.addEventListener('click', () => { setAgentsViewMode('list'); renderActiveAgentsView() })
+  const search = document.getElementById('agentSearchInput')
+  search?.addEventListener('input', (e) => { agentSearchQuery = e.target.value; renderActiveAgentsView() })
 })()

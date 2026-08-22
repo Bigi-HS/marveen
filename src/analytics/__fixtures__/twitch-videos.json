@@ -1,0 +1,50 @@
+{
+  "data": [
+    {
+      "id": "vod001",
+      "user_id": "9998887",
+      "user_login": "dominik",
+      "user_name": "Dominik",
+      "title": "VOD: Building stuff",
+      "description": "",
+      "created_at": "2026-06-26T20:00:00Z",
+      "published_at": "2026-06-26T20:01:00Z",
+      "url": "https://www.twitch.tv/videos/vod001",
+      "view_count": 1834,
+      "language": "hu",
+      "type": "archive",
+      "duration": "2h30m15s"
+    },
+    {
+      "id": "vod002",
+      "user_id": "9998887",
+      "user_login": "dominik",
+      "user_name": "Dominik",
+      "title": "VOD: Just chatting",
+      "description": "",
+      "created_at": "2026-06-24T19:00:00Z",
+      "published_at": "2026-06-24T19:01:00Z",
+      "url": "https://www.twitch.tv/videos/vod002",
+      "view_count": 932,
+      "language": "hu",
+      "type": "archive",
+      "duration": "1h15m00s"
+    },
+    {
+      "id": "hl001",
+      "user_id": "9998887",
+      "user_login": "dominik",
+      "user_name": "Dominik",
+      "title": "Highlight: best moment",
+      "description": "",
+      "created_at": "2026-06-26T22:40:00Z",
+      "published_at": "2026-06-26T22:41:00Z",
+      "url": "https://www.twitch.tv/videos/hl001",
+      "view_count": 4210,
+      "language": "hu",
+      "type": "highlight",
+      "duration": "0h45m00s"
+    }
+  ],
+  "pagination": {}
+}

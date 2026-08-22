@@ -1,16 +1,8 @@
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
-import {
-  searchMemories,
-  recentMemories,
-  touchMemory,
-  saveMemory,
-  decayMemories as dbDecay,
-  getMemoriesForChat,
-  listKanbanCardsSummary,
-  type Memory,
-} from './db.js'
+import { getAgentMemories, appendDailyLog } from './noa-memory.js'
+import { MAIN_AGENT_ID } from './config.js'
 import { runAgent } from './agent.js'
 import { logger } from './logger.js'
 import { wrapUntrusted, UNTRUSTED_PREAMBLE } from './prompt-safety.js'
@@ -67,110 +59,29 @@ function ensureDigestConfigDir(): string {
   return tmpdir()
 }
 
-// Semantic: user preferences, facts about themselves, persistent info
-const SEMANTIC_PATTERN =
-  /\b(my|i am|i'm|i prefer|remember|always|never|az en|nekem|szeretem|nem szeretem|mindig|soha|emlekezzel|en|kedvenc|utokalok|fontos|ne felejtsd|jegyezd meg)\b/i
-
-// Skip: trivial messages not worth remembering
-const SKIP_PATTERN = /^(ok|igen|nem|koszi|kosz|hello|szia|hi|hey|thx|thanks|jo|oke|persze|rendben|ja|aha|\.+|!+|\?+)$/i
-
-export async function buildMemoryContext(
-  chatId: string,
-  userMessage: string
-): Promise<string> {
-  const ftsResults = searchMemories(userMessage, chatId, 3)
-  const recent = recentMemories(chatId, 5)
-
-  const seen = new Set<number>()
-  const combined: Memory[] = []
-
-  for (const m of [...ftsResults, ...recent]) {
-    if (!seen.has(m.id)) {
-      seen.add(m.id)
-      combined.push(m)
-    }
-  }
-
-  if (combined.length === 0) return ''
-
-  for (const m of combined) {
-    touchMemory(m.id)
-  }
-
-  const lines = combined.map((m) => `- ${m.content} (${m.sector})`)
-  return `[Memoria kontextus]\n${lines.join('\n')}`
-}
-
-const STATUS_HU: Record<string, string> = {
-  planned: 'Tervezett',
-  in_progress: 'Folyamatban',
-  waiting: 'Várakozik',
-  done: 'Kész',
-}
-
-const PRIORITY_HU: Record<string, string> = {
-  urgent: '🔴',
-  high: '🟠',
-  normal: '⚪',
-  low: '🔵',
-}
-
-export function buildKanbanContext(): string {
-  const cards = listKanbanCardsSummary()
-  if (cards.length === 0) return ''
-
-  const grouped: Record<string, string[]> = {}
-  for (const c of cards) {
-    const key = STATUS_HU[c.status] ?? c.status
-    if (!grouped[key]) grouped[key] = []
-    const assignee = c.assignee ? ` (${c.assignee})` : ''
-    grouped[key].push(`  ${PRIORITY_HU[c.priority] ?? '⚪'} ${c.title}${assignee} [${c.id}]`)
-  }
-
-  const lines = Object.entries(grouped).map(([status, items]) => `${status}:\n${items.join('\n')}`)
-  return `[Kanban tabla]\n${lines.join('\n')}`
-}
-
-export async function saveConversationTurn(
-  chatId: string,
-  userMsg: string,
-  assistantMsg: string
-): Promise<void> {
-  // Skip trivial, short, or command messages
-  if (userMsg.length <= 20 || userMsg.startsWith('/')) return
-  if (SKIP_PATTERN.test(userMsg.trim())) return
-
-  // Only save semantic memories (user preferences, facts) automatically
-  // Episodic memories come from daily digest and session checkpoints
-  if (SEMANTIC_PATTERN.test(userMsg)) {
-    const content = `Felhasznalo: ${userMsg.slice(0, 500)}\nAsszisztens: ${assistantMsg.slice(0, 500)}`
-    saveMemory(chatId, content, 'semantic')
-    logger.debug({ chatId }, 'Szemantikus emlek mentve')
-  }
-  // Non-semantic turns are NOT saved individually -- they go into daily digest
-}
-
-export function runDecaySweep(): void {
-  dbDecay()
-  logger.info('Memoria leepulesi sopres vegrehajtva')
-}
-
 // --- Daily digest ---
-
-export async function runDailyDigest(chatId: string): Promise<string | null> {
-  // Collect today's episodic memories (last 24h)
+//
+// Generates a short Hungarian summary of the day's memories for the main agent
+// and stores it in the daily log. After the NoA rewrite (slim noa.db schema,
+// Telegram-decoupled) the digest reads agent-scoped memories via noa-memory and
+// writes the summary through appendDailyLog (daily_logs table) -- the legacy
+// chat-scoped getMemoriesForChat + saveMemory('episodic') path is retired
+// ('episodic' is not a slim-schema category). The summary is retrievable via the
+// daily-log read path (recallByDateRange == GET /api/daily-log).
+export async function runDailyDigest(): Promise<string | null> {
+  // Collect the main agent's memories from the last 24h.
   const oneDayAgo = Math.floor(Date.now() / 1000) - 86400
-  const allRecent = getMemoriesForChat(chatId, 50)
-  const todayMemories = allRecent.filter((m) => m.created_at >= oneDayAgo)
+  const recent = getAgentMemories(MAIN_AGENT_ID, 50)
+  const todayMemories = recent.filter((m) => m.created_at >= oneDayAgo)
 
   if (todayMemories.length < 2) {
-    logger.info({ chatId, count: todayMemories.length }, 'Napi naplo: tul keves emlek, kihagyjuk')
+    logger.info({ count: todayMemories.length }, 'Napi naplo: tul keves emlek, kihagyjuk')
     return null
   }
 
-  // Each memory is wrapped individually: the stored content originated in
-  // Telegram messages that could have come through the assistant from a third
-  // party (a forwarded message, a quoted email). Treat every record as data.
+  // Each memory is wrapped individually: the stored content may have originated
+  // from a third party (a forwarded message, a quoted email). Treat every
+  // record as data, not instructions.
   const memoryLines = todayMemories
     .map((m) => `- ${wrapUntrusted('memory-record', m.content.slice(0, 200))}`)
     .join('\n')
@@ -197,8 +108,8 @@ ${memoryLines}`
 
     const digest = text.trim()
     const today = new Date().toLocaleDateString('hu-HU')
-    saveMemory(chatId, `[Napi naplo ${today}] ${digest}`, 'episodic')
-    logger.info({ chatId, digestCwd, digestConfigDir }, `Napi naplo mentve: ${today}`)
+    appendDailyLog(MAIN_AGENT_ID, `[Napi naplo ${today}] ${digest}`)
+    logger.info({ digestCwd, digestConfigDir }, `Napi naplo mentve: ${today}`)
     return digest
   } catch (err) {
     logger.error({ err }, 'Napi naplo generalas hiba')

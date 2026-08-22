@@ -1,13 +1,23 @@
 import {
   saveAgentMemory, getAgentMemories, searchAgentMemories, getMemoryStats, updateMemory,
+  patchMemory, type MemoryPatch,
   hybridSearch, backfillEmbeddings,
-  searchMemories, getMemoriesForChat, getDb,
-  type Memory,
-} from '../../db.js'
-import { MAIN_AGENT_ID, ALLOWED_CHAT_ID, OLLAMA_URL } from '../../config.js'
+  searchAgentMemories as searchMemoriesGlobal, applyScopeFilter, ScopedSharedError,
+  deleteMemory, getNoaDb, type NoaMemory,
+} from '../../noa-memory.js'
+import { MAIN_AGENT_ID, OLLAMA_URL } from '../../config.js'
 import { logger } from '../../logger.js'
+import { decideMemoryMutation, enforceFromBindingEnabled } from '../agent-identity-binding.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
+
+// Resolve a memory row's owner (single owner per row -- the `agent_id` column).
+// Returns undefined when the id does not exist, so the caller can 404 cleanly
+// before any authorization decision.
+function memoryOwner(id: number): string | undefined {
+  const row = getNoaDb().prepare('SELECT agent_id FROM memories WHERE id = ?').get(id) as { agent_id: string } | undefined
+  return row?.agent_id
+}
 
 // Canonical memory categories. Kept in sync with the DB CHECK constraint in
 // src/db.ts so the API rejects bad values before they even reach SQLite.
@@ -31,11 +41,13 @@ function containsSuspiciousContent(content: string): boolean {
 }
 
 export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
-  const { req, res, path, method, url } = ctx
+  const { req, res, path, method, url, identity } = ctx
 
   if (path === '/api/memories' && method === 'POST') {
     const body = await readBody(req)
-    const data = JSON.parse(body.toString()) as { agent_id?: string; content: string; tier?: string; category?: string; keywords?: string }
+    // `access_scope` is read with `'access_scope' in data` semantics below so we
+    // can tell "field absent" (=> PII auto-scope) from "explicit null" (opt-out).
+    const data = JSON.parse(body.toString()) as { agent_id?: string; content: string; tier?: string; category?: string; keywords?: string; access_scope?: string | null }
     if (!data.content?.trim()) { json(res, { error: 'Content is required' }, 400); return true }
     if (containsSuspiciousContent(data.content)) {
       logger.warn({ agent: data.agent_id }, 'Memory content rejected: suspicious pattern')
@@ -50,17 +62,37 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
       json(res, { error: `Invalid category "${category}". Allowed: ${[...MEMORY_CATEGORIES].join(', ')}` }, 400)
       return true
     }
-    const result = saveAgentMemory(
-      data.agent_id || MAIN_AGENT_ID,
-      data.content.trim(),
-      category,
-      data.keywords || undefined,
-      true
-    )
-    json(res, { ok: true, id: result.id })
+    // Distinguish absent (auto-scope) from explicit null (opt-out) from a value.
+    const accessScope = 'access_scope' in data ? data.access_scope : undefined
+    try {
+      const result = saveAgentMemory(
+        data.agent_id || MAIN_AGENT_ID,
+        data.content.trim(),
+        category,
+        data.keywords || undefined,
+        true,
+        accessScope,
+      )
+      // Card MEM/8ad3a1c9: report the scope that was actually applied. Content-derived
+      // scoping used to leave no trace here at all, so a caller could not tell an
+      // unscoped write from one the classifier had quietly restricted to them.
+      json(res, { ok: true, id: result.id, access_scope: result.access_scope })
+    } catch (err) {
+      if (err instanceof ScopedSharedError) {
+        json(res, { error: err.message }, 400)
+        return true
+      }
+      throw err
+    }
     return true
   }
 
+  // Read isolation is NOT a goal of the capability-token system (DA FLAG 2): the
+  // per-agent scope set gates WRITE/DELETE (decideMemoryMutation) only. Reads here
+  // are authentication-only -- any valid token can GET memories, filtered by the
+  // advisory, caller-supplied ?agent= and access_scope, not by the token identity.
+  // Closing read isolation is OS-user/broker work (design Option B/C), out of this
+  // Tier-1 slice.
   if (path === '/api/memories' && method === 'GET') {
     const q = url.searchParams.get('q')?.trim() || ''
     const agentId = url.searchParams.get('agent') || ''
@@ -68,27 +100,36 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200)
     const mode = url.searchParams.get('mode') || 'fts'
 
-    let results: Memory[]
+    let results: NoaMemory[]
     if (q && mode === 'hybrid') {
       results = await hybridSearch(agentId || MAIN_AGENT_ID, q, limit)
     } else if (q && agentId) {
       results = searchAgentMemories(agentId, q, limit)
       if (results.length === 0) {
-        const db2 = getDb()
+        const db2 = getNoaDb()
         results = db2.prepare("SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?")
-          .all(agentId, `%${q}%`, `%${q}%`, limit) as Memory[]
+          .all(agentId, `%${q}%`, `%${q}%`, limit) as NoaMemory[]
       }
     } else if (q) {
-      results = searchMemories(q, ALLOWED_CHAT_ID, limit)
+      // q-only path: chat_id retired (W1); search as MAIN_AGENT_ID (includes shared).
+      results = searchMemoriesGlobal(MAIN_AGENT_ID, q, limit)
       if (results.length === 0) {
-        const db2 = getDb()
-        results = db2.prepare('SELECT * FROM memories WHERE content LIKE ? ORDER BY accessed_at DESC LIMIT ?').all(`%${q}%`, limit) as Memory[]
+        const db2 = getNoaDb()
+        results = db2.prepare('SELECT * FROM memories WHERE content LIKE ? ORDER BY accessed_at DESC LIMIT ?').all(`%${q}%`, limit) as NoaMemory[]
       }
     } else if (agentId) {
       results = getAgentMemories(agentId, limit)
     } else {
-      results = getMemoriesForChat(ALLOWED_CHAT_ID, limit)
+      // no-agent, no-q: chat_id retired (W1); return recent memories for MAIN_AGENT_ID (includes shared).
+      results = getAgentMemories(MAIN_AGENT_ID, limit)
     }
+
+    // PM-AC3 single enforcement point (covers the q-only/neither leak paths and
+    // the inline LIKE fallbacks above; idempotent for the db-layer-filtered
+    // paths). requester = the advisory ?agent= identity; absent => operator/
+    // admin context (PM-AC6: the dashboard/operator sees all, including scoped).
+    // NOTE: ?agent= is caller-supplied and NOT authenticated -- advisory only.
+    results = applyScopeFilter(results, agentId || null)
 
     if (tier) results = results.filter(m => m.category === tier)
 
@@ -205,11 +246,35 @@ Respond ONLY with JSON, nothing else:
 
   if (path === '/api/memories/backfill' && method === 'POST') {
     try {
-      const count = await backfillEmbeddings()
-      json(res, { ok: true, count })
+      const r = await backfillEmbeddings()
+      // `count` kept for backward compat with the existing dashboard client.
+      // Card ENG/811ce3b2: `ok` used to be !aborted, and with a work list of 3 a run
+      // where NOTHING embedded reported aborted -- so the flag was carrying a claim
+      // it could not make. The gate agreed with NoA is: silence only when every row
+      // embedded. Quote the outcome, do not reassemble it here.
+      json(res, { ok: r.outcome === 'ok', count: r.succeeded, ...r })
     } catch (err) {
       logger.error({ err }, 'Backfill failed')
       json(res, { error: 'Backfill failed' }, 500)
+    }
+    return true
+  }
+
+  // POST /api/memories/reembed: targeted backfill with optional category filter.
+  // Body: { categories?: string[] }  (undefined = default hot/warm/shared; [] = all)
+  if (path === '/api/memories/reembed' && method === 'POST') {
+    try {
+      const raw = await readBody(req)
+      const body = raw.length ? (JSON.parse(raw.toString()) as { categories?: string[] }) : {}
+      const r = await backfillEmbeddings({ categories: body.categories })
+      // Card ENG/811ce3b2: `ok` used to be !aborted, and with a work list of 3 a run
+      // where NOTHING embedded reported aborted -- so the flag was carrying a claim
+      // it could not make. The gate agreed with NoA is: silence only when every row
+      // embedded. Quote the outcome, do not reassemble it here.
+      json(res, { ok: r.outcome === 'ok', count: r.succeeded, ...r })
+    } catch (err) {
+      logger.error({ err }, 'Reembed failed')
+      json(res, { error: 'Reembed failed' }, 500)
     }
     return true
   }
@@ -224,16 +289,97 @@ Respond ONLY with JSON, nothing else:
     const id = parseInt(memUpdateMatch[1], 10)
     const body = await readBody(req)
     const { content, category, tier, agent_id, keywords } = JSON.parse(body.toString()) as { content: string; category?: string; tier?: string; agent_id?: string; keywords?: string }
+    // Gap (a), card b1ce5118: a memory may only be mutated by its owner (or the
+    // curator/admin scope). Resolve the owner from the token-bound identity, not
+    // a body field. Gated behind ENFORCE_FROM_BINDING (default OFF) so it is
+    // inert until rollout; with the flag off decideMemoryMutation always allows,
+    // preserving today's behaviour exactly.
+    const owner = memoryOwner(id)
+    if (owner === undefined) { json(res, { error: 'Memory not found' }, 404); return true }
+    const authz = decideMemoryMutation(identity, owner, enforceFromBindingEnabled())
+    if (!authz.ok) {
+      logger.warn({ tokenAgent: identity.agentId, owner, id, op: 'PUT' }, 'Rejected memory mutation: not owner')
+      json(res, { error: authz.error }, authz.status)
+      return true
+    }
     if (updateMemory(id, content, tier || category, agent_id, keywords)) { json(res, { ok: true }); return true }
+    json(res, { error: 'Memory not found' }, 404)
+    return true
+  }
+
+  // PATCH /api/memories/<id> -- partial update (card e163dbf7). Persists any
+  // subset of the mutable fields and returns which ones changed. A category-only
+  // PATCH still updates ONLY the category and leaves content/accessed_at intact
+  // (the b68b9e71 TM-1/TM-3 staleness invariant), so vault-lint --apply is
+  // unaffected; a content update -- previously dropped silently -- now lands.
+  if (memUpdateMatch && method === 'PATCH') {
+    const id = parseInt(memUpdateMatch[1], 10)
+    const body = await readBody(req)
+    const parsed = JSON.parse(body.toString()) as
+      { content?: unknown; category?: unknown; tier?: unknown; keywords?: unknown; agent_id?: unknown }
+
+    const patch: MemoryPatch = {}
+    // `tier` is accepted as an alias for `category`, matching the PUT handler.
+    const cat = parsed.category !== undefined ? parsed.category : parsed.tier
+    if (cat !== undefined) {
+      if (typeof cat !== 'string' || !MEMORY_CATEGORIES.has(cat)) {
+        json(res, { error: `category must be one of: ${[...MEMORY_CATEGORIES].join(', ')}` }, 400)
+        return true
+      }
+      patch.category = cat
+    }
+    if (parsed.content !== undefined) {
+      if (typeof parsed.content !== 'string' || parsed.content.trim() === '') {
+        json(res, { error: 'content must be a non-empty string' }, 400)
+        return true
+      }
+      patch.content = parsed.content
+    }
+    if (parsed.keywords !== undefined) {
+      if (parsed.keywords !== null && typeof parsed.keywords !== 'string') {
+        json(res, { error: 'keywords must be a string or null' }, 400)
+        return true
+      }
+      patch.keywords = parsed.keywords
+    }
+    if (parsed.agent_id !== undefined) {
+      if (typeof parsed.agent_id !== 'string' || parsed.agent_id.trim() === '') {
+        json(res, { error: 'agent_id must be a non-empty string' }, 400)
+        return true
+      }
+      patch.agentId = parsed.agent_id
+    }
+    if (Object.keys(patch).length === 0) {
+      json(res, { error: 'no mutable fields provided (content, category/tier, keywords, agent_id)' }, 400)
+      return true
+    }
+
+    const owner = memoryOwner(id)
+    if (owner === undefined) { json(res, { error: 'Memory not found' }, 404); return true }
+    const authz = decideMemoryMutation(identity, owner, enforceFromBindingEnabled())
+    if (!authz.ok) {
+      logger.warn({ tokenAgent: identity.agentId, owner, id, op: 'PATCH' }, 'Rejected memory mutation: not owner')
+      json(res, { error: authz.error }, authz.status)
+      return true
+    }
+    const updated = patchMemory(id, patch)
+    if (updated.length > 0) { json(res, { ok: true, updated }); return true }
     json(res, { error: 'Memory not found' }, 404)
     return true
   }
 
   if (memUpdateMatch && method === 'DELETE') {
     const id = parseInt(memUpdateMatch[1], 10)
-    const db2 = getDb()
-    const changes = db2.prepare('DELETE FROM memories WHERE id = ?').run(id).changes
-    if (changes > 0) { json(res, { ok: true }); return true }
+    const owner = memoryOwner(id)
+    if (owner === undefined) { json(res, { error: 'Memory not found' }, 404); return true }
+    const authz = decideMemoryMutation(identity, owner, enforceFromBindingEnabled())
+    if (!authz.ok) {
+      logger.warn({ tokenAgent: identity.agentId, owner, id, op: 'DELETE' }, 'Rejected memory mutation: not owner')
+      json(res, { error: authz.error }, authz.status)
+      return true
+    }
+    const deleted = deleteMemory(id, owner)
+    if (deleted) { json(res, { ok: true }); return true }
     json(res, { error: 'Memory not found' }, 404)
     return true
   }

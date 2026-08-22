@@ -1,0 +1,19 @@
+{
+  "entries": [
+    {
+      "date": "2026-06-15",
+      "logged": true,
+      "total_calories": 1723,
+      "protein_g": 181,
+      "carbs_g": 104,
+      "fat_g": 65,
+      "fiber_g": 8,
+      "source": "vision-confirmed",
+      "notes": "edzésnap, 4 étkezés"
+    },
+    {
+      "date": "2026-06-14",
+      "logged": false
+    }
+  ]
+}

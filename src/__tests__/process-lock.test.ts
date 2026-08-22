@@ -6,6 +6,7 @@ import {
   acquirePortLock,
   acquirePidfileLock,
   writeBufferFully,
+  parseLsofListeningPorts,
   DeferToPeerError,
   type ProcessLockContext,
   type PidfileLockContext,
@@ -24,6 +25,13 @@ interface MockOptions {
   portHolders?: Record<number, number[]>
   /** signal-probe override so tests can simulate EPERM etc. */
   signalOverride?: ProcessLockContext['signal']
+  /**
+   * Per-pid listening port map for listeningPortsOf (card 5b993df2, AC-3/AC-7).
+   * null  = probe failed -> spare; [] = zombie; [3499] = holds foreign port.
+   * If pidPorts is undefined (default), listeningPortsOf returns [] for all pids
+   * (backward-compatible: existing zombie/dedup tests still kill correctly).
+   */
+  pidPorts?: Record<number, number[] | null>
 }
 
 function makeCtx(options: MockOptions): {
@@ -54,6 +62,11 @@ function makeCtx(options: MockOptions): {
     currentPid,
     uid,
     listPortHolders: (port: number) => options.portHolders?.[port] ?? [],
+    listeningPortsOf: (pid: number) => {
+      if (options.pidPorts === undefined) return []  // default: no LISTEN ports (zombie -> kill)
+      const v = options.pidPorts[pid]
+      return v === undefined ? [] : v  // null = probe failed -> spare; [] = zombie; [N] = holds N
+    },
     listOwnProcessesMatching: (pattern: RegExp) => {
       const out: number[] = []
       for (const p of table.values()) {
@@ -377,6 +390,132 @@ describe('acquirePortLock', () => {
     }
     await acquirePortLock(3420, stickyPort, { graceMs: 10, postKillDrainMs: 30, postKillPollMs: 10 })
     expect(logs.some(l => l.level === 'warn' && /still held after drain/.test(l.msg))).toBe(true)
+  })
+
+  // ── AC-3: binary match holding a FOREIGN port is SPARED ─────────────────
+  it('AC-3: binary match on a different port is spared (cross-port kill prevention)', async () => {
+    const procs: MockProc[] = [
+      { pid: 200, uid: 501, cmd: 'node', args: 'node dist/index.js', alive: true },
+    ]
+    // pid 200 matches the binary pattern AND holds port 3499 (not 3420)
+    const { ctx, table } = makeCtx({
+      procs,
+      portHolders: { 3420: [] },
+      pidPorts: { 200: [3499] },  // holds 3499, not 3420 -> spare
+    })
+    await acquirePortLock(3420, ctx, { graceMs: 10, binaryPattern: /dist\/index\.js/ })
+    expect(table.get(200)!.alive).toBe(true)  // SPARED: live cross-port server
+  })
+
+  // AC-4b: zombie (no LISTEN ports) is still killed
+  it('AC-4b regression: zombie with no listening port is still killed', async () => {
+    const procs: MockProc[] = [
+      { pid: 200, uid: 501, cmd: 'node', args: 'node dist/index.js', alive: true },
+    ]
+    const { ctx, table } = makeCtx({
+      procs,
+      portHolders: { 3420: [] },
+      pidPorts: { 200: [] },  // definitive empty -> zombie -> kill
+    })
+    await acquirePortLock(3420, ctx, { graceMs: 10, binaryPattern: /dist\/index\.js/ })
+    expect(table.get(200)!.alive).toBe(false)
+  })
+
+  // AC-4d: binary match holding BOTH target AND foreign port -> still killed (target-port-wins)
+  it('AC-4d: binary match holding target port AND foreign port is still killed (target-port-wins)', async () => {
+    const procs: MockProc[] = [
+      { pid: 200, uid: 501, cmd: 'node', args: 'node dist/index.js', alive: true },
+    ]
+    const { ctx, table } = makeCtx({
+      procs,
+      portHolders: { 3420: [] },  // not in byPort, but byBinary picks it up
+      pidPorts: { 200: [3420, 3499] },  // holds BOTH target (3420) and foreign (3499)
+    })
+    await acquirePortLock(3420, ctx, { graceMs: 10, binaryPattern: /dist\/index\.js/ })
+    expect(table.get(200)!.alive).toBe(false)  // killed: holds the target port
+  })
+
+  // AC-7: ASYMMETRIC fail-safe -- null=probe-failed=spare; []=definitive-empty=kill
+  it('AC-7: listeningPortsOf null (probe FAILED) -> pid is SPARED, not killed', async () => {
+    const procs: MockProc[] = [
+      { pid: 200, uid: 501, cmd: 'node', args: 'node dist/index.js', alive: true },
+    ]
+    const { ctx, table } = makeCtx({
+      procs,
+      portHolders: { 3420: [] },
+      pidPorts: { 200: null },  // null = probe failed = SPARE (fail-safe toward not killing)
+    })
+    await acquirePortLock(3420, ctx, { graceMs: 10, binaryPattern: /dist\/index\.js/ })
+    expect(table.get(200)!.alive).toBe(true)  // SPARED: unknown state is safer than killing
+  })
+
+  it('AC-7: listeningPortsOf [] (definitive SUCCESS, no LISTEN ports) -> pid is KILLED (zombie)', async () => {
+    const procs: MockProc[] = [
+      { pid: 200, uid: 501, cmd: 'node', args: 'node dist/index.js', alive: true },
+    ]
+    const { ctx, table } = makeCtx({
+      procs,
+      portHolders: { 3420: [] },
+      pidPorts: { 200: [] },  // [] = probe SUCCEEDED but no LISTEN ports = zombie
+    })
+    await acquirePortLock(3420, ctx, { graceMs: 10, binaryPattern: /dist\/index\.js/ })
+    expect(table.get(200)!.alive).toBe(false)
+  })
+})
+
+// ── parseLsofListeningPorts (AC-3 output-parsing helper, direct unit test) ──
+
+describe('parseLsofListeningPorts', () => {
+  it('extracts LISTEN port from a typical lsof -iTCP -sTCP:LISTEN output line', () => {
+    const output = [
+      'COMMAND   PID   USER   FD   TYPE  DEVICE SIZE/OFF NODE NAME',
+      'node    12345   user   23u  IPv6 0x1234       0t0  TCP *:3420 (LISTEN)',
+    ].join('\n')
+    expect(parseLsofListeningPorts(output)).toEqual([3420])
+  })
+
+  it('extracts multiple LISTEN ports from multiple lines', () => {
+    const output = [
+      'node    12345   user   23u  IPv6 0x1234  0t0  TCP *:3420 (LISTEN)',
+      'node    12345   user   24u  IPv4 0x1234  0t0  TCP *:3421 (LISTEN)',
+    ].join('\n')
+    expect(parseLsofListeningPorts(output)).toEqual([3420, 3421])
+  })
+
+  it('IGNORES ESTABLISHED connections (not LISTEN)', () => {
+    const output = [
+      'node    12345   user   25u  IPv4 0x1234  0t0  TCP 127.0.0.1:3420->127.0.0.1:54321 (ESTABLISHED)',
+    ].join('\n')
+    expect(parseLsofListeningPorts(output)).toEqual([])
+  })
+
+  it('deduplicates when both IPv4 and IPv6 bind the same port', () => {
+    const output = [
+      'node    12345   user   23u  IPv6 0x1234  0t0  TCP *:3420 (LISTEN)',
+      'node    12345   user   24u  IPv4 0x1234  0t0  TCP *:3420 (LISTEN)',
+    ].join('\n')
+    expect(parseLsofListeningPorts(output)).toEqual([3420])
+  })
+
+  it('extracts LISTEN port from the hostname:port NAME form (not just IP:port / *:port)', () => {
+    // lsof renders the NAME column as `<host>:<port> (LISTEN)` when the bind
+    // address resolves to a hostname (e.g. loopback bound to 127.0.0.1 shown as
+    // `localhost`). The regex must anchor on `:PORT (LISTEN)` regardless of what
+    // precedes the colon. Locks the hostname:port variant against regex drift.
+    const output = [
+      'node    12345   user   23u  IPv4 0x1234  0t0  TCP localhost:3420 (LISTEN)',
+      'node    12345   user   24u  IPv4 0x1234  0t0  TCP dave.local:8080 (LISTEN)',
+    ].join('\n')
+    expect(parseLsofListeningPorts(output)).toEqual([3420, 8080])
+  })
+
+  it('returns [] for empty / header-only output (no LISTEN lines)', () => {
+    const output = 'COMMAND   PID   USER   FD   TYPE  DEVICE SIZE/OFF NODE NAME\n'
+    expect(parseLsofListeningPorts(output)).toEqual([])
+  })
+
+  it('returns [] for completely empty string', () => {
+    expect(parseLsofListeningPorts('')).toEqual([])
   })
 })
 

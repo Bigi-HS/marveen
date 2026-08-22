@@ -17,17 +17,20 @@ import {
   resolveModelId,
   readAgentModel,
   writeAgentModel,
+  readAgentArchetype,
+  writeAgentArchetype,
   readAgentDisplayName,
   writeAgentDisplayName,
   readAgentSecurityProfile,
   writeAgentSecurityProfile,
   listAgentNames,
   isKnownAgent,
-  readAgentChannelProvider,
+  readAgentChannelProviderSafe,
   writeAgentChannelProvider,
   readAgentAuthMode,
   writeAgentAuthMode,
   readAgentClaudeConfigDir,
+  contextPercentForModel,
   type AuthMode,
 } from '../agent-config.js'
 import {
@@ -82,7 +85,7 @@ import {
 import { addDesiredAgent, removeDesiredAgent } from '../agent-desired-state.js'
 import { readActiveModelFromProjectDir, readContextTokensFromProjectDir } from '../active-model.js'
 import { collectFleetHealth } from '../agent-health.js'
-import { detectPaneState } from '../../pane-state.js'
+import { computeAgentActivityLabel } from '../../pane-state.js'
 import { detectReauthNeeded } from '../reauth-detect.js'
 import { readAutoRestartConfig, writeAutoRestartConfig } from '../auto-restart-store.js'
 import type { AutoRestartConfig } from '../../auto-restart.js'
@@ -259,6 +262,7 @@ interface AgentSummary {
   displayName: string
   description: string
   model: string
+  archetype: string | null
   activeModel: string | null
   runningSince: number | null
   authMode: AuthMode
@@ -275,10 +279,23 @@ interface AgentSummary {
   /** Live context size in tokens (input+cache_read+cache_creation of the last
    *  turn), or null when not running / no transcript yet. */
   contextTokens: number | null
+  /** contextTokens as a percentage of the active model's context window
+   *  (200K / 1M), or null when not running. Drives the dashboard context-% badge
+   *  and is the same number the context-window watchdog alerts on. */
+  contextPercent: number | null
   /** True when the running session's pane shows a login/401 auth failure --
    *  drives the dashboard "reauth needed" badge + one-click /login button. */
   needsReauth: boolean
   reauthReason?: string
+  /** Channel-health of a running agent as seen by the channel-health monitor:
+   *  true = no failure recorded, false = the monitor caught a plugin-pane
+   *  channel failure (drives the card's "channel dropped" warning + reconnect).
+   *  null when not running. NB: the monitor only sees plugin-pane failures, so a
+   *  silent live-session client-drop can still read healthy -- this surfaces the
+   *  DETECTED drops, not every drop. */
+  channelHealthy: boolean | null
+  /** How many auto-reconnect attempts the monitor has made for this agent. */
+  channelReconnectAttempts: number
 }
 
 interface AgentDetail extends AgentSummary {
@@ -307,12 +324,27 @@ function getAgentSummary(name: string): AgentSummary {
   // no pane to inspect). One capture-pane per running agent on the list poll.
   const reauth = proc.running ? detectReauthNeeded(capturePane(agentSessionName(name))) : { needsReauth: false }
 
+  // Resolve the transcript-derived figures once (each read scans a .jsonl), then
+  // derive the percentage from the active model's window so the dashboard badge
+  // and the watchdog agree on one number.
+  const configDir = readAgentClaudeConfigDir(name) ?? undefined
+  const activeModel = proc.running ? readActiveModelFromProjectDir(dir, runningSince ?? undefined, configDir) : null
+  const contextTokens = proc.running ? readContextTokensFromProjectDir(dir, configDir) : null
+  // Window from the CONFIGURED model (readAgentModel keeps the "[1m]" marker the
+  // transcript drops), so a 1M-context Opus isn't mis-sized at the 200K default.
+  const contextPercent = contextTokens != null ? contextPercentForModel(contextTokens, readAgentModel(name)) : null
+
+  // Channel health from the monitor's in-memory reconnect state (cheap map
+  // lookup, no pane capture here). Only meaningful for a running agent.
+  const channelHealth = proc.running ? getChannelHealth(name) : null
+
   return {
     name,
     displayName: readAgentDisplayName(name),
     description: extractDescriptionFromClaudeMd(claudeMd),
     model: readAgentModel(name),
-    activeModel: proc.running ? readActiveModelFromProjectDir(dir, runningSince ?? undefined, readAgentClaudeConfigDir(name) ?? undefined) : null,
+    archetype: readAgentArchetype(name),
+    activeModel,
     runningSince,
     authMode: readAgentAuthMode(name),
     securityProfile: readAgentSecurityProfile(name),
@@ -325,9 +357,12 @@ function getAgentSummary(name: string): AgentSummary {
     session: proc.session,
     hasAvatar: findAvatarForAgent(name) !== null,
     autoRestart: readAutoRestartConfig(name),
-    contextTokens: proc.running ? readContextTokensFromProjectDir(dir, readAgentClaudeConfigDir(name) ?? undefined) : null,
+    contextTokens,
+    contextPercent,
     needsReauth: reauth.needsReauth,
     reauthReason: reauth.reason,
+    channelHealthy: channelHealth ? channelHealth.healthy : null,
+    channelReconnectAttempts: channelHealth ? channelHealth.reconnectAttempts : 0,
   }
 }
 
@@ -409,14 +444,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   // fleet, not just sub-agents. Restored after #226 dropped this route while the
   // frontend kept calling /api/agents/activity (which then 404'd the panel).
   if (path === '/api/agents/activity' && method === 'GET') {
-    const label = (running: boolean, pane: string | null): string => {
-      if (!running) return 'stopped'
-      if (pane === null) return 'unknown'
-      const s = detectPaneState(pane)
-      if (s === 'busy' || s === 'typing') return 'working'
-      if (s === 'idle') return 'idle'
-      return s // 'unknown' | 'error'
-    }
+    // Coarse activity label shared with the agent-status watcher (card edf73bd7 F2)
+    // via computeAgentActivityLabel -- one source of truth, no poll/push drift.
+    const label = (running: boolean, pane: string | null): string =>
+      computeAgentActivityLabel(running, pane)
     const tailOf = (pane: string | null): string[] =>
       pane === null
         ? []
@@ -578,7 +609,9 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   if (smokeTestMatch && method === 'POST') {
     const name = decodeURIComponent(smokeTestMatch[1])
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
-    const provider = readAgentChannelProvider(name) as ChannelProviderType
+    const providerRead = readAgentChannelProviderSafe(name)
+    if (providerRead.misconfigured) { json(res, { error: 'Channel provider config unreadable (misconfigured secret pointer)' }, 500); return true }
+    const provider = providerRead.provider as ChannelProviderType
     if (provider !== 'slack') { json(res, { error: 'Nem Slack provider' }, 400); return true }
     const scriptPath = join(agentDir(name), '..', '..', 'scripts', 'smoke-test-slack-channel.sh')
     if (!existsSync(scriptPath)) { json(res, { error: 'Smoke-test script nem található' }, 404); return true }
@@ -1117,7 +1150,9 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const request = pending.find(r => r.id === reqId)
     if (!request) { json(res, { error: 'Request not found' }, 404); return true }
 
-    const provider = readAgentChannelProvider(name) as ChannelProviderType
+    const providerRead = readAgentChannelProviderSafe(name)
+    if (providerRead.misconfigured) { json(res, { error: 'Channel provider config unreadable (misconfigured secret pointer)' }, 500); return true }
+    const provider = providerRead.provider as ChannelProviderType
     if (provider !== 'slack') { json(res, { error: 'Only Slack agents support channel requests' }, 400); return true }
 
     const accessPath = resolveAccessPath(name, provider)
@@ -1268,13 +1303,14 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const body = await readBody(req)
     const configRoot = agentConfigRoot(name)
     const data = JSON.parse(body.toString()) as {
-      claudeMd?: string; soulMd?: string; mcpJson?: string; model?: string
+      claudeMd?: string; soulMd?: string; mcpJson?: string; model?: string; archetype?: string
       authMode?: AuthMode; apiKey?: string
     }
     if (data.claudeMd !== undefined) atomicWriteFileSync(join(configRoot, 'CLAUDE.md'), data.claudeMd)
     if (data.soulMd !== undefined) atomicWriteFileSync(join(agentDir(name), 'SOUL.md'), data.soulMd)
     if (data.mcpJson !== undefined) atomicWriteFileSync(join(agentDir(name), '.mcp.json'), data.mcpJson)
     if (data.model !== undefined) writeAgentModel(name, data.model)
+    if (data.archetype !== undefined) writeAgentArchetype(name, data.archetype)
     if (data.authMode !== undefined) {
       writeAgentAuthMode(name, data.authMode)
       if (data.authMode === 'api' && typeof data.apiKey === 'string' && data.apiKey.trim()) {

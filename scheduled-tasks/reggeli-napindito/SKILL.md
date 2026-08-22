@@ -11,4 +11,4 @@ A `cat {{INSTALL_DIR}}/DREAM.md` parancs visszaadja a tartalmat, abból emeld ki
 
 A többi szekció (email, naptár, AI hírek) maradnak a CLAUDE.md-ben leírt formátum szerint.
 
-**AI hírek szekció — CSAK a fő-ágensnél (Marveen / MAIN_AGENT_ID)**: ha NEM a fő-ágensként futsz (pl. sub-agent: boni, deeper, iris, samu, zara), HAGYD KI az "🤖 AI HÍREK" szekciót — sub-agenteknek nem releváns. Az email és naptár szekció marad mindenkinél.
+**AI hírek szekció — CSAK a fő-ágensnél (Marveen / MAIN_AGENT_ID)**: ha NEM a fő-ágensként futsz (pl. sub-agent: blackbeard, morgan, roberts, kidd, rackham), HAGYD KI az "🤖 AI HÍREK" szekciót — sub-agenteknek nem releváns. Az email és naptár szekció marad mindenkinél.

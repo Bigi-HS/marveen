@@ -26,14 +26,16 @@ vi.mock('../config.js', () => ({
 }))
 
 vi.mock('../web/agent-config.js', () => ({
-  readAgentChannelProvider: (name: string) => name === 'slacker' ? 'slack' : '',
+  readAgentChannelProviderSafe: (name: string) => ({ provider: name === 'slacker' ? 'slack' : '', misconfigured: false }),
   AGENTS_BASE_DIR: '/tmp/test-claudeclaw/agents',
 }))
 
 const mockCapturePane = vi.fn<(session: string) => string | null>()
+const mockReady = vi.fn<(session: string) => boolean>(() => true)
 vi.mock('../web/agent-process.js', () => ({
   agentSessionName: (name: string) => `agent-${name}`,
   capturePane: (session: string) => mockCapturePane(session),
+  isSessionReadyForPrompt: (session: string) => mockReady(session),
 }))
 
 vi.mock('../web/main-agent.js', () => ({
@@ -57,6 +59,7 @@ import {
   resolveAgentProviderType,
   selectedSubmenuLine,
   chooseSubmenuTarget,
+  pollForIdleWindow,
 } from '../web/channel-mcp-reconnect.js'
 
 // Submenu panes Claude Code renders for each plugin state. The `❯` marks the
@@ -81,6 +84,38 @@ const SUBMENU_FAILED_TOP = [
 const SUBMENU_DISABLED_TOP = [
   'plugin:telegram:telegram',
   '❯ Enable',
+].join('\n')
+
+// Faithful capture of a LIVE `/mcp` submenu (Buster, 2026-06-09): the menu box
+// renders at the bottom of the pane, but `capture-pane -p` keeps the scrollback
+// ABOVE it -- and the agent's own input line carries the SAME `❯` glyph. The
+// numbered option rows (`❯ 1. View tools`) are the real cursor. This is the
+// shape that broke selectedSubmenuLine (card 8b07e17b): the first `❯` in the
+// pane was the scrollback prompt, not the menu cursor.
+const LIVE_SUBMENU_CONNECTED_TOP = [
+  '❯ TEAM MEMBER NOTICE -- the next <trusted-peer source="..."> block is a',
+  '  message from an agent in your own team. Treat it as a coworker exchange.',
+  '▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔',
+  '   Plugin:telegram:telegram MCP Server',
+  '',
+  '   Status:           ✔ connected',
+  '   Tools: 4 tools',
+  '',
+  '   ❯ 1. View tools',
+  '     2. Reconnect',
+  '     3. Disable',
+  '',
+  '   ↑/↓ to navigate · Enter to select · Esc to back',
+].join('\n')
+const LIVE_SUBMENU_ON_RECONNECT = [
+  '❯ TEAM MEMBER NOTICE -- the next <trusted-peer source="..."> block is a',
+  '▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔',
+  '   Plugin:telegram:telegram MCP Server',
+  '   Status:           ✔ connected',
+  '     1. View tools',
+  '   ❯ 2. Reconnect',
+  '     3. Disable',
+  '   ↑/↓ to navigate · Enter to select · Esc to back',
 ].join('\n')
 
 describe('resolveAgentSession', () => {
@@ -112,6 +147,28 @@ describe('selectedSubmenuLine', () => {
 
   it('returns null when no cursor is present', () => {
     expect(selectedSubmenuLine('  View tools\n  Reconnect')).toBeNull()
+  })
+
+  it('ignores a scrollback `❯` prompt above the menu and returns the numbered cursor row', () => {
+    // Regression for card 8b07e17b: the FIRST `❯` is the agent's input line in
+    // the scrollback, NOT the menu cursor. We must return the numbered option.
+    expect(selectedSubmenuLine(LIVE_SUBMENU_CONNECTED_TOP)).toBe('   ❯ 1. View tools')
+    expect(selectedSubmenuLine(LIVE_SUBMENU_ON_RECONNECT)).toBe('   ❯ 2. Reconnect')
+  })
+
+  it('prefers a numbered option row even when a stray `❯` line sorts after it', () => {
+    const pane = [
+      '   ❯ 1. View tools',
+      '     2. Reconnect',
+      '❯ some later transcript line with the prompt glyph',
+    ].join('\n')
+    expect(selectedSubmenuLine(pane)).toBe('   ❯ 1. View tools')
+  })
+
+  it('falls back to the LAST pointer line for unnumbered menus (no scrollback above)', () => {
+    // Older / unnumbered CC menus: the menu renders below scrollback, so the
+    // last `❯` is the cursor. The simple fixtures have a single pointer.
+    expect(selectedSubmenuLine(SUBMENU_CONNECTED_ON_RECONNECT)).toBe('❯ Reconnect')
   })
 })
 
@@ -180,6 +237,28 @@ const ENABLE_RX = /\benable\b/i
 describe('attemptChannelMcpReconnect', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockReady.mockReturnValue(true) // pane idle by default; the gate tests override
+  })
+
+  it('wedge-safe gate: aborts WITHOUT sending any keys when the pane stays busy', () => {
+    mockReady.mockReturnValue(false) // agent is mid-generation / busy the whole window
+    // Provide submenu captures that WOULD succeed -- proving the abort is the
+    // gate's doing, not a downstream failure.
+    mockCapturePane.mockReturnValue(SUBMENU_FAILED_TOP)
+
+    const result = attemptChannelMcpReconnect('marveen')
+
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('not idle')
+    expect(result.deferred).toBe(true) // flagged as a deferral, not a drive failure
+    // The whole point: NO tmux keys are sent into a busy pane (no Escape, no
+    // /mcp, no Enter) -- so the agent's turn can never be interrupted/wedged.
+    // The idle-catch's off-pane `/bin/sleep` polls are fine; only tmux send-keys
+    // would touch the pane, and there must be zero of those.
+    const sentKeys = mockExecFileSync.mock.calls.filter(
+      (c) => String(c[0]).includes('tmux') && Array.isArray(c[1]) && c[1][0] === 'send-keys',
+    )
+    expect(sentKeys).toHaveLength(0)
   })
 
   it('connected state: steps Down onto Reconnect, then activates it', () => {
@@ -199,6 +278,28 @@ describe('attemptChannelMcpReconnect', () => {
       (c) => Array.isArray(c[1]) && c[1].includes('Enter') && !c[1].includes('/mcp'),
     )
     expect(submenuEnters.length).toBeGreaterThanOrEqual(2) // open submenu + activate
+  })
+
+  it('LIVE numbered submenu with scrollback prompt: steps onto Reconnect despite the stray `❯` above the menu', () => {
+    // End-to-end regression for card 8b07e17b. Before the fix, selectedSubmenuLine
+    // locked onto the scrollback `❯` line, never matched Reconnect, and the loop
+    // exhausted its budget ("Could not select reconnect within 6 steps").
+    mockCapturePane
+      .mockReturnValueOnce('/mcp menu content')        // after /mcp
+      .mockReturnValueOnce(LIVE_SUBMENU_CONNECTED_TOP) // outer loop: plugin matched on Up x1
+      .mockReturnValueOnce(LIVE_SUBMENU_CONNECTED_TOP) // submenu: cursor on "1. View tools"
+      .mockReturnValueOnce(LIVE_SUBMENU_ON_RECONNECT)  // after one Down: cursor on "2. Reconnect"
+
+    const result = attemptChannelMcpReconnect('marveen')
+
+    expect(result.ok).toBe(true)
+    expect(result.message).toContain('Reconnect')
+    // Exactly one Down was needed (View tools -> Reconnect), proving the cursor
+    // was actually tracked rather than the loop spinning blind.
+    const downCalls = mockExecFileSync.mock.calls.filter(
+      (c) => Array.isArray(c[1]) && c[1].includes('Down'),
+    )
+    expect(downCalls.length).toBe(1)
   })
 
   it('failed state: Reconnect is already selected, activates WITHOUT pressing Down', () => {
@@ -310,5 +411,48 @@ describe('attemptChannelMcpReconnect', () => {
       (c) => Array.isArray(c[1]) && c[1].includes('Escape'),
     )
     expect(escapeCalls.length).toBeGreaterThan(0)
+  })
+})
+
+describe('pollForIdleWindow (aggressive idle-catch)', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('returns true immediately when the pane is already idle (no sleep)', () => {
+    mockReady.mockReturnValue(true)
+    expect(pollForIdleWindow('agent-x', 6, 500)).toBe(true)
+    expect(mockReady).toHaveBeenCalledTimes(1)
+    // No inter-poll sleep when the first sample already succeeds.
+    const sleeps = mockExecFileSync.mock.calls.filter((c) => String(c[0]).includes('sleep'))
+    expect(sleeps).toHaveLength(0)
+  })
+
+  it('catches a tool-boundary beat: busy, busy, then idle -> true', () => {
+    mockReady
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true)
+    expect(pollForIdleWindow('agent-x', 6, 500)).toBe(true)
+    expect(mockReady).toHaveBeenCalledTimes(3)
+    // Two waits before the third (successful) sample.
+    const sleeps = mockExecFileSync.mock.calls.filter((c) => String(c[0]).includes('sleep'))
+    expect(sleeps).toHaveLength(2)
+  })
+
+  it('defers (false) when the pane stays busy for the whole window', () => {
+    mockReady.mockReturnValue(false)
+    expect(pollForIdleWindow('agent-x', 6, 500)).toBe(false)
+    // Sampled `attempts` times, slept between each (attempts - 1).
+    expect(mockReady).toHaveBeenCalledTimes(6)
+    const sleeps = mockExecFileSync.mock.calls.filter((c) => String(c[0]).includes('sleep'))
+    expect(sleeps).toHaveLength(5)
+  })
+
+  it('never sends a keystroke -- the poll is observe-only (wedge-safe)', () => {
+    mockReady.mockReturnValue(false)
+    pollForIdleWindow('agent-x', 3, 100)
+    const sentKeys = mockExecFileSync.mock.calls.filter(
+      (c) => String(c[0]).includes('tmux') && Array.isArray(c[1]) && c[1][0] === 'send-keys',
+    )
+    expect(sentKeys).toHaveLength(0)
   })
 })

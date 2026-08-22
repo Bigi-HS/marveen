@@ -1,0 +1,12 @@
+{
+  "model": "qwen3:4b",
+  "displayName": "NoA Local",
+  "securityProfile": "default",
+  "team": {
+    "role": "worker",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": []
+  }
+}

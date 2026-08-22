@@ -103,7 +103,9 @@ describe('message-router channel-inbound classification', () => {
 describe('/api/messages 403 guard (forged coordinator id)', () => {
   it('rejects the coordinator id BEFORE creating the message, normalized with sanitizeAgentIdent (NOT trim)', () => {
     const guardIdx = MESSAGES_ROUTE_SRC.indexOf('sanitizeAgentIdent(from) === COORDINATOR_AGENT_ID')
-    const createIdx = MESSAGES_ROUTE_SRC.indexOf('createAgentMessage(from.trim()')
+    // The create call now binds the token-derived `effectiveFrom` (card
+    // b1ce5118) rather than the raw body `from`; the guard still precedes it.
+    const createIdx = MESSAGES_ROUTE_SRC.indexOf('createAgentMessage(effectiveFrom')
     expect(guardIdx).toBeGreaterThan(0)
     expect(createIdx).toBeGreaterThan(0)
     expect(guardIdx).toBeLessThan(createIdx) // guard runs first
@@ -118,6 +120,33 @@ describe('/api/messages 403 guard (forged coordinator id)', () => {
   it('the guarded id is the same constant the router trusts (one source of truth)', () => {
     expect(MESSAGES_ROUTE_SRC).toMatch(/import \{ COORDINATOR_AGENT_ID \} from '\.\.\/\.\.\/channel-coordinator\/ingest\.js'/)
     expect(COORDINATOR_AGENT_ID).toBe('telegram-coordinator')
+  })
+})
+
+// C-INTERIM (card 38bff392): the detection-only mismatch log is wired into the
+// messages route, runs BEFORE the (flag-gated) enforcement decision, and is NOT
+// itself gated by the flag -- it must surface impersonation evidence while
+// ENFORCE_FROM_BINDING is still OFF.
+describe('/api/messages from_agent mismatch detection log (C-INTERIM 38bff392)', () => {
+  it('imports and invokes logFromMismatch, logging via logger.warn (detection, not block)', () => {
+    expect(MESSAGES_ROUTE_SRC).toMatch(/import \{[^}]*\blogFromMismatch\b[^}]*\} from '\.\.\/agent-identity-binding\.js'/)
+    expect(MESSAGES_ROUTE_SRC).toMatch(/logFromMismatch\(\(line\) => logger\.warn\(line\), identity, from\)/)
+  })
+
+  it('is flag-INDEPENDENT: the detection call carries no ENFORCE_FROM_BINDING gate', () => {
+    // The matched invocation passes (emit, identity, from) only -- never
+    // enforceFromBindingEnabled() -- so detection fires regardless of the flag.
+    const m = MESSAGES_ROUTE_SRC.match(/logFromMismatch\(([^;]*?)\)\s*$/m)
+    expect(m).not.toBeNull()
+    expect(m?.[1]).not.toContain('enforceFromBindingEnabled')
+  })
+
+  it('runs the detection BEFORE the flag-gated enforcement decision', () => {
+    const detectIdx = MESSAGES_ROUTE_SRC.indexOf('logFromMismatch((line) => logger.warn(line)')
+    const enforceIdx = MESSAGES_ROUTE_SRC.indexOf('decideMessageFrom(identity, from, enforceFromBindingEnabled())')
+    expect(detectIdx).toBeGreaterThan(0)
+    expect(enforceIdx).toBeGreaterThan(0)
+    expect(detectIdx).toBeLessThan(enforceIdx)
   })
 })
 

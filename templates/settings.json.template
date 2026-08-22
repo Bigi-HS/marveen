@@ -3,6 +3,20 @@
     "telegram@claude-plugins-official": true
   },
   "effortLevel": "high",
+  "permissions": {
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Write(**/.env)",
+      "Edit(**/.env)",
+      "Write(**/.git-credentials)",
+      "Edit(**/.git-credentials)",
+      "Bash(curl -X POST:*)",
+      "Bash(curl -X PUT:*)",
+      "Bash(curl -X DELETE:*)",
+      "Bash(sudo:*)"
+    ]
+  },
   "hooks": {
     "PreCompact": [
       {
@@ -24,6 +38,79 @@
             "type": "command",
             "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/taskstate-replay.py",
             "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/memory-replay.py",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/session-start-enforce.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/prompt-freshness-nudge.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp__plugin_telegram_telegram__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/guardrail-telegram-chat.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/guardrail-ask-first.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/guardrail-destructive-bash.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/guardrail-permission-rules.py",
+            "timeout": 10
           }
         ]
       }

@@ -1,0 +1,12 @@
+{
+  "model": "claude-haiku-4-5-20251001",
+  "securityProfile": "developer-junior",
+  "displayName": "Dampier",
+  "team": {
+    "role": "member",
+    "reportsTo": "thor",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": []
+  }
+}

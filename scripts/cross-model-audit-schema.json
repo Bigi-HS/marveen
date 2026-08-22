@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CrossModelAuditResult",
+  "description": "Structured output from an independent cross-model security/correctness audit of a PR diff.",
+  "type": "object",
+  "required": ["model", "findings", "overall", "overall_rationale"],
+  "additionalProperties": false,
+  "properties": {
+    "model": {
+      "type": "string",
+      "description": "Model identifier string as returned by the API (e.g. 'gpt-4o-2024-05-13')"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "severity", "location", "summary", "detail"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+$",
+            "description": "Short kebab-case identifier unique within this audit result"
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"]
+          },
+          "location": {
+            "type": "string",
+            "description": "file:line reference or 'general'"
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "detail": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "suggested_fix": {
+            "type": "string",
+            "maxLength": 500
+          }
+        }
+      }
+    },
+    "overall": {
+      "type": "string",
+      "enum": ["pass", "flag", "block"],
+      "description": "pass=no medium+; flag=at least one medium or notable pattern; block=critical or high"
+    },
+    "overall_rationale": {
+      "type": "string",
+      "maxLength": 300
+    }
+  }
+}

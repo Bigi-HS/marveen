@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Bigi-HS/marveen/scripts/pre-gate-schema.json",
+  "title": "pre-gate evidence bundle",
+  "description": "Output of scripts/pre-gate-bundle.sh --json (Thor card b45884fb). Mechanical, reproducible evidence sheet handed to the merge gate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "checks", "diff_additions", "base_anchor"],
+  "properties": {
+    "base_anchor": {
+      "description": "Whether `git fetch origin` succeeded before the 3-dot diff. \"stale\" means the fetch FAILED and the diff ran against a possibly-outdated on-disk origin/<branch> -- a green verdict then says nothing about the current remote tip.",
+      "type": "string",
+      "enum": ["fetched", "stale"]
+    },
+    "verdict": {
+      "description": "Aggregate result. Any check BLOCK -> BLOCK; else any WARN -> WARN; else PASS.",
+      "type": "string",
+      "enum": ["PASS", "WARN", "BLOCK"]
+    },
+    "checks": {
+      "description": "One entry per mechanical check, in execution order.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status", "detail"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Check identifier (e.g. typecheck, tests, diff-size, static)."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["PASS", "WARN", "BLOCK"]
+          },
+          "detail": {
+            "type": "string",
+            "description": "Human-readable evidence. Never contains a secret value -- only pattern names and counts."
+          }
+        }
+      }
+    },
+    "diff_additions": {
+      "description": "Total added lines across the diff (binary files count as 0).",
+      "type": "integer",
+      "minimum": 0
+    },
+    "cross_model": {
+      "description": "Optional. Present only when a cross-model id check ran; flags an unexpected/cross Claude model id introduced by the diff.",
+      "type": ["string", "null"]
+    }
+  }
+}

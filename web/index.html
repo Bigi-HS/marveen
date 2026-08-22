@@ -82,6 +82,11 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
         <span class="sb-label">Státusz</span>
       </a>
+      <a href="#" class="sb-link" data-page="gate">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4"/><path d="M21 12c-1 0-3-1-3-3s2-3 3-3-2-3-3-3-3 2-3 3-3-2-3 0"/><circle cx="12" cy="12" r="9"/></svg>
+        <span class="sb-label">Gate</span>
+        <span class="sb-badge" id="gateNavBadge" hidden></span>
+      </a>
       <a href="#" class="sb-link" data-page="autonomy">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         <span class="sb-label">Autonómia</span>
@@ -93,6 +98,10 @@
       <a href="#" class="sb-link" data-page="tokenUsage">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
         <span class="sb-label">Token Monitor</span>
+      </a>
+      <a href="#" class="sb-link" data-page="toolLog">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16"/><path d="M4 12h10"/><path d="M4 17h7"/><circle cx="18" cy="16" r="3"/><path d="M18 13v-1"/></svg>
+        <span class="sb-label">Workflow-jelöltek</span>
       </a>
       <a href="#" class="sb-link" data-page="ideas">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
@@ -117,6 +126,13 @@
   </aside>
 
   <main>
+    <!-- Claude API status banner: hidden while operational, shows on any active incident. -->
+    <div class="api-status-banner" id="apiStatusBanner" hidden>
+      <span class="api-status-dot"></span>
+      <span class="api-status-text" id="apiStatusText"></span>
+      <a href="#status" class="api-status-link" id="apiStatusLink">Részletek</a>
+    </div>
+
     <!-- === Overview Page (default) === -->
     <div class="page" id="overviewPage">
       <div class="overview-stats">
@@ -163,6 +179,19 @@
           <div id="agentActivityWidget"></div>
         </div>
       </div>
+
+      <!-- === To-Do widget (Claudia + Hibiki) === -->
+      <div class="overview-card todo-widget" id="todoWidget">
+        <div class="overview-card-head">
+          <h3>Napi teendők</h3>
+          <span class="overview-card-meta">élő · 03:00-ás napváltás</span>
+        </div>
+        <div class="todo-columns">
+          <div class="todo-col" id="todoCol-claudia"></div>
+          <div class="todo-col" id="todoCol-hibiki"></div>
+          <div class="todo-col" id="todoCol-bond"></div>
+        </div>
+      </div>
     </div>
 
     <!-- === Kanban Page === -->
@@ -172,6 +201,7 @@
         <select id="kanbanProjectFilter" style="font-size:13px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg);min-width:140px;">
           <option value="">Mind</option>
         </select>
+        <button id="kanbanArchiveBtn" type="button" title="Korábbi kész feladatok archívuma" style="margin-left:auto;font-size:13px;padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg);cursor:pointer;">🗄 Archívum</button>
       </div>
       <div class="kanban-board" id="kanbanBoard">
         <div class="kanban-col" data-status="planned">
@@ -200,10 +230,30 @@
         </div>
         <div class="kanban-col" data-status="done">
           <div class="kanban-col-header">
-            <span class="kanban-col-title">Kész</span>
+            <span class="kanban-col-title">Kész (ma)</span>
             <span class="kanban-col-count" id="countDone">0</span>
           </div>
           <div class="kanban-col-body" data-status="done"></div>
+        </div>
+        <div class="kanban-col" data-status="icebox">
+          <div class="kanban-col-header">
+            <span class="kanban-col-title">Jegelve</span>
+            <span class="kanban-col-count" id="countIcebox">0</span>
+            <button class="kanban-add-btn" data-status="icebox" title="Új kártya">+</button>
+          </div>
+          <div class="kanban-col-body" data-status="icebox"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Kanban archive modal: done cards older than today (auto-archived) + manually archived -->
+    <div class="modal-overlay" id="kanbanArchiveOverlay">
+      <div class="modal" style="max-width:560px">
+        <div class="modal-header">
+          <h2>🗄 Archívum</h2>
+          <button class="modal-close" id="kanbanArchiveClose">&times;</button>
+        </div>
+        <div class="modal-body" id="kanbanArchiveBody" style="max-height:60vh;overflow-y:auto;display:flex;flex-direction:column;gap:6px;">
         </div>
       </div>
     </div>
@@ -218,6 +268,12 @@
           </div>
         </div>
       </div>
+      <div class="agents-view-toggle" id="agentsViewToggle">
+        <button class="view-toggle-btn" data-view="tree" id="viewToggleTree">Fa nézet</button>
+        <button class="view-toggle-btn" data-view="list" id="viewToggleList">Lista</button>
+        <input type="search" id="agentSearchInput" class="agent-search-input" placeholder="Keresés: név / státusz / szerep…" autocomplete="off" aria-label="Ügynök keresés">
+      </div>
+      <div class="agents-tree" id="agentsTree" hidden></div>
       <div class="agents-grid" id="agentsGrid">
         <button class="agent-card add-card" id="addAgentBtn">
           <div class="add-icon">
@@ -514,66 +570,6 @@
         </div>
       </div>
 
-      <!-- connectors.hu cross-promo banner -->
-      <div class="cxhu-banner" id="cxhuBanner">
-        <div class="cxhu-banner-inner">
-          <div class="cxhu-banner-logo">
-            <svg width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
-              <rect width="28" height="28" rx="7" fill="#00977c"/>
-              <path d="M8 14c0-3.314 2.686-6 6-6s6 2.686 6 6" stroke="#fff" stroke-width="2" stroke-linecap="round" fill="none"/>
-              <circle cx="14" cy="19" r="2.5" fill="#59e9ce"/>
-              <circle cx="8" cy="14" r="1.5" fill="#fff" opacity=".7"/>
-              <circle cx="20" cy="14" r="1.5" fill="#fff" opacity=".7"/>
-            </svg>
-          </div>
-          <div class="cxhu-banner-text">
-            <span class="cxhu-banner-headline">connectors.hu, egy MCP mind fölött</span>
-            <span class="cxhu-banner-sub">NAV, Billingo, Wise, fal.ai: egyetlen MCP-ből, vagy token-hatékony CLI-vel. Magyar fókusz, nemzetközi lefedettség.</span>
-          </div>
-          <!-- install flow: states swapped by JS -->
-          <div class="cxhu-banner-action" id="cxhuAction">
-            <div class="cxhu-state" id="cxhuStateLoading">
-              <span class="cxhu-spinner" aria-label="Betöltés..."></span>
-            </div>
-            <div class="cxhu-state" id="cxhuStateDone" hidden>
-              <span class="cxhu-done-badge">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                connectors.hu CLI telepítve
-              </span>
-            </div>
-            <div class="cxhu-state" id="cxhuStateInstall" hidden>
-              <button class="cxhu-banner-cta" id="cxhuInstallBtn">Telepítés</button>
-              <a class="cxhu-link-sm" href="https://connectors.hu" target="_blank" rel="noopener noreferrer">Mi ez?</a>
-            </div>
-            <div class="cxhu-state" id="cxhuStateInstalling" hidden>
-              <span class="cxhu-spinner"></span>
-              <span class="cxhu-state-label">Telepítés folyamatban...</span>
-            </div>
-            <div class="cxhu-state cxhu-state--token" id="cxhuStateToken" hidden>
-              <span class="cxhu-done-badge">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                CLI telepítve
-              </span>
-              <input class="cxhu-token-input" id="cxhuTokenInput" type="password" placeholder="connectors.hu token (dashboardról)" autocomplete="off" spellcheck="false">
-              <button class="cxhu-banner-cta" id="cxhuConfigureBtn">Mentés és szinkron</button>
-            </div>
-            <div class="cxhu-state" id="cxhuStateConfiguring" hidden>
-              <span class="cxhu-spinner"></span>
-              <span class="cxhu-state-label">Szinkronizálás...</span>
-            </div>
-            <div class="cxhu-state" id="cxhuStateError" hidden>
-              <span class="cxhu-error-msg" id="cxhuErrorMsg"></span>
-              <button class="cxhu-banner-cta cxhu-retry-btn" id="cxhuRetryBtn">Újra</button>
-            </div>
-          </div>
-          <button class="cxhu-banner-close" id="cxhuBannerClose" aria-label="Bezárás" title="Bezárás">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-              <line x1="2" y1="2" x2="12" y2="12"/><line x1="12" y1="2" x2="2" y2="12"/>
-            </svg>
-          </button>
-        </div>
-      </div>
-
       <!-- Connector tabs -->
       <div class="connector-tabs">
         <button class="connector-tab active" data-ctab="installed">Telepített</button>
@@ -797,6 +793,28 @@
       </div>
     </div>
 
+    <!-- === Gate / approval queue Page (card ba512371 #8; /api/gate/board) === -->
+    <div class="page" id="gatePage" hidden>
+      <div class="page-header">
+        <div class="page-header-row">
+          <div>
+            <h1>Gate</h1>
+            <p class="subtitle">Merge-gate státusz a legutóbb aktív PR-eken</p>
+          </div>
+          <button class="btn-secondary btn-compact" id="refreshGateBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+            Frissítés
+          </button>
+        </div>
+      </div>
+      <div class="gate-board-meta" id="gateBoardMeta"></div>
+      <div class="gate-board" id="gateBoard">
+        <div class="gate-loading">Betöltés…</div>
+      </div>
+    </div>
+
     <!-- === Autonomy Page === -->
     <div class="page" id="autonomyPage" hidden>
       <div class="page-header">
@@ -870,6 +888,12 @@
             <div style="display:flex;gap:8px">
               <div class="form-group" style="flex:1"><label class="form-label">Kategória</label>
                 <select id="ideaCategoryInput" class="input"><option>Sales</option><option>Oktatás</option><option>Automatizálás</option><option>Integráció</option><option>Rendszer</option><option>Egyéb</option></select>
+              </div>
+              <div class="form-group" style="width:120px"><label class="form-label">Impact</label>
+                <select id="ideaImpactInput" class="input"><option value="">-</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select>
+              </div>
+              <div class="form-group" style="width:120px"><label class="form-label">Effort</label>
+                <select id="ideaEffortInput" class="input"><option value="">-</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select>
               </div>
             </div>
           </div>
@@ -1038,6 +1062,24 @@
       </div>
     </div>
 
+    <!-- === Tool-workflow candidate styles === -->
+    <style>
+      .tl-card { margin-bottom: 12px; }
+      .tl-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+      .tl-sub { font-size: 12px; color: var(--text-muted); }
+      .tl-sub code { font-family: monospace; }
+      .tl-metrics { display: flex; gap: 14px; flex-wrap: wrap; }
+      .tl-metric { font-size: 12px; color: var(--text-secondary); }
+      .tl-metric strong { font-size: 15px; color: var(--text); }
+      .tl-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+      .tl-chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--bg-input); border: 1px solid var(--border); color: var(--text-secondary); }
+      .tl-steps { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--text-muted); }
+      .tl-steps li { margin-bottom: 3px; }
+      .tl-step-tool { color: var(--accent); font-weight: 600; }
+      .tl-step-desc { color: var(--text-muted); margin-left: 6px; }
+      .tl-actions { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
+    </style>
+
     <!-- === Token Usage Page === -->
     <style>
       .tu-active { outline: 2px solid var(--accent, #6366f1); outline-offset: -2px; }
@@ -1054,9 +1096,17 @@
         <div class="page-header-row" style="flex-wrap:wrap">
           <div style="flex:1;min-width:200px">
             <h1>Token Monitor</h1>
-            <p class="subtitle" id="tokenUsageSubtitle">Ügynök token-fogyasztás nyomon követése</p>
+            <p class="subtitle" id="tokenUsageSubtitle">Ügynök token- és költség-fogyasztás nyomon követése</p>
           </div>
           <div class="tu-header-controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <div style="text-align:right;margin-right:4px">
+              <div style="font-size:11px;color:var(--text-secondary);line-height:1.1">Összes költség</div>
+              <div id="tuTotalCost" style="font-size:18px;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums">$0.00</div>
+            </div>
+            <div class="tu-metric-toggle" style="display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+              <button type="button" class="btn-metric tu-active" data-metric="tokens" style="border:none;padding:5px 12px;font-size:13px;cursor:pointer;background:var(--accent-soft);color:var(--text-primary)">Token</button>
+              <button type="button" class="btn-metric" data-metric="usd" style="border:none;padding:5px 12px;font-size:13px;cursor:pointer;background:transparent;color:var(--text-secondary)">USD</button>
+            </div>
             <select id="tuPeriod" class="input-compact" style="width:auto">
               <option value="1h">1 óra</option>
               <option value="24h">24 óra</option>
@@ -1087,6 +1137,8 @@
         </div>
       </div>
 
+      <div class="overview-card" id="tuLineageCard" style="margin-bottom:16px" hidden></div>
+
       <div class="overview-card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
           <h3 style="margin:0">Legnagyobb hívások</h3>
@@ -1096,6 +1148,46 @@
         </div>
         <div id="tuDetailsTable"></div>
       </div>
+    </div>
+
+    <!-- === Tool-workflow automation candidates Page === -->
+    <div class="page" id="toolLogPage" hidden>
+      <div class="page-header">
+        <div class="page-header-row" style="flex-wrap:wrap">
+          <div style="flex:1;min-width:200px">
+            <h1>Workflow-jelöltek</h1>
+            <p class="subtitle">Ismétlődő eszközhívás-sorozatok, amikből ütemezett feladat lehet</p>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select id="tlWindow" class="input-compact" style="width:auto">
+              <option value="3600">1 óra</option>
+              <option value="21600">6 óra</option>
+              <option value="86400" selected>24 óra</option>
+              <option value="604800">7 nap</option>
+            </select>
+            <label style="font-size:13px;color:var(--text-secondary)">
+              Min. lépés: <input type="number" id="tlMinCalls" value="5" min="2" class="input-compact" style="width:64px">
+            </label>
+            <button class="btn-secondary btn-compact" id="tlRefreshBtn">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+              </svg>
+              Frissítés
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="overview-card" style="margin-bottom:16px">
+        <div style="padding:12px 14px;background:var(--bg-input);border-radius:var(--radius);border-left:3px solid var(--accent);font-size:13px;line-height:1.5;color:var(--text-muted)">
+          A rendszer a naplózott eszközhívásokból session-önként azonos időablakban ismétlődő
+          sorozatokat gyűjt. Ha egy sorozat rendszeresen visszatér, érdemes lehet ütemezett
+          feladatként automatizálni. A "Feladattá alakítás" gomb előtölti az ütemezés-űrlapot
+          a javasolt prompttal, amit még átnézhetsz mentés előtt.
+        </div>
+      </div>
+
+      <div id="toolLogList"></div>
     </div>
 
     <!-- === Updates Page === -->
@@ -1409,6 +1501,25 @@
               </button>
               <button class="btn-danger btn-compact" id="agentStopBtn" hidden>Leállítás</button>
               <button class="btn-danger btn-compact" id="marveenRestartBtn" hidden>Channels restart</button>
+            </div>
+          </div>
+
+          <!-- Operator action layer (card d3fc67f2): nudge + run-skill on the
+               open agent. Both inject a prompt into the agent's live session. -->
+          <div class="agent-action-layer" id="agentActionLayer" style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+            <label class="form-label-sm">Művelet az ügynökön</label>
+            <div style="display:flex;gap:8px;margin-top:6px">
+              <textarea id="agentNudgeText" class="form-input" rows="2" placeholder="Nudge üzenet az ügynöknek..." style="flex:1;resize:vertical"></textarea>
+              <button class="btn-primary btn-compact" id="agentNudgeBtn" style="align-self:flex-start">Nudge</button>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <select id="agentSkillSelect" class="form-input" style="flex:1"></select>
+              <button class="btn-primary btn-compact" id="agentRunSkillBtn">Skill futtatása</button>
+            </div>
+            <!-- Soft-interrupt (card b83e7c92): send Escape to cancel the agent's
+                 current turn -- the gentle rung between a nudge and a restart. -->
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <button class="btn-secondary btn-compact" id="agentInterruptBtn" style="flex:1" title="Escape az ügynök paneljébe: megszakítja a folyó kört (nudge és restart közötti finom fokozat)">Megszakítás (Esc)</button>
             </div>
           </div>
         </div>
@@ -2183,6 +2294,7 @@
       <div id="terminalContainer" style="background:#1a1a1a;padding:8px;border-radius:0 0 8px 8px;flex:1;min-height:360px;"></div>
     </div>
   </div>
+  <script src="/dashboard-events.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

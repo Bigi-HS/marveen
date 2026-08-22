@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parsePollerPidsFromPs, findOrphanChannelClaudes, type ProcRow } from '../web/channel-poller-reap.js'
+import { parsePollerPidsFromPs, findOrphanChannelClaudes, decideDetachedClaudeReap, type ProcRow } from '../web/channel-poller-reap.js'
 
 // Sample rows captured from a real `ps eww -e` on macOS during the
 // 2026-06-01 channel-disconnect incident. The bun poller, the slack
@@ -147,5 +147,51 @@ describe('findOrphanChannelClaudes', () => {
       { pid: 76621, ppid: 35874, command: `${CLAUDE} --channels plugin:telegram@claude-plugins-official` },
     ]
     expect(findOrphanChannelClaudes(allLive, new Set([76621]))).toEqual([])
+  })
+})
+
+// decideDetachedClaudeReap wraps findOrphanChannelClaudes with fail-closed
+// semantics + redundant orchestrator protection (card bcf10d21).
+describe('decideDetachedClaudeReap (fail-closed + orchestrator protection)', () => {
+  it('fails CLOSED (reaps nothing) when the global list-panes query failed (null)', () => {
+    const d = decideDetachedClaudeReap({ procs: PROCS, globalPanePids: null, mainSessionPanePids: new Set([76621]) })
+    expect(d.skipped).toBe(true)
+    expect(d.reason).toBe('global-query-failed')
+    expect(d.reap).toEqual([])
+  })
+
+  it('fails CLOSED when the global query resolved zero panes (cannot attribute)', () => {
+    const d = decideDetachedClaudeReap({ procs: PROCS, globalPanePids: new Set(), mainSessionPanePids: new Set([76621]) })
+    expect(d.skipped).toBe(true)
+    expect(d.reason).toBe('no-live-panes')
+    expect(d.reap).toEqual([])
+  })
+
+  it('reaps only the detached orphans when attribution is complete', () => {
+    const d = decideDetachedClaudeReap({ procs: PROCS, globalPanePids: LIVE_PANES, mainSessionPanePids: new Set([76621]) })
+    expect(d.skipped).toBe(false)
+    expect(d.reap.sort((a, b) => a - b)).toEqual([57158, 70459])
+    expect(d.reap).not.toContain(76621) // orchestrator spared
+  })
+
+  it('PARTIAL global set that dropped the orchestrator pane: the main-session union still spares it', () => {
+    // Global -a raced and omitted 76621 (the live orchestrator). Without the
+    // redundant union this would mark the orchestrator an orphan and kill it.
+    const partialGlobal = new Set<number>([77189]) // only the sub-agent pane survived the partial query
+    const d = decideDetachedClaudeReap({
+      procs: PROCS,
+      globalPanePids: partialGlobal,
+      mainSessionPanePids: new Set([76621]), // independent -t query still has the orchestrator
+    })
+    expect(d.skipped).toBe(false)
+    expect(d.reap).not.toContain(76621) // orchestrator protected by the union
+    expect(d.reap.sort((a, b) => a - b)).toEqual([57158, 70459])
+  })
+
+  it('a null/empty main-session set never widens the kill set (only ever adds protection)', () => {
+    const withNull = decideDetachedClaudeReap({ procs: PROCS, globalPanePids: LIVE_PANES, mainSessionPanePids: null })
+    const withEmpty = decideDetachedClaudeReap({ procs: PROCS, globalPanePids: LIVE_PANES, mainSessionPanePids: new Set() })
+    expect(withNull.reap.sort((a, b) => a - b)).toEqual([57158, 70459])
+    expect(withEmpty.reap.sort((a, b) => a - b)).toEqual([57158, 70459])
   })
 })

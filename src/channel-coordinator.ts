@@ -34,7 +34,7 @@ import { execFile } from 'node:child_process'
 import { logger } from './logger.js'
 import { PROJECT_ROOT, MAIN_AGENT_ID, CHANNEL_PROVIDER } from './config.js'
 import { getUpdates, probeHighWater, mapUpdate, TelegramApiError } from './channel-coordinator/telegram-client.js'
-import { probeNativeChannelDown } from './channel-coordinator/liveness.js'
+import { probeNativeChannelDown, probeNativeChannelKind, type NativeDownKind } from './channel-coordinator/liveness.js'
 import {
   initIngestDb,
   insertIncomingEvent,
@@ -60,8 +60,19 @@ const PROVIDER = CHANNEL_PROVIDER
 const TICK_MS = 5000
 // Enter BACKFILLING only after the native reads DOWN this many consecutive
 // probes -- a single transient process-tree race or a restart blip must not
-// flip us into polling (which could 409 the recovering native).
+// flip us into polling (which could 409 the recovering native). A 'hard' down
+// (claude session gone / wedged TUI) is trusted at DOWN_DEBOUNCE; a 'soft' down
+// (only the false-negative-prone plugin-scan miss, with a fresh keepalive)
+// demands the longer DOWN_DEBOUNCE_SOFT streak before we dare a consuming
+// getUpdates, so a flaky hasChannelPluginAlive miss cannot 409 the live native
+// (pipe-RCA #3).
 const DOWN_DEBOUNCE = 2
+const DOWN_DEBOUNCE_SOFT = 6
+
+// Pure: consecutive-down ticks required before backfilling, by down kind.
+export function requiredDownDebounce(kind: NativeDownKind): number {
+  return kind === 'soft' ? DOWN_DEBOUNCE_SOFT : DOWN_DEBOUNCE
+}
 
 // Transient-error backoff (5xx / network) while BACKFILLING.
 const BACKOFF_BASE_MS = 1000
@@ -310,10 +321,14 @@ async function runLoop(token: string): Promise<void> {
       // Watch the native channel. Debounce DOWN readings so a momentary blip
       // (process-tree race, restart) does not flip us into polling. A recent
       // 409 overrides a DOWN reading: it proved the native poller is up, so we
-      // distrust the (flaky) liveness probe until the cooldown expires.
-      const down = probeNativeChannelDown(SESSION, PROVIDER) && !inNative409Cooldown(nativeConfirmedUpUntil, Date.now())
+      // distrust the (flaky) liveness probe until the cooldown expires. The
+      // required streak scales with confidence: a 'soft' down (weak plugin-scan
+      // miss) must persist longer than a 'hard' down before we risk a consuming
+      // getUpdates (pipe-RCA #3).
+      const kind = probeNativeChannelKind(SESSION, PROVIDER)
+      const down = kind !== 'up' && !inNative409Cooldown(nativeConfirmedUpUntil, Date.now())
       downStreak = down ? downStreak + 1 : 0
-      if (downStreak >= DOWN_DEBOUNCE) {
+      if (downStreak >= requiredDownDebounce(kind)) {
         try {
           // Seed poll_offset to the current high-water so we only deliver
           // messages that arrive DURING the outage; the detection-window

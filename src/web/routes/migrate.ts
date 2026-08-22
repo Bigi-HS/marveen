@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { saveAgentMemory } from '../../db.js'
+import { saveAgentMemory } from '../../noa-memory.js'
 import { MAIN_AGENT_ID, OLLAMA_URL } from '../../config.js'
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'

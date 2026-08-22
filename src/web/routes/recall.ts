@@ -1,4 +1,4 @@
-import { recallByDateRange, recallSearch, getDailyLogDates } from '../../db.js'
+import { recallByDateRange, recallSearch, getDailyLogDates } from '../../noa-memory.js'
 import { MAIN_AGENT_ID } from '../../config.js'
 import { json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'

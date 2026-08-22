@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { parseEnvValue } from '../env.js'
 import { writeFileSync, unlinkSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -65,5 +66,52 @@ describe('readEnvFile', () => {
     expect(result['A']).toBe('1')
     expect(result['C']).toBe('3')
     expect(result['B']).toBeUndefined()
+  })
+})
+
+describe('parseEnvValue (pure .env value parse)', () => {
+  it('extracts a simple KEY=value', () => {
+    expect(parseEnvValue('TELEGRAM_BOT_TOKEN=abc123\n', 'TELEGRAM_BOT_TOKEN')).toBe('abc123')
+  })
+
+  it('returns null when the key is absent', () => {
+    expect(parseEnvValue('OTHER=1\n', 'TELEGRAM_BOT_TOKEN')).toBeNull()
+  })
+
+  it('anchors to line start: a prefixed var does not satisfy the request', () => {
+    // MY_TELEGRAM_BOT_TOKEN= must NOT match a request for TELEGRAM_BOT_TOKEN=
+    expect(parseEnvValue('MY_TELEGRAM_BOT_TOKEN=wrong\n', 'TELEGRAM_BOT_TOKEN')).toBeNull()
+  })
+
+  it('picks the real anchored line even when a prefixed decoy precedes it', () => {
+    const content = 'MY_TELEGRAM_BOT_TOKEN=wrong\nTELEGRAM_BOT_TOKEN=right\n'
+    expect(parseEnvValue(content, 'TELEGRAM_BOT_TOKEN')).toBe('right')
+  })
+
+  it('excludes an inline comment from the value', () => {
+    expect(parseEnvValue('GITHUB_PAT=ghp_abc # my token\n', 'GITHUB_PAT')).toBe('ghp_abc')
+  })
+
+  it('stops the value at the first whitespace', () => {
+    expect(parseEnvValue('GITHUB_PAT=ghp_abc def\n', 'GITHUB_PAT')).toBe('ghp_abc')
+  })
+
+  it('treats the key name literally, not as a regex', () => {
+    expect(parseEnvValue('A.B=x\n', 'A.B')).toBe('x')
+    expect(parseEnvValue('AXB=y\n', 'A.B')).toBeNull()
+  })
+})
+
+describe('readEnvValue (file-backed)', () => {
+  it('reads a value from the .env file', async () => {
+    writeFileSync(testEnvPath, 'GITHUB_PAT=ghp_fromfile\n')
+    const { readEnvValue } = await import('../env.js')
+    expect(readEnvValue('GITHUB_PAT')).toBe('ghp_fromfile')
+  })
+
+  it('returns null when the .env file is absent', async () => {
+    try { unlinkSync(testEnvPath) } catch {}
+    const { readEnvValue } = await import('../env.js')
+    expect(readEnvValue('GITHUB_PAT')).toBeNull()
   })
 })

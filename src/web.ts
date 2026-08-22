@@ -1,38 +1,57 @@
 import http from 'node:http'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL } from './config.js'
-import { loadOrCreateDashboardToken, checkBearerToken } from './web/dashboard-auth.js'
-import { json } from './web/http-helpers.js'
+import { bindServer } from './web-bind.js'
+import { SERVER_BOOT_AT_PATH } from './server-boot-path.js'
+import { loadOrCreateDashboardToken, initDashboardToken, getDashboardToken, checkBearerToken, extractBearer, buildDashboardAccessMessage, createSession, verifySession, revokeSession, parseCookies, classifyRequestOrigin, rateLimitKey, verifyPassword, hasPasswordCredentials, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from './web/dashboard-auth.js'
+import { getDb } from './db.js'
+import { resolveRequestIdentity, logFromBindingStatus } from './web/agent-identity-binding.js'
+import { type AgentIdentity } from './web/agent-token-registry.js'
+import { json, readBody } from './web/http-helpers.js'
+import { createRateLimiter } from './web/rate-limit.js'
+import { securityHeaders } from './web/security-headers.js'
 import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
 import { ensureAgentHooks, ensureDefaultScheduledTasks } from './web/agent-scaffold.js'
 import { refreshMarveenBotUsername } from './web/telegram.js'
 import { startMessageRouter } from './web/message-router.js'
+import { startAckClearObserver } from './web/delivery-ack-observer.js'
+import { compactDeliverySentinelsOnBoot, startDeliverySentinelMaintenance } from './web/delivery-sentinel-maintenance.js'
 import { startUpdateChecker } from './web/update-checker.js'
 import { startMcpListChecker } from './web/mcp-list.js'
 import { startScheduleRunner } from './web/schedule-runner.js'
+import { startUsageRefresher } from './web/usage-refresher.js'
+import { applyKanbanMigrations } from './noa-kanban.js'
 import { startChannelPluginMonitor } from './web/channel-monitor.js'
 import { startInboundProber } from './web/inbound-probe.js'
 import { startChannelHealthMonitor } from './web/channel-health-monitor.js'
+import { recoverOrchestratorPipeOnce } from './web/telegram-pipe-watchdog.js'
 import { startStuckInputWatcher } from './web/stuck-input-watcher.js'
 import { startStuckToolCallWatcher } from './web/stuck-tool-call-watcher.js'
+import { startWedgedQueueWatcher } from './web/wedged-queue-watcher.js'
 import { startReauthHealer } from './web/reauth-healer.js'
 import { startAutoRestartRunner } from './web/auto-restart-runner.js'
 import { startSessionSizeWatcher } from './web/session-size-watcher.js'
+import { startTmuxTitleWatcher } from './web/tmux-title.js'
+import { startAgentStatusWatcher } from './web/agent-status-watcher.js'
+import { startSupervisorSentinel } from './web/supervisor-sentinel.js'
 import { logger } from './logger.js'
 import { tryHandleProfiles } from './web/routes/profiles.js'
 import { tryHandleMessages } from './web/routes/messages.js'
 import { tryHandleAgentTerminal } from './web/routes/agent-terminal.js'
+import { tryHandleEvents } from './web/routes/events.js'
+import { isSseStreamPath } from './web/sse-paths.js'
+import { tryHandleAgentActions } from './web/routes/agent-actions.js'
 import { tryHandleAgentTaskState } from './web/routes/agent-taskstate.js'
 import { sweepOrphanTaskStates } from './web/agent-taskstate.js'
 import { tryHandleDailyLog } from './web/routes/daily-log.js'
 import { tryHandleMemories } from './web/routes/memories.js'
 import { tryHandleMigrate } from './web/routes/migrate.js'
 import { tryHandleKanban } from './web/routes/kanban.js'
+import { tryHandleTodos } from './web/routes/todos.js'
 import { tryHandleSchedules } from './web/routes/schedules.js'
 import { tryHandleConnectors } from './web/routes/connectors.js'
-import { tryHandleConnectorsHu } from './web/routes/connectors-hu.js'
 import { tryHandleAgentsSkills } from './web/routes/agents-skills.js'
 import { tryHandleSkills } from './web/routes/skills.js'
 import { tryHandleAgents } from './web/routes/agents.js'
@@ -44,24 +63,53 @@ import { tryHandleUpdates } from './web/routes/updates.js'
 import { tryHandleStatus } from './web/routes/status.js'
 import { tryHandleAutonomy } from './web/routes/autonomy.js'
 import { tryHandleTokenUsage } from './web/routes/token-usage.js'
+import { tryHandleUsage } from './web/routes/usage.js'
 import { tryHandleIdeas } from './web/routes/ideas.js'
 import { tryHandleToolLog } from './web/routes/tool-log.js'
+import { tryHandleCodetree } from './web/routes/codetree.js'
+import { tryHandleGate } from './web/routes/gate.js'
+import { tryHandleGateBoard } from './web/routes/gate-board.js'
+import { tryHandleGithub } from './web/routes/github.js'
+import { tryHandleAck } from './web/routes/ack.js'
+import { tryHandleAgentCategories } from './web/routes/agent-categories.js'
+import { tryHandleAdmin } from './web/routes/admin.js'
+import { tryHandlePublicDigest } from './web/routes/public-digest.js'
+import { tryHandleAnalytics } from './web/routes/analytics.js'
+import { applyAnalyticsMigrations } from './analytics/storage.js'
+import { tryHandleNotify } from './web/routes/notify.js'
+import { tryHandleGithubSearch } from './web/routes/github-search.js'
+import { tryHandleBondSrs } from './web/routes/bond-srs.js'
+import { tryHandleHibikiNutrition } from './web/routes/hibiki-nutrition.js'
+import { tryHandleGuardEvents } from './web/routes/guard-events.js'
+import { tryHandleMetrics } from './web/routes/metrics.js'
+import { tryHandleHealthIngest } from './web/routes/health-ingest.js'
 import { tryHandleStatic } from './web/routes/static.js'
+import { tryHandleDashboardNew } from './web/routes/dashboard-new.js'
 import type { RouteContext } from './web/routes/types.js'
 
 const WEB_DIR = join(PROJECT_ROOT, 'web')
+const DASHBOARD_NEW_DIST = join(PROJECT_ROOT, 'dashboard-new', 'dist')
 
 function ensureDirs() {
   mkdirSync(AGENTS_BASE_DIR, { recursive: true })
 }
 
 export function startWebServer(port = 3420): http.Server {
-  // SECURITY: Server binds to 127.0.0.1 (see server.listen below). The allowed
+  // SECURITY: Server binds to 127.0.0.1 (see bindServer below -- BOTH the normal
+  // and the port-reclaim path go through it, card SEC/a805f9f0). The allowed
   // browser origins mirror that -- anything else is rejected to prevent CSRF
   // from malicious websites the user may visit while the dashboard is running.
   ensureDirs()
 
   const DASHBOARD_TOKEN = loadOrCreateDashboardToken()
+  // Seed the in-memory token the auth middleware checks. The middleware reads it
+  // via getDashboardToken() (not this const) so the admin rotate-token endpoint
+  // can swap it at runtime without a restart. DASHBOARD_TOKEN is only used for
+  // the one-time startup access message below.
+  initDashboardToken(DASHBOARD_TOKEN)
+  // Chad #5: surface the from_agent enforcement state at boot so an env-less
+  // restart that silently flips it OFF is visible in the logs, never invisible.
+  logFromBindingStatus((line) => logger.info(line))
   const allowedOrigins = new Set([
     `http://localhost:${port}`,
     `http://127.0.0.1:${port}`,
@@ -69,6 +117,33 @@ export function startWebServer(port = 3420): http.Server {
     ...(DASHBOARD_PUBLIC_URL ? [DASHBOARD_PUBLIC_URL.replace(/\/$/, '')] : []),
   ])
   const isSafeMethod = (m: string) => m === 'GET' || m === 'HEAD' || m === 'OPTIONS'
+
+  // Per-IP rate limiting (defence-in-depth; the dashboard is tailnet-only, so
+  // this guards against token brute-force and accidental request storms, not
+  // public-scale traffic). Two tiers keyed by the UNSPOOFABLE socket peer (see
+  // rateLimitKey -- NOT the X-Forwarded-For-derived sourceIp, which a local
+  // process could forge to mint unlimited buckets and evade the limiter):
+  //   - strict: POST /api/auth/login -- anti-brute-force (~5/min)
+  //   - lenient: every other /api/* call (~100/10s burst)
+  // The long-lived SSE pane stream and static assets are never rate-limited.
+  const loginLimiter = createRateLimiter({ capacity: 5, refillPerSec: 5 / 60 })
+  const apiLimiter = createRateLimiter({ capacity: 100, refillPerSec: 10 })
+  // Bound memory under a churn of distinct client IPs; prune idle buckets.
+  const rateLimitPruneInterval = setInterval(() => {
+    loginLimiter.prune()
+    apiLimiter.prune()
+  }, 5 * 60 * 1000)
+  if (typeof rateLimitPruneInterval.unref === 'function') rateLimitPruneInterval.unref()
+  // Resolve the request origin (remote-vs-local + client IP) for the AC8 audit
+  // tag ONLY. Honours the first hop of X-Forwarded-For set by the Tailscale
+  // Serve proxy; falls back to the socket peer for direct loopback. ADVISORY --
+  // see classifyRequestOrigin: XFF is spoofable by a local process, so this is
+  // never used for authz or rate-limiting.
+  const reqOrigin = (req: http.IncomingMessage) =>
+    classifyRequestOrigin(req.headers['x-forwarded-for'], req.socket.remoteAddress)
+  // Rate-limit bucket key: the unspoofable socket peer, deliberately independent
+  // of X-Forwarded-For (see rateLimitKey).
+  const limiterKey = (req: http.IncomingMessage): string => rateLimitKey(req.socket.remoteAddress)
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://localhost:${port}`)
@@ -82,6 +157,17 @@ export function startWebServer(port = 3420): http.Server {
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
     }
+    // Resolve the forwarded scheme up front so the security headers (HSTS) and
+    // the Secure cookie flag agree. Tailscale Serve terminates TLS and forwards
+    // X-Forwarded-Proto; a direct loopback hit is plain HTTP.
+    const forwardedProto = String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim()
+    const isHttps = forwardedProto === 'https' || (req.socket as { encrypted?: boolean }).encrypted === true
+    // Apply security response headers (HSTS over HTTPS) to every response,
+    // including OPTIONS preflights and the early CSRF/rate-limit rejections.
+    for (const [name, value] of Object.entries(securityHeaders({ isHttps }))) {
+      res.setHeader(name, value)
+    }
+
     if (method === 'OPTIONS') { res.writeHead(204); res.end(); return }
 
     // Block state-changing requests from browsers running on foreign origins.
@@ -94,10 +180,87 @@ export function startWebServer(port = 3420): http.Server {
       return
     }
 
-    // Auth gate: every /api/* route requires a bearer token in the Authorization
-    // header. Exceptions: the auth-status probe (so the client can tell whether
-    // it needs to prompt the user), and GET requests for avatar images (loaded
-    // via <img src> which can't carry headers -- these are non-sensitive assets).
+    // Per-IP rate limiting (before the auth gate, so brute-force attempts are
+    // throttled even when they carry no/invalid credentials). Skips the
+    // long-lived SSE pane stream and non-/api static assets.
+    if (path.startsWith('/api/') && !isSseStreamPath(path)) {
+      const ip = limiterKey(req)
+      const isLogin = method === 'POST' && path === '/api/auth/login'
+      const limiter = isLogin ? loginLimiter : apiLimiter
+      const verdict = limiter.allow(ip)
+      if (!verdict.allowed) {
+        res.writeHead(429, {
+          'Content-Type': 'application/json',
+          'Retry-After': String(Math.ceil(verdict.retryAfterMs / 1000)),
+        })
+        res.end(JSON.stringify({ error: 'rate limited' }))
+        return
+      }
+    }
+
+    // Auth gate: every /api/* route requires EITHER a valid HttpOnly session
+    // cookie (browser UI, set via POST /api/auth/login) OR a bearer token in the
+    // Authorization header (scripts/curl, backward-compat). Exceptions: the
+    // auth-status probe (so the client can tell whether it needs to prompt the
+    // user), the login/logout endpoints themselves, and GET requests for avatar
+    // images (loaded via <img src> which can't carry headers).
+    const cookies = parseCookies(req.headers.cookie)
+    const sessionValue = cookies[SESSION_COOKIE_NAME]
+    const hasValidSession = () => verifySession(sessionValue).valid
+    const hasValidBearer = () => checkBearerToken(req.headers.authorization, getDashboardToken())
+
+    // Login: exchange the access token for a session cookie. Public (it IS the
+    // authentication step), but rate-limited only by the token check itself.
+    if (path === '/api/auth/login' && method === 'POST') {
+      // Two accepted credential shapes, either mints the same session cookie:
+      //   { token }                -> the high-entropy bearer token (scripts, recovery)
+      //   { username, password }   -> the operator's password login (browser, any device)
+      let token = ''
+      let username = ''
+      let password = ''
+      try {
+        const raw = (await readBody(req, { maxBytes: 4096 })).toString('utf-8')
+        if (raw) {
+          const parsed = JSON.parse(raw)
+          token = parsed.token ?? ''
+          username = parsed.username ?? ''
+          password = parsed.password ?? ''
+        }
+      } catch { /* leave all empty -> rejected below */ }
+      const lo = reqOrigin(req)
+      const tokenOk = token !== '' && checkBearerToken(`Bearer ${token}`, getDashboardToken())
+      const passwordOk = (username !== '' || password !== '') && verifyPassword(username, password)
+      const usedPassword = username !== '' || password !== ''
+      if (!tokenOk && !passwordOk) {
+        // AC8: tag the audit trail remote/local + source IP + which credential
+        // shape was attempted. A rejected login from a remote IP is the signal
+        // worth watching once the dashboard is reachable off-box.
+        logger.warn(
+          { remote: lo.remote, sourceIp: lo.sourceIp, method: usedPassword ? 'password' : 'token' },
+          'dashboard login rejected (bad credentials)',
+        )
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Invalid credentials' }))
+        return
+      }
+      logger.info(
+        { remote: lo.remote, sourceIp: lo.sourceIp, method: passwordOk ? 'password' : 'token' },
+        'dashboard login ok',
+      )
+      const cookie = [
+        `${SESSION_COOKIE_NAME}=${createSession()}`,
+        'HttpOnly', 'SameSite=Strict', 'Path=/', `Max-Age=${SESSION_MAX_AGE_SECONDS}`,
+        ...(isHttps ? ['Secure'] : []),
+      ].join('; ')
+      res.setHeader('Set-Cookie', cookie)
+      return json(res, { ok: true })
+    }
+    // Logout: revoke this session and clear the cookie.
+    if (path === '/api/auth/logout' && method === 'POST') {
+      revokeSession(sessionValue)
+      res.setHeader('Set-Cookie', `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${isHttps ? '; Secure' : ''}`)
+      return json(res, { ok: true })
+    }
     const isPublicApi =
       (path === '/api/auth/status' && method === 'GET') ||
       (method === 'GET' && (
@@ -105,26 +268,46 @@ export function startWebServer(port = 3420): http.Server {
         /^\/api\/agents\/[^/]+\/avatar$/.test(path)
       ))
     if (path === '/api/auth/status' && method === 'GET') {
-      const ok = checkBearerToken(req.headers.authorization, DASHBOARD_TOKEN)
-      return json(res, { authenticated: ok })
+      // `passwordLogin` lets the login UI pick its form: show username+password
+      // fields when credentials are configured, else fall back to token-paste.
+      // It reveals only that SOME credential exists, never the username itself.
+      return json(res, {
+        authenticated: hasValidSession() || hasValidBearer(),
+        passwordLogin: hasPasswordCredentials(),
+      })
     }
     // The live pane SSE stream is consumed via EventSource, which cannot set an
-    // Authorization header -- accept the token via ?token= for this one GET
-    // path, validated with the same constant-time check. Everything else stays
-    // header-only.
-    const isSseStream = method === 'GET' && /^\/api\/agents\/[^/]+\/pane\/stream$/.test(path)
+    // Authorization header. Same-origin EventSource sends the HttpOnly session
+    // cookie automatically (withCredentials:true on the client), so the cookie
+    // path below authenticates it -- no token in the URL. The legacy ?token=
+    // query fallback was removed (card 32bcf962) so the root-equivalent token
+    // never appears in a URL (shell history, proxy/access logs, address bar).
+    // Token-resolved caller identity. Public/static paths fall through with an
+    // anonymous, scope-less placeholder; gated /api routes resolve a real
+    // identity (operator for the shared token / browser session, or a per-agent
+    // identity for a registered token) and 401 on anything unresolved.
+    let identity: AgentIdentity = { agentId: '', scopes: [], source: 'agent' }
     if (path.startsWith('/api/') && !isPublicApi) {
-      const headerOk = checkBearerToken(req.headers.authorization, DASHBOARD_TOKEN)
-      const queryOk = isSseStream && checkBearerToken(`Bearer ${url.searchParams.get('token') ?? ''}`, DASHBOARD_TOKEN)
-      if (!headerOk && !queryOk) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
+      const gate = resolveRequestIdentity({
+        hasSession: hasValidSession(),
+        bearer: extractBearer(req.headers.authorization),
+        db: getDb(),
+        sharedToken: getDashboardToken(),
+        now: Date.now(),
+        isWrite: !isSafeMethod(method),
+      })
+      if (!gate.pass) {
+        const uo = reqOrigin(req)
+        logger.warn({ remote: uo.remote, sourceIp: uo.sourceIp, path }, 'dashboard request unauthorized')
+        res.writeHead(gate.status, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'Unauthorized' }))
         return
       }
+      identity = gate.identity
     }
 
     try {
-      const routeCtx: RouteContext = { req, res, path, method, url }
+      const routeCtx: RouteContext = { req, res, path, method, url, identity }
 
       if (await tryHandleProfiles(routeCtx)) return
       if (await tryHandleMessages(routeCtx)) return
@@ -132,13 +315,18 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleMemories(routeCtx)) return
       if (await tryHandleMigrate(routeCtx)) return
       if (await tryHandleKanban(routeCtx)) return
+      if (await tryHandleTodos(routeCtx)) return
       if (await tryHandleSchedules(routeCtx)) return
-      if (await tryHandleConnectorsHu(routeCtx)) return
       if (await tryHandleConnectors(routeCtx)) return
       if (await tryHandleAgentsSkills(routeCtx)) return
       if (await tryHandleSkills(routeCtx)) return
       if (await tryHandleAgentTerminal(routeCtx)) return
+      if (await tryHandleEvents(routeCtx)) return
+      if (await tryHandleAgentActions(routeCtx)) return
       if (await tryHandleAgentTaskState(routeCtx)) return
+      if (await tryHandleAgentCategories(routeCtx)) return
+      if (await tryHandleAdmin(routeCtx)) return
+      if (await tryHandleAck(routeCtx)) return
       if (await tryHandleAgents(routeCtx, WEB_DIR)) return
       if (await tryHandleMarveen(routeCtx, WEB_DIR)) return
       if (await tryHandleBackgroundTasks(routeCtx)) return
@@ -148,8 +336,25 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleStatus(routeCtx)) return
       if (await tryHandleAutonomy(routeCtx)) return
       if (await tryHandleTokenUsage(routeCtx)) return
+      if (await tryHandleUsage(routeCtx)) return
       if (await tryHandleIdeas(routeCtx)) return
       if (await tryHandleToolLog(routeCtx)) return
+      if (await tryHandleCodetree(routeCtx)) return
+      if (await tryHandleGateBoard(routeCtx)) return
+      if (await tryHandleGate(routeCtx)) return
+      if (await tryHandleGithub(routeCtx)) return
+      if (await tryHandlePublicDigest(routeCtx)) return
+      if (await tryHandleAnalytics(routeCtx)) return
+      if (await tryHandleNotify(routeCtx)) return
+      if (await tryHandleGithubSearch(routeCtx)) return
+      if (await tryHandleBondSrs(routeCtx)) return
+      if (await tryHandleHibikiNutrition(routeCtx)) return
+      if (await tryHandleGuardEvents(routeCtx)) return
+      if (await tryHandleMetrics(routeCtx)) return
+      if (await tryHandleHealthIngest(routeCtx)) return
+      // dashboard-new SPA on /v2, side-by-side with the legacy web/ app on '/'.
+      // Mounted before the legacy static handler so the /v2 prefix is claimed first.
+      if (tryHandleDashboardNew(routeCtx, DASHBOARD_NEW_DIST)) return
       if (await tryHandleStatic(routeCtx, WEB_DIR)) return
 
       res.writeHead(404)
@@ -201,7 +406,13 @@ export function startWebServer(port = 3420): http.Server {
                 try { process.kill(pid, 'SIGKILL') } catch { /* gone */ }
               } catch { /* gone */ }
             }
-            server.listen(port)
+            // Card SEC/a805f9f0: same host scope as the normal bind below. A
+            // host-less listen() here would silently promote the dashboard from
+            // loopback-only to every-interface on a port collision.
+            bindServer(server, port, WEB_HOST, bound => {
+              logger.warn({ port, address: bound?.address, family: bound?.family },
+                'Web dashboard re-bound after port reclaim')
+            })
           }, 1500)
         } else {
           logger.error({ port }, 'Port foglalt de nem talaltunk felszabadithato node processt -- kilepes')
@@ -215,23 +426,64 @@ export function startWebServer(port = 3420): http.Server {
     }
   })
 
-  server.listen(port, WEB_HOST, () => {
-    logger.info({ port }, `Web dashboard: http://localhost:${port}`)
+  bindServer(server, port, WEB_HOST, bound => {
+    // Log the binding we actually got, not the one we asked for: "we are on
+    // loopback" is a security premise other cards lean on (SEC/0fd4dbd8), and it
+    // should be a measurement in the log, not an assumption about which branch ran.
+    logger.info({ port, address: bound?.address, family: bound?.family },
+      `Web dashboard: http://localhost:${port}`)
     // Do NOT log the bearer token: launchd/journal/pipe captures of the
     // structured log would otherwise carry a root-equivalent credential.
-    // Print the bootstrap URL directly to stderr instead so it shows in the
-    // interactive terminal but does not land in the pino log stream.
-    const bootstrapUrl = `http://127.0.0.1:${port}/?token=${DASHBOARD_TOKEN}`
-    process.stderr.write(
-      `\nDashboard access URL (paste into browser, token is stored afterward):\n  ${bootstrapUrl}\n\n`
-    )
+    // Print the access instructions to stderr (interactive terminal only, not the
+    // pino stream). The token is on its OWN line and never in the URL, so a
+    // pasted/logged URL cannot leak the credential.
+    process.stderr.write(buildDashboardAccessMessage(port, DASHBOARD_TOKEN, DASHBOARD_PUBLIC_URL))
   })
 
   const routerInterval = startMessageRouter()
   logger.info('Agent message router started (5s poll)')
 
+  // Fold/cap the append-only delivery sentinel trails once at boot (card
+  // 681f99b0 / A2), BEFORE the clear-observer reads the pending-ack file: drop
+  // collapsed pending+cleared pairs, reconcile terminal-status acks (dampens the
+  // A3 restart-window false escalation), and size-cap the abandonment trail.
+  // Non-fatal: each step is wrapped so it never blocks startup.
+  compactDeliverySentinelsOnBoot()
+  const sentinelMaintenanceInterval = startDeliverySentinelMaintenance()
+  logger.info('Delivery sentinel maintenance started (60min rotation)')
+  // Boot timestamp for delivery-ack-cli escalation boot-grace (card 4beb20b7).
+  try {
+    writeFileSync(SERVER_BOOT_AT_PATH, String(Date.now()))
+  } catch (err) {
+    logger.warn({ err }, 'delivery-ack: failed to write server-boot-at (non-fatal)')
+  }
+
+  // Delivery ACK clear-observer (card 1a99b7e2): watches recipient panes and
+  // clears a pending-ack once the recipient engages (busy = our injected turn
+  // started). Naturally inert until a sender opts into ack_expected (the trail
+  // file is absent otherwise); the out-of-band escalation is the gated part.
+  const ackObserverInterval = startAckClearObserver()
+  logger.info('Delivery ACK clear-observer started (5s poll)')
+
+  // Kanban schema migration (card 65afc67e): additive priority_score column +
+  // someday->icebox parked-lane reconcile + bucket-centre backfill. Idempotent.
+  applyKanbanMigrations()
+  logger.info('Kanban migrations applied (priority_score + icebox lane)')
+
+  // Analytics snapshot storage (card 54df4c8f, A-layer): additive analytics_snapshots
+  // table + index. Idempotent CREATE IF NOT EXISTS so a live noa.db gains the table
+  // on the next boot without a destructive rebuild.
+  applyAnalyticsMigrations()
+  logger.info('Analytics migrations applied (analytics_snapshots)')
+
   const scheduleInterval = startScheduleRunner()
   logger.info('Schedule runner started (60s poll)')
+
+  // Claude usage refresher (card 7fe5662f). Dormant behind the feature-flag:
+  // with no store/.claude-session file it is a no-op that leaves the cache in
+  // feature-absent, so /api/usage/current serves 503 and the panel stays hidden.
+  const usageRefresherInterval = startUsageRefresher()
+  logger.info('Claude usage refresher started (15min poll, 10s boot offset) -- dormant until store/.claude-session is provided')
 
   const pluginMonitorInterval = startChannelPluginMonitor()
   logger.info('Channel plugin health monitor started (60s poll)')
@@ -248,11 +500,32 @@ export function startWebServer(port = 3420): http.Server {
   const channelHealthInterval = startChannelHealthMonitor()
   logger.info('Channel MCP health monitor started (60s poll, 45s offset)')
 
+  // Close the post-restart mute window: the health monitor's first tick is ~45s
+  // out and the standalone watchdog is on a 5-min cadence, so a dashboard
+  // restart that killed the orchestrator's Telegram MCP stdio child would leave
+  // Genesis mute until then (Boss had to run /mcp by hand after the 2026-06-09
+  // deploy). Fire ONE immediate orchestrator recovery shortly after boot --
+  // idempotent (no-op when the pipe is healthy), fire-and-forget, and serialised
+  // against the standalone watchdog by the wedge-safe idle gate. unref() so it
+  // never holds the process open during a fast shutdown.
+  const bootRecoveryTimer = setTimeout(() => {
+    recoverOrchestratorPipeOnce().then(
+      ({ verdict, recovered }) => {
+        if (verdict === 'dead') logger.info({ recovered }, 'Boot orchestrator pipe-recovery: dead pipe, drove recovery')
+      },
+      (err) => logger.warn({ err }, 'Boot orchestrator pipe-recovery failed'),
+    )
+  }, 10_000)
+  bootRecoveryTimer.unref()
+
   const stuckInputInterval = startStuckInputWatcher()
   logger.info('Stuck-input watcher started (15s poll, 20s offset)')
 
   const stuckToolCallInterval = startStuckToolCallWatcher()
   logger.info('Stuck-tool-call watcher started (30s poll, 35s offset)')
+
+  const wedgedQueueInterval = startWedgedQueueWatcher()
+  logger.info('Wedged-queue watcher started (60s poll, 50s offset)')
 
   const reauthHealerInterval = startReauthHealer()
   if (reauthHealerInterval) logger.info('Reauth healer started (3min poll, 90s offset)')
@@ -262,6 +535,15 @@ export function startWebServer(port = 3420): http.Server {
 
   const sessionSizeInterval = startSessionSizeWatcher()
   logger.info('Session-size watcher started (10min poll, 5min offset)')
+
+  const tmuxTitleInterval = startTmuxTitleWatcher()
+  logger.info('tmux-title watcher started (30s poll) -- per-agent window title = id + state + ctx%')
+
+  const agentStatusInterval = startAgentStatusWatcher()
+  logger.info('Agent-status watcher started (2.5s poll, 7s offset) -- pushes agent-status SSE on a stabilised activity transition')
+
+  const supervisorSentinelInterval = startSupervisorSentinel()
+  logger.info('Supervisor sentinel started (60s poll, 60s offset) -- who-watches-the-watcher')
 
   const updateCheckerInterval = startUpdateChecker()
   logger.info('Update checker started (15min poll)')
@@ -277,15 +559,17 @@ export function startWebServer(port = 3420): http.Server {
   // the first dashboard load. Re-fetched lazily otherwise.
   refreshMarveenBotUsername().catch(() => {})
 
-  // Backfill the PreCompact hook into existing agents' settings.json so the
-  // auto-skill / auto-memory flow runs on context compaction. No-op if the
-  // agent already has its own hooks block.
+  // Backfill the shared hooks into existing agents' settings.json: the full
+  // template block for permissions-only agents, or a targeted merge of the
+  // SessionStart memory auto-inject hook for agents that already have a hooks
+  // block (those are skipped by the all-or-nothing seed and would otherwise
+  // never receive a hook added to the template after they were scaffolded).
   try {
     const patched: string[] = []
     for (const agentName of listAgentNames()) {
       if (ensureAgentHooks(agentName)) patched.push(agentName)
     }
-    if (patched.length) logger.info({ patched }, 'PreCompact hook backfilled into agent settings.json')
+    if (patched.length) logger.info({ patched }, 'Agent hooks backfilled into settings.json')
   } catch (err) {
     logger.warn({ err }, 'Agent hook backfill skipped')
   }
@@ -312,16 +596,25 @@ export function startWebServer(port = 3420): http.Server {
 
   const origClose = server.close.bind(server)
   server.close = (cb?: (err?: Error) => void) => {
+    clearTimeout(bootRecoveryTimer)
+    clearInterval(supervisorSentinelInterval)
     clearInterval(routerInterval)
+    clearInterval(ackObserverInterval)
+    clearInterval(sentinelMaintenanceInterval)
     clearInterval(scheduleInterval)
+    clearInterval(usageRefresherInterval)
     if (pluginMonitorInterval) clearInterval(pluginMonitorInterval)
     clearInterval(channelHealthInterval)
     clearInterval(stuckInputInterval)
     clearInterval(stuckToolCallInterval)
+    clearInterval(wedgedQueueInterval)
     if (reauthHealerInterval) clearInterval(reauthHealerInterval)
     clearInterval(autoRestartInterval)
     clearInterval(sessionSizeInterval)
+    clearInterval(tmuxTitleInterval)
+    clearInterval(agentStatusInterval)
     clearInterval(updateCheckerInterval)
+    clearInterval(rateLimitPruneInterval)
     return origClose(cb)
   }
 

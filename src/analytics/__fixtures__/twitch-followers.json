@@ -1,0 +1,8 @@
+{
+  "total": 14823,
+  "data": [
+    {"user_id": "111222", "user_login": "follower_a", "user_name": "Follower_A", "followed_at": "2026-06-28T10:00:00Z"},
+    {"user_id": "333444", "user_login": "follower_b", "user_name": "Follower_B", "followed_at": "2026-06-27T15:30:00Z"}
+  ],
+  "pagination": {"cursor": "abc"}
+}

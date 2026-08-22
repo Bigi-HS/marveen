@@ -55,12 +55,18 @@ const CHANNEL_PLUGIN_DISABLES = {
 // spawns burned tokens with no upside. Haiku finishes in seconds and
 // costs effectively nothing.
 //
-// authMode 'oauth' uses the host's Claude Code OAuth from the
-// Keychain -- the same auth Marveen and every other channel-less
-// sub-agent runs under. NO per-agent API key needed.
+// authMode 'shared' uses the host's shared Claude Code auth (the
+// fleet OAuth / static setup-token injected at launch) -- the same
+// auth Marveen and every other channel-less sub-agent runs under. NO
+// per-agent API key needed. NOTE: 'oauth' is NOT a recognised mode
+// (VALID = shared|own_team|api); the loader silently fell back to
+// 'shared', so the old value was inert but misleading AND -- because
+// agent-config.json is in ALWAYS_WRITE -- every boot rewrote the
+// on-disk config back to 'oauth', clobbering PR #97's fix. See the
+// authMode invariant test in fleet-oauth-launch.test.ts.
 const HEARTBEAT_AGENT_CONFIG = {
   model: 'claude-haiku-4-5',
-  authMode: 'oauth' as const,
+  authMode: 'shared' as const,
   securityProfile: 'standard',
 }
 
@@ -180,7 +186,7 @@ note and stop.
 `
 }
 
-function renderAgentConfigJson(): string {
+export function renderAgentConfigJson(): string {
   return JSON.stringify(HEARTBEAT_AGENT_CONFIG, null, 2) + '\n'
 }
 

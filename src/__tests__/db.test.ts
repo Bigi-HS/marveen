@@ -1,17 +1,17 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { statSync, existsSync, chmodSync } from 'node:fs'
+import { statSync, chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import {
   initDatabase,
-  getSession,
-  setSession,
-  clearSession,
-  saveMemory,
-  recentMemories,
-  decayMemories,
-  getMemoriesForChat,
-  buildFtsMatchExpression,
+  createAgentMessage,
+  getPendingMessages,
+  markMessageDelivered,
+  markMessageDone,
+  markMessageFailed,
+  getMessageStatusesByIds,
   getDb,
+  tightenDbPermissions,
   upsertPendingTaskRetry,
   insertPendingTaskRetryIfNew,
   updatePendingTaskRetry,
@@ -22,107 +22,81 @@ import {
   markPendingTaskRetryAlert,
   clearPendingTaskRetryAlert,
 } from '../db.js'
-import { STORE_DIR, DB_FILENAME } from '../config.js'
 
+// Use in-memory database for tests to avoid polluting the live vault.
+// Each test run gets a fresh, isolated DB that doesn't affect store/claudeclaw.db.
 beforeAll(() => {
-  // Teszt adatbázis inicializálás
   process.env.NODE_ENV = 'test'
-  initDatabase()
+  initDatabase(':memory:')
 })
 
-describe('sessions', () => {
-  it('munkamenetet ment es visszaolvas', () => {
-    setSession('test-chat-1', 'session-abc')
-    const s = getSession('test-chat-1')
-    expect(s?.sessionId).toBe('session-abc')
-    expect(s?.messageCount).toBe(0)
+describe('agent_messages ack_expected (card 1a99b7e2)', () => {
+  it('defaults ack_expected to 0 for a plain message', () => {
+    const msg = createAgentMessage('thor', 'dave', 'plain peer note')
+    expect(msg.ack_expected).toBe(0)
+    const pending = getPendingMessages('dave').find((m) => m.id === msg.id)
+    expect(pending?.ack_expected).toBe(0)
   })
 
-  it('munkamenetet felulir', () => {
-    setSession('test-chat-2', 'old-session')
-    setSession('test-chat-2', 'new-session')
-    expect(getSession('test-chat-2')?.sessionId).toBe('new-session')
-  })
-
-  it('munkamenetet torol', () => {
-    setSession('test-chat-3', 'session-xyz')
-    clearSession('test-chat-3')
-    expect(getSession('test-chat-3')).toBeUndefined()
-  })
-
-  it('undefined ad vissza ha nem letezik', () => {
-    expect(getSession('nem-letezik')).toBeUndefined()
+  it('persists ack_expected=1 when the sender opts in', () => {
+    const msg = createAgentMessage('thor', 'dave', 'please ACK this delegation', true)
+    expect(msg.ack_expected).toBe(1)
+    const pending = getPendingMessages('dave').find((m) => m.id === msg.id)
+    expect(pending?.ack_expected).toBe(1)
   })
 })
 
-describe('memories', () => {
-  it('emlek mentest es lekerdezest vegez', () => {
-    saveMemory('mem-chat-1', 'Szeretem a kavét', 'semantic')
-    const mems = recentMemories('mem-chat-1', 5)
-    expect(mems.length).toBeGreaterThan(0)
-    expect(mems[0].content).toBe('Szeretem a kavét')
-    expect(mems[0].sector).toBe('semantic')
+describe('agent_messages priority (card 28d2179f)', () => {
+  it('defaults priority to "normal" for a plain message', () => {
+    const msg = createAgentMessage('thor', 'dave', 'no explicit priority')
+    expect(msg.priority).toBe('normal')
+    const pending = getPendingMessages('dave').find((m) => m.id === msg.id)
+    expect(pending?.priority).toBe('normal')
   })
 
-  it('epizodikus emleket ment', () => {
-    saveMemory('mem-chat-2', 'Mai megbeszeles eredmenye', 'episodic')
-    const mems = getMemoriesForChat('mem-chat-2')
-    expect(mems.length).toBeGreaterThan(0)
-    expect(mems[0].sector).toBe('episodic')
+  it('persists an explicit urgent priority through the pending queue', () => {
+    const msg = createAgentMessage('thor', 'dave', 'gate-req, time-sensitive', false, 'urgent')
+    expect(msg.priority).toBe('urgent')
+    const pending = getPendingMessages('dave').find((m) => m.id === msg.id)
+    expect(pending?.priority).toBe('urgent')
   })
 
-  it('leepulesi soprest vegrehajt hiba nelkul', () => {
-    expect(() => decayMemories()).not.toThrow()
+  it('priority is independent of ack_expected (both can be set)', () => {
+    const msg = createAgentMessage('thor', 'dave', 'urgent delegation', true, 'high')
+    expect(msg.ack_expected).toBe(1)
+    expect(msg.priority).toBe('high')
   })
 })
 
-describe('buildFtsMatchExpression', () => {
-  it('produces prefix-matched tokens for a plain query', () => {
-    expect(buildFtsMatchExpression('hello world')).toBe('hello* world*')
+// Card d4fe794f: additive nullable in_reply_to column -- the sender-side parent
+// id that lets the router auto-correlate "C's reply to A" (the substrate the
+// ACK protocol, card 1a99b7e2, can later build explicit threading on). Additive
+// + fail-open: a plain message stays unthreaded (NULL), so old rows / old
+// senders never break.
+describe('agent_messages in_reply_to (card d4fe794f)', () => {
+  it('defaults in_reply_to to null for a plain (unthreaded) message', () => {
+    const msg = createAgentMessage('thor', 'dave', 'unthreaded note')
+    expect(msg.in_reply_to).toBeNull()
+    const pending = getPendingMessages('dave').find((m) => m.id === msg.id)
+    expect(pending?.in_reply_to).toBeNull()
   })
 
-  it('returns empty string for whitespace-only or empty input', () => {
-    expect(buildFtsMatchExpression('')).toBe('')
-    expect(buildFtsMatchExpression('   ')).toBe('')
-    expect(buildFtsMatchExpression('!!!***???')).toBe('')
+  it('persists the parent message id through the pending queue', () => {
+    const parent = createAgentMessage('dave', 'thor', 'original ask')
+    const reply = createAgentMessage('thor', 'dave', 'my answer', false, 'normal', parent.id)
+    expect(reply.in_reply_to).toBe(parent.id)
+    const pending = getPendingMessages('dave').find((m) => m.id === reply.id)
+    expect(pending?.in_reply_to).toBe(parent.id)
   })
 
-  it('lowercases to neutralize FTS5 AND/OR/NOT/NEAR operators', () => {
-    const out = buildFtsMatchExpression('foo OR bar AND baz NOT qux')
-    // No uppercase operator keywords should survive as standalone tokens.
-    expect(out).not.toMatch(/\bOR\b/)
-    expect(out).not.toMatch(/\bAND\b/)
-    expect(out).not.toMatch(/\bNOT\b/)
-    expect(out).toBe('foo* or* bar* and* baz* not* qux*')
-  })
-
-  it('strips FTS5 punctuation (quotes, parens, colons); * is ours', () => {
-    const out = buildFtsMatchExpression('"foo" (bar) baz qux:zap')
-    expect(out).not.toMatch(/["():]/)
-    // Every * in the output is our own prefix-match suffix, appended to a token.
-    // No bare *, no doubled **.
-    expect(out).not.toMatch(/\*\*/)
-    expect(out).not.toMatch(/(^| )\*/)
-    expect(out).toBe('foo* bar* baz* quxzap*')
-  })
-
-  it('caps at 20 tokens', () => {
-    const many = Array.from({ length: 30 }, (_, i) => `word${i}`).join(' ')
-    const out = buildFtsMatchExpression(many)
-    expect(out.split(' ').length).toBe(20)
-  })
-
-  it('truncates individual tokens longer than 64 chars', () => {
-    const long = 'a'.repeat(200)
-    const out = buildFtsMatchExpression(long)
-    // 64 'a's + '*'
-    expect(out).toBe('a'.repeat(64) + '*')
-  })
-
-  it('preserves unicode letters and digits', () => {
-    expect(buildFtsMatchExpression('Árvíztűrő 42')).toBe('árvíztűrő* 42*')
+  it('in_reply_to is independent of priority and ack_expected (all three compose)', () => {
+    const msg = createAgentMessage('thor', 'dave', 'threaded + urgent + ack', true, 'urgent', 7)
+    expect(msg.ack_expected).toBe(1)
+    expect(msg.priority).toBe('urgent')
+    expect(msg.in_reply_to).toBe(7)
   })
 })
+
 
 describe('pending task retries', () => {
   // The persistent test DB is shared with the running dashboard (both
@@ -239,47 +213,77 @@ describe('pending task retries', () => {
 })
 
 describe('database file permissions', () => {
-  // Enforcement (not just observation): loosen every sidecar to 0o644
-  // first, then re-run initDatabase() to prove tightenDbPermissions
-  // actually narrows them. Without this, the tests would pass even if
-  // tightenDbPermissions were removed entirely -- the files would
-  // simply retain whatever mode a previous test run left them at.
-  beforeAll(async () => {
-    const { chmodSync } = await import('node:fs')
-    const dbPath = join(STORE_DIR, DB_FILENAME)
-    for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, `${dbPath}-journal`]) {
-      if (existsSync(p)) {
-        try { chmodSync(p, 0o644) } catch { /* best effort */ }
-      }
+  // Verifies tightenDbPermissions enforcement on a THROWAWAY temp directory,
+  // never the live vault (store/claudeclaw.db). We create files at a loose
+  // 0o644 and assert tightenDbPermissions narrows them to owner-only 0o600.
+  // This proves the enforcement actually changes mode bits (a no-op impl
+  // would fail) without any risk of touching or restoring the operator's DB.
+  let tmpDir: string
+  let dbPath: string
+  const sidecarSuffixes = ['', '-wal', '-shm', '-journal'] as const
+
+  beforeAll(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'db-perms-'))
+    dbPath = join(tmpDir, 'throwaway.db')
+    // Create the main file + every sidecar at a deliberately loose 0o644 so
+    // the narrowing is observable.
+    for (const suffix of sidecarSuffixes) {
+      const p = `${dbPath}${suffix}`
+      writeFileSync(p, '')
+      chmodSync(p, 0o644)
+      // Confirm the precondition: files really start loose.
+      expect(statSync(p).mode & 0o777).toBe(0o644)
     }
-    initDatabase()
+    tightenDbPermissions(dbPath)
   })
 
-  it('claudeclaw.db is tightened to owner-only (0o600) by initDatabase', () => {
-    const dbPath = join(STORE_DIR, DB_FILENAME)
-    expect(existsSync(dbPath)).toBe(true)
-    const mode = statSync(dbPath).mode & 0o777
-    expect(mode).toBe(0o600)
+  afterAll(() => {
+    try { rmSync(tmpDir, { recursive: true, force: true }) } catch { /* best effort */ }
   })
 
-  it('WAL sidecar (when present) is tightened to 0o600', () => {
-    const walPath = join(STORE_DIR, `${DB_FILENAME}-wal`)
-    if (!existsSync(walPath)) return // WAL may not exist on a freshly-initialised empty DB
-    const mode = statSync(walPath).mode & 0o777
-    expect(mode).toBe(0o600)
+  it('narrows the main DB file from 0o644 to owner-only 0o600', () => {
+    expect(statSync(dbPath).mode & 0o777).toBe(0o600)
   })
 
-  it('SHM sidecar (when present) is tightened to 0o600', () => {
-    const shmPath = join(STORE_DIR, `${DB_FILENAME}-shm`)
-    if (!existsSync(shmPath)) return
-    const mode = statSync(shmPath).mode & 0o777
-    expect(mode).toBe(0o600)
+  it('narrows the WAL sidecar to 0o600', () => {
+    expect(statSync(`${dbPath}-wal`).mode & 0o777).toBe(0o600)
   })
 
-  it('rollback-journal sidecar (when present) is tightened to 0o600', () => {
-    const journalPath = join(STORE_DIR, `${DB_FILENAME}-journal`)
-    if (!existsSync(journalPath)) return
-    const mode = statSync(journalPath).mode & 0o777
-    expect(mode).toBe(0o600)
+  it('narrows the SHM sidecar to 0o600', () => {
+    expect(statSync(`${dbPath}-shm`).mode & 0o777).toBe(0o600)
+  })
+
+  it('narrows the rollback-journal sidecar to 0o600', () => {
+    expect(statSync(`${dbPath}-journal`).mode & 0o777).toBe(0o600)
+  })
+
+  it('tolerates a missing sidecar without throwing', () => {
+    const absent = join(tmpDir, 'does-not-exist.db')
+    expect(() => tightenDbPermissions(absent)).not.toThrow()
+  })
+})
+
+// Card 681f99b0 (A2): the boot-fold reconciles outstanding pending-acks against
+// the message lifecycle, so it needs the statuses of a set of message ids.
+describe('getMessageStatusesByIds (A2 boot-fold reconcile)', () => {
+  it('returns each id mapped to its current status, omitting unknown ids', () => {
+    const pending = createAgentMessage('thor', 'dave', 'still pending')
+    const delivered = createAgentMessage('thor', 'dave', 'delivered one')
+    const done = createAgentMessage('thor', 'dave', 'done one')
+    const failed = createAgentMessage('thor', 'dave', 'failed one')
+    markMessageDelivered(delivered.id)
+    markMessageDone(done.id, 'ok')
+    markMessageFailed(failed.id, 'boom')
+
+    const statuses = getMessageStatusesByIds([pending.id, delivered.id, done.id, failed.id, 999999])
+    expect(statuses.get(pending.id)).toBe('pending')
+    expect(statuses.get(delivered.id)).toBe('delivered')
+    expect(statuses.get(done.id)).toBe('done')
+    expect(statuses.get(failed.id)).toBe('failed')
+    expect(statuses.has(999999)).toBe(false)
+  })
+
+  it('returns an empty map for no ids', () => {
+    expect(getMessageStatusesByIds([]).size).toBe(0)
   })
 })

@@ -2,17 +2,54 @@ import { execFileSync } from 'node:child_process'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, CHANNEL_PROVIDER } from '../config.js'
-import { readAgentChannelProvider } from './agent-config.js'
-import { agentSessionName, capturePane } from './agent-process.js'
+import { readAgentChannelProviderSafe } from './agent-config.js'
+import { agentSessionName, capturePane, isSessionReadyForPrompt } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { getProvider, type ChannelProviderType } from '../channel-provider.js'
 
 const TMUX = resolveFromPath('tmux')
 const MAX_UP_ATTEMPTS = 8
 
+// Aggressive idle-catch window (card fa3f5012 slice-2). A single
+// isSessionReadyForPrompt() snapshot misses the brief idle BEAT a busy agent
+// returns to between tool calls, so a continuously-working agent (e.g. an
+// always-generating PA) deferred forever and its dead pipe never self-healed.
+// We instead SAMPLE readiness a few times over a short window to catch that beat
+// at a tool boundary. Kept small so a genuinely stuck-busy pane still defers
+// within a couple of seconds (the health monitor's escalation is the backstop).
+const IDLE_CATCH_ATTEMPTS = 6
+const IDLE_CATCH_GAP_MS = 500
+
 export interface ReconnectResult {
   ok: boolean
   message: string
+  // true when we backed off because the pane stayed busy through the whole
+  // idle-catch window -- a DEFERRAL, not a drive failure. Callers use this to
+  // avoid burning the reconnect-retry budget on a busy pane and to escalate a
+  // persistently-stuck-busy agent to the operator instead (channel-health-monitor).
+  deferred?: boolean
+}
+
+/**
+ * Poll for a momentary idle window at a tool boundary. Returns true as soon as
+ * the pane reports ready, false if it stayed busy for the whole window. The
+ * inter-poll sleep is an off-pane `/bin/sleep` (never a keystroke), so this is
+ * wedge-safe even against a busy pane -- it observes, it does not touch.
+ */
+export function pollForIdleWindow(
+  session: string,
+  attempts: number = IDLE_CATCH_ATTEMPTS,
+  gapMs: number = IDLE_CATCH_GAP_MS,
+): boolean {
+  for (let i = 0; i < attempts; i++) {
+    if (isSessionReadyForPrompt(session)) return true
+    if (i < attempts - 1) {
+      try {
+        execFileSync('/bin/sleep', [String(gapMs / 1000)], { timeout: gapMs + 1000 })
+      } catch { /* best effort -- a failed sleep just tightens the poll cadence */ }
+    }
+  }
+  return false
 }
 
 export function resolveAgentSession(agentName: string): string {
@@ -21,7 +58,8 @@ export function resolveAgentSession(agentName: string): string {
 }
 
 export function resolveAgentProviderType(agentName: string): ChannelProviderType {
-  const perAgent = readAgentChannelProvider(agentName)
+  // Fail-soft on an unreadable config (misconfigured secret pointer) -> default.
+  const perAgent = readAgentChannelProviderSafe(agentName).provider
   if (perAgent === 'slack' || perAgent === 'telegram') return perAgent
   return CHANNEL_PROVIDER
 }
@@ -57,11 +95,36 @@ const FAILED_STATUS_RX = /Status:\s*[✗x×]\s*failed/i
 // the input prompt uses -- see pane-state.ts). capture-pane -p strips colour,
 // so this textual marker is our only selection signal.
 const POINTER_RX = /❯/
+// A numbered submenu OPTION row under the cursor: `❯ 1. View tools`. This is
+// the unambiguous shape Claude Code renders for every action row (1.View tools
+// 2.Reconnect 3.Disable / 1.Reconnect / 1.Enable). The `N.` is what separates a
+// real menu cursor from a stray `❯` in the scrollback -- see selectedSubmenuLine.
+const MENU_OPTION_CURSOR_RX = /❯\s*\d+\.\s/
 
-/** The submenu row currently marked with the `❯` cursor, or null. */
+/**
+ * The submenu row currently marked with the `❯` cursor, or null.
+ *
+ * `capture-pane -p` includes the scrollback ABOVE the open menu, and the
+ * agent's own input line (`❯ <queued text>`) plus transcript prompts carry the
+ * SAME `❯` glyph. Returning the FIRST `❯` therefore grabbed that scrollback
+ * line instead of the menu cursor, so the step-loop never saw the cursor reach
+ * Reconnect/Enable and exhausted its budget ("Could not select reconnect within
+ * N steps" -- card 8b07e17b, observed once the /mcp menu started rendering the
+ * status inline on the top-level row and pushed the prompt into the capture).
+ *
+ * Resolution order:
+ *   1. The numbered option cursor (`❯ 1. ...`) -- unambiguous in current Claude
+ *      Code; a scrollback/input `❯` never carries the `N.` prefix.
+ *   2. Fallback (unnumbered menus / older CC): the menu renders at the BOTTOM
+ *      of the pane, below any scrollback, so the LAST `❯` line is the cursor.
+ */
 export function selectedSubmenuLine(pane: string): string | null {
-  for (const raw of pane.split('\n')) {
-    if (POINTER_RX.test(raw)) return raw
+  const lines = pane.split('\n')
+  for (const raw of lines) {
+    if (MENU_OPTION_CURSOR_RX.test(raw)) return raw
+  }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (POINTER_RX.test(lines[i])) return lines[i]
   }
   return null
 }
@@ -122,6 +185,32 @@ export function attemptChannelMcpReconnect(agentName: string): ReconnectResult {
   const pluginPattern = getPluginPattern(providerType)
 
   try {
+    // Pane-idle pre-flight gate. Two purposes:
+    //   1. SERIALISE concurrent drivers (the strong guarantee): a driver that
+    //      arrives while another is already mid-/mcp-nav sees the open menu --
+    //      NOT the idle footer -- so it backs off. This is what lets the
+    //      dashboard-boot recovery (recoverOrchestratorPipeOnce) and the
+    //      standalone 5-min watchdog coexist without ever double-driving the
+    //      same pane (itself a wedge cause).
+    //   2. Avoid driving keys while the agent is ACTIVELY generating, where an
+    //      Escape would interrupt its turn.
+    // Honest scope: detectPaneState reliably flags active streaming but can read
+    // 'idle' during the brief pre-stream "thinking" phase (verified on Buster,
+    // CC 2.1.160). Empirically that same CC absorbs stray /mcp keystrokes
+    // without wedging (the nav just fails gracefully), so this gate is
+    // defense-in-depth + serialisation, not an absolute interrupt-prevention.
+    // A dead pipe does not need INSTANT recovery: if not idle, abort and let the
+    // next cycle retry once the pane has settled.
+    // Aggressive idle-catch: sample readiness across a short window so a busy
+    // agent's tool-boundary beat is caught instead of deferred forever (the old
+    // single snapshot). Only after the whole window stays busy do we defer -- and
+    // we flag it as a DEFERRAL so the caller escalates a stuck-busy agent rather
+    // than silently retrying into a 30-min cooldown (card fa3f5012 slice-2).
+    if (!pollForIdleWindow(session)) {
+      logger.warn({ agentName, session }, 'channel-mcp-reconnect: pane stayed busy through idle-catch window -- deferring /mcp drive')
+      return { ok: false, message: 'Pane not idle (busy/unknown) -- deferred /mcp drive', deferred: true }
+    }
+
     execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
     execFileSync('/bin/sleep', ['1'], { timeout: 2000 })
 

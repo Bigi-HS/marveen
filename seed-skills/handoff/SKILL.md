@@ -18,12 +18,12 @@ description: Generate a HANDOFF.md context transfer document for session continu
 | Argument | Required | Description |
 |----------|----------|-------------|
 | `purpose` | YES | What the next session should do with this context |
-| `target` | no | Agent name (e.g. `target=samu`) -- sends via inter-agent message instead of writing file |
+| `target` | no | Agent name (e.g. `target=dave`) -- sends via inter-agent message instead of writing file |
 | `output` | no | File path override (default: project root `HANDOFF.md`) |
 
 Examples:
 - `/handoff purpose="Continue the Pipedrive connector PR review and address CI failures"`
-- `/handoff purpose="Finish the scheduler forceSend implementation" target=samu`
+- `/handoff purpose="Finish the scheduler forceSend implementation" target=dave`
 - `/handoff purpose="Debug the auth redirect loop" output=/tmp/handoff-auth.md`
 
 ## Procedure
@@ -35,7 +35,7 @@ Collect data from these sources (skip any that return empty):
 ```bash
 # Active kanban cards (assigned to current agent or recently touched)
 AGENT_ID="$(echo $BOT_NAME | tr '[:upper:]' '[:lower:]')"
-sqlite3 store/claudeclaw.db "SELECT id, title, status, priority, assignee, description FROM kanban_cards WHERE archived_at IS NULL AND (assignee = '$AGENT_ID' OR status = 'in_progress') ORDER BY priority DESC, updated_at DESC LIMIT 10"
+sqlite3 store/noa.db "SELECT id, title, status, priority, assignee, description FROM kanban_cards WHERE archived_at IS NULL AND (assignee = '$AGENT_ID' OR status = 'in_progress') ORDER BY priority DESC, updated_at DESC LIMIT 10"
 
 # Hot memories from last 24h
 curl -s -H "Authorization: Bearer $(cat store/.dashboard-token)" \
