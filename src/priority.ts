@@ -4,13 +4,13 @@
 // agent_messages.priority migrates from a TEXT enum to INTEGER:
 //   low=25  normal=50  high=75  urgent=100   (OQ-4, spec-noa-a1-db-schema.md)
 //
-// The fleet runs on claudeclaw.db (TEXT priority, CHECK-constrained) until a
-// SEPARATE cutover Boss-GO points NOA_DB_PATH at noa.db (INTEGER priority). The
-// binary is therefore deployed BEFORE the column type flips. To make the
-// transition deploy-order independent, every read normalizes whatever the row
-// holds (TEXT or INTEGER) to a canonical integer, and every write emits the
-// representation that matches the live column's declared type. No module above
-// this one (db.ts, web/*) re-derives the mapping -- they import it from here.
+// The fleet runs on noa.db (INTEGER priority) since the W5 cutover. The TEXT
+// representation below is kept for migration tooling that still reads the legacy
+// claudeclaw.db. To make the transition deploy-order independent, every read
+// normalizes whatever the row holds (TEXT or INTEGER) to a canonical integer,
+// and every write emits the representation that matches the live column's
+// declared type. No module above this one (db.ts, web/*) re-derives the
+// mapping -- they import it from here.
 
 export type MessagePriority = 'low' | 'normal' | 'high' | 'urgent'
 

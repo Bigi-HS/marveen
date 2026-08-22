@@ -54,7 +54,7 @@ export interface IndexMeta {
 
 let codetreeDb: Database.Database | undefined
 
-// Codetree lives in a SEPARATE SQLite file from claudeclaw.db: it is a fully
+// Codetree lives in a SEPARATE SQLite file from noa.db: it is a fully
 // rebuilable derived artifact, so coupling it to the live fleet DB risks WAL
 // contention during a rebuild + schema coupling. Same pragmas as the main DB
 // so the read-side (HTTP server) and write-side (rebuild child process) share
