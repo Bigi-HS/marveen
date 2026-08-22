@@ -63,10 +63,13 @@ afterEach(wipe)
 // (folded to ASST via PROJECT_VALUE_REMAP); 14 new granular codes added, incl.
 // the CONT-family (DUB/DL/DISC/BIGI) which are now VALID standalone project
 // values (they still fold into the CONT lane on the board, a display concern).
+// OPS-151 enum-widen: 27 -> 30. Added PROD (Black Bart PM), SPE (Kalapács
+// spec-writing), SPE-OLD (legacy spec bucket; folds into SPE lane on board,
+// codes render as SPE-OLD-NNN -- same CONT-family pattern).
 const CANONICAL = [
   'AGENT', 'ASST', 'BIGI', 'BUCC', 'CONT', 'CORE', 'CV', 'DASH', 'DEC',
   'DISC', 'DL', 'DND', 'DUB', 'EDU', 'ENG', 'FABLE', 'FIX', 'KANB', 'KHOOT',
-  'MEM', 'OAUTH', 'OPS', 'RES', 'SEC', 'VOICE', 'WEB', 'WELL',
+  'MEM', 'OAUTH', 'OPS', 'PROD', 'RES', 'SEC', 'SPE', 'SPE-OLD', 'VOICE', 'WEB', 'WELL',
 ]
 
 // ---------------------------------------------------------------------------
@@ -74,13 +77,13 @@ const CANONICAL = [
 // ---------------------------------------------------------------------------
 
 describe('CF0D1BFE enum shape', () => {
-  it('CARD_PROJECTS is exactly the 27 canonical prefixes', () => {
+  it('CARD_PROJECTS is exactly the 30 canonical prefixes', () => {
     expect([...CARD_PROJECTS].sort()).toEqual([...CANONICAL].sort())
   })
 
   it('VALID_PROJECTS set mirrors CARD_PROJECTS', () => {
     for (const p of CANONICAL) expect(VALID_PROJECTS.has(p)).toBe(true)
-    expect(VALID_PROJECTS.size).toBe(27)
+    expect(VALID_PROJECTS.size).toBe(30)
   })
 
   it('PA is retired from the enum (folded to ASST via remap)', () => {
@@ -94,7 +97,7 @@ describe('CF0D1BFE enum shape', () => {
 // ---------------------------------------------------------------------------
 
 describe('CF0D1BFE false-positive: canonical project values accepted', () => {
-  it('all 27 canonical values are accepted by createCard', () => {
+  it('all 30 canonical values are accepted by createCard', () => {
     for (const p of CANONICAL) {
       const card = createCard({ title: `Task ${p}`, project: p, suppressIntake: true })
       expect(card.project).toBe(p)

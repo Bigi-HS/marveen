@@ -140,6 +140,7 @@ export const CARD_PROJECTS = [
   'DASH', 'CORE', 'MEM', 'OPS', 'ENG', 'AGENT', 'KANB', 'FIX', 'WEB', 'OAUTH', 'SEC',
   'CONT', 'DUB', 'DL', 'DISC', 'BIGI', 'FABLE', 'KHOOT', 'VOICE', 'CV',
   'ASST', 'EDU', 'WELL', 'DEC', 'RES', 'DND', 'BUCC',
+  'PROD', 'SPE', 'SPE-OLD',
 ] as const
 
 export type CardProject = (typeof CARD_PROJECTS)[number]
