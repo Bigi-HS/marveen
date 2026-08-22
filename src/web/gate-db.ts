@@ -1,4 +1,4 @@
-// Mechanical merge-gate enforcement -- persistence layer (claudeclaw.db).
+// Mechanical merge-gate enforcement -- persistence layer (noa.db).
 //
 // Two append-mostly tables hold the gate state: reviewer verdicts
 // (`gate_approvals`, strictly append-only -- no UPDATE/DELETE) and Boss-level
