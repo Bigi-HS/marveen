@@ -57,20 +57,25 @@ def last_write_ago_seconds(conn: sqlite3.Connection, owner: str, now: int) -> in
 
 
 def last_activity_ago_seconds(conn: sqlite3.Connection, owner: str, now: int) -> int | None:
-    """Return seconds since the owner's most recent fleet activity (messages or convo log).
+    """Return seconds since the owner's most recent outbound fleet activity.
 
-    Checks both agent_messages (from or to the owner) and conversation_log (agent_id).
+    Only outbound evidence counts: from_agent = owner (the agent itself sent a
+    message) and conversation_log (the agent's own session wrote a turn).
+    Inbound traffic (to_agent = owner) is deliberately excluded: a dead agent
+    still receives messages from peers that believe it is alive, so inbound
+    timestamps would falsely suppress a FRESHNESS ALERT on a wedged agent.
+
     Returns None when neither table has any record for this owner.
     """
     row = conn.execute(
         """SELECT MAX(t) FROM (
             SELECT MAX(created_at) AS t FROM agent_messages
-             WHERE from_agent = ? OR to_agent = ?
+             WHERE from_agent = ?
             UNION ALL
             SELECT MAX(created_at) AS t FROM conversation_log
              WHERE agent_id = ?
         )""",
-        (owner, owner, owner),
+        (owner, owner),
     ).fetchone()
     if row is None or row[0] is None:
         return None

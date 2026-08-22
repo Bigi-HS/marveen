@@ -314,6 +314,22 @@ class LivenessTests(unittest.TestCase):
     def test_liveness_threshold_constant_is_18h(self):
         self.assertEqual(mod.LIVENESS_THRESHOLD_SECONDS, 18 * 3600)
 
+    def test_inbound_only_does_not_rescue_dead_agent(self):
+        # Thor gate finding (gauge #1, PR#492): if a dead agent keeps receiving
+        # messages from peers (to_agent=claudia fresh), the monitor must still
+        # fire -- inbound traffic is not proof the agent itself is alive.
+        # Only outbound (from_agent=claudia) and conversation_log count.
+        db = _make_db(
+            rows=[("claudia", NOW - 40 * 3600)],
+            messages=[("marveen", "claudia", NOW - 1 * 3600)],  # inbound only
+        )
+        conn = sqlite3.connect(db)
+        try:
+            verdicts = {v["owner"]: v for v in mod.evaluate(conn, NOW, mod.THRESHOLD_SECONDS)}
+        finally:
+            conn.close()
+        self.assertEqual(verdicts["claudia"]["state"], "stale")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
