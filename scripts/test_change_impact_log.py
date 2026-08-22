@@ -118,7 +118,12 @@ class BuildRecordTests(unittest.TestCase):
 
 class AppendTests(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        # The log target is confined to store/ (path-traversal guard, kidd gate
+        # PR#488), so the test tmpdir lives INSIDE store/ -- exercising a real,
+        # allowed path rather than one the guard must reject. store/ is
+        # gitignored runtime data, so a fresh worktree may not have it yet.
+        cil._STORE_DIR.mkdir(parents=True, exist_ok=True)
+        self._tmp = tempfile.TemporaryDirectory(dir=cil._STORE_DIR)
         self.log = Path(self._tmp.name) / "change-impact-log.jsonl"
 
     def tearDown(self):
@@ -166,6 +171,51 @@ class AppendTests(unittest.TestCase):
         ])
         self.assertNotEqual(rc, 0)
         self.assertFalse(self.log.exists(), "malformed row must not be written")
+
+
+class LogPathConfinementTests(unittest.TestCase):
+    """A caller must not write outside store/ via --log-path (kidd gate PR#488)."""
+
+    def test_append_rejects_path_outside_store(self):
+        rec = cil.build_record(
+            agent="dave", change_ref="x", classification="ran",
+            findings=0, top_risk="", decision="proceed",
+        )
+        target = Path(tempfile.gettempdir()) / "evil-change-impact.jsonl"
+        target.unlink(missing_ok=True)
+        with self.assertRaises(ValueError):
+            cil.append_record(rec, target)
+        self.assertFalse(target.exists(), "rejected path must not be created")
+
+    def test_append_rejects_traversal_escape(self):
+        # store/../<something> resolves outside store -> rejected.
+        rec = cil.build_record(
+            agent="dave", change_ref="x", classification="ran",
+            findings=0, top_risk="", decision="proceed",
+        )
+        target = cil._STORE_DIR / ".." / "escaped.jsonl"
+        with self.assertRaises(ValueError):
+            cil.append_record(rec, target)
+        self.assertFalse(Path(target).resolve().exists())
+
+    def test_cli_traversal_writes_nothing_and_exit_nonzero(self):
+        target = Path(tempfile.gettempdir()) / "evil-cli-change-impact.jsonl"
+        if target.exists():
+            target.unlink()
+        rc = cil.main([
+            "--agent", "dave", "--change-ref", "x",
+            "--classification", "ran", "--findings", "0",
+            "--decision", "proceed", "--log-path", str(target),
+        ])
+        self.assertNotEqual(rc, 0)
+        self.assertFalse(target.exists(), "traversal target must not be written")
+
+    def test_default_log_path_is_allowed(self):
+        # The real default (store/change-impact-log.jsonl) must pass the guard.
+        self.assertEqual(
+            cil._validate_log_path(cil._DEFAULT_LOG),
+            Path(cil._DEFAULT_LOG).resolve(),
+        )
 
 
 if __name__ == "__main__":

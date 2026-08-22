@@ -32,7 +32,25 @@ _CLASSIFICATIONS = ("ran", "skipped-trivial")
 _DECISIONS = ("proceed", "mitigate", "hold")
 _TZ = ZoneInfo("Europe/Budapest")
 
-_DEFAULT_LOG = Path(__file__).resolve().parent.parent / "store" / "change-impact-log.jsonl"
+_STORE_DIR = Path(__file__).resolve().parent.parent / "store"
+_DEFAULT_LOG = _STORE_DIR / "change-impact-log.jsonl"
+
+
+def _validate_log_path(log_path):
+    """Confine the log target to store/ and return the resolved Path.
+
+    --log-path is caller-supplied, so without this a compromised or careless
+    invocation could append (and mkdir) anywhere on disk -- a path-traversal
+    write (kidd gate, PR#488). resolve() collapses any `..`, so an escape like
+    store/../etc/x is caught. Raises ValueError for anything outside store/.
+    """
+    resolved = Path(log_path).resolve()
+    store = _STORE_DIR.resolve()
+    if resolved != store and store not in resolved.parents:
+        raise ValueError(f"log path must be inside {store}, got {resolved}")
+    if resolved == store:
+        raise ValueError("log path must be a file inside store/, not the dir itself")
+    return resolved
 
 
 def build_record(agent, change_ref, classification, findings, top_risk, decision):
@@ -72,8 +90,12 @@ def build_record(agent, change_ref, classification, findings, top_risk, decision
 
 
 def append_record(record, log_path=_DEFAULT_LOG):
-    """Append one JSON line to the log, creating parent dir if needed."""
-    log_path = Path(log_path)
+    """Append one JSON line to the log, creating parent dir if needed.
+
+    Validates the target is inside store/ BEFORE any mkdir/open, so a rejected
+    path leaves nothing on disk.
+    """
+    log_path = _validate_log_path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -96,11 +118,13 @@ def main(argv=None):
             classification=args.classification, findings=args.findings,
             top_risk=args.top_risk, decision=args.decision,
         )
+        # Path confinement lives in append_record; a bad --log-path raises here
+        # so the CLI exits nonzero and writes nothing, same as a bad record.
+        append_record(rec, args.log_path)
     except ValueError as e:
         print(f"change-impact-log: {e}", file=sys.stderr)
         return 2
 
-    append_record(rec, args.log_path)
     print(json.dumps(rec, ensure_ascii=False))
     return 0
 
