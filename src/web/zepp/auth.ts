@@ -93,3 +93,16 @@ export const DEFAULT_AUTH_CONFIG = {
   loginUrl: 'https://account.huami.com/v1/user/login.json',
   refreshUrl: 'https://account.huami.com/v1/user/token.json',
 }
+
+// Resolves credentials to tokens regardless of mode.
+// token-mode: skips login entirely, returns the token directly with no expiry.
+// password-mode: calls zeppLogin.
+export async function zeppLoginOrToken(
+  creds: import('./creds-reader.js').ZeppCredsOrToken,
+  deps: ZeppAuthDeps,
+): Promise<ZeppTokens> {
+  if (creds.mode === 'token') {
+    return { accessToken: creds.token, refreshToken: '' }
+  }
+  return zeppLogin({ email: creds.email, password: creds.password }, deps)
+}

@@ -17,7 +17,7 @@ export interface HealthGuardAlert {
 // A pull is stale when no successful (or partial) data arrived for this long.
 const STALE_THRESHOLD_MS = 26 * 60 * 60 * 1000
 
-const STATUS_ALERT: Record<Exclude<ZeppPullStatus, 'ok' | 'stale'>, AlertType> = {
+const STATUS_ALERT: Record<Exclude<ZeppPullStatus, 'ok' | 'stale' | 'no_new_data'>, AlertType> = {
   auth_fail: 'auth_fail',
   endpoint_error: 'endpoint_error',
   partial: 'partial',

@@ -3,7 +3,7 @@
 // adaptive-plan consumer reads. The pull layer (huami-token + rolandsz exporter)
 // populates these fields; the consumer never touches credentials or HTTP.
 
-export type ZeppPullStatus = 'ok' | 'partial' | 'auth_fail' | 'endpoint_error' | 'stale'
+export type ZeppPullStatus = 'ok' | 'partial' | 'auth_fail' | 'endpoint_error' | 'stale' | 'no_new_data'
 
 export interface ZeppSleep {
   /** Total sleep duration in minutes */
@@ -28,7 +28,7 @@ export interface ZeppVitals {
   restingHr?: number
   /** Blood oxygen %, single measurement */
   spo2?: number
-  /** Heart rate variability ms */
+  /** Heart rate variability ms (RMSSD) */
   hrv?: number
   /** Stress score 0-100 (derived from HRV if direct unavailable) */
   stress?: number
@@ -36,6 +36,24 @@ export interface ZeppVitals {
   skinTemp?: number
   /** Breathing rate breaths/min */
   breathingRate?: number
+  /** Day-average heart rate bpm (from HC HeartRate) */
+  hrAvg?: number
+  /** Day-minimum heart rate bpm */
+  hrMin?: number
+  /** Day-maximum heart rate bpm */
+  hrMax?: number
+}
+
+/** Activity / steps summary for the day (HC "Tevekenysegek" category) */
+export interface ZeppActivity {
+  /** Active calories burned kcal */
+  activeKcal?: number
+  /** Distance metres */
+  distanceM?: number
+  /** Floors climbed */
+  floors?: number
+  /** VO2max ml/kg/min */
+  vo2max?: number
 }
 
 export interface ZeppWorkout {
@@ -58,17 +76,21 @@ export interface ZeppWorkout {
 export interface ZeppDailySnapshot {
   /** YYYY-MM-DD local date the snapshot covers */
   date: string
-  /** ISO timestamp when the pull completed */
+  /** ISO timestamp when the pull or ingest completed */
   pulledAt: string
-  /** Outcome of the pull attempt */
+  /** Outcome of the pull/ingest attempt */
   status: ZeppPullStatus
   sleep?: ZeppSleep
   vitals?: ZeppVitals
   workouts?: ZeppWorkout[]
+  /** Activity summary (steps/distance/floors/vo2max) */
+  activity?: ZeppActivity
   /** Raw error message when status is not 'ok' */
   error?: string
-  /** Steps if exposed by the endpoint */
+  /** Steps (top-level shortcut, mirrors activity.steps if present) */
   steps?: number
-  /** Total calories burned for the day */
+  /** Total calories burned for the day kcal */
   caloriesTotal?: number
+  /** ISO UTC of last device->cloud sync (from HC synced_at) */
+  sourceSyncedAt?: string
 }
