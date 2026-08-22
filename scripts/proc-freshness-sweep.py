@@ -98,8 +98,13 @@ def process_start_time(proc_dir, boot):
 
 
 def _sweep_bash(root, boot, stale, unknown, suspect, supervisors_ref):
-    """Classify bash processes via fd/255 content comparison (content-verified)."""
+    """Classify bash processes via fd/255 content comparison (content-verified).
+
+    Returns (fresh_count, seen_pids) so the caller can pass seen_pids to the
+    uncategorised sweep and avoid double-reporting the same pid.
+    """
     fresh = 0
+    seen_pids = set()
     for proc_dir in glob.glob("/proc/[0-9]*"):
         pid = os.path.basename(proc_dir)
         fd255 = os.path.join(proc_dir, "fd", "255")
@@ -113,6 +118,7 @@ def _sweep_bash(root, boot, stale, unknown, suspect, supervisors_ref):
         if not path.startswith(root + "/") or not path.endswith(".sh"):
             continue
 
+        seen_pids.add(pid)
         name = os.path.basename(path)
         if name == "fleet-supervisor.sh":
             supervisors_ref[0] += 1
@@ -152,7 +158,7 @@ def _sweep_bash(root, boot, stale, unknown, suspect, supervisors_ref):
             suspect.append((pid, name, "file modified after process start; parsed version unverifiable", started, mtime, method))
         else:
             fresh += 1
-    return fresh
+    return fresh, seen_pids
 
 
 def _sweep_python(root, boot, stale, unknown, suspect):
@@ -166,6 +172,8 @@ def _sweep_python(root, boot, stale, unknown, suspect):
 
     Only the interpreter name and script path are examined. Argv beyond the
     script name is never read or reported (may contain credentials).
+
+    Returns seen_pids so the caller can avoid double-reporting.
     """
     seen_pids = {str(os.getpid())}  # exclude the sweep process itself
     for proc_dir in glob.glob("/proc/[0-9]*"):
@@ -235,6 +243,101 @@ def _sweep_python(root, boot, stale, unknown, suspect):
             unknown.append((pid, name,
                              "mtime-heuristic: content comparison not possible for python; no mtime staleness signal",
                              started, mtime, method))
+    return seen_pids
+
+
+def _sweep_node(root, boot, stale, unknown, suspect):
+    """Classify node processes via cmdline + mtime-heuristic.
+
+    Node loads its entry-point .js file at startup but holds no open fd to it
+    afterward (/proc/PID/fd holds no .js entries; /proc/PID/maps shows no dist/
+    mappings).  Content comparison is therefore not possible from outside the
+    process.
+
+    The method is mtime-heuristic: if the entry-point file was modified after
+    the process started, flag SUSPECT (running version unverifiable); otherwise
+    UNKNOWN (no staleness signal, but content cannot be confirmed -- must not
+    read as fresh per OPS-103 constraint, same as python).
+
+    Only the interpreter name and first .js path in argv are examined.  Args
+    beyond the script name are never read or reported (may contain credentials).
+
+    Returns seen_pids so the caller can avoid double-reporting.
+    """
+    seen_pids = {str(os.getpid())}
+    for proc_dir in glob.glob("/proc/[0-9]*"):
+        pid = os.path.basename(proc_dir)
+
+        # Identify node by exe name, not cmdline, to avoid matching wrappers
+        # that merely mention "node" in their argv.
+        try:
+            exe = os.readlink(os.path.join(proc_dir, "exe"))
+        except OSError:
+            continue
+        exe_name = os.path.basename(exe)
+        if not exe_name.startswith("node"):
+            continue
+
+        cmdline_path = os.path.join(proc_dir, "cmdline")
+        try:
+            with open(cmdline_path, "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+
+        args = raw.rstrip(b"\x00").split(b"\x00")
+        if not args:
+            continue
+
+        # Find the first .js argument under root (skip flags starting with -).
+        script_path = None
+        for arg in args[1:]:
+            decoded = arg.decode(errors="replace")
+            if not decoded or decoded.startswith("-"):
+                continue
+            if decoded.endswith(".js"):
+                candidate = os.path.realpath(decoded)
+                if candidate.startswith(root + "/"):
+                    script_path = candidate
+                break
+            # Non-flag, non-.js arg (e.g. --disallow-code-generation-from-strings)
+            # -- keep scanning; the entry-point .js may come later in argv.
+
+        if script_path is None:
+            continue
+        if pid in seen_pids:
+            continue
+        seen_pids.add(pid)
+
+        name = os.path.basename(script_path)
+        method = "mtime-heuristic"
+        started = process_start_time(proc_dir, boot)
+
+        if not os.path.exists(script_path):
+            mtime = None
+            stale.append((pid, name, "script no longer exists on disk", started, mtime, method))
+            continue
+
+        try:
+            mtime = os.path.getmtime(script_path)
+        except OSError:
+            mtime = None
+
+        if started is None or mtime is None:
+            unknown.append((pid, name,
+                            "mtime-heuristic: start time or file mtime unreadable",
+                            started, mtime, method))
+        elif started + START_MTIME_GRACE_SECONDS < mtime:
+            suspect.append((pid, name,
+                            "mtime-heuristic: file modified after process start; running version unverifiable",
+                            started, mtime, method))
+        else:
+            # mtime shows no staleness signal, but content cannot be verified --
+            # must be UNKNOWN, not fresh (OPS-103: content-unverifiable != PASS)
+            unknown.append((pid, name,
+                            "mtime-heuristic: content comparison not possible for node; no mtime staleness signal",
+                            started, mtime, method))
+    return seen_pids
 
 
 def sweep(root):
@@ -245,8 +348,9 @@ def sweep(root):
     stale, unknown, suspect = [], [], []
     supervisors_ref = [0]
 
-    fresh = _sweep_bash(root, boot, stale, unknown, suspect, supervisors_ref)
-    _sweep_python(root, boot, stale, unknown, suspect)
+    fresh, bash_pids = _sweep_bash(root, boot, stale, unknown, suspect, supervisors_ref)
+    python_pids = _sweep_python(root, boot, stale, unknown, suspect)
+    _sweep_node(root, boot, stale, unknown, suspect)
 
     return stale, unknown, suspect, fresh, supervisors_ref[0]
 
