@@ -83,6 +83,7 @@ import { tryHandleHibikiNutrition } from './web/routes/hibiki-nutrition.js'
 import { tryHandleGuardEvents } from './web/routes/guard-events.js'
 import { tryHandleMetrics } from './web/routes/metrics.js'
 import { tryHandleHealthIngest } from './web/routes/health-ingest.js'
+import { isPublicApiPath } from './web/public-paths.js'
 import { tryHandleStatic } from './web/routes/static.js'
 import { tryHandleDashboardNew } from './web/routes/dashboard-new.js'
 import type { RouteContext } from './web/routes/types.js'
@@ -261,12 +262,7 @@ export function startWebServer(port = 3420): http.Server {
       res.setHeader('Set-Cookie', `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${isHttps ? '; Secure' : ''}`)
       return json(res, { ok: true })
     }
-    const isPublicApi =
-      (path === '/api/auth/status' && method === 'GET') ||
-      (method === 'GET' && (
-        path === '/api/marveen/avatar' ||
-        /^\/api\/agents\/[^/]+\/avatar$/.test(path)
-      ))
+    const isPublicApi = isPublicApiPath(path, method)
     if (path === '/api/auth/status' && method === 'GET') {
       // `passwordLogin` lets the login UI pick its form: show username+password
       // fields when credentials are configured, else fall back to token-paste.
