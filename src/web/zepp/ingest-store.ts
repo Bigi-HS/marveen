@@ -11,6 +11,15 @@ import type { ZeppDailySnapshot } from './contract.js'
 const FILE_PREFIX = 'daily-'
 const FILE_SUFFIX = '.json'
 
+// Strict YYYY-MM-DD. A snapshot date is the only user-influenced part of the
+// on-disk filename, so it must never contain path separators or `..` segments
+// that could escape the store root (ENG-083). Any deviation is rejected.
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+
+function isValidDate(date: string): boolean {
+  return typeof date === 'string' && DATE_RE.test(date)
+}
+
 function fileName(date: string): string {
   return `${FILE_PREFIX}${date}${FILE_SUFFIX}`
 }
@@ -26,11 +35,15 @@ export class ZeppIngestStore {
   }
 
   write(snapshot: ZeppDailySnapshot): void {
+    if (!isValidDate(snapshot.date)) {
+      throw new Error(`invalid snapshot date: ${JSON.stringify(snapshot.date)} (expected YYYY-MM-DD)`)
+    }
     const path = join(this.root, fileName(snapshot.date))
     writeFileSync(path, JSON.stringify(snapshot, null, 2), { mode: 0o600 })
   }
 
   read(date: string): ZeppDailySnapshot | null {
+    if (!isValidDate(date)) return null
     const path = join(this.root, fileName(date))
     if (!existsSync(path)) return null
     try {

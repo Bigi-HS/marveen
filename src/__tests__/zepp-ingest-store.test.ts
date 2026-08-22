@@ -81,4 +81,47 @@ describe('ZeppIngestStore', () => {
     const mode = statSync(subDir).mode & 0o777
     expect(mode).toBe(0o700)
   })
+
+  // ENG-083: the store must validate `date` before it reaches path.join, so a
+  // crafted date cannot escape the store directory. Defence-in-depth: the HTTP
+  // ingest route already screens date, but the store is a reusable component and
+  // other callers (cloud puller, programmatic writes) must not be able to traverse.
+  describe('date validation (path-traversal guard)', () => {
+    const TRAVERSAL_DATES = [
+      '2026-08-22/../../etc/x',
+      '../../../tmp/evil',
+      '..',
+      'foo/bar',
+      '2026-08-22\0',
+      '2026-8-2', // not zero-padded -> not a valid YYYY-MM-DD
+      '',
+      '2026_08_22',
+    ]
+
+    it('write() throws on a date that is not strict YYYY-MM-DD', () => {
+      for (const bad of TRAVERSAL_DATES) {
+        expect(() => store.write(makeSnapshot(bad)), `date=${JSON.stringify(bad)}`).toThrow(
+          /invalid snapshot date/i,
+        )
+      }
+    })
+
+    it('write() with a traversal date does not create any file outside the store root', () => {
+      const { readdirSync } = require('node:fs') as typeof import('node:fs')
+      expect(() => store.write(makeSnapshot('2026-08-22/../../escape'))).toThrow()
+      // The store dir stays empty; nothing leaked to a parent path.
+      expect(readdirSync(dir)).toHaveLength(0)
+    })
+
+    it('read() returns null for a non-YYYY-MM-DD date instead of touching a traversed path', () => {
+      for (const bad of TRAVERSAL_DATES) {
+        expect(store.read(bad)).toBeNull()
+      }
+    })
+
+    it('accepts a well-formed YYYY-MM-DD date', () => {
+      expect(() => store.write(makeSnapshot('2026-12-31'))).not.toThrow()
+      expect(store.read('2026-12-31')?.date).toBe('2026-12-31')
+    })
+  })
 })
