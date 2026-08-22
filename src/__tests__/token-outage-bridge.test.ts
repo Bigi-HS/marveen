@@ -25,6 +25,9 @@ function makeDeps(over: Partial<OutageDeps> & { limited?: boolean; resetAtText?:
     createCard: vi.fn(() => 'card-1'),
     msSinceLastRespawn: () => Number.POSITIVE_INFINITY,
     redispatch: vi.fn(() => true),
+    dismissModal: vi.fn(),
+    relaunchSession: vi.fn(() => true),
+    staleOutageMs: 20 * 60 * 1000,
     readState: () => store,
     writeState: (s) => { store = s },
     redispatchBackoffMs: 5 * 60 * 1000,
@@ -183,6 +186,66 @@ describe('runCycle transitions', () => {
     const r = await runCycle(NOW, deps)
     expect(r.acked).toBe(false)
     expect(deps._state().limited).toBe(true) // we still entered the outage state
+  })
+})
+
+describe('auto-dismiss: ENTERED calls dismissModal', () => {
+  it('calls dismissModal once when limit is first detected', async () => {
+    const deps = makeDeps({ limited: true })
+    await runCycle(NOW, deps)
+    expect(deps.dismissModal).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not call dismissModal on steady-state limited cycles', async () => {
+    const deps = makeDeps({ limited: true })
+    await runCycle(NOW, deps)          // ENTERED
+    await runCycle(NOW + 30_000, deps) // still limited
+    expect(deps.dismissModal).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not call dismissModal when not limited', async () => {
+    const deps = makeDeps({ limited: false })
+    await runCycle(NOW, deps)
+    expect(deps.dismissModal).not.toHaveBeenCalled()
+  })
+})
+
+describe('stale-outage guard: relaunchSession after staleOutageMs', () => {
+  const STALE_MS = 20 * 60 * 1000
+
+  it('calls relaunchSession once when still limited after staleOutageMs', async () => {
+    const deps = makeDeps({ limited: true, staleOutageMs: STALE_MS })
+    await runCycle(NOW, deps)                     // ENTERED
+    await runCycle(NOW + STALE_MS + 1, deps)      // stale
+    expect(deps.relaunchSession).toHaveBeenCalledTimes(1)
+    expect(deps._state().staleLimitKilled).toBe(true)
+  })
+
+  it('does not call relaunchSession before staleOutageMs elapses', async () => {
+    const deps = makeDeps({ limited: true, staleOutageMs: STALE_MS })
+    await runCycle(NOW, deps)
+    await runCycle(NOW + STALE_MS - 1000, deps)
+    expect(deps.relaunchSession).not.toHaveBeenCalled()
+  })
+
+  it('does not call relaunchSession a second time (staleLimitKilled idempotent)', async () => {
+    const deps = makeDeps({ limited: true, staleOutageMs: STALE_MS })
+    await runCycle(NOW, deps)
+    await runCycle(NOW + STALE_MS + 1, deps)      // stale -> kill
+    await runCycle(NOW + STALE_MS + 60_000, deps) // still limited -> no second kill
+    expect(deps.relaunchSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('resets staleLimitKilled on a new ENTERED after an EXITED', async () => {
+    let limited = true
+    const deps = makeDeps({ detectLimit: () => ({ limited, resetAtText: null }), staleOutageMs: STALE_MS })
+    await runCycle(NOW, deps)                          // ENTERED
+    await runCycle(NOW + STALE_MS + 1, deps)           // stale -> kill
+    limited = false
+    await runCycle(NOW + STALE_MS + 60_000, deps)      // EXITED
+    limited = true
+    await runCycle(NOW + STALE_MS + 120_000, deps)     // new ENTERED -> staleLimitKilled resets
+    expect(deps._state().staleLimitKilled).toBe(false)
   })
 })
 
