@@ -24,8 +24,11 @@ _spec.loader.exec_module(mod)
 NOW = 1_800_000_000
 
 
-def _make_db(rows):
-    """rows: list of (owner, updated_at). Returns a temp db path."""
+def _make_db(rows, messages=(), convo=()):
+    """rows: list of (owner, updated_at). Returns a temp db path.
+    messages: list of (from_agent, to_agent, created_at) for agent_messages.
+    convo: list of (agent_id, created_at) for conversation_log.
+    """
     d = tempfile.mkdtemp()
     path = Path(d) / "todo.db"
     conn = sqlite3.connect(path)
@@ -35,10 +38,32 @@ def _make_db(rows):
             created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
         )"""
     )
+    conn.execute(
+        """CREATE TABLE agent_messages (
+            id INTEGER PRIMARY KEY, from_agent TEXT NOT NULL, to_agent TEXT NOT NULL,
+            content TEXT, created_at INTEGER NOT NULL
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE conversation_log (
+            id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL,
+            chat_id TEXT, direction TEXT, created_at INTEGER NOT NULL
+        )"""
+    )
     for i, (owner, updated) in enumerate(rows):
         conn.execute(
             "INSERT INTO todo_items (id, owner, title, created_at, updated_at) VALUES (?,?,?,?,?)",
             (f"r{i}", owner, "t", updated, updated),
+        )
+    for i, (fa, ta, ca) in enumerate(messages):
+        conn.execute(
+            "INSERT INTO agent_messages (from_agent, to_agent, content, created_at) VALUES (?,?,?,?)",
+            (fa, ta, "x", ca),
+        )
+    for i, (agent_id, ca) in enumerate(convo):
+        conn.execute(
+            "INSERT INTO conversation_log (agent_id, chat_id, direction, created_at) VALUES (?,?,?,?)",
+            (agent_id, "0", "out", ca),
         )
     conn.commit()
     conn.close()
@@ -213,6 +238,81 @@ class SenderTests(unittest.TestCase):
             mod.urllib.request.urlopen = orig
         self.assertEqual(status, 200)
         self.assertEqual(captured["from"], "forge")
+
+
+class LivenessTests(unittest.TestCase):
+    """Card cbaa66fa: liveness cross-check before firing a freshness alert.
+
+    An owner with a stale todo_items write but recent fleet activity (agent_messages
+    or conversation_log) must be reported as ok-alive, not stale, and must NOT
+    trigger a FRESHNESS ALERT in the dry-run path.
+    """
+
+    def test_stale_write_plus_recent_message_is_ok_alive(self):
+        # Write is 40h ago (> 36h threshold) but a message from claudia is 10h ago.
+        db = _make_db(
+            rows=[("claudia", NOW - 40 * 3600)],
+            messages=[("claudia", "marveen", NOW - 10 * 3600)],
+        )
+        conn = sqlite3.connect(db)
+        try:
+            verdicts = {v["owner"]: v for v in mod.evaluate(conn, NOW, mod.THRESHOLD_SECONDS)}
+        finally:
+            conn.close()
+        self.assertEqual(verdicts["claudia"]["state"], "ok-alive")
+
+    def test_stale_write_plus_recent_convo_is_ok_alive(self):
+        # Write is 40h ago but a conversation_log entry for hibiki is 8h ago.
+        db = _make_db(
+            rows=[("hibiki", NOW - 40 * 3600)],
+            convo=[("hibiki", NOW - 8 * 3600)],
+        )
+        conn = sqlite3.connect(db)
+        try:
+            verdicts = {v["owner"]: v for v in mod.evaluate(conn, NOW, mod.THRESHOLD_SECONDS)}
+        finally:
+            conn.close()
+        self.assertEqual(verdicts["hibiki"]["state"], "ok-alive")
+
+    def test_ok_alive_does_not_alert_in_dry_run(self):
+        # alive+no-write must not produce WOULD ALERT.
+        db = _make_db(
+            rows=[("claudia", NOW - 40 * 3600)],
+            messages=[("claudia", "marveen", NOW - 10 * 3600)],
+        )
+        state = str(Path(tempfile.mkdtemp()) / "state.json")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            mod.main(["--db", db, "--state", state, "--dry-run", "--now", str(NOW)])
+        out = buf.getvalue()
+        self.assertNotIn("WOULD ALERT", out)
+        self.assertIn("ok-alive", out)
+
+    def test_stale_write_no_activity_still_stale(self):
+        # No recent messages, no convo -- should remain stale.
+        db = _make_db(rows=[("hibiki", NOW - 40 * 3600)])
+        conn = sqlite3.connect(db)
+        try:
+            verdicts = {v["owner"]: v for v in mod.evaluate(conn, NOW, mod.THRESHOLD_SECONDS)}
+        finally:
+            conn.close()
+        self.assertEqual(verdicts["hibiki"]["state"], "stale")
+
+    def test_old_message_does_not_rescue_stale(self):
+        # A message older than LIVENESS_THRESHOLD_SECONDS must not suppress the alert.
+        db = _make_db(
+            rows=[("claudia", NOW - 40 * 3600)],
+            messages=[("claudia", "marveen", NOW - 20 * 3600)],  # 20h > 18h liveness window
+        )
+        conn = sqlite3.connect(db)
+        try:
+            verdicts = {v["owner"]: v for v in mod.evaluate(conn, NOW, mod.THRESHOLD_SECONDS)}
+        finally:
+            conn.close()
+        self.assertEqual(verdicts["claudia"]["state"], "stale")
+
+    def test_liveness_threshold_constant_is_18h(self):
+        self.assertEqual(mod.LIVENESS_THRESHOLD_SECONDS, 18 * 3600)
 
 
 if __name__ == "__main__":

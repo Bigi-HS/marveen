@@ -39,6 +39,9 @@ DEFAULT_TOKEN = "store/.dashboard-token"
 DEFAULT_FROM = "forge"
 OWNERS = ("claudia", "hibiki")
 THRESHOLD_SECONDS = 129600  # 36h (FS-AC4; widened from 26h: 24h cycle + 12h margin for outage/restart delays)
+# If an agent sent a message or had a conversation_log entry within this window, it is
+# considered alive even without a todo_items write (card cbaa66fa).
+LIVENESS_THRESHOLD_SECONDS = 18 * 3600  # 18h -- one full daily cycle + 6h margin
 # Suppress a repeat alert for the same ongoing outage within this window.
 REALERT_SUPPRESS_SECONDS = 23 * 3600
 MESSAGES_URL = "http://localhost:3420/api/messages"
@@ -53,17 +56,59 @@ def last_write_ago_seconds(conn: sqlite3.Connection, owner: str, now: int) -> in
     return now - int(row[0])
 
 
-def evaluate(conn: sqlite3.Connection, now: int, threshold: int) -> list[dict]:
-    """Pure evaluation: one verdict dict per owner (no IO side effects)."""
+def last_activity_ago_seconds(conn: sqlite3.Connection, owner: str, now: int) -> int | None:
+    """Return seconds since the owner's most recent fleet activity (messages or convo log).
+
+    Checks both agent_messages (from or to the owner) and conversation_log (agent_id).
+    Returns None when neither table has any record for this owner.
+    """
+    row = conn.execute(
+        """SELECT MAX(t) FROM (
+            SELECT MAX(created_at) AS t FROM agent_messages
+             WHERE from_agent = ? OR to_agent = ?
+            UNION ALL
+            SELECT MAX(created_at) AS t FROM conversation_log
+             WHERE agent_id = ?
+        )""",
+        (owner, owner, owner),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return now - int(row[0])
+
+
+def evaluate(
+    conn: sqlite3.Connection,
+    now: int,
+    threshold: int,
+    liveness_threshold: int = LIVENESS_THRESHOLD_SECONDS,
+) -> list[dict]:
+    """Pure evaluation: one verdict dict per owner (no IO side effects).
+
+    States:
+      ok        -- write is within threshold.
+      no-rows   -- no write record at all; treated as benign (spec FS-AC4 edge).
+      ok-alive  -- write is stale but agent has recent fleet activity; no alert.
+      stale     -- write is stale AND no recent activity; alert warranted.
+    """
     out = []
     for owner in OWNERS:
         ago = last_write_ago_seconds(conn, owner, now)
         if ago is None:
             out.append({"owner": owner, "state": "no-rows", "ago": None})
-        elif ago > threshold:
-            out.append({"owner": owner, "state": "stale", "ago": ago})
-        else:
+        elif ago <= threshold:
             out.append({"owner": owner, "state": "ok", "ago": ago})
+        else:
+            activity_ago = last_activity_ago_seconds(conn, owner, now)
+            if activity_ago is not None and activity_ago < liveness_threshold:
+                out.append({
+                    "owner": owner,
+                    "state": "ok-alive",
+                    "ago": ago,
+                    "activity_ago": activity_ago,
+                })
+            else:
+                out.append({"owner": owner, "state": "stale", "ago": ago})
     return out
 
 
@@ -125,9 +170,14 @@ def main(argv: list[str]) -> int:
     for v in verdicts:
         owner, st, ago = v["owner"], v["state"], v["ago"]
         if st != "stale":
-            # A healthy/empty owner clears any prior alert marker.
+            # A healthy/empty/alive owner clears any prior alert marker.
             state.pop(owner, None)
-            print(f"[{owner}] {st}" + (f" (ago={ago}s)" if ago is not None else ""))
+            suffix = f" (ago={ago}s" if ago is not None else ""
+            if st == "ok-alive" and "activity_ago" in v:
+                suffix += f", last_activity={v['activity_ago']}s"
+            if suffix:
+                suffix += ")"
+            print(f"[{owner}] {st}{suffix}")
             continue
 
         last_alert = state.get(owner, 0)
