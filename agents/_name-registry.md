@@ -43,6 +43,15 @@ Maintained by: Dave (updates via PR, same AC-P0-2 diff check).
 | thor           | Thor                     |                                            |
 | vane           | Vane                     |                                            |
 
+## Aliases
+
+Boss-used short forms / nicknames that resolve to a canonical agent_id. When the
+Boss refers to an agent by one of these, treat it as that agent.
+
+| alias | agent_id  | since      |
+|-------|-----------|------------|
+| BB    | blackbart | 2026-08-22 |
+
 ## AC-P0-2 verification
 
 Run to confirm no agent with a hyphen/underscore in id has displayName == Capitalize(id):
