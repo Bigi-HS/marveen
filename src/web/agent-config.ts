@@ -610,6 +610,50 @@ export function normalizeRecipient(
   return null
 }
 
+// The REVERSE of readAgentDisplayName (OPS-151, card 930bba69): resolve a
+// Boss-typed name -- a display name ("NoA", "Grace") OR a raw agent id ("dave")
+// -- back to the internal agent id, for the launch/route alias (a human terminal
+// typing "NoA" starts agent "marveen").
+//
+// Failure policy is FAIL-CLOSED, the OPPOSITE of the Boss-facing text guard: an
+// ambiguous name returns null (refuse), it never guesses. This feeds a
+// launch/route action, so a wrong resolution would spawn or address the WRONG
+// agent -- here silence is safer than a wrong pick. (The Boss-facing text guard
+// must never swallow a reply, so it rewrites/warns; this must never mis-launch,
+// so it refuses.)
+//
+// The reverse index maps BOTH each agent's display name and its raw id (case-
+// insensitively) to the id. A collision -- two agents sharing a display name, or
+// one agent's display equal to another agent's id -- marks that key ambiguous, so
+// it resolves to null. An agent's own id+display (e.g. dave/"Dave") is not a
+// self-collision (same id both ways).
+//
+// `roster` and `resolveDisplay` are injectable so the logic is unit-testable
+// without the filesystem (mirrors normalizeRecipient's isKnown seam).
+export function displayNameToAgentId(
+  input: string,
+  roster: string[] = [MAIN_AGENT_ID, ...listAgentNames()],
+  resolveDisplay: (id: string) => string = readAgentDisplayName,
+): string | null {
+  const key = (input ?? '').trim().toLowerCase()
+  if (!key) return null
+  const index = new Map<string, string | null>() // key -> id, or null when ambiguous
+  const add = (raw: string, id: string): void => {
+    const k = (raw ?? '').trim().toLowerCase()
+    if (!k) return
+    if (index.has(k)) {
+      if (index.get(k) !== id) index.set(k, null) // collision -> ambiguous, fail-closed
+    } else {
+      index.set(k, id)
+    }
+  }
+  for (const id of roster) {
+    add(id, id)
+    add(resolveDisplay(id), id)
+  }
+  return index.get(key) ?? null
+}
+
 // --- Secret-pointer resolver (card b83e7c92 item-5) -----------------------
 //
 // Resolves {env:VAR_NAME} and {file:relative/path} placeholders so agent
