@@ -565,7 +565,14 @@ export function getCostBySession(opts: { agent?: string; from?: number; to?: num
 
   const bySession = new Map<string, SessionCost>()
   for (const r of rows) {
-    const key = `${r.agent} ${r.sessionId}`
+    // Composite Map key only (never persisted, never returned). The separator
+    // used to be a literal NUL, which made this whole FILE unsearchable:
+    // GNU grep calls any file containing a NUL binary, prints no matching
+    // lines, and sends its only notice to stderr -- which every audit
+    // one-liner discards with 2>/dev/null (DA-57, card OPS/5a719242).
+    // U+001F keeps the same "cannot occur in an agent id or a session id"
+    // property without taking the file out of every content search.
+    const key = `${r.agent}\u001f${r.sessionId}`
     let s = bySession.get(key)
     if (!s) {
       s = {
