@@ -8,5 +8,6 @@
     "delegatesTo": [],
     "autoDelegation": false,
     "trustFrom": []
-  }
+  },
+  "displayName": "Vane"
 }
