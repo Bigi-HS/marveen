@@ -1,6 +1,6 @@
 {
   "model": "qwen3:4b",
-  "displayName": "GenesisLocal",
+  "displayName": "NoA (local)",
   "securityProfile": "default",
   "team": {
     "role": "worker",

@@ -1,6 +1,6 @@
 {
   "model": "qwen3:4b",
-  "displayName": "ClaudiaLocal",
+  "displayName": "Claudia (local)",
   "securityProfile": "default",
   "team": {
     "role": "worker",
