@@ -54,6 +54,14 @@ describe('checkSnapshot', () => {
     expect(alerts.some((a) => a.type === 'partial')).toBe(true)
   })
 
+  it('raises stale alert when status is explicitly stale with fresh pulledAt (kidd blocking bug)', () => {
+    // status='stale' + fresh pulledAt must NOT silently pass.
+    // The API marking data as stale is a distinct signal from pulledAt-based staleness.
+    const freshPulledAt = new Date(BASE_NOW_MS - 60 * 60 * 1000).toISOString() // 1h ago
+    const alerts = checkSnapshot(snap({ status: 'stale', pulledAt: freshPulledAt }), BASE_NOW_MS)
+    expect(alerts.some((a) => a.type === 'stale')).toBe(true)
+  })
+
   it('alert includes the snapshot date', () => {
     const alerts = checkSnapshot(snap({ status: 'auth_fail' }), BASE_NOW_MS)
     expect(alerts[0].date).toBe('2026-08-22')

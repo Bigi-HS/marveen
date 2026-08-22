@@ -22,7 +22,7 @@ function parseDate(name: string): string | null {
 
 export class ZeppIngestStore {
   constructor(private readonly root: string) {
-    mkdirSync(root, { recursive: true })
+    mkdirSync(root, { recursive: true, mode: 0o700 })
   }
 
   write(snapshot: ZeppDailySnapshot): void {

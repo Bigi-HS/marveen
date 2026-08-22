@@ -73,4 +73,12 @@ describe('ZeppIngestStore', () => {
     const mode = statSync(join(dir, 'daily-2026-08-22.json')).mode & 0o777
     expect(mode).toBe(0o600)
   })
+
+  it('store directory is created with 0700 permissions', () => {
+    const { statSync } = require('node:fs') as typeof import('node:fs')
+    const subDir = join(dir, 'sub-0700-test')
+    new ZeppIngestStore(subDir)
+    const mode = statSync(subDir).mode & 0o777
+    expect(mode).toBe(0o700)
+  })
 })

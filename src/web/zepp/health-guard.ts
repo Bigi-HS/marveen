@@ -41,6 +41,16 @@ export function checkSnapshot(
     }
   }
 
+  // API-reported stale: the pull layer flagged data as stale regardless of pulledAt age.
+  // Must alert even when pulledAt is fresh -- failing to do so is itself a silent-guard failure.
+  if (snapshot.status === 'stale') {
+    alerts.push({
+      type: 'stale',
+      date: snapshot.date,
+      message: `Zepp API reported stale data for ${snapshot.date}`,
+    })
+  }
+
   // Staleness: pulledAt is too old regardless of status
   const pulledAtMs = new Date(snapshot.pulledAt).getTime()
   if (nowMs - pulledAtMs > STALE_THRESHOLD_MS) {
