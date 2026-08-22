@@ -45,6 +45,7 @@ import argparse
 import importlib.util
 import itertools
 import os
+import shlex
 import subprocess
 import sys
 
@@ -1227,6 +1228,46 @@ CASES = [
         command="rm -rf / $'\\ud800'",
     ),
 
+    # ---- S: what --fuzz-dq and --fuzz-split found ----------------------------
+    # These rows pin the oracle measurements for the two NEW layers (the dollar-
+    # quoting WRAPPER and the SPLITTER), analogous to what the R family does for
+    # the body-level expander.
+    #
+    # --fuzz-dq at len=3: 36 567 pieces checked (simple / foo-prefix / x-suffix),
+    # 81 divergences (all \cDIGIT -- same mechanism as R2, same safe direction),
+    # 0 in the hiding direction.
+    # --fuzz-split at len=2: 529 bodies, 0 pieces under-split, 0 hiding.
+    dict(
+        id="S1", family="fuzz-divergence", should=BLOCK, owner="destructive",
+        guard_file=DESTRUCTIVE_FIXED,
+        note="wrapper-level CONTROL: prefix-concat $'\\cX' diverges same way as R2",
+        why="foo$'\\c0' -- guard gives foop (XOR), bash gives foo\\x10 (mask). "
+            "Both the body and the prefix-concatenated wrapper diverge on \\cDIGIT. "
+            "bash's form is always a control character, never a letter, so it cannot "
+            "spell a verb. Divergence safe: guard is more restrictive, not less.",
+        command="rm -rf / foo$'\\c0'",
+    ),
+    dict(
+        id="S2", family="fuzz-divergence", should=BLOCK, owner="destructive",
+        guard_file=DESTRUCTIVE_FIXED,
+        note="wrapper PIPE: suffix-concatenated command word is correctly detected",
+        why="r$'\\x6d' concatenates to 'rm': the second token of a $'...' form "
+            "may complete a command word started by a plain prefix. The full "
+            "pipeline _expand_dollar_quoting -> shlex.split produces ['rm', '-rf', '/'] "
+            "which the rule catches. --fuzz-dq confirms 0 hiding across 36 567 pieces.",
+        command="r$'\\x6d' -rf /",
+    ),
+    dict(
+        id="S3", family="fuzz-divergence", should=BLOCK, owner="destructive",
+        guard_file=DESTRUCTIVE_FIXED,
+        note="splitter BOUNDARY: ';' INSIDE $'...' is not a boundary; ';' outside is",
+        why="echo $'\\x3b' ; rm -rf / -- the \\x3b (semicolon) is inside the "
+            "ANSI-C form and protected; the outer ';' IS a boundary. Splitter "
+            "gives 2 pieces. Second piece command word is rm: BLOCKED. "
+            "--fuzz-split confirms 0 under-splits across all 529 bodies at len=2.",
+        command="echo $'\\x3b' ; rm -rf /",
+    ),
+
     # ---- R: what the differential fuzz found (see --fuzz) -------------------
     # These three pin the classes bash itself disagreed on, so a later change to
     # the expander cannot quietly move them. The fuzz is the instrument; these
@@ -1818,6 +1859,222 @@ def fuzz_expander(max_len=3):
     return 1 if (hiding or raised) else 0
 
 
+def _bash_piece_first_token(pieces):
+    """Ask bash to treat each piece as printf arguments and return the first token.
+
+    Each piece is embedded literally in 'printf "%s" PIECE; printf "\\0"'.
+    Pieces must be safe to embed: no unbalanced raw quotes outside $'...' forms.
+    Returns None if the oracle probe fails (control mismatch).
+
+    NUL cannot appear inside a bash word, so the NUL from 'printf "\\0"' always
+    marks an inter-piece boundary.  Output is compared as bytes -- the same
+    discipline as _bash_expansions.
+    """
+    probe = [("A", b"A"), ("$'\\x41'", b"A"), ("foo$'\\x41'", b"fooA")]
+    all_pieces = [p for p, _ in probe] + list(pieces)
+    script = "; ".join(f"printf '%s' {p}; printf '\\0'" for p in all_pieces)
+    out = subprocess.run(["bash", "-c", script],
+                         capture_output=True, timeout=120).stdout.split(b"\x00")
+    if len(out) < len(all_pieces):
+        return None
+    if [out[i] for i in range(len(probe))] != [e for _, e in probe]:
+        return None
+    return out[len(probe):len(all_pieces)]
+
+
+def fuzz_dollar_quoting(max_len=3):
+    r"""Differential-fuzz _expand_dollar_quoting against bash.
+
+    Extends --fuzz (which tests _expand_ansi_c body-only) by testing the
+    WRAPPER layer: pieces of form $'BODY', foo$'BODY', and $'BODY'x.  The
+    oracle compares shlex.split(_expand_dollar_quoting(piece))[0] against
+    the first token bash assigns to the piece.
+
+    Self-check: a blind expander (one that strips the $'...' form entirely)
+    must fire the hiding detector before we trust a zero result.
+
+    LIMITS: only pieces whose non-$'...' parts are safe to embed in bash -c
+    (no raw outer single/double quotes, only alphanumeric/safe prefix/suffix).
+    A zero is a lower bound on the dollar-quoting wrapper correctness.
+    """
+    mod = load_guard(DESTRUCTIVE_FIXED)
+    if not hasattr(mod, "_expand_dollar_quoting"):
+        print("guard has no _expand_dollar_quoting -- nothing to fuzz here.")
+        return 1
+
+    # Self-check: a "blind" expander that drops $'...' without expanding yields
+    # empty string where bash produces subject bytes.  The hiding detector must
+    # fire before we trust a zero measurement below.
+    blind_probe = ["$'\\x72m'", "$'\\x63at'", "foo$'\\x72m'"]
+    blind_want = _bash_piece_first_token(blind_probe)
+    if blind_want is None:
+        print("SELF-CHECK FAILED: piece oracle probe mismatch. No verdict reported.")
+        return 2
+    blind_got = [b"" for _ in blind_probe]
+    caught = [w for w, g in zip(blind_want, blind_got)
+              if (set(w) & _SUBJECT_BYTES) - (set(g) & _SUBJECT_BYTES)]
+    if len(caught) != len(blind_probe):
+        print("SELF-CHECK FAILED: hiding detector did not fire on blank expander. "
+              "No verdict reported.")
+        return 2
+
+    # Generate all bodies up to max_len from the fuzz alphabet.
+    bodies = []
+    for n in range(1, max_len + 1):
+        for combo in itertools.product(_FUZZ_ALPHABET, repeat=n):
+            body = "".join(combo)
+            if _odd_trailing_backslashes(body):
+                continue
+            bodies.append(body)
+
+    # Three piece shapes: simple, prefix-concatenated, suffix-concatenated.
+    all_pieces = (
+        [f"$'{b}'" for b in bodies] +
+        [f"foo$'{b}'" for b in bodies] +
+        [f"$'{b}'x" for b in bodies]
+    )
+
+    BATCH = 400
+    bash_results = []
+    for start in range(0, len(all_pieces), BATCH):
+        batch = all_pieces[start:start + BATCH]
+        r = _bash_piece_first_token(batch)
+        if r is None:
+            print("ORACLE CONTROL FAILED during batched fuzz. No verdict reported.")
+            return 2
+        bash_results.extend(r)
+
+    diverged, hiding, raised, checked = [], [], [], 0
+    for piece, want in zip(all_pieces, bash_results):
+        try:
+            expanded = mod._expand_dollar_quoting(piece)
+            toks = shlex.split(expanded, comments=False, posix=True)
+            got = (toks[0] if toks else "").encode("utf-8", "surrogatepass")
+        except Exception as exc:
+            raised.append((piece, f"{type(exc).__name__}: {exc}"))
+            continue
+        checked += 1
+        if got != want:
+            diverged.append((piece, want, got))
+            if (set(want) & _SUBJECT_BYTES) - (set(got) & _SUBJECT_BYTES):
+                hiding.append((piece, want, got))
+
+    shapes = len(bodies)
+    print(f"pieces checked: {checked}  "
+          f"(bodies: {shapes}, shapes: simple + foo-prefix + x-suffix = {len(all_pieces)})")
+    print(f"  raised: {len(raised)}")
+    for piece, err in raised[:5]:
+        print(f"  {piece!r:<28} {err}")
+    print(f"  diverged from bash: {len(diverged)}")
+    groups: dict = {}
+    for piece, want, got in diverged:
+        key = piece[:5]
+        groups.setdefault(key, []).append((piece, want, got))
+    for key, rows in sorted(groups.items(), key=lambda kv: -len(kv[1]))[:5]:
+        p, w, g = rows[0]
+        print(f"  {key!r:<8} x{len(rows):<4} e.g. {p!r:<28} bash={w!r:<14} guard={g!r}")
+    print(f"\nHIDING DIRECTION (bash yields subject bytes the wrapper does not): {len(hiding)}")
+    for piece, want, got in hiding[:10]:
+        print(f"  {piece!r:<28} bash={want!r:<14} guard={got!r}")
+    print("\nLIMITS: simple $'BODY' shapes covered by --fuzz too; new coverage is")
+    print("context (prefix/suffix concatenation).  A zero is a lower bound.")
+    return 1 if (hiding or raised) else 0
+
+
+def fuzz_splitter(max_len=2):
+    r"""Test _split_subcommands for $'...' boundary accuracy against bash.
+
+    TYPE A: 'echo $'BODY' ; printf MARK\\0' -- the semicolon is OUTSIDE the
+    $'...' form, so bash always splits and the splitter must give >= 2 pieces.
+
+    Self-check:
+      1. Four known structural cases (plain ';', ANSI-C + ';', ANSI-C alone,
+         ';' INSIDE $'...' body via \x3b).
+      2. A bash oracle on a small sample confirms the TYPE A semicolon is
+         genuinely a separator (MARK appears in bash output).
+
+    Hiding: splitter returns < 2 pieces for a TYPE A command.
+
+    LIMITS: only ';' tested as separator; bash oracle on first 30 bodies.
+    A zero is a lower bound on splitter boundary correctness.
+    """
+    mod = load_guard(DESTRUCTIVE_FIXED)
+    if not hasattr(mod, "_split_subcommands"):
+        print("guard has no _split_subcommands -- nothing to fuzz here.")
+        return 1
+
+    # Self-check 1: four known structural cases.
+    # _odd_trailing_backslashes would skip \x3b if it ended with \\ but it doesn't.
+    sc_cases = [
+        ("echo foo ; rm -rf /", 2, "plain semicolon"),
+        ("echo $'\\x41' ; rm -rf /", 2, "ANSI-C form + semicolon"),
+        ("echo $'\\x41'", 1, "ANSI-C, no separator"),
+        ("echo $'\\x3b'", 1, "semicolon INSIDE $'...' body -- not a boundary"),
+    ]
+    for cmd, want_count, label in sc_cases:
+        pieces = mod._split_subcommands(cmd)
+        non_empty = [p for p in pieces if p.strip()]
+        ok = (len(non_empty) >= 2) if want_count >= 2 else (len(non_empty) == 1)
+        if not ok:
+            print(f"SELF-CHECK FAILED [{label}]: "
+                  f"got {len(non_empty)} pieces, expected {want_count}")
+            return 2
+
+    # Self-check 2: bash oracle on one TYPE A probe.
+    bash_probe_out = subprocess.run(
+        ["bash", "-c", "echo $'\\x41' ; printf 'SPLITPROBE\\0'"],
+        capture_output=True, timeout=5,
+    ).stdout
+    if b"SPLITPROBE" not in bash_probe_out:
+        print("SELF-CHECK FAILED: bash did not split on outer ';'. No verdict.")
+        return 2
+
+    # Generate bodies.
+    bodies = []
+    for n in range(1, max_len + 1):
+        for combo in itertools.product(_FUZZ_ALPHABET, repeat=n):
+            body = "".join(combo)
+            if _odd_trailing_backslashes(body):
+                continue
+            bodies.append(body)
+
+    # Python check: splitter must return >= 2 non-empty pieces for TYPE A.
+    under_split = []
+    for body in bodies:
+        cmd = f"echo $'{body}' ; printf 'MARK\\0'"
+        pieces = mod._split_subcommands(cmd)
+        non_empty = [p for p in pieces if p.strip()]
+        if len(non_empty) < 2:
+            under_split.append((body, cmd, pieces))
+
+    # Bash oracle on first 30 bodies: verify MARK appears (TYPE A assumption).
+    sample = bodies[:min(30, len(bodies))]
+    marks = [f"BMARK{i}" for i in range(len(sample))]
+    batch = "; ".join(
+        f"echo $'{b}' ; printf '{m}\\0'"
+        for b, m in zip(sample, marks)
+    )
+    bash_out = subprocess.run(["bash", "-c", batch],
+                               capture_output=True, timeout=30).stdout
+    bash_missing = [m for m in marks if m.encode() not in bash_out]
+
+    print(f"self-check: 4 structural cases pass, bash oracle probe pass")
+    print(f"bodies checked (TYPE A): {len(bodies)}")
+    print(f"bash oracle sample ({len(sample)} bodies): "
+          f"{len(bash_missing)} marks missing (0 expected)")
+    if bash_missing:
+        print(f"  WARNING: bash missing marks: {bash_missing[:5]}")
+
+    print(f"\nPython splitter gave < 2 pieces for TYPE A: {len(under_split)}")
+    for body, cmd, pieces in under_split[:10]:
+        print(f"  body={body!r:<16} pieces={[p[:40] for p in pieces]}")
+
+    print(f"\nHIDING (splitter missed outer ';' boundary): {len(under_split)}")
+    print("\nLIMITS: only ';' separator tested; bash oracle on first 30 bodies only.")
+    print("A zero is a lower bound on _split_subcommands boundary correctness.")
+    return 1 if under_split else 0
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--verbose", action="store_true",
@@ -1833,9 +2090,19 @@ if __name__ == "__main__":
     ap.add_argument("--fuzz", nargs="?", type=int, const=3, default=None,
                     metavar="LEN",
                     help="differential-fuzz the escape expander against bash")
+    ap.add_argument("--fuzz-dq", nargs="?", type=int, const=3, default=None,
+                    metavar="LEN",
+                    help="differential-fuzz _expand_dollar_quoting in full-piece context")
+    ap.add_argument("--fuzz-split", nargs="?", type=int, const=2, default=None,
+                    metavar="LEN",
+                    help="fuzz _split_subcommands for $'...' boundary accuracy")
     args = ap.parse_args()
     if args.fuzz is not None:
         sys.exit(fuzz_expander(args.fuzz))
+    if args.fuzz_dq is not None:
+        sys.exit(fuzz_dollar_quoting(args.fuzz_dq))
+    if args.fuzz_split is not None:
+        sys.exit(fuzz_splitter(args.fuzz_split))
     if args.parse:
         sys.exit(parse_check())
     if args.splitter:

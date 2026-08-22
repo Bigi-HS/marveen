@@ -3,11 +3,12 @@
 Built by rackham, 2026-08-14, at marveen's request: validate dave's fix against
 **measured** benign cases rather than assumed ones.
 
-Harness: `scripts/guard_fp_corpus.py` (119 cases, runs in <1s, executes nothing).
+Harness: `scripts/guard_fp_corpus.py` (122 cases, runs in <1s, executes nothing).
 `--compare` diffs the two copies of the permission ruleset; `--splitter` reports
 which splitter a per-piece fix would inherit; `--guards` asks **both guard files**
 the same shapes; `--parse` reports which rows are valid bash at all; `--fuzz`
-differential-fuzzes the escape expander against bash itself.
+differential-fuzzes the escape expander against bash; `--fuzz-dq` fuzzes the
+dollar-quoting wrapper; `--fuzz-split` fuzzes the splitter boundary.
 
 ```
 python3 scripts/guard_fp_corpus.py            # table + summary
@@ -16,6 +17,8 @@ python3 scripts/guard_fp_corpus.py --compare  # live guard vs develop-tracked
 python3 scripts/guard_fp_corpus.py --guards   # permission vs destructive-bash
 python3 scripts/guard_fp_corpus.py --parse    # which BLOCK rows are valid bash
 python3 scripts/guard_fp_corpus.py --fuzz 3   # expander vs bash, as bytes
+python3 scripts/guard_fp_corpus.py --fuzz-dq 3    # wrapper in full-piece context
+python3 scripts/guard_fp_corpus.py --fuzz-split 2 # splitter boundary accuracy
 ```
 
 The bash PreToolUse chain is **two files**, so every row names the guard that
@@ -853,6 +856,89 @@ reads it to set a priority. So it is reported on its own line, as `L8` and `N5`
 are — the same rule reached from the other side: `not_runnable` is "cannot run",
 `no_effect` is "runs and does nothing", and both are excluded from the two
 headline counts and both say so.
+
+---
+
+## 5k. Extending the oracle to the wrapper and splitter layers (`--fuzz-dq`, `--fuzz-split`)
+
+`--fuzz` (5j) tested `_expand_ansi_c` on the body it receives. The body arrives
+pre-extracted, so that oracle is blind to two things: whether the **wrapper**
+(`_expand_dollar_quoting`) correctly finds the `$'...'` boundaries in a larger
+piece, and whether the **splitter** (`_split_subcommands`) correctly identifies
+command boundaries when `$'...'` forms are present.
+
+### `--fuzz-dq`: the dollar-quoting wrapper
+
+```
+python3 scripts/guard_fp_corpus.py --fuzz-dq 3
+```
+
+For each generated body, build three piece shapes — `$'BODY'`, `foo$'BODY'`, and
+`$'BODY'x` — and compare `shlex.split(_expand_dollar_quoting(piece))[0]` against
+the first token bash assigns to the piece. Result at len=3 (~36k pieces):
+
+| | |
+| --- | --- |
+| raised | **0** |
+| diverged from bash | **81** |
+| **diverged in the hiding direction** | **0** |
+
+The 81 divergences are the `\cDIGIT` family (`\c0`, `\c1`, …): the same class
+as R2, now confirmed to propagate through the wrapper into all three piece shapes.
+bash gives a control character; the wrapper gives the XOR result — a printable
+letter. The letter is NOT subject bytes that bash lacks, so it is still in the
+safe direction (guard is more restrictive than bash, not less). `S1` pins one
+representative.
+
+`S2` pins a different coverage point: `r$'\x6d' -rf /` — a command word built
+from a plain prefix plus a `$'...'` suffix. The full pipeline correctly detects
+`rm` as the command verb.
+
+**Self-check discipline:** A deliberately blank expander (drops all `$'...'`
+content) must fire the hiding detector before results are accepted. If it does not
+fire, no result is printed.
+
+### `--fuzz-split`: the splitter boundary
+
+```
+python3 scripts/guard_fp_corpus.py --fuzz-split 2
+```
+
+For each generated body, build a TYPE A command: `echo $'BODY' ; printf MARK\0`.
+The semicolon is **outside** the `$'...'` form, so it must always be a boundary.
+`_split_subcommands` must return ≥ 2 pieces. Result at len=2 (~529 bodies):
+
+| | |
+| --- | --- |
+| bodies checked | **529** |
+| under-splits (< 2 pieces for TYPE A) | **0** |
+| **hiding (bash split, splitter did not)** | **0** |
+
+`S3` pins the complementary case: `echo $'\x3b' ; rm -rf /`. The `\x3b`
+(semicolon) is **inside** the ANSI-C form and protected; the outer `;` is a real
+boundary. The splitter gives two pieces: command word of the first is `echo`
+(safe), the second is `rm -rf /` (blocked). This confirms the escape-aware scan
+correctly distinguishes a separator byte inside a `$'...'` body from one outside.
+
+**Self-check:** Four structural cases are verified before the fuzz run starts, and
+a bash probe confirms the TYPE A semicolon is genuinely a separator.
+
+### What these two zeros add
+
+`--fuzz` established that `_expand_ansi_c` does not hide subject bytes in the
+bodies it processes. `--fuzz-dq` and `--fuzz-split` extend that claim one layer
+up: the wrapper that calls `_expand_ansi_c` correctly handles the `$'...'`
+context boundary in all tested piece shapes, and the splitter correctly finds the
+command boundaries even when `$'...'` forms with separator-like content are
+present.
+
+All three oracles share the same control discipline — a probe in the same
+invocation, a detector proved able to fire — so a zero from any of them carries
+the same epistemic status.
+
+**Limits:** `--fuzz-dq` only tests pieces whose non-`$'...'` parts are safe to
+embed (no raw outer quotes). `--fuzz-split` only tests `;` as separator, and the
+bash oracle only covers the first 30 bodies. These are lower bounds.
 
 ---
 
