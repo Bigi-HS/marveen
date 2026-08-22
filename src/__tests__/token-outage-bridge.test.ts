@@ -3,6 +3,7 @@ import {
   classifyPane,
   runCycle,
   LIMIT_PATTERNS,
+  DEFAULT_STALE_OUTAGE_MS,
   type OutageDeps,
   type OutageState,
 } from '../web/token-outage-bridge.js'
@@ -253,6 +254,14 @@ describe('stale-outage guard: relaunchSession after staleOutageMs', () => {
 // The production DEFAULT_DEPS.createCard = defaultCreateCard calls createCard from noa-kanban.
 // We verify via the OutageDeps injection: the test passes a real createCard spy to confirm
 // the card is created with the expected fields when a limit is first detected.
+describe('DEFAULT_STALE_OUTAGE_MS literal pin (card 4defece0)', () => {
+  it('is exactly 20 minutes (policy change without test update must fail)', () => {
+    // Symbolic tests pass at any threshold -- this literal pins the policy value.
+    // Ref: symbolic-boundary-test-is-green-at-any-threshold memory entry.
+    expect(Math.round(DEFAULT_STALE_OUTAGE_MS / 60000)).toBe(20)
+  })
+})
+
 describe('W4: token-outage-bridge createCard routed through noa-kanban interface', () => {
   it('runCycle creates a card via the injected createCard dep on first limit detection', async () => {
     const createCard = vi.fn(() => 'card-xyz')

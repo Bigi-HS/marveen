@@ -20,7 +20,7 @@
 
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
@@ -93,7 +93,7 @@ export interface CycleResult {
 // force-relaunches it. Set to 20 min so a normal short limit window (< 5 min
 // observed in practice) is never disturbed, while a genuinely wedged session
 // (the 14:06 incident: 55 min stuck, no EXITED) gets recovered automatically.
-const DEFAULT_STALE_OUTAGE_MS = 20 * 60 * 1000
+export const DEFAULT_STALE_OUTAGE_MS = 20 * 60 * 1000
 
 export interface OutageDeps {
   detectLimit: () => LimitDetection
@@ -241,7 +241,11 @@ function defaultRelaunchSession(): boolean {
     logger.warn('token-outage: stale-limit kill-session executed')
     // Spawn channels.sh detached so the current process (token-outage-cli)
     // outlives the session kill and exits cleanly before the new session starts.
-    execFileSync('/bin/bash', [CHANNELS_SH], { timeout: 30_000, stdio: 'ignore', detached: true } as any)
+    // execFileSync does not support detached: true (option silently ignored,
+    // call blocks synchronously for 30 s then kills channels.sh). Use spawn +
+    // unref() instead so the child outlives the token-outage-cli process.
+    const child = spawn('/bin/bash', [CHANNELS_SH], { detached: true, stdio: 'ignore' })
+    child.unref()
     logger.warn('token-outage: channels.sh relaunched after stale limit')
     try {
       writeFileSync(RESPAWN_STAMP_FILE, String(Math.floor(Date.now() / 1000)))
