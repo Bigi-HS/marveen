@@ -5,7 +5,27 @@ dist/
 # Secrets & personal data
 .env
 .env.*
-store/
+store/*
+!store/buccaneers-kb/
+store/buccaneers-kb/*
+!store/buccaneers-kb/*.md
+!store/buccaneers-kb/topics/
+!store/buccaneers-kb/weapons/
+!store/buccaneers-kb/navies/
+!store/buccaneers-kb/fencing/
+!store/buccaneers-kb/sources/
+!store/buccaneers-kb/service/
+!store/buccaneers-kb/drafts/
+!store/buccaneers-kb/images/
+store/buccaneers-kb/images/*
+!store/buccaneers-kb/images/INDEX.md
+!store/claude-course/
+store/claude-course/*
+!store/claude-course/*.md
+!store/claude-course/*.html
+!store/claude-course/img-src/
+store/claude-course/img-src/*
+!store/claude-course/img-src/*.html
 workspace/
 agents/
 # Version-control ONLY per-agent agent-config.json (no secrets: model/team/
