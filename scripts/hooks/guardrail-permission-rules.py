@@ -42,10 +42,15 @@ import shlex
 
 # ── helpers (shared with destructive-bash) ───────────────────────────────────
 
-_CMD_SUBST_RE = re.compile(r'\$\(|[<>]\(|\)|`')
-
-def _split_subcommands(command):
+def _split_subcommands(command, *, nested=True):
     """Split on shell sequencing operators + command substitution boundaries.
+
+    `nested=False` yields TOP-LEVEL segments instead: substitutions stay inline
+    with the command that contains them, and a separator inside one does not
+    split. That answers a different question -- "which command does this nested
+    read belong to" -- which R2 needs to scope its carve-out (see
+    match_env_file_print). Both modes share this one scanner on purpose: two
+    scanners would drift, and every quoting fix has had to be made exactly once.
 
     Quote-aware: | ; && || \\n are only treated as separators OUTSIDE single-
     or double-quoted strings.  A bare regex split on | would cut inside quoted
@@ -57,40 +62,179 @@ def _split_subcommands(command):
     Without this, a trailing \\ before \\n leaves a dangling escape that makes
     shlex raise ValueError -> the piece is silently skipped, bypassing URL
     and filename detection in R2/R3 (card 9e465135).
+
+    Substitution boundaries are recognised DURING this scan, not in a regex
+    pre-pass (card 2cb1ed6e).  The pre-pass rewrote `$(` `)` and backticks to
+    ';' while blind to quoting, and this scan then split on ';' while unable to
+    tell an injected separator from a typed one -- so inside double quotes the
+    injected separators were stranded as literal text, the nested command never
+    became its own piece, and the piece classified by its OUTER word:
+
+        echo "$(cat .env)"  ->  ['echo ";cat .env;"']  ->  command word `echo`
+
+    R2, R2b and R3 all consume this function, so all three were bypassed by one
+    pair of quotes.  Which forms are live in which context is asymmetric, and
+    the table is measured against bash rather than assumed:
+
+        form        unquoted   in "double"   in 'single'
+        $( ... )    expands    EXPANDS       literal
+        ` ... `     expands    EXPANDS       literal
+        <( ... )    expands    LITERAL       literal
+
+    Hence: extract substitutions everywhere except inside single quotes, and
+    process substitution only when fully unquoted.  A symmetric rule that also
+    split inside single quotes would re-create the over-block card 295ebfcc
+    removed; a revert re-creates its false positives.  Both naive directions
+    oscillate, which is the tell that quoting was never the axis -- "is this a
+    nested command" is.
     """
     command = re.sub(r'\\\n[ \t]*', ' ', command)
-    normalized = _CMD_SUBST_RE.sub(';', command)
     parts: list[str] = []
     buf: list[str] = []
+    # Quote state saved on entering a substitution: a substitution starts a
+    # FRESH quoting context, so `"$(cat '.env')"` must honour the inner single
+    # quotes rather than inherit the outer double ones.
+    stack: list[tuple[bool, bool, str]] = []
     in_sq = False  # inside '...'
     in_dq = False  # inside "..."
+
+    def _open_substitution(opener, closer):
+        """Flush the enclosing fragment and start the nested command.
+
+        The flushed fragment must stay parseable on its own: lifting
+        `$(...)` out of `-H "Bearer $(cat f)"` would otherwise leave a dangling
+        `"` behind, shlex raises, and the piece becomes _PARSE_FAIL -- turning a
+        readable command into a fail-closed block. So the open quote is closed on
+        the way out and re-opened on the way back in.
+
+        In top-level mode nothing is flushed: the substitution keeps its literal
+        text inside the enclosing segment, and the stack only records that we are
+        no longer at top level.
+        """
+        nonlocal buf, in_sq, in_dq
+        if nested:
+            parts.append(''.join(buf) + ('"' if in_dq else ''))
+            buf = []
+        else:
+            buf.append(opener)
+        stack.append((in_sq, in_dq, closer))
+        in_sq = in_dq = False
+
+    def _close_substitution(closer):
+        nonlocal buf, in_sq, in_dq
+        if nested:
+            parts.append(''.join(buf))
+            in_sq, in_dq, _ = stack.pop()
+            buf = ['"'] if in_dq else []
+        else:
+            buf.append(closer)
+            in_sq, in_dq, _ = stack.pop()
+
     i = 0
-    n = len(normalized)
+    n = len(command)
     while i < n:
-        ch = normalized[i]
+        ch = command[i]
+        nxt = command[i + 1] if i + 1 < n else ''
+
+        # Inside double quotes a backslash escapes only these four; unquoted it
+        # escapes anything -- `find . \( -name x \)` must not be read as a
+        # subshell.  Inside single quotes a backslash is literal.
+        if ch == '\\' and not in_sq and nxt:
+            if in_dq and nxt not in ('"', '$', '`', '\\'):
+                buf.append(ch); i += 1
+                continue
+            buf.append(ch); buf.append(nxt); i += 2
+            continue
+
         if ch == "'" and not in_dq:
             in_sq = not in_sq
-            buf.append(ch)
-        elif ch == '"' and not in_sq:
+            buf.append(ch); i += 1
+            continue
+        if ch == '"' and not in_sq:
             in_dq = not in_dq
-            buf.append(ch)
-        elif not in_sq and not in_dq:
+            buf.append(ch); i += 1
+            continue
+
+        # `$'...'` is ANSI-C quoting, and inside it `\'` is an ESCAPED QUOTE,
+        # not a close. Reading it with the ordinary single-quote rule (where a
+        # backslash is literal) ends the string one quote early -- and quote
+        # parity is a state machine, not an offset: the next quote RE-OPENS a
+        # region bash never opened, it stays open to end of line, and every
+        # separator after it is swallowed into this piece. All five rules then
+        # look at one piece whose command word is whatever came first.
+        # `_expand_dollar_quoting` already scans the body this way. The two have
+        # to agree, and this one runs first.
+        if not in_sq and not in_dq and ch == '$' and nxt == "'":
+            j = i + 2
+            while j < n and command[j] != "'":
+                j += 2 if command[j] == '\\' else 1
+            # Unterminated: bash rejects the line, so there is nothing to split.
+            buf.append(command[i:j + 1])
+            i = j + 1
+            continue
+        if not in_sq and ch == '$' and nxt == '(':
+            _open_substitution('$(', ')')
+            i += 2
+            continue
+        if not in_sq and ch == '`':
+            # In nested mode a closing backtick simply opens another (empty)
+            # piece, which is harmless there. Top-level mode must actually close,
+            # or the rest of the command would stay inside a substitution that
+            # never ends and would never split into segments again.
+            if not nested and stack and stack[-1][2] == '`':
+                _close_substitution('`')
+            else:
+                _open_substitution('`', '`')
+            i += 1
+            continue
+        if not in_sq and not in_dq and ch in '<>' and nxt == '(':
+            _open_substitution(ch + '(', ')')
+            i += 2
+            continue
+        # A bare `( ... )` subshell at command position is a nested command too:
+        # `(curl -X PUT ...)` must still classify as curl (card ec7754d7).  Only
+        # at command position -- a stray '(' inside an argument is not an opener.
+        if (not in_sq and not in_dq and ch == '('
+                and not ''.join(buf).strip().split(';')[-1].strip()):
+            _open_substitution('(', ')')
+            i += 1
+            continue
+        # The closer has to be as quote-aware as the openers above, or a close
+        # paren sitting inside quotes INSIDE the substitution pops the stack
+        # early and swallows the rest of the command into one piece -- the same
+        # endpoint as the defect this function was rewritten to fix (DA-62-C).
+        # Measured: `echo "$(echo 'x)' ; echo M)"` prints M, so that paren
+        # closes nothing.  The stack reset means in_sq/in_dq here are the
+        # substitution's OWN quotes, not the enclosing ones.
+        # Nested mode pops on ANY ')' with a non-empty stack, unchanged. Top-level
+        # mode requires the opener to match, so a ')' inside a backtick pair does
+        # not end the segment early.
+        if (ch == ')' and stack and not in_sq and not in_dq
+                and (nested or stack[-1][2] == ')')):
+            _close_substitution(')')
+            i += 1
+            continue
+
+        # Separators split only at top level. In nested mode the stack is empty
+        # whenever we are inside a substitution's own piece, so this reads the
+        # same as before; in top-level mode it keeps `a $(b; c) d` as one segment.
+        if not in_sq and not in_dq and not (stack and not nested):
             if ch in (';', '\n'):
-                parts.append(''.join(buf)); buf = []
-            elif ch == '|':
+                parts.append(''.join(buf)); buf = []; i += 1
+                continue
+            if ch == '|':
                 # || (logical-OR) -> skip second |, split once
-                if i + 1 < n and normalized[i + 1] == '|':
+                if nxt == '|':
                     i += 1
-                parts.append(''.join(buf)); buf = []
-            elif ch == '&' and i + 1 < n and normalized[i + 1] == '&':
+                parts.append(''.join(buf)); buf = []; i += 1
+                continue
+            if ch == '&' and nxt == '&':
                 # && (logical-AND) -> skip second &, split once
                 i += 1
-                parts.append(''.join(buf)); buf = []
-            else:
-                buf.append(ch)
-        else:
-            buf.append(ch)
-        i += 1
+                parts.append(''.join(buf)); buf = []; i += 1
+                continue
+
+        buf.append(ch); i += 1
     parts.append(''.join(buf))
     return parts
 
@@ -99,22 +243,219 @@ def _split_subcommands(command):
 # piece we cannot prove it is safe (card 295ebfcc).
 _PARSE_FAIL = object()
 
+def _expand_ansi_c(body):
+    r"""Expand the escapes bash expands inside `$'...'`, and only those.
+
+    The escape set is the shell's: the named ones, `\xHH`, `\uHHHH`,
+    `\UHHHHHHHH`, one to three octal digits, and `\cX` for a control character.
+    An escape bash does not recognise is left alone, backslash included, because
+    bash leaves it alone too -- guessing here would invent a token no shell would
+    ever build.
+
+    TOTAL BY CONSTRUCTION, which is the property that matters more than the
+    fidelity. `chr()` stops at 0x10FFFF and bash does not: it writes the bytes
+    and carries on. A codepoint above the ceiling therefore has to degrade to
+    literal text here, because the alternative is an exception crossing into
+    _tokenize, where every rule would skip the piece and a destructive command
+    would be allowed by a word appended to it (card 151a0756, rackham Q family).
+    The value this produces is not what bash produces; the point is only that the
+    REST of the command stays visible to the rules.
+
+    A NUL cannot survive in a bash word, so it is dropped rather than carried
+    into a regex that would then match on something the shell never passes.
+    """
+    hexdigits = "0123456789abcdefABCDEF"
+    named = {
+        "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f",
+        "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+        "\\": "\\", "'": "'", '"': '"', "?": "?",
+    }
+    out = []
+    i = 0
+    n = len(body)
+    while i < n:
+        ch = body[i]
+        if ch != "\\" or i + 1 >= n:
+            out.append(ch)
+            i += 1
+            continue
+        nxt = body[i + 1]
+        if nxt in named:
+            out.append(named[nxt])
+            i += 2
+        elif nxt in ("x", "u", "U"):
+            width = {"x": 2, "u": 4, "U": 8}[nxt]
+            j = i + 2
+            digits = ""
+            while j < n and len(digits) < width and body[j] in hexdigits:
+                digits += body[j]
+                j += 1
+            if not digits:
+                out.append(ch)
+                out.append(nxt)
+                i += 2
+                continue
+            try:
+                out.append(chr(int(digits, 16)))
+            except ValueError:
+                out.append(ch)
+                out.append(nxt)
+                out.append(digits)
+            i = j
+        elif nxt in "01234567":
+            j = i + 1
+            digits = ""
+            while j < n and len(digits) < 3 and body[j] in "01234567":
+                digits += body[j]
+                j += 1
+            out.append(chr(int(digits, 8) & 0xFF))
+            i = j
+        elif nxt == "c" and i + 2 < n:
+            # Lower-cased ASCII only. `str.upper()` can return TWO characters for
+            # some codepoints, and `ord()` on those raises a TypeError that the
+            # ValueError guard above would not even catch.
+            code = ord(body[i + 2])
+            if 0x61 <= code <= 0x7A:
+                code -= 0x20
+            out.append(chr(code ^ 0x40))
+            i += 3
+        else:
+            out.append(ch)
+            out.append(nxt)
+            i += 2
+    return "".join(out).replace("\x00", "")
+
+
+def _expand_dollar_quoting(piece):
+    r"""Resolve ANSI-C (`$'...'`) and locale (`$"..."`) quoting the way bash does.
+
+    shlex implements neither, so it leaves the dollar glued to the token while
+    bash strips it -- and, for the ANSI-C form, expands the escapes inside it.
+    Both halves hide a rule's subject, at two different heights:
+
+        cat $'~/.git-credentials'  ->  ['cat', '$~/.git-credentials']   (path)
+        $'\x72m' -rf /             ->  ['\x72m', '-rf', '/']            (verb)
+
+    The path form defeats rules that anchor a path to the whole token. The verb
+    form is worse, because no rule reaches its subject at all -- the guard sees a
+    command word it has never heard of and moves on. Both are fixed here, in the
+    tokenizer, rather than by loosening the anchors: the anchoring is deliberate
+    (card 48d3c0f9), and a substring search would trade one false negative for a
+    class of false positives.
+
+    Scoped exactly as bash scopes it, which is the part that keeps this from
+    blocking ordinary work. bash applies neither form inside single or double
+    quotes, so escape text in a commit message or in `awk '{print $1}'` survives
+    untouched; a real expansion (`$HOME/...`) keeps its dollar; and a plain
+    `'\x72m'` stays the literal string it is -- that one is not a near miss, it
+    is a command bash refuses to find, so allowing it is the correct verdict and
+    an expander that ignored the dollar would be blocking a string.
+    """
+    out = []
+    in_sq = in_dq = False
+    i = 0
+    n = len(piece)
+    while i < n:
+        ch = piece[i]
+        if ch == "\\" and not in_sq and i + 1 < n:
+            out.append(ch)
+            out.append(piece[i + 1])
+            i += 2
+            continue
+        if ch == "'" and not in_dq:
+            in_sq = not in_sq
+        elif ch == '"' and not in_sq:
+            in_dq = not in_dq
+        elif (ch == "$" and not in_sq and not in_dq
+                and i + 1 < n and piece[i + 1] == "'"):
+            j = i + 2
+            while j < n and piece[j] != "'":
+                j += 2 if piece[j] == "\\" else 1
+            if j >= n:
+                # Unterminated: bash will not run this either. Drop the dollar
+                # and let the dangling quote reach shlex, which is where the
+                # unparseable verdict already lives.
+                i += 1
+                continue
+            out.append(shlex.quote(_expand_ansi_c(piece[i + 2:j])))
+            i = j + 1
+            continue
+        elif (ch == "$" and not in_sq and not in_dq
+                and i + 1 < n and piece[i + 1] == '"'):
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _tokenize(piece):
+    # The quoting is resolved OUTSIDE the try on purpose. `except ValueError`
+    # here means one thing -- shlex could not parse the quoting -- and an
+    # expander raising inside it would be answering a different question with
+    # that branch. In THIS file that lands on the fail-CLOSED side, so such a
+    # defect surfaces as a block with a false cause; in the sibling the same
+    # defect is a silent allow. Neither is a branch a tokenizer bug should reach:
+    # an internal failure belongs to main(), which fails open loudly.
+    expanded = _expand_dollar_quoting(piece)
     try:
-        return shlex.split(piece, comments=False, posix=True)
+        return shlex.split(expanded, comments=False, posix=True)
     except ValueError:
         return _PARSE_FAIL  # fail-closed: unparseable piece -> callers block
 
+# Words that can stand where the command word stands without BEING the command.
+# Until card 151a0756 only three were handled -- `sudo`, a VAR=x assignment and
+# the bare `(` subshell -- each added when a report of the day showed it. That is
+# what a mis-scoped error class looks like from the inside: the piece produced by
+#
+#     for x in 1; do cat store/.dashboard-token; done
+#
+# is `do cat store/.dashboard-token`, its command word was `do`, `do` is in no
+# verb set, and so R2, R2b and R3 all silently stopped applying. Measured on the
+# promoted copy through the real hook invocation: five wrapper forms turned every
+# deny rule off, while `( … )` still blocked -- the class was scoped to one
+# wrapper, not to the position.
+_SHELL_KEYWORDS = frozenset({
+    'do', 'done', 'then', 'else', 'elif', 'fi', 'esac', 'in', 'coproc',
+    'for', 'if', 'while', 'until', 'case', 'select', 'function', '{', '}', '!',
+})
+
+# Wrappers that RUN the command that follows them, so the real command word is
+# further right. Measured, not assumed: `command`, `env`, `timeout 5` and `!` all
+# reach the file (rackham, corpus rows L13-L16). The fleet has met this family
+# before -- the same prefixes reached the real binary past the grep shim.
+_COMMAND_PREFIXES = frozenset({
+    'sudo', 'command', 'builtin', 'exec', 'nohup', 'env', 'nice', 'ionice',
+    'time', 'timeout', 'stdbuf', 'setsid', 'doas',
+})
+
+# A wrapper may carry its OWN argument before the command (`timeout 5 cat f`,
+# `nice -n 10 cat f`), so skipping is not "skip token 0" -- that would return the
+# duration as the command word and miss the read.
+_PREFIX_ARG_RE = re.compile(r'^\d+(?:\.\d+)?[smhd]?$')
+
 def _command_word(tokens):
+    after_prefix = False
     for tok in tokens:
-        if tok == 'sudo':
+        if tok in _SHELL_KEYWORDS:
+            after_prefix = False
             continue
         if '=' in tok and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', tok):
             continue
         # Strip leading ( from subshell context: (curl ...) tokenizes as '(curl'
         cmd = tok.lstrip('(')
-        if cmd:
-            return os.path.basename(cmd)
+        if not cmd:
+            continue
+        cmd = os.path.basename(cmd)
+        if cmd in _COMMAND_PREFIXES:
+            after_prefix = True
+            continue
+        # Only a wrapper's own flags/duration are skipped, and only directly
+        # after it. Widening this to "any unrecognised word" would invent a new
+        # false positive: `echo cat .env` prints a string, it reads nothing.
+        if after_prefix and (tok.startswith('-') or _PREFIX_ARG_RE.match(tok)):
+            continue
+        return cmd
     return ''
 
 # Verbs that read their positional argument AS A FILE (not as a string to print).
@@ -207,34 +548,85 @@ def match_external_dir(tool_name: str, path: str) -> bool:
 
 # ── R2: .env file print via Bash ─────────────────────────────────────────────
 
+def _is_localhost_only_curl(command: str) -> bool:
+    """The documented fleet-API shape: a curl whose every URL is loopback.
+
+    Used only to carve out the sanctioned auth-token read (see
+    match_env_file_print). Deliberately strict: the outer command must BE curl,
+    there must be at least one URL, and every URL must be loopback. One external
+    URL anywhere in the command disqualifies the whole command.
+    """
+    pieces = _split_subcommands(command)
+    head = _tokenize(pieces[0]) if pieces else None
+    if head is _PARSE_FAIL or not head or _command_word(head) != 'curl':
+        return False
+    urls = []
+    for piece in pieces:
+        tokens = _tokenize(piece)
+        if tokens is _PARSE_FAIL or not tokens:
+            continue
+        urls.extend(t for t in tokens
+                    if t.startswith('http://') or t.startswith('https://'))
+    return bool(urls) and all(_LOCALHOST_RE.match(u) for u in urls)
+
+
 def match_env_file_print(command: str) -> bool:
     """R2: A print-style Bash command reading a .env/.env.* file or a fleet
     credential file (store/.dashboard-token, ~/.git-credentials, ~/.claude.json).
     .env files hold project credentials; credential files hold fleet API / GitHub
     PAT / Claude auth secrets. Reading either via shell exposes raw content to the
     agent's output context (in-process read; card 0680cf34 extends to token paths).
-    """
-    def _is_sensitive(tok: str) -> bool:
-        return bool(_ENV_FILE_RE.search(tok) or _TOKEN_PATHS_RE.search(tok))
 
-    for piece in _split_subcommands(command):
-        tokens = _tokenize(piece)
-        if tokens is _PARSE_FAIL:
-            # Targeted fail-closed: only block when the unparseable piece also
-            # contains the specific threat pattern (a sensitive filename).
-            if _is_sensitive(piece):
-                return True
-            continue
-        if not tokens:
-            continue
-        if _command_word(tokens) not in _FILE_READ_VERBS:
-            continue
-        # Check every non-flag argument for a sensitive file pattern.
-        for tok in tokens[1:]:
-            if tok.startswith('-'):
+    ONE CARVE-OUT (card 2cb1ed6e): the auth-token read inside the canonical
+    inter-agent send, which every agent's CLAUDE.md prescribes:
+
+        curl ... http://localhost:3420/api/messages
+             -H "Authorization: Bearer $(cat store/.dashboard-token)" ...
+
+    That read passed only because the quote shield hid it from this rule. Fixing
+    the splitter makes it visible, so without this carve-out closing the hole
+    would block every agent's every send at once, mid-work, fleet-wide -- the
+    repair would be a worse outage than the defect. The carve-out is as narrow as
+    the recipe: fleet TOKEN paths only, .env NEVER, and only when the command is
+    a curl whose every URL is loopback. `cat store/.dashboard-token` on its own,
+    the same read piped anywhere else, or the same header sent to an external
+    host all stay denied.
+    """
+    def _is_sensitive(tok: str, sanctioned: bool) -> bool:
+        if _ENV_FILE_RE.search(tok):
+            return True
+        if _TOKEN_PATHS_RE.search(tok):
+            return not sanctioned
+        return False
+
+    # The sanction is a property of ONE curl invocation, so it is decided per
+    # top-level segment rather than per command string. Deciding it once for the
+    # whole string had two opposite failures from the same offset (card 151a0756
+    # sibling): any leading piece that was not curl disqualified a legitimate
+    # send, and once a command did qualify the exemption also covered pieces
+    # AFTER the curl, so `<loopback curl>; cat <token>` passed. Only the first
+    # hurts anyone, which is why the tempting repair -- widening the carve-out --
+    # is the one that makes the silent direction worse.
+    for segment in _split_subcommands(command, nested=False):
+        sanctioned = _is_localhost_only_curl(segment)
+        for piece in _split_subcommands(segment):
+            tokens = _tokenize(piece)
+            if tokens is _PARSE_FAIL:
+                # Targeted fail-closed: only block when the unparseable piece also
+                # contains the specific threat pattern (a sensitive filename).
+                if _is_sensitive(piece, sanctioned):
+                    return True
                 continue
-            if _is_sensitive(tok):
-                return True
+            if not tokens:
+                continue
+            if _command_word(tokens) not in _FILE_READ_VERBS:
+                continue
+            # Check every non-flag argument for a sensitive file pattern.
+            for tok in tokens[1:]:
+                if tok.startswith('-'):
+                    continue
+                if _is_sensitive(tok, sanctioned):
+                    return True
     return False
 
 
@@ -263,11 +655,16 @@ _OPEN_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
-# NOTE: _split_subcommands + _tokenize are NOT used here because _split_subcommands
-# replaces ALL ')' with ';', which destroys inline code strings that contain
-# parentheses (e.g. open('.env').read()). Instead we tokenize the raw command
-# directly with shlex, which handles quoted strings correctly, then scan for the
-# -c/-e flag and inspect its value token for .env open patterns.
+# This rule used to tokenize the RAW command and never split it, because the old
+# splitter rewrote every ')' to ';' in a regex pre-pass and so destroyed inline
+# code containing parentheses (`open('.env').read()`). That pre-pass is gone
+# (card 2cb1ed6e): the scan is quote-aware, and `(` only opens a nested command
+# when it is unquoted at command position -- which the paren in `print(open(...))`
+# never is. The stale note mattered, because not splitting meant any word before
+# the interpreter hid it: `for x in 1; do python3 -c "…" ; done` tokenized whole,
+# the command word was `for`, and the rule stopped (card 151a0756).
+# The PARSE-FAIL surface is deliberately left on the whole command, exactly as
+# before, so this change widens detection without moving the fail-closed line.
 
 
 def match_interpreter_env_read(command: str) -> bool:
@@ -276,33 +673,34 @@ def match_interpreter_env_read(command: str) -> bool:
     bypass shell file-read verbs and therefore slip past R2.
     Script-file invocations (python3 script.py) are not inspected because
     we cannot read the file contents statically."""
-    tokens = _tokenize(command)
-    if tokens is _PARSE_FAIL:
+    if _tokenize(command) is _PARSE_FAIL:
         return True  # fail-closed: unparseable interpreter command -> block
-    if not tokens:
-        return False
-    if _command_word(tokens) not in _INTERPRETER_CMDS:
-        return False
-    # Walk tokens looking for -c/-e flags or <<< (here-string) followed by code.
-    i = 1
-    while i < len(tokens):
-        tok = tokens[i]
-        code = None
-        if tok in ('-c', '-e') and i + 1 < len(tokens):
-            code = tokens[i + 1]
-            i += 2
-        elif tok.startswith(('-c', '-e')) and len(tok) > 2:
-            code = tok[2:]
-            i += 1
-        elif tok == '<<<' and i + 1 < len(tokens):
-            # here-string: `python3 <<< "code"` -- the next token IS the code
-            code = tokens[i + 1]
-            i += 2
-        else:
-            i += 1
+    for piece in _split_subcommands(command):
+        tokens = _tokenize(piece)
+        if tokens is _PARSE_FAIL or not tokens:
             continue
-        if code and (_OPEN_ENV_RE.search(code) or _OPEN_TOKEN_RE.search(code)):
-            return True
+        if _command_word(tokens) not in _INTERPRETER_CMDS:
+            continue
+        # Walk tokens looking for -c/-e flags or <<< (here-string) followed by code.
+        i = 1
+        while i < len(tokens):
+            tok = tokens[i]
+            code = None
+            if tok in ('-c', '-e') and i + 1 < len(tokens):
+                code = tokens[i + 1]
+                i += 2
+            elif tok.startswith(('-c', '-e')) and len(tok) > 2:
+                code = tok[2:]
+                i += 1
+            elif tok == '<<<' and i + 1 < len(tokens):
+                # here-string: `python3 <<< "code"` -- the next token IS the code
+                code = tokens[i + 1]
+                i += 2
+            else:
+                i += 1
+                continue
+            if code and (_OPEN_ENV_RE.search(code) or _OPEN_TOKEN_RE.search(code)):
+                return True
     return False
 
 

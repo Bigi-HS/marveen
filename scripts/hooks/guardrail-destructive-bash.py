@@ -88,40 +88,414 @@ _SQL_CLIENTS = frozenset({"sqlite3", "psql", "mysql", "mariadb"})
 _SQL_DROP_RE = re.compile(r"\b(?:DROP|TRUNCATE)\s+(?:TABLE|DATABASE)\b", re.IGNORECASE)
 
 
-# Command-substitution delimiters ($(  )  `) are neutralized to separators so an
-# inner command (e.g. the `cat` in `echo $(cat ~/.git-credentials)`) becomes its
-# own piece with its own command word, instead of being hidden as an argument.
-_CMD_SUBST_RE = re.compile(r"\$\(|\)|`")
-
-
-def _split_subcommands(command):
+def _split_subcommands(command, *, nested=True):
     """Split a command line into the pieces that each start with their own
-    command word, on the shell operators that sequence commands (and on
-    command-substitution boundaries). Lets us catch `echo x && rm -rf ~` and the
-    inner command of `$( ... )` while keeping per-subcommand command-word context."""
-    normalized = _CMD_SUBST_RE.sub(";", command)
-    return re.split(r"(?:&&|\|\||[;|\n])", normalized)
+    command word, on the shell operators that sequence commands and on
+    command-substitution boundaries. Lets us catch `echo x && rm -rf ~` and the
+    inner `rm` of `$( ... )` while keeping per-piece command-word context.
+
+    Quote-aware, and that is the point of card 151a0756. This file used to find
+    the substitution boundaries in a regex PRE-PASS over the raw string, blind
+    to quoting, so a close paren inside a quoted ARGUMENT was rewritten to a
+    separator and the split landed in the middle of the string. Both halves were
+    left with an unbalanced quote, `_tokenize` raised, and every rule skips a
+    piece it cannot tokenize -- so the dangerous piece was never examined:
+
+        rm -rf /            -> ['rm -rf /']              BLOCK
+        rm -rf / "note )"   -> ['rm -rf / "note ', '"']  allow
+
+    Five rules, four quoted forms, twenty cells, all open, and no wrapper
+    needed. Finding the boundaries DURING this scan is what closes it: a close
+    paren is a boundary only where bash treats it as one.
+
+    `nested=False` yields top-level segments instead. Nothing in this file calls
+    that mode; it is carried so that both copies of this function stay identical,
+    which SiblingSourceIdentityTests asserts.
+
+    The two guards hold COPIES rather than importing one shared module on
+    purpose: promote-guard.py promotes a SINGLE file into .guard/, so an import
+    of a neighbouring module would resolve against a directory that does not
+    contain it, the hook would raise on every invocation, and a crashing hook
+    fails open on everything. The duplication is deliberate; the test is what
+    keeps it honest.
+    """
+    command = re.sub(r'\\\n[ \t]*', ' ', command)
+    parts: list[str] = []
+    buf: list[str] = []
+    # Quote state saved on entering a substitution: a substitution starts a
+    # FRESH quoting context, so `"$(cat '.env')"` must honour the inner single
+    # quotes rather than inherit the outer double ones.
+    stack: list[tuple[bool, bool, str]] = []
+    in_sq = False  # inside '...'
+    in_dq = False  # inside "..."
+
+    def _open_substitution(opener, closer):
+        """Flush the enclosing fragment and start the nested command.
+
+        The flushed fragment must stay parseable on its own: lifting
+        `$(...)` out of `-H "Bearer $(cat f)"` would otherwise leave a dangling
+        `"` behind, shlex raises, and the piece becomes _PARSE_FAIL -- turning a
+        readable command into a fail-closed block. So the open quote is closed on
+        the way out and re-opened on the way back in.
+
+        In top-level mode nothing is flushed: the substitution keeps its literal
+        text inside the enclosing segment, and the stack only records that we are
+        no longer at top level.
+        """
+        nonlocal buf, in_sq, in_dq
+        if nested:
+            parts.append(''.join(buf) + ('"' if in_dq else ''))
+            buf = []
+        else:
+            buf.append(opener)
+        stack.append((in_sq, in_dq, closer))
+        in_sq = in_dq = False
+
+    def _close_substitution(closer):
+        nonlocal buf, in_sq, in_dq
+        if nested:
+            parts.append(''.join(buf))
+            in_sq, in_dq, _ = stack.pop()
+            buf = ['"'] if in_dq else []
+        else:
+            buf.append(closer)
+            in_sq, in_dq, _ = stack.pop()
+
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        nxt = command[i + 1] if i + 1 < n else ''
+
+        # Inside double quotes a backslash escapes only these four; unquoted it
+        # escapes anything -- `find . \( -name x \)` must not be read as a
+        # subshell.  Inside single quotes a backslash is literal.
+        if ch == '\\' and not in_sq and nxt:
+            if in_dq and nxt not in ('"', '$', '`', '\\'):
+                buf.append(ch); i += 1
+                continue
+            buf.append(ch); buf.append(nxt); i += 2
+            continue
+
+        if ch == "'" and not in_dq:
+            in_sq = not in_sq
+            buf.append(ch); i += 1
+            continue
+        if ch == '"' and not in_sq:
+            in_dq = not in_dq
+            buf.append(ch); i += 1
+            continue
+
+        # `$'...'` is ANSI-C quoting, and inside it `\'` is an ESCAPED QUOTE,
+        # not a close. Reading it with the ordinary single-quote rule (where a
+        # backslash is literal) ends the string one quote early -- and quote
+        # parity is a state machine, not an offset: the next quote RE-OPENS a
+        # region bash never opened, it stays open to end of line, and every
+        # separator after it is swallowed into this piece. All five rules then
+        # look at one piece whose command word is whatever came first.
+        # `_expand_dollar_quoting` already scans the body this way. The two have
+        # to agree, and this one runs first.
+        if not in_sq and not in_dq and ch == '$' and nxt == "'":
+            j = i + 2
+            while j < n and command[j] != "'":
+                j += 2 if command[j] == '\\' else 1
+            # Unterminated: bash rejects the line, so there is nothing to split.
+            buf.append(command[i:j + 1])
+            i = j + 1
+            continue
+        if not in_sq and ch == '$' and nxt == '(':
+            _open_substitution('$(', ')')
+            i += 2
+            continue
+        if not in_sq and ch == '`':
+            # In nested mode a closing backtick simply opens another (empty)
+            # piece, which is harmless there. Top-level mode must actually close,
+            # or the rest of the command would stay inside a substitution that
+            # never ends and would never split into segments again.
+            if not nested and stack and stack[-1][2] == '`':
+                _close_substitution('`')
+            else:
+                _open_substitution('`', '`')
+            i += 1
+            continue
+        if not in_sq and not in_dq and ch in '<>' and nxt == '(':
+            _open_substitution(ch + '(', ')')
+            i += 2
+            continue
+        # A bare `( ... )` subshell at command position is a nested command too:
+        # `(curl -X PUT ...)` must still classify as curl (card ec7754d7).  Only
+        # at command position -- a stray '(' inside an argument is not an opener.
+        if (not in_sq and not in_dq and ch == '('
+                and not ''.join(buf).strip().split(';')[-1].strip()):
+            _open_substitution('(', ')')
+            i += 1
+            continue
+        # The closer has to be as quote-aware as the openers above, or a close
+        # paren sitting inside quotes INSIDE the substitution pops the stack
+        # early and swallows the rest of the command into one piece -- the same
+        # endpoint as the defect this function was rewritten to fix (DA-62-C).
+        # Measured: `echo "$(echo 'x)' ; echo M)"` prints M, so that paren
+        # closes nothing.  The stack reset means in_sq/in_dq here are the
+        # substitution's OWN quotes, not the enclosing ones.
+        # Nested mode pops on ANY ')' with a non-empty stack, unchanged. Top-level
+        # mode requires the opener to match, so a ')' inside a backtick pair does
+        # not end the segment early.
+        if (ch == ')' and stack and not in_sq and not in_dq
+                and (nested or stack[-1][2] == ')')):
+            _close_substitution(')')
+            i += 1
+            continue
+
+        # Separators split only at top level. In nested mode the stack is empty
+        # whenever we are inside a substitution's own piece, so this reads the
+        # same as before; in top-level mode it keeps `a $(b; c) d` as one segment.
+        if not in_sq and not in_dq and not (stack and not nested):
+            if ch in (';', '\n'):
+                parts.append(''.join(buf)); buf = []; i += 1
+                continue
+            if ch == '|':
+                # || (logical-OR) -> skip second |, split once
+                if nxt == '|':
+                    i += 1
+                parts.append(''.join(buf)); buf = []; i += 1
+                continue
+            if ch == '&' and nxt == '&':
+                # && (logical-AND) -> skip second &, split once
+                i += 1
+                parts.append(''.join(buf)); buf = []; i += 1
+                continue
+
+        buf.append(ch); i += 1
+    parts.append(''.join(buf))
+    return parts
+
+
+# Sentinel returned by _tokenize on shlex ValueError (malformed shell syntax).
+# Callers skip such a piece. That is safe only while an unparseable piece implies
+# an UNRUNNABLE command -- true for an unbalanced quote the operator typed, false
+# for one the old pre-pass manufactured out of a valid command.
+# QuotedSeparatorFailOpenTests asserts that implication against `bash -n`.
+_PARSE_FAIL = object()
+
+
+def _expand_ansi_c(body):
+    r"""Expand the escapes bash expands inside `$'...'`, and only those.
+
+    The escape set is the shell's: the named ones, `\xHH`, `\uHHHH`,
+    `\UHHHHHHHH`, one to three octal digits, and `\cX` for a control character.
+    An escape bash does not recognise is left alone, backslash included, because
+    bash leaves it alone too -- guessing here would invent a token no shell would
+    ever build.
+
+    TOTAL BY CONSTRUCTION, which is the property that matters more than the
+    fidelity. `chr()` stops at 0x10FFFF and bash does not: it writes the bytes
+    and carries on. A codepoint above the ceiling therefore has to degrade to
+    literal text here, because the alternative is an exception crossing into
+    _tokenize, where every rule would skip the piece and a destructive command
+    would be allowed by a word appended to it (card 151a0756, rackham Q family).
+    The value this produces is not what bash produces; the point is only that the
+    REST of the command stays visible to the rules.
+
+    A NUL cannot survive in a bash word, so it is dropped rather than carried
+    into a regex that would then match on something the shell never passes.
+    """
+    hexdigits = "0123456789abcdefABCDEF"
+    named = {
+        "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f",
+        "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+        "\\": "\\", "'": "'", '"': '"', "?": "?",
+    }
+    out = []
+    i = 0
+    n = len(body)
+    while i < n:
+        ch = body[i]
+        if ch != "\\" or i + 1 >= n:
+            out.append(ch)
+            i += 1
+            continue
+        nxt = body[i + 1]
+        if nxt in named:
+            out.append(named[nxt])
+            i += 2
+        elif nxt in ("x", "u", "U"):
+            width = {"x": 2, "u": 4, "U": 8}[nxt]
+            j = i + 2
+            digits = ""
+            while j < n and len(digits) < width and body[j] in hexdigits:
+                digits += body[j]
+                j += 1
+            if not digits:
+                out.append(ch)
+                out.append(nxt)
+                i += 2
+                continue
+            try:
+                out.append(chr(int(digits, 16)))
+            except ValueError:
+                out.append(ch)
+                out.append(nxt)
+                out.append(digits)
+            i = j
+        elif nxt in "01234567":
+            j = i + 1
+            digits = ""
+            while j < n and len(digits) < 3 and body[j] in "01234567":
+                digits += body[j]
+                j += 1
+            out.append(chr(int(digits, 8) & 0xFF))
+            i = j
+        elif nxt == "c" and i + 2 < n:
+            # Lower-cased ASCII only. `str.upper()` can return TWO characters for
+            # some codepoints, and `ord()` on those raises a TypeError that the
+            # ValueError guard above would not even catch.
+            code = ord(body[i + 2])
+            if 0x61 <= code <= 0x7A:
+                code -= 0x20
+            out.append(chr(code ^ 0x40))
+            i += 3
+        else:
+            out.append(ch)
+            out.append(nxt)
+            i += 2
+    return "".join(out).replace("\x00", "")
+
+
+def _expand_dollar_quoting(piece):
+    r"""Resolve ANSI-C (`$'...'`) and locale (`$"..."`) quoting the way bash does.
+
+    shlex implements neither, so it leaves the dollar glued to the token while
+    bash strips it -- and, for the ANSI-C form, expands the escapes inside it.
+    Both halves hide a rule's subject, at two different heights:
+
+        cat $'~/.git-credentials'  ->  ['cat', '$~/.git-credentials']   (path)
+        $'\x72m' -rf /             ->  ['\x72m', '-rf', '/']            (verb)
+
+    The path form defeats rules that anchor a path to the whole token. The verb
+    form is worse, because no rule reaches its subject at all -- the guard sees a
+    command word it has never heard of and moves on. Both are fixed here, in the
+    tokenizer, rather than by loosening the anchors: the anchoring is deliberate
+    (card 48d3c0f9), and a substring search would trade one false negative for a
+    class of false positives.
+
+    Scoped exactly as bash scopes it, which is the part that keeps this from
+    blocking ordinary work. bash applies neither form inside single or double
+    quotes, so escape text in a commit message or in `awk '{print $1}'` survives
+    untouched; a real expansion (`$HOME/...`) keeps its dollar; and a plain
+    `'\x72m'` stays the literal string it is -- that one is not a near miss, it
+    is a command bash refuses to find, so allowing it is the correct verdict and
+    an expander that ignored the dollar would be blocking a string.
+    """
+    out = []
+    in_sq = in_dq = False
+    i = 0
+    n = len(piece)
+    while i < n:
+        ch = piece[i]
+        if ch == "\\" and not in_sq and i + 1 < n:
+            out.append(ch)
+            out.append(piece[i + 1])
+            i += 2
+            continue
+        if ch == "'" and not in_dq:
+            in_sq = not in_sq
+        elif ch == '"' and not in_sq:
+            in_dq = not in_dq
+        elif (ch == "$" and not in_sq and not in_dq
+                and i + 1 < n and piece[i + 1] == "'"):
+            j = i + 2
+            while j < n and piece[j] != "'":
+                j += 2 if piece[j] == "\\" else 1
+            if j >= n:
+                # Unterminated: bash will not run this either. Drop the dollar
+                # and let the dangling quote reach shlex, which is where the
+                # unparseable verdict already lives.
+                i += 1
+                continue
+            out.append(shlex.quote(_expand_ansi_c(piece[i + 2:j])))
+            i = j + 1
+            continue
+        elif (ch == "$" and not in_sq and not in_dq
+                and i + 1 < n and piece[i + 1] == '"'):
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _tokenize(piece):
     """shlex tokens for a sub-command. shlex does NOT expand ~ or $HOME, so they
-    stay literal and matchable. Returns None on a malformed (unbalanced-quote)
-    piece so callers can fail open for that piece."""
+    stay literal and matchable.
+
+    The quoting is resolved OUTSIDE the try on purpose. `except ValueError` here
+    means one thing -- shlex could not parse the quoting -- and an expander that
+    raised inside it would be answering a different question with that branch:
+    the piece would become _PARSE_FAIL and every rule would skip it, silently.
+    An internal failure belongs to main(), which fails open LOUDLY instead."""
+    expanded = _expand_dollar_quoting(piece)
     try:
-        return shlex.split(piece, comments=False, posix=True)
+        return shlex.split(expanded, comments=False, posix=True)
     except ValueError:
-        return None
+        return _PARSE_FAIL
+
+
+# Words that can stand where the command word stands without BEING the command.
+# Kept in sync with the sibling guard on purpose: the two files hold COPIES of
+# these helpers, and a fix landing in one copy while silently missing the other
+# is how this defect survived -- the paren handling of card ec7754d7 reached the
+# sibling and never got here, which is what made the two measurably disagree.
+_SHELL_KEYWORDS = frozenset(
+    {
+        "do", "done", "then", "else", "elif", "fi", "esac", "in", "coproc",
+        "for", "if", "while", "until", "case", "select", "function", "{", "}", "!",
+    }
+)
+
+# Wrappers that RUN the command that follows, so the real command word is further
+# right. Measured, not assumed: each of these reaches the command.
+_COMMAND_PREFIXES = frozenset(
+    {
+        "sudo", "command", "builtin", "exec", "nohup", "env", "nice", "ionice",
+        "time", "timeout", "stdbuf", "setsid", "doas",
+    }
+)
+
+# A wrapper may carry its own argument before the command (`timeout 5 rm -rf /`),
+# so skipping cannot be "skip token 0" -- that returns the duration as the
+# command word and misses the rm.
+_PREFIX_ARG_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
 
 
 def _command_word(tokens):
-    """The effective command word of a token list: skip a leading `sudo`, env
-    assignments (FOO=bar), and absolute paths -> return the basename, or ''."""
+    """The effective command word of a token list: skip words that cannot BE the
+    command -- `sudo`, env assignments (FOO=bar), shell keywords, and wrappers
+    that run what follows -- then return the basename, or ''.
+
+    Before card 151a0756 only `sudo` and assignments were skipped, so the piece
+    `do rm -rf /` reported `do`, and every rule in this file stopped applying.
+    """
+    after_prefix = False
     for tok in tokens:
-        if tok == "sudo":
+        if tok in _SHELL_KEYWORDS:
+            after_prefix = False
             continue
         if "=" in tok and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
             continue  # env assignment prefix
-        return os.path.basename(tok)
+        # A subshell tokenizes as '(rm', so the paren is not part of the name.
+        cmd = tok.lstrip("(")
+        if not cmd:
+            continue
+        cmd = os.path.basename(cmd)
+        if cmd in _COMMAND_PREFIXES:
+            after_prefix = True
+            continue
+        # Only a wrapper's own flags and duration are skipped, and only directly
+        # after it. Widening this to any unrecognised word would make `echo rm
+        # -rf /` a block, and echo destroys nothing.
+        if after_prefix and (tok.startswith("-") or _PREFIX_ARG_RE.match(tok)):
+            continue
+        return cmd
     return ""
 
 
@@ -130,7 +504,7 @@ def match_rm_rf_root(command):
     root (/, ~, $HOME, /home/<user>). NOT a deeper path (worktree rm is fine)."""
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
-        if not tokens:
+        if tokens is _PARSE_FAIL or not tokens:
             continue
         if _command_word(tokens) != "rm":
             continue
@@ -167,7 +541,7 @@ def match_force_push_protected(command):
     non-force push to main both pass."""
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
-        if not tokens:
+        if tokens is _PARSE_FAIL or not tokens:
             continue
         if _command_word(tokens) != "git" or "push" not in tokens:
             continue
@@ -200,7 +574,7 @@ def match_sql_drop(command):
         return False
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
-        if not tokens:
+        if tokens is _PARSE_FAIL or not tokens:
             continue
         if _command_word(tokens) in _SQL_CLIENTS:
             return True
@@ -213,7 +587,7 @@ def match_cred_file_print(command):
     read via `$(cat ...)` in every fleet-ops recipe."""
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
-        if not tokens:
+        if tokens is _PARSE_FAIL or not tokens:
             continue
         if _command_word(tokens) not in _PRINT_VERBS:
             continue
@@ -229,7 +603,7 @@ def match_sensitive_file_print(command):
     Sibling of match_cred_file_print (which guards ~/.git-credentials)."""
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
-        if not tokens:
+        if tokens is _PARSE_FAIL or not tokens:
             continue
         if _command_word(tokens) not in _PRINT_VERBS:
             continue
