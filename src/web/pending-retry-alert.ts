@@ -13,7 +13,7 @@
 // so the delivery seam is injectable for tests -- a test must never be able to
 // send a real Telegram message.
 import { logger } from '../logger.js'
-import { classifyTelegramSendError, type PendingRetryView } from '../pending-retries.js'
+import { classifyTelegramSendError, reAlertIntervalS, type PendingRetryView } from '../pending-retries.js'
 import { defaultDeliver, type AlertDeliver } from './operator-alert.js'
 
 export type { AlertDeliver }
@@ -30,11 +30,23 @@ type AlertDb = {
  * both win -- exactly one gets `changes > 0` and therefore exactly one send is
  * attempted per stamp.
  */
-function claimAlert(db: AlertDb, taskName: string, agentName: string, nowS: number): boolean {
+function claimAlert(
+  db: AlertDb,
+  taskName: string,
+  agentName: string,
+  nowS: number,
+  reAlertAfterS: number,
+): boolean {
+  // Claim the alert slot when either:
+  //   - never alerted (alert_sent_at IS NULL), OR
+  //   - the re-alert interval since the last notification has elapsed.
+  // The UPDATE guard is atomic: concurrent ticks racing on the same row
+  // cannot both win, so exactly one send is attempted per stamp.
   return db.prepare(
     `UPDATE pending_task_retries SET alert_sent_at = ?
-      WHERE task_name = ? AND agent_name = ? AND alert_sent_at IS NULL`
-  ).run(nowS, taskName, agentName).changes > 0
+      WHERE task_name = ? AND agent_name = ?
+        AND (alert_sent_at IS NULL OR ? - alert_sent_at > ?)`
+  ).run(nowS, taskName, agentName, nowS, reAlertAfterS).changes > 0
 }
 
 function releaseAlert(db: AlertDb, taskName: string, agentName: string): void {
@@ -73,7 +85,8 @@ export function sendPendingRetryAlert(
   db: AlertDb,
   deliver: AlertDeliver = defaultDeliver,
 ): void {
-  if (!claimAlert(db, view.taskName, view.agentName, nowS)) return
+  const intervalS = reAlertIntervalS(view.ageMs / 1000)
+  if (!claimAlert(db, view.taskName, view.agentName, nowS, intervalS)) return
 
   void deliver(formatPendingRetryAlert(view)).then(
     () => {

@@ -410,10 +410,12 @@ describe('runSweepTick', () => {
     ).all()
     expect(retryRows).toHaveLength(1)
 
-    // Tick 2: session free -> retry fires; cron sweep skips (pendingKeys guard)
+    // Tick 2: session free -> retry fires; cron sweep skips (pendingKeys guard).
+    // Advance time by MAX_BACKOFF_S (10 min) so the exponential-backoff window
+    // has elapsed regardless of attempt_count (card c87b198a).
     vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
     vi.mocked(sendPromptToSession).mockReset()
-    runSweepTick(60000, db)
+    runSweepTick(60000, db, Date.now() + 11 * 60 * 1000)
 
     // (a) Exactly ONE fire across both paths (retry succeeded, cron sweep was skipped)
     expect(vi.mocked(sendPromptToSession)).toHaveBeenCalledOnce()
@@ -722,8 +724,9 @@ describe('runSweepTick: parked (un-submitted) prompt', () => {
     runSweepTick(60000, db)
     expect(getTask('parked-recover', db)!.next_run).toBe(nowS - 10)
 
+    // Advance time past MAX_BACKOFF_S so the backoff window has elapsed (card c87b198a).
     vi.mocked(sendPromptToSession).mockReturnValue('submitted')
-    runSweepTick(60000, db)
+    runSweepTick(60000, db, Date.now() + 11 * 60 * 1000)
 
     const after = getTask('parked-recover', db)!
     expect(after.last_result).toBe('fired')
