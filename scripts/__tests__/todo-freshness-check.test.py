@@ -67,14 +67,14 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(verdicts["claudia"]["ago"], 3600)
 
     def test_stale_write_over_threshold(self):
-        db = _make_db([("hibiki", NOW - 27 * 3600)])  # 27h old > 26h threshold
+        db = _make_db([("hibiki", NOW - 37 * 3600)])  # 37h old > 36h threshold
         conn = sqlite3.connect(db)
         try:
             verdicts = {v["owner"]: v for v in mod.evaluate(conn, NOW, mod.THRESHOLD_SECONDS)}
         finally:
             conn.close()
         self.assertEqual(verdicts["hibiki"]["state"], "stale")
-        self.assertEqual(verdicts["hibiki"]["ago"], 27 * 3600)
+        self.assertEqual(verdicts["hibiki"]["ago"], 37 * 3600)
 
     def test_uses_max_updated_at(self):
         # An old row plus a recent row -> owner is fresh (MAX wins).
@@ -93,10 +93,15 @@ class AdversarialThresholdTests(unittest.TestCase):
     no longer manufacture a spurious FAIL -- the invocation is a plain, session-free
     python run. What must still hold is the semantic guarantee the Boss-visible
     FAIL surface depended on: a benign tick NEVER alerts, and only a genuine
-    >26h staleness does. These pin that boundary end-to-end through main()."""
+    >36h staleness does. These pin that boundary end-to-end through main()."""
+
+    def test_threshold_constant_is_36h(self):
+        # Literal pin: if THRESHOLD_SECONDS changes, this test goes red (audible signal).
+        # The symbolic boundary tests above are green at any threshold value -- this one is not.
+        self.assertEqual(mod.THRESHOLD_SECONDS, 129600)  # 36h
 
     def test_exactly_at_threshold_is_not_stale(self):
-        # Strict > threshold: an owner exactly at 26h is still ok (no FAIL).
+        # Strict > threshold: an owner exactly at 36h is still ok (no FAIL).
         db = _make_db([("hibiki", NOW - mod.THRESHOLD_SECONDS)])
         conn = sqlite3.connect(db)
         try:
@@ -140,7 +145,7 @@ class AdversarialThresholdTests(unittest.TestCase):
 
 class DryRunTests(unittest.TestCase):
     def test_dry_run_reports_would_alert_for_stale(self):
-        db = _make_db([("hibiki", NOW - 27 * 3600)])
+        db = _make_db([("hibiki", NOW - 37 * 3600)])
         state = str(Path(tempfile.mkdtemp()) / "state.json")
         buf = io.StringIO()
         with redirect_stdout(buf):
@@ -148,7 +153,7 @@ class DryRunTests(unittest.TestCase):
         out = buf.getvalue()
         self.assertEqual(rc, 0)
         self.assertIn("WOULD ALERT", out)
-        self.assertIn("hibiki has not written to todo_items in 27h", out)
+        self.assertIn("hibiki has not written to todo_items in 37h", out)
         # dry-run must not persist a state file
         self.assertFalse(Path(state).exists())
 
@@ -161,9 +166,20 @@ class DryRunTests(unittest.TestCase):
         self.assertNotIn("WOULD ALERT", buf.getvalue())
 
     def test_alert_content_format(self):
+        # 27h < 72h -> "delayed/missed" detail branch.
         self.assertEqual(
             mod._alert_content("claudia", 27 * 3600),
-            "FRESHNESS ALERT: claudia has not written to todo_items in 27h. Check agent health.",
+            "FRESHNESS ALERT: claudia has not written to todo_items in 27h."
+            " Daily write task appears delayed or missed."
+            " Verify the task ran and the agent is healthy.",
+        )
+
+    def test_alert_content_format_extended_outage(self):
+        # 73h >= 72h -> "may be down" detail branch.
+        self.assertEqual(
+            mod._alert_content("hibiki", 73 * 3600),
+            "FRESHNESS ALERT: hibiki has not written to todo_items in 73h."
+            " No write in an extended period -- agent may be down or task permanently broken.",
         )
 
 
