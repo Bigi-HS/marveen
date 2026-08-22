@@ -4,6 +4,10 @@ import {
   toPendingRetryView,
   classifyTelegramSendError,
   ALERT_THRESHOLD_S,
+  reAlertIntervalS,
+  retryBackoffS,
+  shouldRetryNow,
+  MAX_BACKOFF_S,
 } from '../pending-retries.js'
 
 describe('shouldSendAlert', () => {
@@ -26,10 +30,45 @@ describe('shouldSendAlert', () => {
     expect(shouldSendAlert(firstAttempt + threshold + 1, firstAttempt, null, threshold)).toBe(true)
   })
 
-  it('returns false if an alert was already sent', () => {
-    expect(
-      shouldSendAlert(firstAttempt + 10 * threshold, firstAttempt, firstAttempt + threshold + 1, threshold),
-    ).toBe(false)
+  it('returns false if an alert was sent and the re-alert window has not elapsed', () => {
+    // Re-alert interval for age < 6h is 1h (3600s). Alert was sent 100s ago -> suppressed.
+    const alertSentAt = firstAttempt + ALERT_THRESHOLD_S + 100
+    const now = alertSentAt + 100  // 100s after alert, well within the 1h re-alert window
+    expect(shouldSendAlert(now, firstAttempt, alertSentAt)).toBe(false)
+  })
+
+  it('returns true when the re-alert interval has elapsed since last alert (card c87b198a)', () => {
+    // age < 6h -> re-alert every 1h. Alert sent 3601s ago -> re-alert due.
+    const alertSentAt = firstAttempt + ALERT_THRESHOLD_S + 1
+    const now = alertSentAt + 3601  // just over 1h since the alert
+    expect(shouldSendAlert(now, firstAttempt, alertSentAt)).toBe(true)
+  })
+
+  it('uses a 6h re-alert interval when age is between 6h and 24h', () => {
+    const ageS = 12 * 3600  // 12h age -> reAlertIntervalS = 6h
+    // Alert was sent 5h ago (< 6h interval) -> still suppressed
+    const alertSentAt = firstAttempt + ageS - 5 * 3600  // 5h before now
+    const now = firstAttempt + ageS
+    expect(shouldSendAlert(now, firstAttempt, alertSentAt)).toBe(false)
+    // Alert was sent 6h+1s ago -> re-alert due
+    const olderAlertSentAt = firstAttempt + ageS - (6 * 3600 + 1)
+    expect(shouldSendAlert(now, firstAttempt, olderAlertSentAt)).toBe(true)
+  })
+
+  it('uses a 24h re-alert interval when age exceeds 24h', () => {
+    const ageS = 30 * 3600  // 30h
+    const alertSentAt = firstAttempt + ALERT_THRESHOLD_S + 1
+    const now = firstAttempt + ageS
+    // 23h since alert (< 24h interval) -> suppressed
+    const twentyThreeHoursLater = alertSentAt + 23 * 3600
+    if (twentyThreeHoursLater < now) {
+      expect(shouldSendAlert(twentyThreeHoursLater, firstAttempt, alertSentAt)).toBe(false)
+    }
+    // 25h since alert -> re-alert due
+    const twentyFiveHoursLater = alertSentAt + 25 * 3600
+    if (twentyFiveHoursLater <= firstAttempt + ageS + 3600) {
+      expect(shouldSendAlert(twentyFiveHoursLater, firstAttempt, alertSentAt)).toBe(true)
+    }
   })
 
   it('uses the default threshold (1 hour) when not supplied', () => {
@@ -105,12 +144,23 @@ describe('toPendingRetryView', () => {
     expect(view.alertDue).toBe(true)
   })
 
-  it('sets alertDue=false if an alert was already sent', () => {
+  it('sets alertDue=false if an alert was sent and re-alert window has not elapsed', () => {
+    // age = 2*ALERT_THRESHOLD_S = 7200s < 6h -> reAlertIntervalS = 3600.
+    // Alert was sent 3500s ago (< 3600s) -> still suppressed.
+    const alertSentAt = 1_000_000 + ALERT_THRESHOLD_S + 100
     const view = toPendingRetryView(
-      { ...baseRow, alert_sent_at: 1_000_000 + ALERT_THRESHOLD_S + 100 },
-      1_000_000 + 2 * ALERT_THRESHOLD_S,
+      { ...baseRow, alert_sent_at: alertSentAt },
+      1_000_000 + 2 * ALERT_THRESHOLD_S,  // now - alertSentAt = 2*3600 - 3700 = 3500 < 3600
     )
     expect(view.alertDue).toBe(false)
+  })
+
+  it('sets alertDue=true when the re-alert interval has elapsed (card c87b198a)', () => {
+    // age ~= 6500s < 6h -> reAlertIntervalS = 3600. Alert was sent 3700s ago -> due.
+    const alertSentAt = 1_000_000 + ALERT_THRESHOLD_S + 100
+    const now = alertSentAt + 3700  // 3700s after the alert (> 1h re-alert interval)
+    const view = toPendingRetryView({ ...baseRow, alert_sent_at: alertSentAt }, now)
+    expect(view.alertDue).toBe(true)
   })
 
   it('honors a custom threshold', () => {
@@ -144,5 +194,66 @@ describe('classifyTelegramSendError', () => {
     expect(classifyTelegramSendError('Telegram API 401: Unauthorized')).toBe('permanent')
     expect(classifyTelegramSendError('Telegram API 403: Forbidden: bot was blocked by the user')).toBe('permanent')
     expect(classifyTelegramSendError('Telegram API 404: Not Found')).toBe('permanent')
+  })
+})
+
+describe('reAlertIntervalS (card c87b198a: escalating re-alert schedule)', () => {
+  it('returns 1h for age < 6h', () => {
+    expect(reAlertIntervalS(0)).toBe(3600)
+    expect(reAlertIntervalS(3600)).toBe(3600)
+    expect(reAlertIntervalS(6 * 3600 - 1)).toBe(3600)
+  })
+
+  it('returns 6h for age between 6h and 24h', () => {
+    expect(reAlertIntervalS(6 * 3600)).toBe(6 * 3600)
+    expect(reAlertIntervalS(12 * 3600)).toBe(6 * 3600)
+    expect(reAlertIntervalS(24 * 3600 - 1)).toBe(6 * 3600)
+  })
+
+  it('returns 24h for age >= 24h', () => {
+    expect(reAlertIntervalS(24 * 3600)).toBe(24 * 3600)
+    expect(reAlertIntervalS(61 * 3600)).toBe(24 * 3600)
+  })
+})
+
+describe('retryBackoffS + shouldRetryNow (card c87b198a: exponential backoff, cap MAX_BACKOFF_S)', () => {
+  it('starts at 60s for attempt 0', () => {
+    expect(retryBackoffS(0)).toBe(60)
+  })
+
+  it('doubles every 3 attempts', () => {
+    expect(retryBackoffS(0)).toBe(60)
+    expect(retryBackoffS(3)).toBe(120)
+    expect(retryBackoffS(6)).toBe(240)
+    expect(retryBackoffS(9)).toBe(480)
+  })
+
+  it('caps at MAX_BACKOFF_S', () => {
+    expect(retryBackoffS(100)).toBe(MAX_BACKOFF_S)
+    expect(retryBackoffS(9)).toBeLessThanOrEqual(MAX_BACKOFF_S)
+    expect(retryBackoffS(12)).toBe(MAX_BACKOFF_S)
+  })
+
+  it('MAX_BACKOFF_S is at most 10 minutes', () => {
+    expect(MAX_BACKOFF_S).toBeLessThanOrEqual(10 * 60)
+  })
+
+  it('shouldRetryNow returns true when backoff has elapsed', () => {
+    const lastAttempt = 1_000_000
+    const attemptCount = 0  // backoff = 60s
+    expect(shouldRetryNow(lastAttempt, attemptCount, lastAttempt + 60)).toBe(true)
+    expect(shouldRetryNow(lastAttempt, attemptCount, lastAttempt + 61)).toBe(true)
+  })
+
+  it('shouldRetryNow returns false before the backoff elapses', () => {
+    const lastAttempt = 1_000_000
+    const attemptCount = 3  // backoff = 120s
+    expect(shouldRetryNow(lastAttempt, attemptCount, lastAttempt + 119)).toBe(false)
+    expect(shouldRetryNow(lastAttempt, attemptCount, lastAttempt + 120)).toBe(true)
+  })
+
+  it('shouldRetryNow always returns true once MAX_BACKOFF_S has elapsed', () => {
+    const lastAttempt = 1_000_000
+    expect(shouldRetryNow(lastAttempt, 999, lastAttempt + MAX_BACKOFF_S)).toBe(true)
   })
 })

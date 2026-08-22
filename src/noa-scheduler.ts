@@ -13,7 +13,7 @@ import {
   sendPromptToSession,
 } from './web/agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './web/main-agent.js'
-import { toPendingRetryView } from './pending-retries.js'
+import { toPendingRetryView, shouldRetryNow } from './pending-retries.js'
 import { sendPendingRetryAlert } from './web/pending-retry-alert.js'
 import { sweepStuckTasks } from './web/stuck-task-sentinel.js'
 import { resolveFromPath } from './platform.js'
@@ -644,8 +644,8 @@ export function migrateFileBasedTasks(db = getNoaDb(), tasksDir = SCHEDULED_TASK
 // Sweep tick (exported for testability)
 // ---------------------------------------------------------------------------
 
-export function runSweepTick(catchUpMs: number, db = getNoaDb()): void {
-  const nowMs = Date.now()
+export function runSweepTick(catchUpMs: number, db = getNoaDb(), nowMsOverride?: number): void {
+  const nowMs = nowMsOverride ?? Date.now()
   const nowS = Math.floor(nowMs / 1000)
   const catchUpS = Math.floor(catchUpMs / 1000)
 
@@ -666,6 +666,10 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb()): void {
     const key = `${row.task_name}@${row.agent_name}`
     pendingKeys.add(key)
 
+    // Skip rows whose backoff window has not elapsed yet (card c87b198a).
+    // The key is registered above so the cron sweep does not double-fire it.
+    if (!shouldRetryNow(row.last_attempt, row.attempt_count, nowS)) continue
+
     const result = attemptFireTask(taskDef, row.agent_name, sessions, db)
     if (result === 'fired') {
       rollForwardFired(taskDef, nowMs, nowS, db)
@@ -677,8 +681,8 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb()): void {
       // Escalate a row that has been stuck past the threshold. Restored here
       // because the A4 migration dropped it (see pending-retry-alert.ts): a
       // task that never fires is only a silent outage until somebody is told.
-      // Capped by construction -- alert_sent_at is stamped once per row, so a
-      // permanently wedged agent produces one message, not one per tick.
+      // Re-alerts on an escalating schedule (1h/6h/24h) so chronic wedges
+      // stay visible without flooding the operator (card c87b198a).
       const fresh = getPendingRetry(row.task_name, row.agent_name, db)
       if (fresh) {
         const view = toPendingRetryView(fresh, nowS)

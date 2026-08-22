@@ -37,6 +37,45 @@
 export const ALERT_THRESHOLD_S = 60 * 60
 
 /**
+ * Maximum interval between retry attempts for a pending row (card c87b198a).
+ * Backoff grows exponentially from 60s but caps here so recovery after a
+ * wedge clears takes at most MAX_BACKOFF_S, not hours.
+ */
+export const MAX_BACKOFF_S = 10 * 60  // 10 minutes
+
+/**
+ * Exponential backoff for a pending retry row (card c87b198a).
+ * Doubles every 3 attempts from 60s, capped at MAX_BACKOFF_S.
+ *   attempt 0-2 -> 60s | 3-5 -> 120s | 6-8 -> 240s | 9-11 -> 480s | 12+ -> 600s
+ * Goal: reduce DB churn during wedges; recovery stays fast (at most MAX_BACKOFF_S
+ * to next attempt once the wedge clears -- measured: 69s with 60s cadence).
+ */
+export function retryBackoffS(attemptCount: number): number {
+  return Math.min(60 * Math.pow(2, Math.floor(attemptCount / 3)), MAX_BACKOFF_S)
+}
+
+/**
+ * True when the backoff window since the last attempt has elapsed.
+ */
+export function shouldRetryNow(lastAttemptS: number, attemptCount: number, nowS: number): boolean {
+  return nowS >= toSeconds(lastAttemptS) + retryBackoffS(attemptCount)
+}
+
+/**
+ * Escalating re-alert interval after the first operator notification
+ * (card c87b198a). Measured 2026-08-12: 13 rows had alert_sent_at set for
+ * 61h with zero follow-up. Interval scales with age:
+ *   age < 6h  -> re-alert every 1h  (quick turnaround expected)
+ *   age < 24h -> re-alert every 6h  (once-per-shift visibility)
+ *   age >= 24h -> re-alert every 24h (chronic outage daily reminder)
+ */
+export function reAlertIntervalS(ageS: number): number {
+  if (ageS < 6 * 3600) return 3600
+  if (ageS < 24 * 3600) return 6 * 3600
+  return 24 * 3600
+}
+
+/**
  * Coerce a stored timestamp to seconds.
  *
  * Rows written before the sweep migration hold MILLISECONDS. Left alone, such
@@ -70,11 +109,14 @@ export function shouldSendAlert(
   alertSentAt: number | null,
   thresholdS: number = ALERT_THRESHOLD_S,
 ): boolean {
-  if (alertSentAt != null) return false
   const first = toSeconds(firstAttemptS)
   if (!Number.isFinite(first) || first <= 0) return false
   if (!Number.isFinite(nowS) || nowS < first) return false
-  return nowS - first > thresholdS
+  const ageS = nowS - first
+  if (ageS <= thresholdS) return false
+  if (alertSentAt == null) return true  // first alert
+  // Re-alert when the escalating interval since the last notification has elapsed.
+  return nowS - toSeconds(alertSentAt) > reAlertIntervalS(ageS)
 }
 
 /**
