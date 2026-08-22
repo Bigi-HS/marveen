@@ -314,6 +314,50 @@ class LivenessTests(unittest.TestCase):
     def test_liveness_threshold_constant_is_18h(self):
         self.assertEqual(mod.LIVENESS_THRESHOLD_SECONDS, 18 * 3600)
 
+    def test_inbound_only_does_not_rescue_dead_agent(self):
+        # Thor gate finding (gauge #1, PR#492): if a dead agent keeps receiving
+        # messages from peers (to_agent=claudia fresh), the monitor must still
+        # fire -- inbound traffic is not proof the agent itself is alive.
+        # Only outbound (from_agent=claudia) and conversation_log count.
+        db = _make_db(
+            rows=[("claudia", NOW - 40 * 3600)],
+            messages=[("marveen", "claudia", NOW - 1 * 3600)],  # inbound only
+        )
+        conn = sqlite3.connect(db)
+        try:
+            verdicts = {v["owner"]: v for v in mod.evaluate(conn, NOW, mod.THRESHOLD_SECONDS)}
+        finally:
+            conn.close()
+        self.assertEqual(verdicts["claudia"]["state"], "stale")
+
+    def test_missing_liveness_tables_do_not_crash(self):
+        # Gauge finding #2 (card d115de7f): if agent_messages or conversation_log
+        # are absent (fresh deploy, incomplete migration), the monitor must not
+        # crash -- it must fall back to stale, not suppress the alert silently.
+        d = tempfile.mkdtemp()
+        db_path = str(Path(d) / "bare.db")
+        conn_bare = sqlite3.connect(db_path)
+        conn_bare.execute(
+            """CREATE TABLE todo_items (
+                id TEXT PRIMARY KEY, owner TEXT NOT NULL, title TEXT NOT NULL,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            )"""
+        )
+        conn_bare.execute(
+            "INSERT INTO todo_items (id, owner, title, created_at, updated_at) VALUES (?,?,?,?,?)",
+            ("r0", "claudia", "t", NOW - 40 * 3600, NOW - 40 * 3600),
+        )
+        conn_bare.commit()
+        conn_bare.close()
+
+        conn = sqlite3.connect(db_path)
+        try:
+            # Must not raise; must classify as stale (no tables = no activity data)
+            verdicts = {v["owner"]: v for v in mod.evaluate(conn, NOW, mod.THRESHOLD_SECONDS)}
+        finally:
+            conn.close()
+        self.assertEqual(verdicts["claudia"]["state"], "stale")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
