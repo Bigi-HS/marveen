@@ -8,13 +8,30 @@
 // Silent-guard: always writes a snapshot -- an empty or failed push is visible.
 
 import { IncomingMessage, ServerResponse } from 'node:http'
-import { readBody, json } from '../http-helpers.js'
+import { timingSafeEqual } from 'node:crypto'
+import { readBody, RequestBodyTooLargeError, json } from '../http-helpers.js'
 import { defaultZeppStore } from '../zepp/ingest-store.js'
 import { readIngestToken } from '../zepp/ingest-secret.js'
 import type {
   ZeppDailySnapshot, ZeppVitals, ZeppSleep, ZeppWorkout, ZeppActivity, ZeppPullStatus,
 } from '../zepp/contract.js'
 import type { RouteContext } from './types.js'
+
+// HC daily payloads are small structured JSON (vitals/sleep/activity). Cap the
+// read well below the generic default: the endpoint is public via the Cloudflare
+// tunnel, so an unbounded body is a memory-exhaustion surface (chad FLAG medium).
+const MAX_INGEST_BYTES = 64 * 1024
+
+// Constant-time secret comparison so the token gate does not leak byte-position
+// via response timing (chad INFO low). Length is compared first (a length leak is
+// standard and unavoidable with fixed-time compare); the bytes are compared in
+// constant time.
+function tokenMatches(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided)
+  const b = Buffer.from(expected)
+  if (a.length !== b.length) return false
+  return timingSafeEqual(a, b)
+}
 
 export interface HealthIngestDeps {
   readIngestToken: () => string
@@ -95,16 +112,20 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
     if (req.method !== 'POST') return
 
     const token = (req.headers as Record<string, string | undefined>)['x-ingest-token']
-    if (!token || token !== deps.readIngestToken()) {
+    if (!token || !tokenMatches(token, deps.readIngestToken())) {
       json(res, { error: 'Unauthorized' }, 401)
       return
     }
 
     let body: Record<string, unknown>
     try {
-      const raw = await readBody(req)
+      const raw = await readBody(req, { maxBytes: MAX_INGEST_BYTES })
       body = JSON.parse(raw.toString()) as Record<string, unknown>
-    } catch {
+    } catch (err) {
+      if (err instanceof RequestBodyTooLargeError) {
+        json(res, { error: 'Payload too large' }, 413)
+        return
+      }
       json(res, { error: 'Invalid JSON' }, 400)
       return
     }

@@ -79,6 +79,39 @@ describe('POST /api/health/ingest', () => {
       const { status } = await handle(deps, { token: VALID_TOKEN, body: { date: '2026-08-22' } })
       expect(status).toBe(200)
     })
+
+    it('returns 401 for a wrong token of the SAME length (constant-time compare)', async () => {
+      // VALID_TOKEN is 15 chars; this wrong token is also 15 chars, so the length
+      // guard passes and the constant-time byte comparison must reject it.
+      const deps = makeDeps()
+      const sameLenWrong = 'test-secret-XYZ'
+      expect(sameLenWrong.length).toBe(VALID_TOKEN.length)
+      const { status } = await handle(deps, { token: sameLenWrong, body: { date: '2026-08-22' } })
+      expect(status).toBe(401)
+    })
+  })
+
+  describe('body size (DoS guard)', () => {
+    it('rejects an oversized (>64KB) body with 413 and does not write a snapshot', async () => {
+      const deps = makeDeps()
+      const big = 'x'.repeat(70 * 1024) // pushes the JSON body past the 64KB cap
+      const { status, snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', filler: big },
+      })
+      expect(status).toBe(413)
+      expect(snap).toBeNull()
+      expect(deps.writeSnapshot).not.toHaveBeenCalled()
+    })
+
+    it('accepts a normal-sized HC payload', async () => {
+      const deps = makeDeps()
+      const { status } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', vitals: { resting_hr_bpm: 52 } },
+      })
+      expect(status).toBe(200)
+    })
   })
 
   describe('validation', () => {
