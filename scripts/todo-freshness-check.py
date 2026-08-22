@@ -67,16 +67,21 @@ def last_activity_ago_seconds(conn: sqlite3.Connection, owner: str, now: int) ->
 
     Returns None when neither table has any record for this owner.
     """
-    row = conn.execute(
-        """SELECT MAX(t) FROM (
-            SELECT MAX(created_at) AS t FROM agent_messages
-             WHERE from_agent = ?
-            UNION ALL
-            SELECT MAX(created_at) AS t FROM conversation_log
-             WHERE agent_id = ?
-        )""",
-        (owner, owner),
-    ).fetchone()
+    try:
+        row = conn.execute(
+            """SELECT MAX(t) FROM (
+                SELECT MAX(created_at) AS t FROM agent_messages
+                 WHERE from_agent = ?
+                UNION ALL
+                SELECT MAX(created_at) AS t FROM conversation_log
+                 WHERE agent_id = ?
+            )""",
+            (owner, owner),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # One or both tables are absent (fresh deploy, incomplete migration).
+        # Treat as no activity data -- do NOT suppress the freshness alert.
+        return None
     if row is None or row[0] is None:
         return None
     return now - int(row[0])
