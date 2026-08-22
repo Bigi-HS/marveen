@@ -156,6 +156,71 @@ outside=$(run_sweep | awk -F'\t' '$1 != "COUNT"' | grep -c "watchdog" || true)
   && pass "sweep is scoped to the given root only" \
   || fail "sweep leaked $outside process(es) from outside the root"
 
+
+# --- node process tests (card 0941d203) --------------------------------------
+# These tests verify that node processes running code under the root are NOT
+# silently dropped from the sweep output.  Before the fix every node pid
+# produced zero rows, making the C5 gate a false green for the dashboard.
+
+mkdir -p "$ROOT/dist"
+
+# node-fresh: .js file unchanged since the process started -> UNKNOWN
+# (content cannot be verified; mtime shows no staleness signal)
+cat > "$ROOT/dist/fresh-app.js" <<'JSEOF'
+setTimeout(() => {}, 120000);
+JSEOF
+node "$ROOT/dist/fresh-app.js" >/dev/null 2>&1 &
+NODE_FRESH_PID=$!
+PIDS+=("$NODE_FRESH_PID")
+
+# node-suspect: .js file modified AFTER the process starts -> SUSPECT
+cat > "$ROOT/dist/suspect-app.js" <<'JSEOF'
+setTimeout(() => {}, 120000);
+JSEOF
+node "$ROOT/dist/suspect-app.js" >/dev/null 2>&1 &
+NODE_SUSPECT_PID=$!
+PIDS+=("$NODE_SUSPECT_PID")
+
+# Wait long enough that the modification timestamp exceeds started + START_MTIME_GRACE_SECONDS (2s).
+# A 1s sleep is eaten by the grace window; 3s gives a clear signal.
+sleep 3
+# Mutate suspect-app.js after the process is running
+printf '// modified\nsetTimeout(() => {}, 120000);\n' > "$ROOT/dist/suspect-app.js"
+sleep 1
+
+echo "sweep node fixtures under $ROOT/dist"
+
+# Core regression: node process must not silently disappear from the sweep.
+# Before the fix: label_of returns empty for every node pid.
+node_fresh_label=$(label_of "$NODE_FRESH_PID")
+[ -n "$node_fresh_label" ] \
+  && pass "node process (fresh .js) appears in sweep output (was silently invisible before)" \
+  || fail "node process should appear in sweep output, got empty (card 0941d203 regression)"
+
+# A node process with an unchanged .js cannot be content-verified -> UNKNOWN.
+[ "$node_fresh_label" = "UNKNOWN" ] \
+  && pass "node process (fresh .js) classified UNKNOWN (mtime no staleness signal, content unverifiable)" \
+  || fail "expected UNKNOWN for node/fresh, got '$node_fresh_label'"
+
+# A node process whose .js was modified after start -> SUSPECT.
+node_suspect_label=$(label_of "$NODE_SUSPECT_PID")
+[ "$node_suspect_label" = "SUSPECT" ] \
+  && pass "node process (stale .js) classified SUSPECT (mtime shows post-start modification)" \
+  || fail "expected SUSPECT for node/suspect, got '$node_suspect_label'"
+
+# Scoping: node processes outside root must not appear.
+# (The existing scoping test already covers this for bash; extend explicitly for node.)
+outside_node=$(run_sweep | awk -F'\t' '$1 != "COUNT" { print $3 }' | grep -c "meld-studio\|n8n" || true)
+[ "$outside_node" -eq 0 ] \
+  && pass "node sweep is scoped: node processes outside root not reported" \
+  || fail "sweep leaked $outside_node node process(es) from outside the root"
+
+# method column must say mtime-heuristic for node rows (not content-verified).
+node_method=$(run_sweep | awk -F'\t' -v p="$NODE_FRESH_PID" '$2 == p { print $7 }')
+[ "$node_method" = "mtime-heuristic" ] \
+  && pass "node row carries method=mtime-heuristic" \
+  || fail "expected method=mtime-heuristic for node row, got '$node_method'"
+
 echo
 if [ "$FAIL" -gt 0 ]; then echo "FAILED ($FAIL)"; exit 1; fi
 echo "OK"
