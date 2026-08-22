@@ -12,7 +12,7 @@ and the staleness-guard stays a backstop, not the normal path.
 
 Layering / sources (deliberately split, mirrors the live data layout):
   - kanban in_progress: noa.db (NOA_DB_PATH)        -> the agent's active work
-  - ledger recent:      claudeclaw.db (ledger_lib)  -> the agent's last turn
+  - ledger recent:      noa.db (ledger_lib)         -> the agent's last turn
 
 Each agent only ever reads its OWN assigned cards + its OWN ledger and writes its
 OWN cache -- no cross-agent data flow.

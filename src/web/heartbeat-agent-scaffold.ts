@@ -110,8 +110,8 @@ When you receive the heartbeat prompt:
      If the call fails (token revoked / 401), record the failure
      reason rather than the events; Marveen can act on the failure.
    - **Kanban** — read the SQLite DB at
-     \`/Users/marvin/ClaudeClaw/store/claudeclaw.db\`:
-     \`sqlite3 store/claudeclaw.db "SELECT status, COUNT(*) FROM
+     \`store/noa.db\`:
+     \`sqlite3 store/noa.db "SELECT status, COUNT(*) FROM
      kanban_cards WHERE archived_at IS NULL GROUP BY status"\` for
      counts, and grab the titles of cards where
      \`priority='urgent'\` or \`status='waiting'\`.
