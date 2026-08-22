@@ -49,6 +49,29 @@ describe('checkSnapshot', () => {
     expect(alerts.some((a) => a.type === 'stale')).toBe(false)
   })
 
+  // ENG-084: literal boundary pin for the 26h staleness threshold. Without these,
+  // the 10h-fresh / 27h-stale pair leaves the boundary unconstrained anywhere in
+  // (10h, 27h] -- a mutation to e.g. 20h passes every other test silently.
+  const STALE_THRESHOLD_MS = 26 * 60 * 60 * 1000 // literal fixture, must equal the module constant
+
+  it('is fresh at exactly 26h (threshold is strict >, not >=)', () => {
+    const atBoundary = BASE_NOW_MS - STALE_THRESHOLD_MS
+    const alerts = checkSnapshot(
+      snap({ status: 'ok', pulledAt: new Date(atBoundary).toISOString() }),
+      BASE_NOW_MS,
+    )
+    expect(alerts.some((a) => a.type === 'stale')).toBe(false)
+  })
+
+  it('is stale just past 26h (1s over the threshold)', () => {
+    const justOver = BASE_NOW_MS - (STALE_THRESHOLD_MS + 1000)
+    const alerts = checkSnapshot(
+      snap({ status: 'ok', pulledAt: new Date(justOver).toISOString() }),
+      BASE_NOW_MS,
+    )
+    expect(alerts.some((a) => a.type === 'stale')).toBe(true)
+  })
+
   it('raises partial alert when status is partial', () => {
     const alerts = checkSnapshot(snap({ status: 'partial', error: 'sleep endpoint 429' }), BASE_NOW_MS)
     expect(alerts.some((a) => a.type === 'partial')).toBe(true)
