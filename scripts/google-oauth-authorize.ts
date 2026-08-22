@@ -12,13 +12,14 @@
 // approves (Calendar read + Gmail send) -> Google redirects to localhost where
 // this script captures the code -> exchange for a refresh token -> persist 0600.
 // No secret is ever printed; only the consent URL (which carries no secret) is.
-import { createServer } from 'node:http'
 import { mkdir, readFile, writeFile, chmod } from 'node:fs/promises'
 import { resolve, join } from 'node:path'
 import {
   parseClientJson,
   buildAuthUrl,
   exchangeCodeForTokens,
+  awaitLoopbackCode,
+  generateState,
   SCOPES,
 } from '../src/mcp/google-authorize.js'
 
@@ -32,36 +33,12 @@ const OUT_DIR = resolve(arg('--out', 'agents/claudia/.claude/channels/google'))
 const PORT = Number(arg('--port', '4117'))
 const REDIRECT_URI = `http://localhost:${PORT}/`
 
-// Wait for Google to redirect back with ?code=, then resolve it (or reject on
-// an error / timeout).
-function awaitCode(): Promise<string> {
-  return new Promise((resolveCode, rejectCode) => {
-    const server = createServer((req, res) => {
-      const url = new URL(req.url ?? '/', REDIRECT_URI)
-      const code = url.searchParams.get('code')
-      const err = url.searchParams.get('error')
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-      res.end(
-        `<html><body style="font-family:sans-serif"><h2>${
-          code ? 'Authorized. You can close this tab.' : 'Authorization failed: ' + (err ?? 'no code')
-        }</h2></body></html>`,
-      )
-      server.close()
-      if (code) resolveCode(code)
-      else rejectCode(new Error(`authorization failed: ${err ?? 'no code in redirect'}`))
-    })
-    server.on('error', rejectCode)
-    server.listen(PORT)
-    setTimeout(() => {
-      server.close()
-      rejectCode(new Error('timed out waiting for the browser redirect (5 min)'))
-    }, 5 * 60 * 1000).unref()
-  })
-}
-
 async function main(): Promise<void> {
   const client = parseClientJson(await readFile(CLIENT_PATH, 'utf-8'))
-  const authUrl = buildAuthUrl(client.clientId, REDIRECT_URI)
+  // SEC-042: bind the nonce into the consent URL and require it back on the
+  // redirect. The receiver (shared helper) listens on loopback only.
+  const state = generateState()
+  const authUrl = buildAuthUrl(client.clientId, REDIRECT_URI, SCOPES, state)
 
   console.error('\nOpen this URL in your browser and approve the two permissions')
   console.error('(Calendar read-only + Gmail send). "Google hasn\'t verified this app"')
@@ -69,7 +46,11 @@ async function main(): Promise<void> {
   console.error(authUrl)
   console.error(`\nScopes requested: ${SCOPES.join('  ')}\n`)
 
-  const code = await awaitCode()
+  const code = await awaitLoopbackCode({
+    port: PORT,
+    redirectUri: REDIRECT_URI,
+    expectedState: state,
+  })
   const { refreshToken } = await exchangeCodeForTokens(client, code, REDIRECT_URI)
 
   await mkdir(OUT_DIR, { recursive: true })
