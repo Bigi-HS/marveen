@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes, timingSafeEqual, createHmac, createHash, scryptSync } from 'node:crypto'
 import { PROJECT_ROOT } from '../config.js'
@@ -221,19 +221,33 @@ interface StoredCredentials {
 
 // undefined = not yet loaded from disk; null = loaded, none configured.
 let cachedCredentials: StoredCredentials | null | undefined
+// mtime of the credentials file when it was last read. 0 = not yet read / file absent.
+let cachedCredentialsMtime = 0
 
 function loadCredentials(): StoredCredentials | null {
-  if (cachedCredentials !== undefined) return cachedCredentials
+  if (cachedCredentials !== undefined) {
+    // mtime-recheck: re-read when the file has been replaced externally (AC1).
+    try {
+      const mtime = existsSync(DASHBOARD_CREDENTIALS_PATH)
+        ? statSync(DASHBOARD_CREDENTIALS_PATH).mtimeMs
+        : 0
+      if (mtime === cachedCredentialsMtime) return cachedCredentials
+    } catch { /* stat failed: keep cache to avoid a hot-path retry storm */ }
+    // mtime changed or stat failed with a different value: fall through and re-read.
+    cachedCredentials = undefined
+  }
   try {
     if (existsSync(DASHBOARD_CREDENTIALS_PATH)) {
       const obj = JSON.parse(readFileSync(DASHBOARD_CREDENTIALS_PATH, 'utf-8')) as StoredCredentials
       if (obj && obj.username && obj.salt && obj.hash) {
         cachedCredentials = obj
+        try { cachedCredentialsMtime = statSync(DASHBOARD_CREDENTIALS_PATH).mtimeMs } catch { cachedCredentialsMtime = 0 }
         return obj
       }
     }
   } catch { /* fall through: treat unreadable/corrupt file as "none configured" */ }
   cachedCredentials = null
+  cachedCredentialsMtime = 0
   return null
 }
 
@@ -274,6 +288,11 @@ export function setDashboardCredentials(username: string, password: string): voi
   mkdirSync(join(PROJECT_ROOT, 'store'), { recursive: true })
   atomicWriteFileSync(DASHBOARD_CREDENTIALS_PATH, JSON.stringify(rec), { mode: 0o600 })
   cachedCredentials = rec
+  try { cachedCredentialsMtime = statSync(DASHBOARD_CREDENTIALS_PATH).mtimeMs } catch { cachedCredentialsMtime = 0 }
+  // AC2: rotate the session secret so all previously issued browser sessions are
+  // invalidated immediately. Agents use the bearer token (separate path), so they
+  // are unaffected. No restart required.
+  rotateSessionSecret()
 }
 
 // Verify a username+password pair. Returns false when no credentials are
@@ -485,7 +504,17 @@ export function __resetSessionStateForTests(): void {
   // Drop the in-memory revocation cache so the next call reloads from disk --
   // this models a server restart (the very case the stateless fix targets).
   revokedSessions = null
+  // Drop the session secret so tests that rotate credentials get a fresh secret.
+  sessionSecret = null
   // Drop the credentials cache too, so a test that writes/removes the creds file
   // between cases sees the fresh on-disk state.
   cachedCredentials = undefined
+  cachedCredentialsMtime = 0
+}
+
+// Test-only: set the cached credentials mtime directly, simulating a state where
+// the cache was loaded at time T but the file has since been replaced externally.
+// Used to test AC1 mtime-recheck without requiring a real filesystem timestamp race.
+export function __setCredentialsMtimeForTests(mtime: number): void {
+  cachedCredentialsMtime = mtime
 }
