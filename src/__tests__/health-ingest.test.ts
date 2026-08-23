@@ -235,6 +235,84 @@ describe('POST /api/health/ingest', () => {
       expect(snap?.sleep?.stages?.light).toBe(240)
       expect(snap?.sleep?.stages?.rem).toBe(85)
       expect(snap?.sleep?.stages?.awake).toBe(12)
+      // A single object carries no naps list.
+      expect(snap?.sleep?.naps).toBeUndefined()
+    })
+
+    // Multi-session days: HC records one main night plus daytime naps. The transform
+    // now forwards ALL sessions as an array; the main night is the longest session and
+    // the rest surface as naps[] (Boss asked for nap visibility). Previously only
+    // sleep[0] survived, so naps vanished from the daily aggregate.
+    it('maps a sleep session ARRAY: main = longest, rest -> naps[]', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-13',
+          sleep: [
+            // main night (484 min)
+            { start: '2026-08-12T23:10:00Z', end: '2026-08-13T07:14:00Z', total_min: 484,
+              stages: { deep_min: 80, light_min: 300, rem_min: 90, awake_min: 14 } },
+            // evening nap (80 min)
+            { start: '2026-08-13T17:26:00Z', end: '2026-08-13T18:46:00Z', total_min: 80,
+              stages: { deep_min: 5, light_min: 70, rem_min: 5, awake_min: 0 } },
+            // short afternoon nap (23 min)
+            { start: '2026-08-13T14:55:00Z', end: '2026-08-13T15:18:00Z', total_min: 23 },
+          ],
+        },
+      })
+      expect(snap?.sleep?.durationMin).toBe(484)
+      expect(snap?.sleep?.startAt).toBe('2026-08-12T23:10:00Z')
+      expect(snap?.sleep?.stages?.deep).toBe(80)
+      expect(snap?.sleep?.naps).toHaveLength(2)
+      // naps ordered by start time (afternoon 14:55 before evening 17:26)
+      expect(snap?.sleep?.naps?.[0].durationMin).toBe(23)
+      expect(snap?.sleep?.naps?.[0].startAt).toBe('2026-08-13T14:55:00Z')
+      expect(snap?.sleep?.naps?.[1].durationMin).toBe(80)
+      expect(snap?.sleep?.naps?.[1].stages?.light).toBe(70)
+      // a nap does not nest its own naps
+      expect(snap?.sleep?.naps?.[1].naps).toBeUndefined()
+    })
+
+    it('picks the longest session as main even when it is not first in the array', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-13',
+          sleep: [
+            { start: '2026-08-13T13:00:00Z', end: '2026-08-13T13:40:00Z', total_min: 40 },
+            { start: '2026-08-12T23:00:00Z', end: '2026-08-13T06:30:00Z', total_min: 450 },
+          ],
+        },
+      })
+      expect(snap?.sleep?.durationMin).toBe(450)
+      expect(snap?.sleep?.naps).toHaveLength(1)
+      expect(snap?.sleep?.naps?.[0].durationMin).toBe(40)
+    })
+
+    it('a single-element session array yields a main with no naps[]', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-13',
+          sleep: [
+            { start: '2026-08-12T23:00:00Z', end: '2026-08-13T06:30:00Z', total_min: 450 },
+          ],
+        },
+      })
+      expect(snap?.sleep?.durationMin).toBe(450)
+      expect(snap?.sleep?.naps).toBeUndefined()
+    })
+
+    it('an empty sleep array yields no sleep block', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-13', sleep: [] },
+      })
+      expect(snap?.sleep).toBeUndefined()
     })
 
     it('maps HC activity to snapshot top-level fields', async () => {
