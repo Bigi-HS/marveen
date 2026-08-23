@@ -128,8 +128,59 @@ function localDateBudapest(isoUtc: string): string | undefined {
   return new Date(d.getTime() + offH * 3600_000).toISOString().slice(0, 10)
 }
 
+// Zepp fragments one continuous activity into several short same-type records (measured
+// on the real backfill: type-79 walks arrive as ~10-16 min pieces with 2-9 min gaps,
+// while genuinely separate sessions sit 20+ min apart). Merge consecutive same-type
+// records whose inter-record gap is within this threshold so a downstream load model
+// (hibiki TRIMP/CTL/ATL) sees one activity instead of N fragments. 10 min cleanly
+// captures the fragment gaps without swallowing distinct sessions.
+const WORKOUT_MERGE_GAP_SEC = 10 * 60
+
+function mergeConsecutiveWorkouts(workouts: ZeppWorkout[]): ZeppWorkout[] {
+  if (workouts.length <= 1) return workouts
+  // Sort by start so "consecutive" is by clock time, not source order.
+  const sorted = [...workouts].sort((a, b) => a.startAt.localeCompare(b.startAt))
+  const out: ZeppWorkout[] = []
+  let cur: ZeppWorkout | null = null
+  let curEndMs = Number.NEGATIVE_INFINITY // true clock end of the running session
+  let hrWeighted = 0 // Sum(avgHr * durationSec) over fragments that reported avgHr
+  let hrDur = 0 // Sum(durationSec) over fragments that reported avgHr
+  const flush = () => {
+    if (!cur) return
+    // Duration-weighted avgHr across the merged fragments (only those that had one).
+    if (hrDur > 0) cur.avgHr = Math.round(hrWeighted / hrDur)
+    out.push(cur)
+  }
+  for (const w of sorted) {
+    const startMs = new Date(w.startAt).getTime()
+    const endMs = Number.isNaN(startMs) ? Number.NaN : startMs + w.durationSec * 1000
+    const contiguous =
+      cur !== null &&
+      cur.type === w.type &&
+      !Number.isNaN(startMs) &&
+      (startMs - curEndMs) / 1000 <= WORKOUT_MERGE_GAP_SEC
+    if (contiguous) {
+      // Extend the running session. Active duration is the SUM of fragment durations
+      // (the gap is rest, not active time); distance/calories accumulate.
+      cur!.durationSec += w.durationSec
+      if (w.distanceM !== undefined) cur!.distanceM = (cur!.distanceM ?? 0) + w.distanceM
+      if (w.calories !== undefined) cur!.calories = (cur!.calories ?? 0) + w.calories
+      if (w.avgHr !== undefined) { hrWeighted += w.avgHr * w.durationSec; hrDur += w.durationSec }
+      curEndMs = Math.max(curEndMs, endMs)
+    } else {
+      flush()
+      cur = { ...w }
+      curEndMs = Number.isNaN(endMs) ? Number.NEGATIVE_INFINITY : endMs
+      hrWeighted = w.avgHr !== undefined ? w.avgHr * w.durationSec : 0
+      hrDur = w.avgHr !== undefined ? w.durationSec : 0
+    }
+  }
+  flush()
+  return out
+}
+
 function mapWorkouts(list: unknown[], snapshotDate: string): ZeppWorkout[] {
-  return list
+  const mapped = list
     .map((w: any) => {
       const resolved = resolveWorkoutType(str(w['type']))
       return {
@@ -150,6 +201,7 @@ function mapWorkouts(list: unknown[], snapshotDate: string): ZeppWorkout[] {
       const wd = localDateBudapest(w.startAt)
       return wd === undefined || wd === snapshotDate
     })
+  return mergeConsecutiveWorkouts(mapped)
 }
 
 function num(v: unknown): number | undefined {
