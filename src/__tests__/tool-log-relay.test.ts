@@ -14,9 +14,10 @@ import { subscribeDashboardEvents, type DashboardEvent } from '../event-bus.js'
 
 const TEST_DB = '/tmp/test-tool-log-relay.db'
 
-async function call(method: string, fullPath: string, body?: unknown) {
+async function call(method: string, fullPath: string, body?: unknown, remoteAddress?: string) {
   const url = new URL('http://x' + fullPath)
-  const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]) as any
+  const stream = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))])
+  const req = Object.assign(stream, remoteAddress !== undefined ? { socket: { remoteAddress } } : {}) as any
   const captured: { status: number; body: any } = { status: 0, body: undefined }
   const res = {
     writeHead(status: number) { captured.status = status; return res },
@@ -77,5 +78,41 @@ describe('tool-log relay -> dashboard event bus (card 229a9000)', () => {
       expect(r.status === 0 || r.status === 200).toBe(true)
     })
     expect(events.some((e) => e.type === 'hook-event')).toBe(false)
+  })
+})
+
+// Card 8293dd11: tool-log-relay loopback-guard
+describe('tool-log POST loopback guard (card 8293dd11)', () => {
+  beforeEach(() => { rmSync(TEST_DB, { force: true }); initDatabase(TEST_DB) })
+  afterAll(() => rmSync(TEST_DB, { force: true }))
+
+  it('rejects POST from a non-loopback address with 403', async () => {
+    const r = await call('POST', '/api/tool-log',
+      { session_id: 's-evil', tool_name: 'Bash', success: true }, '1.2.3.4')
+    expect(r.status).toBe(403)
+  })
+
+  it('allows POST from 127.0.0.1', async () => {
+    const r = await call('POST', '/api/tool-log',
+      { session_id: 's-lb1', tool_name: 'Bash', success: true }, '127.0.0.1')
+    expect(r.status).toBe(200)
+  })
+
+  it('allows POST from localhost', async () => {
+    const r = await call('POST', '/api/tool-log',
+      { session_id: 's-lb2', tool_name: 'Bash', success: true }, 'localhost')
+    expect(r.status).toBe(200)
+  })
+
+  it('allows POST from ::1', async () => {
+    const r = await call('POST', '/api/tool-log',
+      { session_id: 's-lb3', tool_name: 'Bash', success: true }, '::1')
+    expect(r.status).toBe(200)
+  })
+
+  it('allows POST when remoteAddress is absent (Unix socket / in-process)', async () => {
+    const r = await call('POST', '/api/tool-log',
+      { session_id: 's-unix', tool_name: 'Bash', success: true })
+    expect(r.status).toBe(200)
   })
 })
