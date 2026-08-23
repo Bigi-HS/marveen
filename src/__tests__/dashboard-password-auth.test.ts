@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from 'vitest'
 import http from 'node:http'
-import { mkdirSync, rmSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { randomBytes, scryptSync } from 'node:crypto'
 
 const TEST_DIR = '/tmp/test-dashboard-password-auth'
 
@@ -28,6 +29,7 @@ import {
   SESSION_COOKIE_NAME,
   SESSION_MAX_AGE_SECONDS,
   __resetSessionStateForTests,
+  __setCredentialsMtimeForTests,
 } from '../web/dashboard-auth.js'
 
 const USER = 'dominik'
@@ -205,5 +207,146 @@ describe('POST /api/auth/login (username+password)', () => {
     })
     expect(r.status).toBe(200)
     expect(r.setCookie).toContain(`${SESSION_COOKIE_NAME}=`)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// AC1: mtime-recheck -- external file modification is detected without restart
+// ---------------------------------------------------------------------------
+describe('568f0255 stale-cache fix: mtime-recheck (AC1)', () => {
+  const credsPath = join(TEST_DIR, 'store', '.dashboard-credentials.json')
+  const PASS2 = 'second-strong-password-abcd'
+
+  beforeEach(() => {
+    rmSync(credsPath, { force: true })
+    __resetSessionStateForTests()
+  })
+
+  it('detects external credentials file replacement and re-reads', () => {
+    // Warm the in-memory cache with PASS
+    setDashboardCredentials(USER, PASS)
+    expect(verifyPassword(USER, PASS)).toBe(true)
+
+    // Backdate the cached mtime so the next statSync sees a mismatch
+    __setCredentialsMtimeForTests(0)
+
+    // Simulate an external CLI tool writing new credentials directly to disk
+    const salt2 = randomBytes(16)
+    const hash2 = scryptSync(PASS2, salt2, 64)
+    writeFileSync(credsPath, JSON.stringify({
+      username: USER,
+      salt: salt2.toString('hex'),
+      hash: hash2.toString('hex'),
+      createdAt: Math.floor(Date.now() / 1000),
+    }))
+
+    // loadCredentials() must detect the mtime mismatch and re-read PASS2 from disk
+    expect(verifyPassword(USER, PASS2)).toBe(true)
+    expect(verifyPassword(USER, PASS)).toBe(false)
+  })
+
+  it('does not re-read when the file is unchanged (cache hit)', () => {
+    setDashboardCredentials(USER, PASS)
+    // Three consecutive calls must not re-read (mtime matches)
+    expect(verifyPassword(USER, PASS)).toBe(true)
+    expect(verifyPassword(USER, PASS)).toBe(true)
+    expect(verifyPassword(USER, PASS)).toBe(true)
+  })
+
+  it('handles missing credentials file gracefully after cache was warm', () => {
+    setDashboardCredentials(USER, PASS)
+    expect(hasPasswordCredentials()).toBe(true)
+
+    // External deletion: file gone -> statSync returns mtime=0, which differs from
+    // the T>0 mtime stored when setDashboardCredentials wrote the file -> re-read.
+    rmSync(credsPath, { force: true })
+
+    // Should detect mtime mismatch (0 != T) and re-read -> none configured
+    expect(hasPasswordCredentials()).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// AC-login-2: cold start disk-read -- after module reset (process restart without
+// --continue) loadCredentials() reads credentials from disk, not from any
+// in-process cache that may have held values before the restart.
+// ---------------------------------------------------------------------------
+describe('568f0255 AC-login-2: cold-start reads credentials from disk (no stale in-process cache)', () => {
+  const credsPath = join(TEST_DIR, 'store', '.dashboard-credentials.json')
+
+  beforeEach(() => {
+    rmSync(credsPath, { force: true })
+    __resetSessionStateForTests()
+  })
+
+  it('reads credentials written to disk before a cold start (module reset simulates restart)', () => {
+    // Phase 1: write credentials via API (like a pre-restart admin setup)
+    setDashboardCredentials(USER, PASS)
+    // The cache is now warm with USER/PASS.
+
+    // Phase 2: simulate process restart -- reset all module-level state.
+    // __resetSessionStateForTests() sets cachedCredentials=undefined, mtime=0,
+    // exactly what a fresh Node.js process would have before first loadCredentials().
+    __resetSessionStateForTests()
+
+    // Phase 3: first call after cold start must disk-read and return the persisted cred.
+    expect(hasPasswordCredentials()).toBe(true)
+    expect(verifyPassword(USER, PASS)).toBe(true)
+  })
+
+  it('returns no credentials after cold start when credentials file was deleted before restart', () => {
+    // Write creds, then delete the file, then simulate restart.
+    setDashboardCredentials(USER, PASS)
+    rmSync(credsPath, { force: true })
+    __resetSessionStateForTests()
+
+    // After cold start with no file on disk, must report no credentials.
+    expect(hasPasswordCredentials()).toBe(false)
+  })
+
+  it('does not bleed cache across simulated restarts (old value cannot survive reset)', () => {
+    const PASS2 = 'second-different-password-zz7'
+    // Restart 1: creds = PASS
+    setDashboardCredentials(USER, PASS)
+    __resetSessionStateForTests()
+    expect(verifyPassword(USER, PASS)).toBe(true)
+
+    // Restart 2: overwrite with PASS2 (simulates out-of-band credential rotation
+    // followed by a server restart) -- old PASS must NOT be served from cache.
+    setDashboardCredentials(USER, PASS2)
+    __resetSessionStateForTests()
+    expect(verifyPassword(USER, PASS2)).toBe(true)
+    expect(verifyPassword(USER, PASS)).toBe(false)
+  })
+})
+
+// AC2: session-invalidation -- credential rotation invalidates active sessions
+// ---------------------------------------------------------------------------
+describe('568f0255 stale-cache fix: session-invalidation on credential change (AC2)', () => {
+  const credsPath = join(TEST_DIR, 'store', '.dashboard-credentials.json')
+  const secretPath = join(TEST_DIR, 'store', '.dashboard-session-secret')
+
+  beforeEach(() => {
+    rmSync(credsPath, { force: true })
+    rmSync(secretPath, { force: true })
+    __resetSessionStateForTests()
+  })
+
+  it('invalidates all active sessions when credentials are rotated via setDashboardCredentials', () => {
+    const PASS2 = 'second-strong-password-xyz9'
+
+    // Issue a session under the first credential set
+    setDashboardCredentials(USER, PASS)
+    const sessionBefore = createSession()
+    expect(verifySession(sessionBefore).valid).toBe(true)
+
+    // Rotate credentials -- this must rotate the session secret too
+    setDashboardCredentials(USER, PASS2)
+
+    // Old session must be invalid (secret rotated)
+    expect(verifySession(sessionBefore).valid).toBe(false)
+    // New credentials must work
+    expect(verifyPassword(USER, PASS2)).toBe(true)
+    expect(verifyPassword(USER, PASS)).toBe(false)
   })
 })
