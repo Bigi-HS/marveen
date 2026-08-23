@@ -8,6 +8,8 @@ export async function tryHandleToolLog(ctx: RouteContext): Promise<boolean> {
 
   // POST /api/tool-log -- log a tool call (from PostToolUse hook)
   if (path === '/api/tool-log' && method === 'POST') {
+    const ra = (req.socket as any)?.remoteAddress
+    if (ra && !['127.0.0.1', '::1', 'localhost', '::ffff:127.0.0.1'].includes(ra)) { json(res, { error: 'loopback only' }, 403); return true }
     const body = await readBody(req)
     const data = JSON.parse(body.toString()) as {
       session_id: string
