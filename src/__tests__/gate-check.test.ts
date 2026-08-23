@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach } from 'vitest'
 import {
   isValidSha,
   isValidReviewer,
@@ -6,6 +6,7 @@ import {
   isPositiveInt,
   isSecuritySensitivePath,
   requiredReviewers,
+  getQaSeat,
   applyAuthorRecusal,
   evaluateApprovals,
   runGateCheck,
@@ -26,8 +27,9 @@ describe('input validation (MG-AC1)', () => {
     expect(isValidSha(undefined)).toBe(false)
   })
 
-  it('isValidReviewer accepts only thor/dave/chad', () => {
+  it('isValidReviewer accepts thor/gauge/dave/chad', () => {
     expect(isValidReviewer('thor')).toBe(true)
+    expect(isValidReviewer('gauge')).toBe(true)
     expect(isValidReviewer('dave')).toBe(true)
     expect(isValidReviewer('chad')).toBe(true)
     expect(isValidReviewer('alice')).toBe(false)
@@ -192,12 +194,38 @@ describe('runGateCheck requires chad for a gate-code PR (card 88eb6120)', () => 
   })
 })
 
+describe('getQaSeat / GATE_QA_SEAT env', () => {
+  afterEach(() => { delete process.env.GATE_QA_SEAT })
+
+  it('defaults to thor when env is unset', () => {
+    delete process.env.GATE_QA_SEAT
+    expect(getQaSeat()).toBe('thor')
+  })
+
+  it('returns gauge when GATE_QA_SEAT=gauge', () => {
+    process.env.GATE_QA_SEAT = 'gauge'
+    expect(getQaSeat()).toBe('gauge')
+  })
+
+  it('falls back to thor when GATE_QA_SEAT is not a valid reviewer', () => {
+    process.env.GATE_QA_SEAT = 'alice'
+    expect(getQaSeat()).toBe('thor')
+  })
+})
+
 describe('requiredReviewers (MG-AC4)', () => {
-  it('is thor+dave for a non-security PR', () => {
+  afterEach(() => { delete process.env.GATE_QA_SEAT })
+
+  it('is thor+dave for a non-security PR (default QA seat)', () => {
     expect(requiredReviewers(false)).toEqual(['thor', 'dave'])
   })
-  it('adds chad for a security PR', () => {
+  it('adds chad for a security PR (default QA seat)', () => {
     expect(requiredReviewers(true)).toEqual(['thor', 'dave', 'chad'])
+  })
+  it('uses gauge as QA seat when GATE_QA_SEAT=gauge', () => {
+    process.env.GATE_QA_SEAT = 'gauge'
+    expect(requiredReviewers(false)).toEqual(['gauge', 'dave'])
+    expect(requiredReviewers(true)).toEqual(['gauge', 'dave', 'chad'])
   })
 })
 

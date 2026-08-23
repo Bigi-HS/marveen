@@ -11,8 +11,19 @@
 //
 // See store/specs/merge-gate-enforcement.md (card fa11eb63).
 
-export const GATE_REVIEWERS = ['thor', 'dave', 'chad'] as const
+export const GATE_REVIEWERS = ['thor', 'gauge', 'dave', 'chad'] as const
 export type Reviewer = (typeof GATE_REVIEWERS)[number]
+
+// QA seat is normally held by thor. Set GATE_QA_SEAT env to substitute
+// (e.g. 'gauge') without touching any other reviewer logic. The default keeps
+// all existing tests green -- tests that don't set the env see 'thor'.
+export function getQaSeat(): Reviewer {
+  const seat = process.env.GATE_QA_SEAT
+  if (seat && (GATE_REVIEWERS as readonly string[]).includes(seat)) {
+    return seat as Reviewer
+  }
+  return 'thor'
+}
 
 export const GATE_VERDICTS = ['approved', 'blocked'] as const
 export type Verdict = (typeof GATE_VERDICTS)[number]
@@ -153,10 +164,12 @@ export function isSecuritySensitivePath(filename: string): boolean {
   return false
 }
 
-// Required reviewers for a PR: Thor + Dave always; Chad added for a
-// security-sensitive diff (MG-AC4).
+// Required reviewers for a PR: QA-seat + Dave always; Chad added for a
+// security-sensitive diff (MG-AC4). The QA seat is normally 'thor' but can be
+// overridden via GATE_QA_SEAT env (see getQaSeat()).
 export function requiredReviewers(securityTouched: boolean): Reviewer[] {
-  return securityTouched ? ['thor', 'dave', 'chad'] : ['thor', 'dave']
+  const qa = getQaSeat()
+  return securityTouched ? [qa, 'dave', 'chad'] : [qa, 'dave']
 }
 
 // The standing backup seat promoted when a required reviewer recuses (card

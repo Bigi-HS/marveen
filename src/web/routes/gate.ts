@@ -96,7 +96,7 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
       return true
     }
     if (!isValidReviewer(reviewer)) {
-      json(res, { error: "reviewer must be one of 'thor', 'dave', 'chad'" }, 400)
+      json(res, { error: "reviewer must be one of 'thor', 'gauge', 'dave', 'chad'" }, 400)
       return true
     }
     // MG-SEC4 BLOCK (card db9bc192, C-BIND): a per-agent token may only record

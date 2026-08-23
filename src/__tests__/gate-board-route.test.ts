@@ -80,7 +80,7 @@ describe('computeGateBoard -- aggregation', () => {
     const pr = board.prs[0]
     expect(pr.pr_number).toBe(344)
     expect(pr.author).toBe('bigben')
-    expect(pr.seats).toEqual({ thor: 'approved', dave: 'approved', chad: 'none' })
+    expect(pr.seats).toEqual({ thor: 'approved', gauge: 'none', dave: 'approved', chad: 'none' })
     expect(pr.ci_status).toBe('pass')
     expect(pr.chad_reviewed).toBe(false)
     expect(pr.override_active).toBe(false)
@@ -92,7 +92,7 @@ describe('computeGateBoard -- aggregation', () => {
     const t = nowS()
     insertApproval(db, { pr_number: 10, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, t)
     const pr = computeGateBoard(db, nowS()).prs[0]
-    expect(pr.seats).toEqual({ thor: 'approved', dave: 'none', chad: 'none' })
+    expect(pr.seats).toEqual({ thor: 'approved', gauge: 'none', dave: 'none', chad: 'none' })
     expect(pr.merge_ready).toBe(false)
   })
 
@@ -137,7 +137,7 @@ describe('computeGateBoard -- aggregation', () => {
     insertCiRun(db, { pr_number: 20, head_sha: SHA_B, status: 'pass', recorded_by: 'buster' }, t + 10)
     const pr = computeGateBoard(db, nowS()).prs[0]
     // seats must reflect SHA_B (empty), NOT the stale SHA_A approvals
-    expect(pr.seats).toEqual({ thor: 'none', dave: 'none', chad: 'none' })
+    expect(pr.seats).toEqual({ thor: 'none', gauge: 'none', dave: 'none', chad: 'none' })
     expect(pr.merge_ready).toBe(false)
   })
 

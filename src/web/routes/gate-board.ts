@@ -30,6 +30,7 @@ import {
   applyAuthorRecusal,
   resolveCiStatus,
   isGateCiRequired,
+  getQaSeat,
   type Reviewer,
   type CiStatus,
 } from '../gate-check.js'
@@ -124,8 +125,10 @@ export function computeGateBoard(db: Database.Database, nowS: number): GateBoard
   for (const [prNumber, { sha, lastActivity }] of latest) {
     if (lastActivity < cutoff) continue
     const approvals = readApprovals(db, prNumber, sha)
+    const qa = getQaSeat()
     const seats: Record<Reviewer, Seat> = {
       thor: seatFor(approvals, 'thor'),
+      gauge: seatFor(approvals, 'gauge'),
       dave: seatFor(approvals, 'dave'),
       chad: seatFor(approvals, 'chad'),
     }
@@ -136,7 +139,7 @@ export function computeGateBoard(db: Database.Database, nowS: number): GateBoard
     // Mirror runGateCheck's pass semantics with a DB-derived `required` set, then
     // apply author recusal (card 46de122b) so the board's merge_ready matches the
     // merge route: a reviewer-author is dropped and the backup (chad) promoted.
-    const baseRequired: Reviewer[] = chadReviewed ? ['thor', 'dave', 'chad'] : ['thor', 'dave']
+    const baseRequired: Reviewer[] = chadReviewed ? [qa, 'dave', 'chad'] : [qa, 'dave']
     const required = applyAuthorRecusal(baseRequired, prAuthor).required
     const evaluation = evaluateApprovals(approvals, required)
     const ciSatisfied = ciRequired ? ciStatus === 'pass' : true
