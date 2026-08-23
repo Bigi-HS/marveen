@@ -9,9 +9,11 @@ import { UNTRUSTED_PREAMBLE, wrapUntrusted } from './prompt-safety.js'
 import { SCHEDULED_TASKS_DIR, parseSkillMdFrontmatter } from './web/scheduled-tasks-io.js'
 import {
   agentSessionName,
+  capturePane,
   isSessionReadyForPrompt,
   sendPromptToSession,
 } from './web/agent-process.js'
+import { detectPaneState } from './pane-state.js'
 import { MAIN_CHANNELS_SESSION } from './web/main-agent.js'
 import { toPendingRetryView, shouldRetryNow } from './pending-retries.js'
 import { sendPendingRetryAlert } from './web/pending-retry-alert.js'
@@ -376,6 +378,21 @@ function rollForwardFired(
   ).run(nowS, computeNextRun(task.schedule, basisMs), task.id)
 }
 
+// Roll next_run forward after an unconfirmable (unknown) send on an effect-bearing
+// task. Marks last_result='unconfirmed' so callers can distinguish "we know it ran"
+// from "we cannot tell" -- the operator alert must accompany this call.
+function rollForwardUnknown(
+  task: ScheduledTask,
+  nowMs: number,
+  nowS: number,
+  db: ReturnType<typeof getNoaDb>,
+): void {
+  const basisMs = Math.max(nowMs, task.next_run * 1000)
+  db.prepare(
+    `UPDATE scheduled_tasks SET last_run=?, last_result='unconfirmed', next_run=? WHERE id=?`
+  ).run(nowS, computeNextRun(task.schedule, basisMs), task.id)
+}
+
 // Record a successful trigger-mode fire from an external caller (e.g. n8n cron).
 // Uses exactly the same last_run/next_run roll-forward as the native sweep tick so
 // the native runner's query (last_run < next_run) treats this as "already fired"
@@ -438,7 +455,10 @@ export function buildScheduledTaskPrompt(task: ScheduledTask, agentName: string)
 // mechanically succeeded, so the old code counted it as a fire, rolled
 // next_run forward and wrote a task_runs row for a run that never happened.
 // It is treated like 'busy' by the sweep -- retry, do not advance.
-type FireResult = 'fired' | 'busy' | 'missing' | 'error' | 'parked'
+// 'unknown' = pane unreadable after re-probe; effect-bearing tasks are rolled
+// forward with last_result='unconfirmed' and the operator is alerted. Heartbeat
+// tasks return 'parked' instead (idempotent -- safe to retry).
+type FireResult = 'fired' | 'busy' | 'missing' | 'error' | 'parked' | 'unknown'
 
 // Snapshot the live tmux session names once. Resolved at the top of a sweep tick
 // and shared across every attemptFireTask call so we spawn `tmux list-sessions`
@@ -494,6 +514,38 @@ function attemptFireTask(
         'scheduler: prompt parked in composer (never submitted), residue cleared -- not counted as fired',
       )
       return 'parked'
+    }
+
+    if (verdict === 'unknown') {
+      // pane unreadable after sendPromptToSession's own retry loop.
+      // Step 1: re-probe once with a fresh capture -- most 'unknown' is transient
+      // redraw and resolves to 'idle' or 'typing' within a second.
+      const reprobePanText = capturePane(session)
+      const reprobeState = reprobePanText != null ? detectPaneState(reprobePanText) : 'unknown'
+
+      if (reprobeState === 'idle') {
+        // Prompt likely landed -- fall through to appendTaskRun (treat as submitted).
+        logger.info({ task: task.id, agent: agentName, session },
+          'scheduler: unknown resolved to idle on re-probe -- treating as submitted')
+      } else if (reprobeState === 'typing') {
+        // Text is still staged in the composer -- same as 'parked'.
+        logger.warn({ task: task.id, agent: agentName, session },
+          'scheduler: unknown resolved to typing on re-probe -- treating as parked')
+        return 'parked'
+      } else {
+        // Still unknown after re-probe. Gate on idempotency:
+        //   heartbeat: defer (safe to retry -- re-injection is a no-op)
+        //   effect-bearing task: return 'unknown' so the sweep escalates the
+        //     operator rather than silently marking delivered or risking double-send.
+        if (task.type === 'heartbeat') {
+          logger.warn({ task: task.id, agent: agentName, session },
+            'scheduler: unknown unresolved for heartbeat -- deferring (safe to retry)')
+          return 'parked'
+        }
+        logger.warn({ task: task.id, agent: agentName, session },
+          'scheduler: unknown unresolved for effect-bearing task -- escalating operator')
+        return 'unknown'
+      }
     }
 
     appendTaskRun(task.id, agentName, db)
@@ -714,6 +766,18 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb(), nowMsOverride?:
       // written but never submitted, so the retry queue records WHY the
       // slot was missed instead of blaming a busy peer.
       insertPendingRetryIfNew(task.id, agentName, nowS, result, db)
+    } else if (result === 'unknown') {
+      // Pane was unreadable after re-probe and the task is effect-bearing (not
+      // heartbeat -- those return 'parked'). We cannot safely retry (double-send
+      // risk) and we cannot prove it fired. Roll next_run forward with
+      // last_result='unconfirmed' so the task is not perpetually stuck, and
+      // escalate the operator immediately so the slot is not silently lost.
+      // "SOHA silent-delivered a scheduler úton" -- card 3e5c2914.
+      rollForwardUnknown(task, nowMs, nowS, db)
+      logger.warn(
+        { task: task.id, agent: agentName },
+        'scheduler: send unconfirmed (pane unreadable after re-probe) -- operator escalation, next_run rolled forward',
+      )
     } else if (result === 'missing') {
       logger.warn({ task: task.id, agent: agentName }, 'scheduler: session missing, skipping (no retry)')
     } else if (result === 'error') {
