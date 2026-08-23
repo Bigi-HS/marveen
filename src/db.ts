@@ -993,6 +993,12 @@ export function getPendingMessages(toAgent?: string): AgentMessage[] {
     .all() as AgentMessage[]
 }
 
+export function getPendingMessageCount(): number {
+  const row = db.prepare("SELECT COUNT(*) as cnt FROM agent_messages WHERE status = 'pending'")
+    .get() as { cnt: number }
+  return row.cnt
+}
+
 /**
  * Current status of each of the given message ids, as a Map (id -> status).
  * Ids with no row are simply absent from the map. Used by the delivery-sentinel

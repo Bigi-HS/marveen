@@ -92,6 +92,29 @@ const routerLoggedMisses: Set<number> = new Set()
 const quiescenceCheckedAt: Map<number, number> = new Map()
 const QUIESCENCE_RECHECK_MS = 60 * 1000
 
+// Delivery burst cap (card fee86966): each sendPromptToSession call blocks the
+// event loop for ~2s on a large message (execFileSync send-keys chunks + retry
+// sleeps). Without a cap, a spawn-broadcast flood (4 agents * ~15 recipients =
+// 60 pending rows) can stall the event loop for >8s, tripping the supervisor's
+// health-check timeout and triggering a kill-restart loop. With cap=3, the
+// maximum per-tick blocking is 3 * 2s = 6s, comfortably below the 8s threshold.
+// Remaining messages are delivered in subsequent 5s ticks.
+export const MAX_DELIVERIES_PER_TICK = 3
+
+// Spawn-broadcast depth guard (card fee86966 / Fix B): when a new agent is
+// spawned the router notifies all running agents, but if the queue already has
+// more than SPAWN_BROADCAST_QUEUE_MAX pending rows the flood would extend the
+// backlog rather than clear it. Callers (agents.ts spawn handler) should check
+// this before fanning out to all targets beyond MAIN_AGENT_ID.
+export const SPAWN_BROADCAST_QUEUE_MAX = 10
+
+// Returns true when the pending-message queue is already deep enough that
+// adding a fleet-wide spawn-broadcast would worsen congestion rather than help.
+// In that case callers should restrict notifications to MAIN_AGENT_ID only.
+export function shouldSkipSpawnBroadcast(pendingCount: number): boolean {
+  return pendingCount >= SPAWN_BROADCAST_QUEUE_MAX
+}
+
 // Durable, delivery-independent trail (PR #130 DA review, MEDIUM): the in-band
 // alert is itself an inter-agent message and can also be lost -- acutely when
 // the recipient IS the wedged main agent. Every overdue/dropped event is
@@ -160,7 +183,13 @@ export function startMessageRouter(): NodeJS.Timeout {
     // delivered per idle window; ordering surfaces a fresh urgent ahead of a
     // stale low-priority backlog. Pure reordering -- drops nothing, leaves the
     // per-message escalate/hard-fail and hard-TTL untouched.
+    // Burst cap (card fee86966): stop after MAX_DELIVERIES_PER_TICK successful
+    // injects so a flood of pending rows cannot stall the event loop past the
+    // supervisor's 8s health-check timeout. Skips (busy/missing/paused) and
+    // 'parked' re-queues do not count against the cap.
+    let deliveriesThisTick = 0
     for (const msg of orderPendingByPriority(pending)) {
+      if (deliveriesThisTick >= MAX_DELIVERIES_PER_TICK) break
       const ageMs = now - msg.created_at * 1000
       // Priority-derived escalation timing (card 28d2179f): urgent/high messages
       // escalate sooner than the 60-min default. The hard-TTL is invariant across
@@ -376,6 +405,7 @@ export function startMessageRouter(): NodeJS.Timeout {
         routerLoggedMisses.delete(msg.id)
         escalationState.delete(msg.id)
         logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, category: isChannelInbound ? 'channel-inbound' : trusted ? 'trusted-peer' : 'untrusted', ackExpected: msg.ack_expected }, 'Agent message delivered')
+        deliveriesThisTick++
       } catch (err) {
         logger.warn({ err, id: msg.id }, 'Failed to deliver agent message')
         if (!markMessageFailed(msg.id, 'Failed to inject into tmux session')) {
