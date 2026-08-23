@@ -35,6 +35,22 @@ describe('isPublicApiPath', () => {
     })
   })
 
+  describe('POST /api/health/ingest-raw (WELL-018 Path B n8n proxy)', () => {
+    it('is public for POST so the phone can reach the n8n transform proxy', () => {
+      expect(isPublicApiPath('/api/health/ingest-raw', 'POST')).toBe(true)
+    })
+
+    it('stays GATED for non-POST methods', () => {
+      expect(isPublicApiPath('/api/health/ingest-raw', 'GET')).toBe(false)
+      expect(isPublicApiPath('/api/health/ingest-raw', 'DELETE')).toBe(false)
+    })
+
+    it('does not exempt look-alike paths', () => {
+      expect(isPublicApiPath('/api/health/ingest-rawx', 'POST')).toBe(false)
+      expect(isPublicApiPath('/api/health/ingest-raw/x', 'POST')).toBe(false)
+    })
+  })
+
   it('gates every other /api path', () => {
     expect(isPublicApiPath('/api/memories', 'GET')).toBe(false)
     expect(isPublicApiPath('/api/kanban', 'POST')).toBe(false)
