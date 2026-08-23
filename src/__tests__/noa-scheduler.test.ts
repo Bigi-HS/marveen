@@ -17,6 +17,11 @@ vi.mock('../web/agent-process.js', () => ({
   isSessionReadyForPrompt: vi.fn().mockReturnValue(true),
   sendPromptToSession: vi.fn(),
   isAgentRunning: vi.fn().mockReturnValue(false),
+  capturePane: vi.fn().mockReturnValue(null),
+}))
+
+vi.mock('../pane-state.js', () => ({
+  detectPaneState: vi.fn().mockReturnValue('unknown'),
 }))
 
 vi.mock('../web/main-agent.js', () => ({
@@ -64,7 +69,8 @@ const {
   MAX_SCHEDULED_TASK_PROMPT_LEN,
 } = await import('../noa-scheduler.js')
 
-const { isSessionReadyForPrompt, sendPromptToSession } = await import('../web/agent-process.js')
+const { isSessionReadyForPrompt, sendPromptToSession, capturePane } = await import('../web/agent-process.js')
+const { detectPaneState } = await import('../pane-state.js')
 const { sendPendingRetryAlert } = await import('../web/pending-retry-alert.js')
 const { sweepStuckTasks } = await import('../web/stuck-task-sentinel.js')
 
@@ -739,16 +745,136 @@ describe('runSweepTick: parked (un-submitted) prompt', () => {
     // The opposite failure direction: treating "cannot tell" as "did not
     // fire" would re-run a task that may already have executed. Only a
     // MEASURED parked verdict withholds the roll-forward.
+    // NOTE: last_result is now 'unconfirmed' (not 'fired') so the operator
+    // can distinguish "confirmed fired" from "sent but unverifiable".
+    // next_run still rolls forward so the task does not get stuck.
     const db = getNoaDb()
     const nowS = Math.floor(Date.now() / 1000)
     insertDueTask(db, 'unknown-task', nowS)
     vi.mocked(sendPromptToSession).mockReturnValue('unknown')
+    // capturePane returns null -> detectPaneState not called -> still unknown
+    vi.mocked(capturePane).mockReturnValue(null)
 
     runSweepTick(60000, db)
 
     const after = getTask('unknown-task', db)!
+    // 'unconfirmed' not 'fired': operator can tell this slot was not verified
+    expect(after.last_result).toBe('unconfirmed')
+    expect(after.next_run).toBeGreaterThan(nowS)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Staged-input wedge: 'unknown' verdict re-probe + idempotency-gating
+// (card 3e5c2914 -- empty-composer check + submit-verify + escalation)
+//
+// An 'unknown' SubmitVerdict means capturePane failed inside sendPromptToSession.
+// The scheduler must NOT silently mark a task as delivered:
+//   1. Re-probe once: capturePane + detectPaneState.
+//      - 'idle'   -> prompt likely landed, treat as submitted.
+//      - 'typing' -> prompt still staged, treat as parked (retry safe).
+//      - still 'unknown' -> idempotency gate:
+//          heartbeat: defer ('parked' -- re-injection is idempotent)
+//          effect-bearing task: escalate ('unconfirmed' + operator alert)
+// ---------------------------------------------------------------------------
+
+describe('runSweepTick: unknown verdict re-probe (card 3e5c2914)', () => {
+  function insertDueTaskWithType(
+    db: ReturnType<typeof getNoaDb>,
+    id: string,
+    nowS: number,
+    type: 'task' | 'heartbeat' = 'task',
+  ): void {
+    db.prepare(`
+      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES (?, 'marveen', ?, '', 'Do it', '0 9 * * *', ?, 'active', ?)
+    `).run(id, type, nowS - 10, nowS - 100)
+  }
+
+  beforeEach(() => {
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+    vi.mocked(sendPromptToSession).mockReset()
+    vi.mocked(capturePane).mockReset()
+    vi.mocked(detectPaneState).mockReset()
+  })
+
+  it('unknown resolves to idle on re-probe: treats as submitted (fires normally)', () => {
+    // submit-verify: capturePane succeeds on re-probe and shows idle ->
+    // prompt almost certainly landed, safe to count as fired.
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    insertDueTaskWithType(db, 'unknown-idle-task', nowS, 'task')
+    vi.mocked(sendPromptToSession).mockReturnValue('unknown')
+    vi.mocked(capturePane).mockReturnValue('❯ ')        // non-null pane
+    vi.mocked(detectPaneState).mockReturnValue('idle')  // idle -> submitted
+
+    runSweepTick(60000, db)
+
+    const after = getTask('unknown-idle-task', db)!
     expect(after.last_result).toBe('fired')
     expect(after.next_run).toBeGreaterThan(nowS)
+  })
+
+  it('unknown resolves to typing on re-probe: treated as parked (queued for retry)', () => {
+    // composer-nonempty-after-send: the prompt is still staged in the input box.
+    // Treat as 'parked' so a later tick can re-deliver safely.
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    insertDueTaskWithType(db, 'unknown-typing-task', nowS, 'task')
+    vi.mocked(sendPromptToSession).mockReturnValue('unknown')
+    vi.mocked(capturePane).mockReturnValue('❯ some text')
+    vi.mocked(detectPaneState).mockReturnValue('typing')
+
+    runSweepTick(60000, db)
+
+    const after = getTask('unknown-typing-task', db)!
+    expect(after.next_run).toBe(nowS - 10)  // NOT rolled forward
+    const retries = db.prepare(
+      `SELECT * FROM pending_task_retries WHERE task_name='unknown-typing-task'`
+    ).all() as Array<{ last_reason: string }>
+    expect(retries).toHaveLength(1)
+    expect(retries[0]!.last_reason).toBe('parked')
+  })
+
+  it('unknown persists after re-probe for a heartbeat: deferred safely (parked)', () => {
+    // heartbeat + persistent unknown: re-injection is idempotent (keepalive),
+    // so defer is safe. Must NOT count as fired.
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    insertDueTaskWithType(db, 'unknown-hb-task', nowS, 'heartbeat')
+    vi.mocked(sendPromptToSession).mockReturnValue('unknown')
+    vi.mocked(capturePane).mockReturnValue(null)  // re-probe also fails
+
+    runSweepTick(60000, db)
+
+    const after = getTask('unknown-hb-task', db)!
+    expect(after.next_run).toBe(nowS - 10)  // NOT rolled forward
+    expect(after.last_result).not.toBe('fired')
+    const retries = db.prepare(
+      `SELECT * FROM pending_task_retries WHERE task_name='unknown-hb-task'`
+    ).all()
+    expect(retries).toHaveLength(1)  // queued for retry
+  })
+
+  it('unknown persists after re-probe for effect-bearing task: escalated, next_run rolled (not retried)', () => {
+    // effect-bearing task + persistent unknown: re-delivery risks double-send.
+    // Escalate (last_result=unconfirmed) and roll next_run so it does not get stuck.
+    // Must NOT be queued for automatic retry.
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    insertDueTaskWithType(db, 'unknown-effect-task', nowS, 'task')
+    vi.mocked(sendPromptToSession).mockReturnValue('unknown')
+    vi.mocked(capturePane).mockReturnValue(null)  // re-probe fails too
+
+    runSweepTick(60000, db)
+
+    const after = getTask('unknown-effect-task', db)!
+    expect(after.last_result).toBe('unconfirmed')      // NOT 'fired'
+    expect(after.next_run).toBeGreaterThan(nowS)       // rolled to avoid stuck
+    const retries = db.prepare(
+      `SELECT * FROM pending_task_retries WHERE task_name='unknown-effect-task'`
+    ).all()
+    expect(retries).toHaveLength(0)  // NOT queued (double-send risk)
   })
 })
 
