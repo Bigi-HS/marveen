@@ -68,15 +68,19 @@ else:
             errs.append("check status invalid: %r" % c.get("status"))
 if doc.get("verdict") != "WARN" or doc.get("diff_additions") != 512 or len(checks) != 4:
     errs.append("values not round-tripped")
-# If jsonschema is available, validate against the real schema file too.
+# Schema validation is mandatory -- silent ImportError skip was a false-PASS
+# (card c44ea607). If jsonschema is absent, fail loudly so the CI host is
+# fixed rather than letting the validation silently not run.
 try:
     import jsonschema
-    with open(os.environ["SCHEMA"], encoding="utf-8") as fh:
-        jsonschema.validate(doc, json.load(fh))
 except ImportError:
-    pass
-except Exception as exc:  # schema validation failure is a real error
-    errs.append("schema validation: %s" % exc)
+    errs.append("jsonschema not installed -- schema validation cannot run (install it)")
+else:
+    try:
+        with open(os.environ["SCHEMA"], encoding="utf-8") as fh:
+            jsonschema.validate(doc, json.load(fh))
+    except Exception as exc:
+        errs.append("schema validation: %s" % exc)
 sys.exit("; ".join(errs) if errs else 0)
 PY
 if [ $? -eq 0 ]; then ok "pgb_json emits schema-valid JSON (required fields + check shape)"; else bad "pgb_json JSON contract"; fi
