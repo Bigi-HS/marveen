@@ -267,6 +267,59 @@ describe('568f0255 stale-cache fix: mtime-recheck (AC1)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// AC-login-2: cold start disk-read -- after module reset (process restart without
+// --continue) loadCredentials() reads credentials from disk, not from any
+// in-process cache that may have held values before the restart.
+// ---------------------------------------------------------------------------
+describe('568f0255 AC-login-2: cold-start reads credentials from disk (no stale in-process cache)', () => {
+  const credsPath = join(TEST_DIR, 'store', '.dashboard-credentials.json')
+
+  beforeEach(() => {
+    rmSync(credsPath, { force: true })
+    __resetSessionStateForTests()
+  })
+
+  it('reads credentials written to disk before a cold start (module reset simulates restart)', () => {
+    // Phase 1: write credentials via API (like a pre-restart admin setup)
+    setDashboardCredentials(USER, PASS)
+    // The cache is now warm with USER/PASS.
+
+    // Phase 2: simulate process restart -- reset all module-level state.
+    // __resetSessionStateForTests() sets cachedCredentials=undefined, mtime=0,
+    // exactly what a fresh Node.js process would have before first loadCredentials().
+    __resetSessionStateForTests()
+
+    // Phase 3: first call after cold start must disk-read and return the persisted cred.
+    expect(hasPasswordCredentials()).toBe(true)
+    expect(verifyPassword(USER, PASS)).toBe(true)
+  })
+
+  it('returns no credentials after cold start when credentials file was deleted before restart', () => {
+    // Write creds, then delete the file, then simulate restart.
+    setDashboardCredentials(USER, PASS)
+    rmSync(credsPath, { force: true })
+    __resetSessionStateForTests()
+
+    // After cold start with no file on disk, must report no credentials.
+    expect(hasPasswordCredentials()).toBe(false)
+  })
+
+  it('does not bleed cache across simulated restarts (old value cannot survive reset)', () => {
+    const PASS2 = 'second-different-password-zz7'
+    // Restart 1: creds = PASS
+    setDashboardCredentials(USER, PASS)
+    __resetSessionStateForTests()
+    expect(verifyPassword(USER, PASS)).toBe(true)
+
+    // Restart 2: overwrite with PASS2 (simulates out-of-band credential rotation
+    // followed by a server restart) -- old PASS must NOT be served from cache.
+    setDashboardCredentials(USER, PASS2)
+    __resetSessionStateForTests()
+    expect(verifyPassword(USER, PASS2)).toBe(true)
+    expect(verifyPassword(USER, PASS)).toBe(false)
+  })
+})
+
 // AC2: session-invalidation -- credential rotation invalidates active sessions
 // ---------------------------------------------------------------------------
 describe('568f0255 stale-cache fix: session-invalidation on credential change (AC2)', () => {
