@@ -110,6 +110,12 @@ describe('tool-log POST loopback guard (card 8293dd11)', () => {
     expect(r.status).toBe(200)
   })
 
+  it('allows POST from ::ffff:127.0.0.1 (IPv4-mapped on dual-stack listener)', async () => {
+    const r = await call('POST', '/api/tool-log',
+      { session_id: 's-lb4', tool_name: 'Bash', success: true }, '::ffff:127.0.0.1')
+    expect(r.status).toBe(200)
+  })
+
   it('allows POST when remoteAddress is absent (Unix socket / in-process)', async () => {
     const r = await call('POST', '/api/tool-log',
       { session_id: 's-unix', tool_name: 'Bash', success: true })
