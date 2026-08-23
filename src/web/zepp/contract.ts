@@ -21,6 +21,14 @@ export interface ZeppSleep {
     light?: number
     awake?: number
   }
+  /**
+   * Daytime naps / secondary sleep sessions, present only when the source recorded
+   * more than one session for the day. This object is the main night (the longest
+   * session); each nap is a full ZeppSleep with its own duration/stages but never its
+   * own nested naps. Boss asked for nap visibility -- previously only the first HC
+   * session survived and naps were dropped from the daily aggregate.
+   */
+  naps?: ZeppSleep[]
 }
 
 export interface ZeppVitals {

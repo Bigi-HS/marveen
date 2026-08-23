@@ -54,7 +54,8 @@ function mapVitals(v: Record<string, unknown>): ZeppVitals {
   }
 }
 
-function mapSleep(s: Record<string, unknown>): ZeppSleep {
+// Map one HC sleep session into a ZeppSleep (no nested naps).
+function mapSleepSession(s: Record<string, unknown>): ZeppSleep {
   const totalMin = num(s['total_min']) ?? 0
   const raw = s['stages'] as Record<string, unknown> | undefined
   const stages = raw
@@ -71,6 +72,28 @@ function mapSleep(s: Record<string, unknown>): ZeppSleep {
     endAt: str(s['end']) ?? (str(s['date']) + 'T08:00:00Z'),
     ...(stages && { stages }),
   }
+}
+
+// Reduce an HC sleep-session list to a single ZeppSleep: the main night is the
+// longest session, and every other session surfaces as a nap (ordered by start time).
+// The transform forwards ALL sessions as an array; folding to sleep[0] here would drop
+// the naps Boss asked to see. Returns undefined for an empty list.
+function mapSleepList(list: unknown[]): ZeppSleep | undefined {
+  const sessions = list
+    .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object')
+    .map(mapSleepSession)
+  if (sessions.length === 0) return undefined
+  // Longest = main night. Stable pick: the first max by duration keeps the source order
+  // among equal-length sessions.
+  let mainIdx = 0
+  for (let i = 1; i < sessions.length; i++) {
+    if (sessions[i].durationMin > sessions[mainIdx].durationMin) mainIdx = i
+  }
+  const main = sessions[mainIdx]
+  const naps = sessions
+    .filter((_, i) => i !== mainIdx)
+    .sort((a, b) => a.startAt.localeCompare(b.startAt))
+  return naps.length > 0 ? { ...main, naps } : main
 }
 
 function mapActivity(a: Record<string, unknown>): ZeppActivity {
@@ -209,8 +232,13 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
       const v = mapVitals(body['vitals'] as Record<string, unknown>)
       if (isNonEmpty(v as Record<string, unknown>)) vitals = v
     }
-    if (body['sleep'] && typeof body['sleep'] === 'object') {
-      sleep = mapSleep(body['sleep'] as Record<string, unknown>)
+    if (Array.isArray(body['sleep'])) {
+      // Multi-session shape (main night + naps). Empty array -> no sleep block.
+      sleep = mapSleepList(body['sleep'])
+    } else if (body['sleep'] && typeof body['sleep'] === 'object') {
+      // Legacy single-object shape (kept for backward-compat so the ingest can deploy
+      // before the transform switches to forwarding the session array).
+      sleep = mapSleepSession(body['sleep'] as Record<string, unknown>)
     }
     if (Array.isArray(body['workouts']) && body['workouts'].length > 0) {
       const mapped = mapWorkouts(body['workouts'], date)
