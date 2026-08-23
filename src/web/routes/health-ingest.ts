@@ -159,6 +159,35 @@ function localDateBudapest(isoUtc: string): string | undefined {
 // captures the fragment gaps without swallowing distinct sessions.
 const WORKOUT_MERGE_GAP_SEC = 10 * 60
 
+// HC heart_rate buckets are ~15 min apart, so a short workout can span zero buckets on a
+// strict [start, end] window. Widen by half the bucket spacing on each side so every
+// workout captures at least the nearest sample (measured: this lifts real-blob coverage
+// from 32/41 to 41/41 sessions). The Zepp exercise record carries no HR of its own, so
+// this windowed mean is the per-workout avgHr the load model (Banister TRIMP) needs --
+// distinct from the whole-day vitals.hrAvg, which covers the entire day, not the session.
+const HR_WINDOW_TOL_SEC = 7.5 * 60
+
+// Mean of the heart_rate bucket avgs whose sample time falls in the workout's window
+// (start-tol .. start+durationSec+tol). Returns undefined when no bucket lands in range.
+function windowedAvgHr(
+  hrBuckets: Array<{ time?: unknown; avg?: unknown }>,
+  startAt: string,
+  durationSec: number,
+): number | undefined {
+  const start = new Date(startAt).getTime()
+  if (Number.isNaN(start)) return undefined
+  const lo = start - HR_WINDOW_TOL_SEC * 1000
+  const hi = start + durationSec * 1000 + HR_WINDOW_TOL_SEC * 1000
+  let sum = 0
+  let n = 0
+  for (const b of hrBuckets) {
+    const t = new Date(str(b.time) ?? '').getTime()
+    const v = num(b.avg)
+    if (!Number.isNaN(t) && t >= lo && t <= hi && v !== undefined) { sum += v; n++ }
+  }
+  return n > 0 ? Math.round(sum / n) : undefined
+}
+
 function mergeConsecutiveWorkouts(workouts: ZeppWorkout[]): ZeppWorkout[] {
   if (workouts.length <= 1) return workouts
   // Sort by start so "consecutive" is by clock time, not source order.
@@ -202,7 +231,11 @@ function mergeConsecutiveWorkouts(workouts: ZeppWorkout[]): ZeppWorkout[] {
   return out
 }
 
-function mapWorkouts(list: unknown[], snapshotDate: string): ZeppWorkout[] {
+function mapWorkouts(
+  list: unknown[],
+  snapshotDate: string,
+  hrBuckets: Array<{ time?: unknown; avg?: unknown }>,
+): ZeppWorkout[] {
   const mapped = list
     .map((w: any) => {
       const resolved = resolveWorkoutType(str(w['type']))
@@ -224,6 +257,15 @@ function mapWorkouts(list: unknown[], snapshotDate: string): ZeppWorkout[] {
       const wd = localDateBudapest(w.startAt)
       return wd === undefined || wd === snapshotDate
     })
+  // Fill per-workout avgHr from the HR buckets for fragments the source left without one,
+  // BEFORE merging -- so the merge's duration-weighting produces the session avgHr. A
+  // source-provided avgHr is left untouched.
+  for (const w of mapped) {
+    if (w.avgHr === undefined) {
+      const hr = windowedAvgHr(hrBuckets, w.startAt, w.durationSec)
+      if (hr !== undefined) w.avgHr = hr
+    }
+  }
   return mergeConsecutiveWorkouts(mapped)
 }
 
@@ -293,7 +335,10 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
       sleep = mapSleepSession(body['sleep'] as Record<string, unknown>)
     }
     if (Array.isArray(body['workouts']) && body['workouts'].length > 0) {
-      const mapped = mapWorkouts(body['workouts'], date)
+      const hrBuckets = Array.isArray(body['heart_rate'])
+        ? (body['heart_rate'] as Array<{ time?: unknown; avg?: unknown }>)
+        : []
+      const mapped = mapWorkouts(body['workouts'], date, hrBuckets)
       if (mapped.length > 0) workouts = mapped
     }
     if (body['activity'] && typeof body['activity'] === 'object') {

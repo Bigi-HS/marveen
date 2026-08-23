@@ -534,6 +534,106 @@ describe('POST /api/health/ingest', () => {
       expect(snap?.workouts).toHaveLength(3)
       expect(snap?.workouts?.map((w) => w.type)).toEqual(['walking', 'swimming_open_water', 'walking'])
     })
+
+    // The Zepp exercise record carries no HR (avg_hr_bpm is null in the source), yet the
+    // load model needs per-workout HR (Banister TRIMP) rather than the whole-day average.
+    // HC heart_rate buckets are ~15 min apart, so a short workout is windowed with a
+    // half-bucket (+-7.5 min) tolerance to still capture a nearby sample. avgHr is the
+    // mean of the bucket avgs in that window; a source-provided avgHr is never overwritten.
+    it('fills per-workout avgHr from heart_rate buckets in the workout window', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-22',
+          workouts: [{ type: '56', start: '2026-08-22T06:00:00Z', duration_min: 30 }],
+          heart_rate: [
+            { time: '2026-08-22T06:00:00Z', avg: 100 },
+            { time: '2026-08-22T06:15:00Z', avg: 110 },
+            { time: '2026-08-22T06:30:00Z', avg: 120 },
+            { time: '2026-08-22T09:00:00Z', avg: 70 }, // outside the window, ignored
+          ],
+        },
+      })
+      expect(snap?.workouts?.[0]?.avgHr).toBe(110)
+    })
+
+    it('uses a +-7.5min tolerance so a short workout still catches a nearby bucket', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-22',
+          // 10-min workout [06:00, 06:10]; window with tolerance is [05:52:30, 06:17:30]
+          workouts: [{ type: '56', start: '2026-08-22T06:00:00Z', duration_min: 10 }],
+          heart_rate: [
+            { time: '2026-08-22T05:53:00Z', avg: 95 },  // 7 min before start, within tolerance
+            { time: '2026-08-22T06:15:00Z', avg: 105 }, // 5 min after end, within tolerance
+          ],
+        },
+      })
+      expect(snap?.workouts?.[0]?.avgHr).toBe(100)
+    })
+
+    it('does not overwrite a source-provided workout avgHr', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-22',
+          workouts: [{ type: '56', start: '2026-08-22T06:00:00Z', duration_min: 30, avg_hr_bpm: 140 }],
+          heart_rate: [{ time: '2026-08-22T06:15:00Z', avg: 90 }],
+        },
+      })
+      expect(snap?.workouts?.[0]?.avgHr).toBe(140)
+    })
+
+    it('leaves avgHr undefined when no bucket falls in the window', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-22',
+          workouts: [{ type: '56', start: '2026-08-22T06:00:00Z', duration_min: 10 }],
+          heart_rate: [{ time: '2026-08-22T09:00:00Z', avg: 90 }],
+        },
+      })
+      expect(snap?.workouts?.[0]?.avgHr).toBeUndefined()
+    })
+
+    it('leaves avgHr undefined when the body carries no heart_rate array (legacy transform)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-22',
+          workouts: [{ type: '56', start: '2026-08-22T06:00:00Z', duration_min: 30 }],
+        },
+      })
+      expect(snap?.workouts?.[0]?.avgHr).toBeUndefined()
+    })
+
+    it('computes per-fragment avgHr before merge so the session avgHr is duration-weighted', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-22',
+          workouts: [
+            { type: '79', start: '2026-08-22T06:00:00Z', duration_min: 30 }, // ends 06:30
+            { type: '79', start: '2026-08-22T06:33:00Z', duration_min: 10 }, // gap 3 -> merges
+          ],
+          heart_rate: [
+            { time: '2026-08-22T06:10:00Z', avg: 120 }, // only in fragment 1's window
+            { time: '2026-08-22T06:45:00Z', avg: 150 }, // only in fragment 2's window
+          ],
+        },
+      })
+      expect(snap?.workouts).toHaveLength(1)
+      // fragment HRs 120 (30 min) and 150 (10 min) -> (30*120 + 10*150)/40 = 127.5 -> 128
+      expect(snap?.workouts?.[0]?.avgHr).toBe(128)
+      expect(snap?.workouts?.[0]?.durationSec).toBe(40 * 60)
+    })
   })
 
   describe('idempotency', () => {
