@@ -18,6 +18,7 @@
 export function isPublicApiPath(path: string, method: string): boolean {
   if (path === '/api/auth/status' && method === 'GET') return true
   if (path === '/api/health/ingest' && method === 'POST') return true
+  if (path === '/api/health/ingest-raw' && method === 'POST') return true
   if (method === 'GET') {
     if (path === '/api/marveen/avatar') return true
     if (/^\/api\/agents\/[^/]+\/avatar$/.test(path)) return true
