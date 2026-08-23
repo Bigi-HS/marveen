@@ -437,6 +437,103 @@ describe('POST /api/health/ingest', () => {
       expect(snap?.workouts).toHaveLength(1)
       expect(snap?.workouts?.[0]?.type).toBe('strength_training')
     })
+
+    // Zepp fragments one continuous activity into several short same-type records with
+    // small gaps (measured on the real backfill: type-79 walks split into ~10-16 min
+    // pieces with 2-9 min gaps). Merge consecutive same-type records whose gap is under
+    // the threshold into one session so downstream load models see one activity, not N.
+    it('merges consecutive same-type workouts with a sub-threshold gap into one session', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-22',
+          workouts: [
+            // walk piece 1: 06:00 +30min -> ends 06:30
+            { type: '79', start: '2026-08-22T06:00:00Z', duration_min: 30, avg_hr_bpm: 120, distance_m: 3000, kcal: 200 },
+            // walk piece 2: starts 06:33 (3 min gap) +20min
+            { type: '79', start: '2026-08-22T06:33:00Z', duration_min: 20, avg_hr_bpm: 150, distance_m: 2000, kcal: 150 },
+          ],
+        },
+      })
+      expect(snap?.workouts).toHaveLength(1)
+      const w = snap?.workouts?.[0]
+      expect(w?.type).toBe('walking')
+      expect(w?.typeCode).toBe('79')
+      expect(w?.startAt).toBe('2026-08-22T06:00:00Z')
+      // active duration = sum of the fragments (the gap is rest, not counted)
+      expect(w?.durationSec).toBe((30 + 20) * 60)
+      expect(w?.distanceM).toBe(5000)
+      expect(w?.calories).toBe(350)
+      // avgHr duration-weighted: (30*120 + 20*150) / 50 = 132
+      expect(w?.avgHr).toBe(132)
+    })
+
+    it('does NOT merge same-type workouts separated by an over-threshold gap', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-22',
+          workouts: [
+            { type: '79', start: '2026-08-22T06:00:00Z', duration_min: 15 }, // ends 06:15
+            { type: '79', start: '2026-08-22T09:00:00Z', duration_min: 15 }, // gap ~2h45
+          ],
+        },
+      })
+      expect(snap?.workouts).toHaveLength(2)
+    })
+
+    it('does NOT merge adjacent workouts of different type even with a tiny gap', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-22',
+          workouts: [
+            { type: '79', start: '2026-08-22T06:00:00Z', duration_min: 15 }, // walking, ends 06:15
+            { type: '73', start: '2026-08-22T06:16:00Z', duration_min: 15 }, // swimming, 1 min later
+          ],
+        },
+      })
+      expect(snap?.workouts).toHaveLength(2)
+      expect(snap?.workouts?.map((w) => w.type)).toEqual(['walking', 'swimming_open_water'])
+    })
+
+    it('merges a run of three consecutive same-type fragments into one session', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-22',
+          workouts: [
+            { type: '79', start: '2026-08-22T06:00:00Z', duration_min: 10 }, // ends 06:10
+            { type: '79', start: '2026-08-22T06:14:00Z', duration_min: 10 }, // gap 4 -> ends 06:24
+            { type: '79', start: '2026-08-22T06:29:00Z', duration_min: 10 }, // gap 5
+          ],
+        },
+      })
+      expect(snap?.workouts).toHaveLength(1)
+      expect(snap?.workouts?.[0]?.durationSec).toBe(30 * 60)
+      expect(snap?.workouts?.[0]?.startAt).toBe('2026-08-22T06:00:00Z')
+    })
+
+    it('an interleaved different-type record breaks the merge run', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-22',
+          workouts: [
+            { type: '79', start: '2026-08-22T06:00:00Z', duration_min: 10 }, // ends 06:10
+            { type: '73', start: '2026-08-22T06:12:00Z', duration_min: 5 },  // swim breaks the run
+            { type: '79', start: '2026-08-22T06:20:00Z', duration_min: 10 }, // separate walk
+          ],
+        },
+      })
+      expect(snap?.workouts).toHaveLength(3)
+      expect(snap?.workouts?.map((w) => w.type)).toEqual(['walking', 'swimming_open_water', 'walking'])
+    })
   })
 
   describe('idempotency', () => {
