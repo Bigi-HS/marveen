@@ -29,6 +29,7 @@ DASHBOARD_TOKEN_PATH (default <install>/store/.dashboard-token).
 import json
 import os
 import sys
+import urllib.parse
 import urllib.request
 
 INSTALL_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -103,6 +104,8 @@ def _post(payload):
     if not token:
         return
     base = os.environ.get("DASHBOARD_URL", "http://localhost:3420").rstrip("/")
+    if urllib.parse.urlparse(base).hostname not in ("127.0.0.1", "localhost", "::1"):
+        return
     req = urllib.request.Request(
         base + "/api/tool-log",
         data=json.dumps(payload).encode(),
