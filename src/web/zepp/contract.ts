@@ -57,8 +57,12 @@ export interface ZeppActivity {
 }
 
 export interface ZeppWorkout {
-  /** Workout type string as returned by Zepp (e.g. "outdoor_running") */
+  /** Human-readable workout type (e.g. "running", "other_workout"). Mapped from the
+   *  Health Connect ExerciseType code when the source sends a numeric code. */
   type: string
+  /** Raw source code, preserved verbatim when the source sent a numeric HC code
+   *  (e.g. "0"). Absent when the source already provided a descriptive name. */
+  typeCode?: string
   /** ISO start timestamp */
   startAt: string
   /** Duration seconds */

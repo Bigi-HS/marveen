@@ -82,15 +82,74 @@ function mapActivity(a: Record<string, unknown>): ZeppActivity {
   }
 }
 
-function mapWorkouts(list: unknown[]): ZeppWorkout[] {
-  return list.map((w: any) => ({
-    type: str(w['type']) ?? 'unknown',
-    startAt: str(w['start']) ?? '',
-    durationSec: (num(w['duration_min']) ?? 0) * 60,
-    avgHr: num(w['avg_hr_bpm']),
-    calories: num(w['kcal']),
-    distanceM: num(w['distance_m']),
-  }))
+// Health Connect ExerciseSessionRecord.exerciseType integer codes -> readable names.
+// The zepp-hc pipeline forwards the raw HC code; we resolve it to a name here (tested,
+// gated) rather than in the untested n8n transform. Code 0 = OTHER_WORKOUT.
+// Source: androidx.health.connect.client.records.ExerciseSessionRecord.
+const EXERCISE_TYPE_NAMES: Record<string, string> = {
+  '0': 'other_workout', '2': 'badminton', '4': 'baseball', '5': 'basketball',
+  '8': 'biking', '9': 'biking_stationary', '10': 'boot_camp', '11': 'boxing',
+  '13': 'calisthenics', '14': 'cricket', '16': 'dancing', '25': 'elliptical',
+  '26': 'exercise_class', '27': 'fencing', '28': 'football_american',
+  '29': 'football_australian', '31': 'frisbee_disc', '32': 'golf',
+  '33': 'guided_breathing', '34': 'gymnastics', '35': 'handball', '36': 'hiit',
+  '37': 'hiking', '38': 'ice_hockey', '39': 'ice_skating', '44': 'martial_arts',
+  '46': 'paddling', '47': 'paragliding', '48': 'pilates', '50': 'racquetball',
+  '51': 'rock_climbing', '52': 'roller_hockey', '53': 'rowing', '54': 'rowing_machine',
+  '55': 'rugby', '56': 'running', '57': 'running_treadmill', '58': 'sailing',
+  '59': 'scuba_diving', '60': 'skating', '61': 'skiing', '62': 'snowboarding',
+  '63': 'snowshoeing', '64': 'soccer', '65': 'softball', '66': 'squash',
+  '68': 'stair_climbing', '69': 'stair_climbing_machine', '70': 'strength_training',
+  '71': 'stretching', '72': 'surfing', '73': 'swimming_open_water',
+  '74': 'swimming_pool', '75': 'table_tennis', '76': 'tennis', '78': 'volleyball',
+  '79': 'walking', '80': 'water_polo', '81': 'weightlifting', '82': 'wheelchair',
+  '83': 'yoga',
+}
+
+// Resolve a workout type field into a readable name plus the preserved raw code.
+// - numeric HC code -> mapped name (+ typeCode = raw); unmapped code -> 'unknown' (+ typeCode = raw, no data loss)
+// - already-descriptive string (non-numeric) -> passed through unchanged, no typeCode
+function resolveWorkoutType(raw: string | undefined): { type: string; typeCode?: string } {
+  if (raw === undefined) return { type: 'unknown' }
+  if (/^\d+$/.test(raw)) {
+    return { type: EXERCISE_TYPE_NAMES[raw] ?? 'unknown', typeCode: raw }
+  }
+  return { type: raw }
+}
+
+// Europe/Budapest local calendar date of a UTC ISO timestamp (CEST +2 Mar-Oct,
+// CET +1 otherwise -- DST approximation matching the n8n transform's date logic).
+function localDateBudapest(isoUtc: string): string | undefined {
+  if (!isoUtc) return undefined
+  const d = new Date(isoUtc)
+  if (Number.isNaN(d.getTime())) return undefined
+  const mo = d.getUTCMonth() + 1
+  const offH = (mo >= 3 && mo <= 10) ? 2 : 1
+  return new Date(d.getTime() + offH * 3600_000).toISOString().slice(0, 10)
+}
+
+function mapWorkouts(list: unknown[], snapshotDate: string): ZeppWorkout[] {
+  return list
+    .map((w: any) => {
+      const resolved = resolveWorkoutType(str(w['type']))
+      return {
+        type: resolved.type,
+        ...(resolved.typeCode !== undefined && { typeCode: resolved.typeCode }),
+        startAt: str(w['start']) ?? '',
+        durationSec: (num(w['duration_min']) ?? 0) * 60,
+        avgHr: num(w['avg_hr_bpm']),
+        calories: num(w['kcal']),
+        distanceM: num(w['distance_m']),
+      }
+    })
+    // Each push carries a 48h rolling window, so one workout recurs across consecutive
+    // pushes/dates. File a workout only on its own local day; otherwise the same session
+    // lands in two daily files and downstream TRIMP double-counts it. Undatable workouts
+    // (missing/invalid start) are kept on the current snapshot to avoid silent loss.
+    .filter((w) => {
+      const wd = localDateBudapest(w.startAt)
+      return wd === undefined || wd === snapshotDate
+    })
 }
 
 function num(v: unknown): number | undefined {
@@ -154,7 +213,8 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
       sleep = mapSleep(body['sleep'] as Record<string, unknown>)
     }
     if (Array.isArray(body['workouts']) && body['workouts'].length > 0) {
-      workouts = mapWorkouts(body['workouts'])
+      const mapped = mapWorkouts(body['workouts'], date)
+      if (mapped.length > 0) workouts = mapped
     }
     if (body['activity'] && typeof body['activity'] === 'object') {
       const a = body['activity'] as Record<string, unknown>
