@@ -280,6 +280,85 @@ describe('POST /api/health/ingest', () => {
       expect(w?.calories).toBe(320)
       expect(w?.distanceM).toBe(5000)
     })
+
+    it('resolves a numeric HC exercise-type code to a name and preserves the raw code', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-22',
+          workouts: [{ type: '0', start: '2026-08-21T22:40:30Z', duration_min: 14, distance_m: 460 }],
+        },
+      })
+      const w = snap?.workouts?.[0]
+      expect(w?.type).toBe('other_workout')
+      expect(w?.typeCode).toBe('0')
+    })
+
+    it('maps a known HC code (56 -> running)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', workouts: [{ type: '56', start: '2026-08-22T06:00:00Z' }] },
+      })
+      const w = snap?.workouts?.[0]
+      expect(w?.type).toBe('running')
+      expect(w?.typeCode).toBe('56')
+    })
+
+    it('preserves an unmapped numeric code as typeCode with type unknown (no data loss)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', workouts: [{ type: '9999', start: '2026-08-22T06:00:00Z' }] },
+      })
+      const w = snap?.workouts?.[0]
+      expect(w?.type).toBe('unknown')
+      expect(w?.typeCode).toBe('9999')
+    })
+
+    it('passes a descriptive name through unchanged without a typeCode', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', workouts: [{ type: 'outdoor_running', start: '2026-08-22T06:00:00Z' }] },
+      })
+      const w = snap?.workouts?.[0]
+      expect(w?.type).toBe('outdoor_running')
+      expect(w?.typeCode).toBeUndefined()
+    })
+
+    it('keeps a workout on its own local day (start 22:40Z -> Budapest next-day 00:40)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        // 2026-08-21T22:40:30Z is 2026-08-22T00:40 Budapest (CEST +2) -> own day 08-22
+        body: { date: '2026-08-22', workouts: [{ type: '0', start: '2026-08-21T22:40:30Z', duration_min: 14 }] },
+      })
+      expect(snap?.workouts).toHaveLength(1)
+      expect(snap?.workouts?.[0]?.startAt).toBe('2026-08-21T22:40:30Z')
+    })
+
+    it('drops the same workout from a later day snapshot (48h-window dedup)', async () => {
+      const deps = makeDeps()
+      // The same session (own day 08-22) recurs in the 08-23 push's 48h window; it must not
+      // be filed again under 08-23, else downstream TRIMP double-counts it.
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-23', workouts: [{ type: '0', start: '2026-08-21T22:40:30Z', duration_min: 14 }] },
+      })
+      expect(snap?.workouts).toBeUndefined()
+    })
+
+    it('keeps an undatable workout (missing start) on the current snapshot, no silent loss', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-23', workouts: [{ type: '70', duration_min: 40 }] },
+      })
+      expect(snap?.workouts).toHaveLength(1)
+      expect(snap?.workouts?.[0]?.type).toBe('strength_training')
+    })
   })
 
   describe('idempotency', () => {
