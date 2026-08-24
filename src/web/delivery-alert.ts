@@ -72,6 +72,30 @@ export function abandonAlertContent(
   )
 }
 
+/**
+ * Sender-facing alert body for a permanently abandoned inter-agent message
+ * (card 2adc8c5a). Sent directly to the SENDER (msg.from_agent) so they know
+ * their own outgoing message was dropped -- they have the context to decide
+ * whether to re-send. This is the primary notification; the orchestrator alert
+ * (abandonAlertContent -> MAIN_AGENT_ID) is secondary and circular when the
+ * orchestrator itself is down. Perspective: "Your message #N to X was NOT
+ * delivered" (sender-centric). Kept pure -- resolver injected, same contract
+ * as abandonAlertContent.
+ */
+export function senderAbandonAlertContent(
+  msg: { id: number; from_agent: string; to_agent: string },
+  ageMs: number,
+  resolveName: (id: string) => string = (id) => id,
+): string {
+  const mins = Math.round(ageMs / 60000)
+  const to = resolveName(msg.to_agent)
+  return (
+    `DELIVERY DROPPED: your inter-agent message #${msg.id} to "${to}" ` +
+    `was abandoned after ${mins} min (target session never became ready). ` +
+    `The message was NOT delivered. Re-send if it still matters.`
+  )
+}
+
 // Durable, delivery-independent sentinel for abandoned messages (PR #130 DA
 // review, MEDIUM). The inter-agent alert above is itself an inter-agent
 // message, so it can also go undelivered -- most acutely when the abandoned
