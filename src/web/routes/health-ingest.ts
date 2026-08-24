@@ -3,14 +3,19 @@
 // Auth: X-Ingest-Token header (dedicated secret, distinct from dashboard bearer).
 // The endpoint is public via Cloudflare tunnel -> the token gate is load-bearing.
 //
-// Idempotency: same-date overwrites (last-write-wins). The phone may push several
-// times per day (sleep in morning, activity in evening); each overwrites the file.
-// Silent-guard: always writes a snapshot -- an empty or failed push is visible.
+// Idempotency: same-date pushes accumulate via a field-level no-clobber merge (AC-A8).
+// The phone may push several times per day (sleep in the morning, a workout in the
+// evening) as separate deltas; a full-file overwrite would silently wipe whatever an
+// earlier push wrote. The handler reads the existing snapshot and merges the incoming
+// push field-by-field (present -> replace, absent/null -> keep), recomputing status so a
+// bare no_new_data push never downgrades an ok day. See snapshot-merge.ts.
+// Silent-guard: always writes a snapshot -- an empty or failed push is still visible.
 
 import { IncomingMessage, ServerResponse } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import { readBody, RequestBodyTooLargeError, json } from '../http-helpers.js'
 import { defaultZeppStore } from '../zepp/ingest-store.js'
+import { mergeDailySnapshot } from '../zepp/snapshot-merge.js'
 import { readIngestToken } from '../zepp/ingest-secret.js'
 import type {
   ZeppDailySnapshot, ZeppVitals, ZeppSleep, ZeppWorkout, ZeppActivity, ZeppPullStatus,
@@ -35,6 +40,9 @@ function tokenMatches(provided: string, expected: string): boolean {
 
 export interface HealthIngestDeps {
   readIngestToken: () => string
+  // Read the existing daily snapshot for a date (null if none), so a partial push merges
+  // onto it instead of overwriting it (AC-A8 no-clobber).
+  readSnapshot: (date: string) => ZeppDailySnapshot | null
   writeSnapshot: (snap: ZeppDailySnapshot) => void
   nowIso: () => string
 }
@@ -366,9 +374,14 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
       ...(sourceSyncedAt && { sourceSyncedAt }),
     }
 
-    deps.writeSnapshot(snapshot)
+    // Read-modify-write: merge this push onto the existing day so a partial/empty push
+    // never clobbers data an earlier push stored (AC-A8). First write of the day (no
+    // existing record) passes through unchanged.
+    const existing = deps.readSnapshot(date)
+    const merged = mergeDailySnapshot(existing, snapshot)
+    deps.writeSnapshot(merged)
 
-    json(res, { status, date, pulledAt })
+    json(res, { status: merged.status, date, pulledAt: merged.pulledAt })
   }
 }
 
@@ -376,6 +389,7 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
 export function makeDefaultHealthIngestDeps(): HealthIngestDeps {
   return {
     readIngestToken,
+    readSnapshot: (date) => defaultZeppStore.read(date),
     writeSnapshot: (snap) => defaultZeppStore.write(snap),
     nowIso: () => new Date().toISOString(),
   }

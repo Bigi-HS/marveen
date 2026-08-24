@@ -37,9 +37,22 @@ const VALID_TOKEN = 'test-secret-abc'
 function makeDeps(over: Partial<HealthIngestDeps> = {}): HealthIngestDeps {
   return {
     readIngestToken: () => VALID_TOKEN,
+    readSnapshot: () => null,
     writeSnapshot: vi.fn(),
     nowIso: () => '2026-08-22T18:00:00.000Z',
     ...over,
+  }
+}
+
+// Deps backed by an in-memory store so sequential same-date pushes accumulate, mirroring
+// the on-disk daily file. Used by the AC-A8 no-clobber tests where read-modify-write matters.
+function makeStatefulDeps(): HealthIngestDeps {
+  const store = new Map<string, ZeppDailySnapshot>()
+  return {
+    readIngestToken: () => VALID_TOKEN,
+    readSnapshot: (date: string) => store.get(date) ?? null,
+    writeSnapshot: vi.fn((s: ZeppDailySnapshot) => { store.set(s.date, s) }),
+    nowIso: () => '2026-08-22T18:00:00.000Z',
   }
 }
 
@@ -646,6 +659,91 @@ describe('POST /api/health/ingest', () => {
       await handle(deps, { token: VALID_TOKEN, body: { date: '2026-08-22', vitals: { resting_hr_bpm: 62 } } })
       expect(deps.writeSnapshot).toHaveBeenCalledTimes(2)
       expect((deps.writeSnapshot as ReturnType<typeof vi.fn>).mock.calls[1][0].vitals?.restingHr).toBe(62)
+    })
+  })
+
+  // AC-A8 (WELL-018): the handler reads the existing daily snapshot and merges the incoming
+  // push field-by-field (null-only), so a partial or empty same-date push never wipes data
+  // an earlier push wrote. AC-A5 (full-record overwrite) stays green but is blind to this
+  // partial-push clobber. Spec: store/specs/zepp-well-018-health-ingest.md (Path A).
+  describe('AC-A8: no-clobber field-merge', () => {
+    const SLEEP_BODY = {
+      total_min: 420, start: '2026-08-21T23:00:00Z', end: '2026-08-22T06:00:00Z',
+    }
+
+    // Test 1: a push carrying sleep writes a snapshot containing sleep.
+    it('writes a snapshot containing sleep when sleep is pushed', async () => {
+      const deps = makeStatefulDeps()
+      const { snap } = await handle(deps, { token: VALID_TOKEN, body: { date: '2026-08-22', sleep: SLEEP_BODY } })
+      expect(snap?.sleep?.durationMin).toBe(420)
+    })
+
+    // Test 2: an evening workouts-only push must not clobber the morning sleep.
+    it('a workouts-only delta push preserves an earlier sleep (both survive)', async () => {
+      const deps = makeStatefulDeps()
+      await handle(deps, { token: VALID_TOKEN, body: { date: '2026-08-22', sleep: SLEEP_BODY } })
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', workouts: [{ type: 'running', start: '2026-08-22T06:30:00Z', duration_min: 35, avg_hr_bpm: 148 }] },
+      })
+      expect(snap?.sleep?.durationMin).toBe(420) // morning sleep preserved
+      expect(snap?.workouts).toHaveLength(1) // evening workout added
+    })
+
+    // Test 3: an empty (no_new_data) push must not overwrite an ok record, in data OR status.
+    it('an empty no_new_data push does not clobber an ok record (data and status survive)', async () => {
+      const deps = makeStatefulDeps()
+      await handle(deps, { token: VALID_TOKEN, body: { date: '2026-08-22', vitals: { resting_hr_bpm: 52, hrv_rmssd_ms: 60 } } })
+      const { snap } = await handle(deps, { token: VALID_TOKEN, body: { date: '2026-08-22' } })
+      expect(snap?.vitals?.restingHr).toBe(52)
+      expect(snap?.vitals?.hrv).toBe(60)
+      expect(snap?.status).toBe('ok') // NOT downgraded to no_new_data
+    })
+
+    // Test 4: a fewer-fields ok push preserves the fields it omits (not just status).
+    it('a sleep-only ok push preserves earlier workouts', async () => {
+      const deps = makeStatefulDeps()
+      await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-22',
+          sleep: { total_min: 400, start: '2026-08-21T23:00:00Z', end: '2026-08-22T05:40:00Z' },
+          workouts: [{ type: 'running', start: '2026-08-22T06:30:00Z', duration_min: 30 }],
+        },
+      })
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', sleep: { total_min: 415, start: '2026-08-21T22:50:00Z', end: '2026-08-22T05:45:00Z' } },
+      })
+      expect(snap?.sleep?.durationMin).toBe(415) // sleep updated
+      expect(snap?.workouts).toHaveLength(1) // workouts preserved
+    })
+
+    // Test 5: a workouts push REPLACES the stored array (no append -> no TRIMP double count).
+    it('a workouts push replaces the stored workouts rather than appending', async () => {
+      const deps = makeStatefulDeps()
+      await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', workouts: [{ type: 'running', start: '2026-08-22T06:30:00Z', duration_min: 30 }] },
+      })
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', workouts: [{ type: 'walking', start: '2026-08-22T18:00:00Z', duration_min: 20 }] },
+      })
+      expect(snap?.workouts).toHaveLength(1) // replaced, not [running, walking]
+      expect(snap?.workouts?.[0]?.type).toBe('walking')
+    })
+
+    // DA refinement: an explicit null field is treated as absent (no field-delete signal).
+    it('an explicit null field does not clobber (explicit null == absent)', async () => {
+      const deps = makeStatefulDeps()
+      await handle(deps, { token: VALID_TOKEN, body: { date: '2026-08-22', sleep: SLEEP_BODY } })
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', sleep: null, vitals: { resting_hr_bpm: 50 } },
+      })
+      expect(snap?.sleep?.durationMin).toBe(420) // explicit sleep:null did not wipe
+      expect(snap?.vitals?.restingHr).toBe(50)
     })
   })
 })
