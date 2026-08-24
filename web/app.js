@@ -838,7 +838,7 @@ async function showCardDetail(card) {
   const statusLabels = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Várakozik', done: 'Kész', icebox: 'Jegelve' }
 
   const meta = document.getElementById('cardDetailMeta')
-  const idLabel = (card.seq != null ? `#${card.seq} · ` : '') + card.id
+  const idLabel = (card.seq != null ? `#${card.seq} · ` : '') + (card.code || card.id)
   meta.innerHTML = `
     <div class="meta-item">
       <span class="meta-label">Azonosító</span>
