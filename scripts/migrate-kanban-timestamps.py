@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Normalize kanban_cards timestamp columns to epoch-seconds.
 
+Originally written to repair the mixed-format timestamps that accumulated in
+store/claudeclaw.db before the W5-cutover (2026-06-28). The live kanban table
+now lives in store/noa.db; claudeclaw.db is scheduled for retirement (ENG-024).
+The DEFAULT_DB now points to noa.db so this script does not crash after the
+retire. Running against noa.db is a no-op (timestamps are already epoch-seconds)
+but is safe -- every value already in epoch-seconds is left untouched.
+
 The `created_at` and `updated_at` columns in store/claudeclaw.db accumulated a
 MIX of formats over time: epoch-seconds, epoch-milliseconds, and ISO-8601
 strings (both naive and tz-aware). Every other time column and the table's own
@@ -30,7 +37,7 @@ from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-DEFAULT_DB = os.environ.get("MIGRATE_KANBAN_DB", "store/claudeclaw.db")
+DEFAULT_DB = os.environ.get("MIGRATE_KANBAN_DB", "store/noa.db")
 TABLE = "kanban_cards"
 COLUMNS = ("created_at", "updated_at")
 LOCAL_TZ = ZoneInfo("Europe/Budapest")

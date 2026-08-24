@@ -3,7 +3,8 @@
 
 Card: 4cb02536. Spec: store/vault-lint-layer2-spec.md v1.2.
 
-Reads store/claudeclaw.db (memories table). Never modifies the DB or calls
+Reads store/noa.db (memories table; claudeclaw.db was the legacy location before
+the W5-cutover -- ENG-024 retires it). Never modifies the DB or calls
 any API endpoint. Writes two output files:
   store/vault-lint-l2-proposals.json -- structured proposal list
   store/vault-lint-l2-badge.json     -- shields.io endpoint badge
