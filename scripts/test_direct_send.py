@@ -296,10 +296,10 @@ class MainEndToEndTests(unittest.TestCase):
         con = sqlite3.connect(self.db)
         try:
             con.execute(
-                "CREATE TABLE IF NOT EXISTS kanban_cards (id TEXT PRIMARY KEY, status TEXT, updated_at INTEGER)"
+                "CREATE TABLE IF NOT EXISTS kanban_cards (id TEXT PRIMARY KEY, status TEXT, updated_at INTEGER, last_moved INTEGER)"
             )
             con.execute(
-                "INSERT OR REPLACE INTO kanban_cards (id, status, updated_at) VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO kanban_cards (id, status, updated_at, last_moved) VALUES (?, ?, ?, NULL)",
                 (card_id, status, 0),
             )
             con.commit()

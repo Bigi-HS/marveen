@@ -884,23 +884,46 @@ describe('isCardStale', () => {
   const now = 1_000_000_000
 
   it('an active card past its level threshold is stale', () => {
-    const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400 } // normal = 3d
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400, last_moved: null } // normal = 3d
     expect(isCardStale(card, now)).toBe(true)
   })
 
   it('an active card within its threshold is not stale', () => {
-    const card = { status: 'planned', priority_score: 6, updated_at: now - 1 * 86400 }
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 1 * 86400, last_moved: null }
     expect(isCardStale(card, now)).toBe(false)
   })
 
   it('a SEV1 (score 1) card goes stale after just 2h', () => {
-    expect(isCardStale({ status: 'in_progress', priority_score: 1, updated_at: now - 3 * 3600 }, now)).toBe(true)
-    expect(isCardStale({ status: 'in_progress', priority_score: 1, updated_at: now - 1 * 3600 }, now)).toBe(false)
+    expect(isCardStale({ status: 'in_progress', priority_score: 1, updated_at: now - 3 * 3600, last_moved: null }, now)).toBe(true)
+    expect(isCardStale({ status: 'in_progress', priority_score: 1, updated_at: now - 1 * 3600, last_moved: null }, now)).toBe(false)
   })
 
   it('icebox and done cards never go stale', () => {
-    expect(isCardStale({ status: 'icebox', priority_score: null, updated_at: 0 }, now)).toBe(false)
-    expect(isCardStale({ status: 'done', priority_score: 6, updated_at: 0 }, now)).toBe(false)
+    expect(isCardStale({ status: 'icebox', priority_score: null, updated_at: 0, last_moved: null }, now)).toBe(false)
+    expect(isCardStale({ status: 'done', priority_score: 6, updated_at: 0, last_moved: null }, now)).toBe(false)
+  })
+
+  it('last_moved takes precedence over updated_at', () => {
+    // updated_at says fresh (within threshold), but last_moved says stale
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 1 * 86400, last_moved: now - 4 * 86400 }
+    expect(isCardStale(card, now)).toBe(true)
+    // updated_at says stale, but last_moved says fresh
+    const card2 = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400, last_moved: now - 1 * 86400 }
+    expect(isCardStale(card2, now)).toBe(false)
+  })
+
+  it('returns unknown for a bulk-stamp updated_at with null last_moved', () => {
+    // 1785334212..1785334253 is the 07-29 bulk-stamp burst
+    const BURST_TS = 1785334230 // mid-burst
+    const card = { status: 'planned', priority_score: 6, updated_at: BURST_TS, last_moved: null }
+    expect(isCardStale(card, now + 100 * 86400)).toBe('unknown')
+  })
+
+  it('a null last_moved + non-burst updated_at uses updated_at as proxy', () => {
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400, last_moved: null }
+    expect(isCardStale(card, now)).toBe(true)
+    const card2 = { status: 'planned', priority_score: 6, updated_at: now - 1 * 86400, last_moved: null }
+    expect(isCardStale(card2, now)).toBe(false)
   })
 })
 
@@ -1021,5 +1044,96 @@ describe('AC-DEP: depends_on read-only dependency field', () => {
     applyKanbanMigrations()
     applyKanbanMigrations() // second run must not throw (column already exists)
     expect(getCard(card.id)!.depends_on).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// last_moved: movement tracking (card 4326682b)
+// ---------------------------------------------------------------------------
+// AC-G: acceptance tests -- each must fail BEFORE the fix, pass AFTER.
+//   G1: description-only update -> last_moved unchanged (stays NULL)
+//   G2: status change -> last_moved = now
+//   G3: assignee change -> last_moved = now
+//   G4: sort_order-only reorder -> last_moved unchanged
+//   G5: migration code paths (applyKanbanMigrations) -> last_moved unchanged
+//   G6: updateCard status=<same value> -> last_moved unchanged (write != change)
+
+describe('last_moved (card 4326682b)', () => {
+  it('G1: description-only updateCard does NOT bump last_moved', () => {
+    const card = createCard({ title: 'T', suppressIntake: true })
+    const before = getCard(card.id)!.last_moved
+    updateCard(card.id, { description: 'Some description' })
+    expect(getCard(card.id)!.last_moved).toBe(before)
+  })
+
+  it('G2: status change via updateCard sets last_moved = now', () => {
+    const card = createCard({ title: 'T', suppressIntake: true })
+    const t0 = Math.floor(Date.now() / 1000)
+    updateCard(card.id, { status: 'in_progress' })
+    const after = getCard(card.id)!.last_moved
+    expect(after).not.toBeNull()
+    expect(after!).toBeGreaterThanOrEqual(t0)
+  })
+
+  it('G2b: moveCard sets last_moved = now', () => {
+    const card = createCard({ title: 'T', status: 'planned', suppressIntake: true })
+    const maxSo = (getNoaDb().prepare("SELECT MAX(sort_order) as m FROM kanban_cards WHERE status='in_progress' AND archived_at IS NULL").get() as { m: number | null }).m ?? 0
+    const t0 = Math.floor(Date.now() / 1000)
+    moveCard(card.id, 'in_progress', maxSo + 1)
+    const after = getCard(card.id)!.last_moved
+    expect(after).not.toBeNull()
+    expect(after!).toBeGreaterThanOrEqual(t0)
+  })
+
+  it('G3: assignee change via updateCard sets last_moved = now', () => {
+    const card = createCard({ title: 'T', suppressIntake: true })
+    const t0 = Math.floor(Date.now() / 1000)
+    updateCard(card.id, { assignee: 'dave' })
+    const after = getCard(card.id)!.last_moved
+    expect(after).not.toBeNull()
+    expect(after!).toBeGreaterThanOrEqual(t0)
+  })
+
+  it('G4: sort_order-only reorderCards does NOT bump last_moved', () => {
+    const a = createCard({ title: 'A', status: 'planned', suppressIntake: true })
+    const b = createCard({ title: 'B', status: 'planned', suppressIntake: true })
+    const beforeA = getCard(a.id)!.last_moved
+    const beforeB = getCard(b.id)!.last_moved
+    reorderCards([{ id: a.id, sort_order: 2 }, { id: b.id, sort_order: 1 }])
+    expect(getCard(a.id)!.last_moved).toBe(beforeA)
+    expect(getCard(b.id)!.last_moved).toBe(beforeB)
+  })
+
+  it('G5: applyKanbanMigrations does NOT modify last_moved', () => {
+    const card = createCard({ title: 'T', suppressIntake: true })
+    const before = getCard(card.id)!.last_moved
+    applyKanbanMigrations()
+    expect(getCard(card.id)!.last_moved).toBe(before)
+  })
+
+  it('G6: updateCard with same status value does NOT bump last_moved', () => {
+    const card = createCard({ title: 'T', suppressIntake: true })
+    const before = getCard(card.id)!.last_moved
+    updateCard(card.id, { status: card.status })
+    expect(getCard(card.id)!.last_moved).toBe(before)
+  })
+
+  it('archiveCard sets last_moved = now', () => {
+    const card = createCard({ title: 'T', suppressIntake: true })
+    const t0 = Math.floor(Date.now() / 1000)
+    archiveCard(card.id)
+    const after = getCard(card.id)!.last_moved
+    expect(after).not.toBeNull()
+    expect(after!).toBeGreaterThanOrEqual(t0)
+  })
+
+  it('unarchiveCard sets last_moved = now', () => {
+    const card = createCard({ title: 'T', suppressIntake: true })
+    archiveCard(card.id)
+    const t0 = Math.floor(Date.now() / 1000)
+    unarchiveCard(card.id)
+    const after = getCard(card.id)!.last_moved
+    expect(after).not.toBeNull()
+    expect(after!).toBeGreaterThanOrEqual(t0)
   })
 })
