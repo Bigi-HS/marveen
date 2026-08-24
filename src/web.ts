@@ -84,6 +84,7 @@ import { tryHandleGuardEvents } from './web/routes/guard-events.js'
 import { tryHandleMetrics } from './web/routes/metrics.js'
 import { tryHandleHealthIngest } from './web/routes/health-ingest.js'
 import { tryHandleHealthIngestRaw } from './web/routes/health-ingest-raw.js'
+import { tryHandleZeppFreshness } from './web/routes/health-zepp-freshness.js'
 import { isPublicApiPath } from './web/public-paths.js'
 import { tryHandleStatic } from './web/routes/static.js'
 import { tryHandleDashboardNew } from './web/routes/dashboard-new.js'
@@ -350,6 +351,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleMetrics(routeCtx)) return
       if (await tryHandleHealthIngest(routeCtx)) return
       if (await tryHandleHealthIngestRaw(routeCtx)) return
+      if (await tryHandleZeppFreshness(routeCtx)) return
       // dashboard-new SPA on /v2, side-by-side with the legacy web/ app on '/'.
       // Mounted before the legacy static handler so the /v2 prefix is claimed first.
       if (tryHandleDashboardNew(routeCtx, DASHBOARD_NEW_DIST)) return
