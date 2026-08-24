@@ -38,7 +38,12 @@ import {
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { probeTelegramConflict } from './channel-conflict-probe.js'
 import { schedulePluginUnlockAfterRespawn } from './channel-plugin-unlock.js'
-import { detectPaneState, decidePaneErrorAlert, type PaneErrorAlertState, type PaneState } from '../pane-state.js'
+import { detectPaneState, decidePaneErrorAlert, detectsUsageLimitMenu, type PaneErrorAlertState, type PaneState } from '../pane-state.js'
+import {
+  decideUsageLimitRecovery,
+  DEFAULT_USAGE_LIMIT_WEDGE_THRESHOLDS,
+  type UsageLimitWedgeState,
+} from './usage-limit-wedge.js'
 import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
 import { notifyChannel } from '../notify.js'
 import { getProvider, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
@@ -80,6 +85,14 @@ function resolveAgentProvider(name: string): ChannelProviderType {
 
 const agentDownSince: Map<string, number> = new Map()
 const agentLastRestart: Map<string, number> = new Map()
+// Per-agent usage-limit-modal wedge bookkeeping (confirm window + restart cap).
+const agentUsageLimitWedge: Map<string, UsageLimitWedgeState> = new Map()
+const CLEAN_USAGE_LIMIT_WEDGE_STATE: UsageLimitWedgeState = {
+  consecutiveModalTicks: 0,
+  lastRestartAtMs: null,
+  restartCount: 0,
+  escalationCount: 0,
+}
 const AGENT_RESTART_GRACE_MS = 90_000
 // A freshly started agent can take well over the first-probe window to bring
 // its channel plugin up (a large-context model launched with --continue spawns
@@ -929,6 +942,48 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           logger.info({ agent: t.agentName, model: origModel }, '[opus-fallback] reset -- restoring Opus model, watchdog will restart')
           sendAlert(`✅ ${t.agentName}: Reset -- visszaállítva erre: ${origModel}.`)
           stopAgentProcess(t.agentName)
+        }
+      }
+
+      // Usage-limit-modal wedge auto-recovery. A sticky "Stop and wait for limit
+      // to reset" modal freezes the BRAIN while the MCP plugin child stays alive,
+      // so the plugin-liveness loop below never sees it and the bash watchdog
+      // (which only relaunches on session DEATH) never fires -- the agent sits
+      // mute indefinitely. Detect it on the pane and restart the agent fresh,
+      // gated by a confirm window + cooldown + restart cap (decideUsageLimitRecovery).
+      // Scope boundary: the main session (marveen-channels) is owned by the
+      // token-outage bridge + keepalive path, and OPUS_FALLBACK_AGENTS are owned by
+      // the opus-fallback block above (which answers the same usage-limit signal
+      // with a Sonnet-downgrade) -- both are excluded here so two handlers never
+      // fight over the same pane. This path never model-downgrades: a transient
+      // sticky 5h modal only needs a fresh session.
+      if (!t.isMarveen && t.agentName && !OPUS_FALLBACK_AGENTS.includes(t.agentName)) {
+        const modalDetected = pane != null && detectsUsageLimitMenu(pane)
+        const prevWedge = agentUsageLimitWedge.get(t.agentName) ?? CLEAN_USAGE_LIMIT_WEDGE_STATE
+        const wedgeDecision = decideUsageLimitRecovery(modalDetected, prevWedge, Date.now())
+        // consecutiveModalTicks === 0 only on the cleared/no-modal reset branch.
+        if (wedgeDecision.next.consecutiveModalTicks === 0) {
+          agentUsageLimitWedge.delete(t.agentName)
+        } else {
+          agentUsageLimitWedge.set(t.agentName, wedgeDecision.next)
+        }
+        if (wedgeDecision.action === 'recover') {
+          logger.warn({ agent: t.agentName, session: t.session, reason: wedgeDecision.reason }, 'Agent wedged on usage-limit modal -- auto-restarting fresh')
+          try {
+            stopAgentProcess(t.agentName)
+            execSync('sleep 2', { timeout: 4000 })
+            startAgentProcess(t.agentName)
+            // Mark the restart so the plugin-liveness loop below and the bash
+            // watchdog defer instead of double-relaunching this same tick/window.
+            agentLastRestart.set(t.agentName, Date.now())
+            agentDownSince.delete(t.session)
+            sendAlert(`⚠️ ${t.agentName}: usage-limit modálra fagyott (élő session, fagyott agy) -- friss újraindítás. Reset után magától fut tovább.`)
+          } catch (err) {
+            logger.error({ err, agent: t.agentName }, 'Failed to auto-restart agent wedged on usage-limit modal')
+          }
+        } else if (wedgeDecision.action === 'escalate') {
+          logger.error({ agent: t.agentName, session: t.session, reason: wedgeDecision.reason }, 'Agent still wedged on usage-limit modal after restart cap -- operator needed')
+          sendAlert(`🚨 ${t.agentName}: usage-limit modál ${DEFAULT_USAGE_LIMIT_WEDGE_THRESHOLDS.maxRestarts} friss újraindítás után is fennáll -- valószínűleg tényleg aktív account-limit, nem elakadt modál. Kézi beavatkozás kellhet: tmux attach -t ${t.session}`)
         }
       }
     }
