@@ -42,8 +42,18 @@ describe('computeFreshness', () => {
       expect(r.blocksSince1am).toBe(0)
     })
 
-    it('returns 0 before 01:00 (midnight)', () => {
+    it('returns 0 at 00:00 midnight', () => {
+      const r = computeFreshness(makeDeps({ nowBudapest: () => ({ date: '2026-08-24', hours: 0, minutes: 0 }) }))
+      expect(r.blocksSince1am).toBe(0)
+    })
+
+    it('returns 0 before 01:00 (00:45)', () => {
       const r = computeFreshness(makeDeps({ nowBudapest: () => ({ date: '2026-08-24', hours: 0, minutes: 45 }) }))
+      expect(r.blocksSince1am).toBe(0)
+    })
+
+    it('returns 0 at 01:29 (just before first block completes)', () => {
+      const r = computeFreshness(makeDeps({ nowBudapest: () => ({ date: '2026-08-24', hours: 1, minutes: 29 }) }))
       expect(r.blocksSince1am).toBe(0)
     })
 
@@ -106,7 +116,9 @@ describe('computeFreshness', () => {
         latestSnapshot: () => ({ date: '2026-08-23', sourceSyncedAt: '2026-08-23T20:00:00Z' }),
         nowBudapest: () => ({ date: '2026-08-24', hours: 14, minutes: 0 }),
       }))
-      expect(r.alertReason).toContain('26')
+      // 14:00 -> minutesSince1am = 780, blocks = 26. Assert on "26 30-min blocks"
+      // not just "26" -- the date string "2026-08-24" also contains "26" (Thor #530).
+      expect(r.alertReason).toContain('26 30-min blocks')
     })
   })
 
