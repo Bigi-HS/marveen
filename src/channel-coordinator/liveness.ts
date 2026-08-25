@@ -18,9 +18,12 @@ import { agentDir } from '../web/agent-config.js'
 
 const TMUX = resolveFromPath('tmux')
 
-// Keep in sync with channel-monitor.ts. The scheduled keepalive refreshes
-// store/.channel-keepalive every ~6 min REGARDLESS of inbound traffic, so a
-// stale file with a live process means the TUI is wedged (not merely quiet).
+// Keep in sync with channel-monitor.ts. store/.channel-keepalive is advanced
+// by inbound traffic (channel-monitor inbound-advance) and launch-touch.
+// NOTE (card 2c5d6896): the original independent ~6-min scheduled round-trip
+// is not currently running; a stale file in a quiet session still triggers a
+// respawn (intentional for a deaf session; false-positive risk in quiet-but-
+// healthy sessions is accepted until the idle keepalive is restored).
 export const KEEPALIVE_FILE = join(PROJECT_ROOT, 'store', '.channel-keepalive')
 export const KEEPALIVE_STALE_MS = 18 * 60 * 1000
 // After any main-session respawn the plugin needs time to come up; never call
