@@ -122,7 +122,11 @@ CREATE TABLE kanban_cards (
   -- create from the canonical project prefix and IMMUTABLE thereafter -- a later
   -- project change never re-sequences it. NULL when the card has no project.
   -- Card cf0d1bfe S2.
-  code TEXT
+  code TEXT,
+  -- Epoch-seconds of last meaningful movement (status/assignee change, archive,
+  -- dispatch). NULL = unmeasured (card predates this column or no movement yet).
+  -- NEVER written by bulk migrations or sort_order updates (card 4326682b).
+  last_moved INTEGER
 );
 
 -- Per-prefix monotonic counter backing the card `code` auto-sequence (card

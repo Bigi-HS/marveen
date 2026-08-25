@@ -149,8 +149,8 @@ def update_card(db_path, card_id, now):
         con = _connect(db_path)
         try:
             cur = con.execute(
-                "UPDATE kanban_cards SET status = 'done', updated_at = ? WHERE id = ?",
-                (now, card_id),
+                "UPDATE kanban_cards SET status = 'done', updated_at = ?, last_moved = ? WHERE id = ?",
+                (now, now, card_id),
             )
             con.commit()
             return "updated" if cur.rowcount > 0 else "not_found"

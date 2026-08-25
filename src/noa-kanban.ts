@@ -206,6 +206,13 @@ export interface KanbanCard {
    * the card has no project.
    */
   code: string | null
+  /**
+   * Epoch-seconds of last meaningful movement: status/assignee change, archive,
+   * unarchive, or dispatch. NULL = unmeasured (card predates the column or has
+   * not moved since it was added). NEVER written by sort_order-only updates or
+   * bulk migrations (card 4326682b).
+   */
+  last_moved: number | null
 }
 
 export interface BoardColumn {
@@ -344,11 +351,31 @@ export function staleThresholdSeconds(score: number | null): number | null {
   return STALE_THRESHOLD_SECONDS[score] ?? null
 }
 
-export function isCardStale(card: Pick<KanbanCard, 'priority_score' | 'updated_at' | 'status'>, nowSec: number = Math.floor(Date.now() / 1000)): boolean {
+/**
+ * Returns true/false/`'unknown'`.
+ * Precedence (card 4326682b):
+ *   1. last_moved NOT NULL  -> use last_moved for age comparison
+ *   2. last_moved NULL, updated_at NOT in bulk-stamp burst window -> updated_at as proxy
+ *   3. last_moved NULL, updated_at IN burst window -> 'unknown' (unmeasured; NEVER false)
+ */
+export function isCardStale(
+  card: Pick<KanbanCard, 'priority_score' | 'updated_at' | 'last_moved' | 'status'>,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): boolean | 'unknown' {
   if (card.status === PARKED_STATUS || card.status === 'done') return false
   const threshold = staleThresholdSeconds(card.priority_score)
   if (threshold === null) return false
-  return nowSec - card.updated_at >= threshold
+
+  if (card.last_moved !== null && card.last_moved !== undefined) {
+    return nowSec - card.last_moved >= threshold
+  }
+
+  const ts = card.updated_at
+  if (ts >= BULK_STAMP_BURST_START && ts <= BULK_STAMP_BURST_END) {
+    return 'unknown'
+  }
+
+  return nowSec - ts >= threshold
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +386,17 @@ const KANBAN_MIGRATIONS = [
   `ALTER TABLE kanban_cards ADD COLUMN priority_score INTEGER`,
   `ALTER TABLE kanban_cards ADD COLUMN depends_on TEXT REFERENCES kanban_cards(id)`,
   `ALTER TABLE kanban_cards ADD COLUMN code TEXT`,
+  `ALTER TABLE kanban_cards ADD COLUMN last_moved INTEGER`,
 ]
+
+// The 07-29 taxonomy-backfill burst rewrote updated_at on 253 cards within
+// this 41-second window [1785334212..1785334253]. A card whose last_moved is
+// NULL and whose updated_at falls inside this window is UNMEASURED (the column
+// value reflects when the migration ran, not when the card last moved).
+// isCardStale returns 'unknown' for such cards -- never collapses to false.
+// Card 4326682b.
+const BULK_STAMP_BURST_START = 1785334212
+const BULK_STAMP_BURST_END   = 1785334253
 
 // ---------------------------------------------------------------------------
 // Card-code auto-sequence (card cf0d1bfe S2)
@@ -723,12 +760,19 @@ export function updateCard(id: string, params: UpdateCardParams): boolean {
     sort_order: params.sort_order ?? card.sort_order,
     updated_at: now,
     code: newCode,
+    last_moved: card.last_moved,
   }
 
+  // Set last_moved ONLY when status or assignee actually changes (write != change).
+  // Sort, description, title, priority, project, etc. are NOT movement (card 4326682b).
+  const statusMoved = f.status !== card.status
+  const assigneeMoved = f.assignee !== card.assignee
+  const newLastMoved = (statusMoved || assigneeMoved) ? now : card.last_moved
+
   const changed = getNoaDb().prepare(
-    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, depends_on=?, due_date=?, sort_order=?, updated_at=?, priority_score=?, code=?
+    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, depends_on=?, due_date=?, sort_order=?, updated_at=?, priority_score=?, code=?, last_moved=?
      WHERE id=?`
-  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.depends_on, f.due_date, f.sort_order, f.updated_at, f.priority_score, f.code, id).changes > 0
+  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.depends_on, f.due_date, f.sort_order, f.updated_at, f.priority_score, f.code, newLastMoved, id).changes > 0
 
   if (!changed) return false
 
@@ -772,8 +816,8 @@ export function moveCard(id: string, toStatus: string, sortOrder: number): boole
   // unscored card to an active lane gives it a bucket centre. Otherwise unchanged.
   const newScore = computeUpdatedScore(card, { status: toStatus }, toStatus, card.priority)
   const changed = getNoaDb().prepare(
-    'UPDATE kanban_cards SET status=?, sort_order=?, updated_at=?, priority_score=? WHERE id=?'
-  ).run(toStatus, sortOrder, now, newScore, id).changes > 0
+    'UPDATE kanban_cards SET status=?, sort_order=?, updated_at=?, priority_score=?, last_moved=? WHERE id=?'
+  ).run(toStatus, sortOrder, now, newScore, now, id).changes > 0
 
   if (!changed) return false
 
@@ -799,7 +843,7 @@ export function archiveCard(id: string): boolean {
   if (card.archived_at !== null) return true
 
   const now = Math.floor(Date.now() / 1000)
-  getNoaDb().prepare('UPDATE kanban_cards SET archived_at=?, updated_at=? WHERE id=?').run(now, now, id)
+  getNoaDb().prepare('UPDATE kanban_cards SET archived_at=?, updated_at=?, last_moved=? WHERE id=?').run(now, now, now, id)
   emitOrDefer({ type: 'kanban', id, action: 'archived' })
 
   // Check all children done (archiving a child counts as removing it from active)
@@ -816,8 +860,8 @@ export function unarchiveCard(id: string): boolean {
   const newSortOrder = maxSortOrderInStatus(card.status) + 1.0
   const now = Math.floor(Date.now() / 1000)
   const changed = getNoaDb().prepare(
-    'UPDATE kanban_cards SET archived_at=NULL, sort_order=?, updated_at=? WHERE id=?'
-  ).run(newSortOrder, now, id).changes > 0
+    'UPDATE kanban_cards SET archived_at=NULL, sort_order=?, updated_at=?, last_moved=? WHERE id=?'
+  ).run(newSortOrder, now, now, id).changes > 0
 
   if (changed) emitOrDefer({ type: 'kanban', id, action: 'unarchived' })
   return changed

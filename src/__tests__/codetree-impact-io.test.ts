@@ -36,7 +36,7 @@ describe('codetree-impact-io: production wiring uses noa-kanban + noa-memory', (
       status: 'in_progress', assignee: 'dave', priority: 'high',
       project: null, parent_id: null, due_date: null, sort_order: 0,
       created_at: 0, updated_at: 0, archived_at: null, dispatched_at: null,
-      priority_score: 4, depends_on: null, code: null,
+      priority_score: 4, depends_on: null, code: null, last_moved: null,
     })
     const deps = realImpactDeps()
     const result = deps.getCard('abc123')
