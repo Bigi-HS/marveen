@@ -746,4 +746,61 @@ describe('POST /api/health/ingest', () => {
       expect(snap?.vitals?.restingHr).toBe(50)
     })
   })
+
+  // card 75337cdc: numeric plausibility guard, log-only rollout. The handler flags a
+  // suspect merged day via onPlausibility but must NOT mutate the stored status.
+  describe('plausibility guard (log-only)', () => {
+    it('calls onPlausibility for a physically impossible activity push (live 08-25 bug)', async () => {
+      const onPlausibility = vi.fn()
+      const deps = makeDeps({ onPlausibility })
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-25', activity: { steps: 15790, active_kcal: 5, distance_m: 456 } },
+      })
+      expect(onPlausibility).toHaveBeenCalledTimes(1)
+      const [, violations] = onPlausibility.mock.calls[0]
+      expect(violations.some((v: { severity: string }) => v.severity === 'suspect')).toBe(true)
+      // log-only: the stored status is untouched, no data change.
+      expect(snap?.status).toBe('ok')
+    })
+
+    it('catches the DA falsifier #3 absurd push (kcal=3, dist=1, steps=20000)', async () => {
+      const onPlausibility = vi.fn()
+      const deps = makeDeps({ onPlausibility })
+      await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-26', activity: { steps: 20000, active_kcal: 3, distance_m: 1 } },
+      })
+      expect(onPlausibility).toHaveBeenCalledTimes(1)
+    })
+
+    it('does NOT call onPlausibility for a coherent activity push', async () => {
+      const onPlausibility = vi.fn()
+      const deps = makeDeps({ onPlausibility })
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-25', activity: { steps: 13694, active_kcal: 1011, distance_m: 12040 } },
+      })
+      expect(onPlausibility).not.toHaveBeenCalled()
+      expect(snap?.status).toBe('ok')
+    })
+
+    it('judges plausibility on the MERGED day (activity + steps from separate pushes)', async () => {
+      const onPlausibility = vi.fn()
+      const deps = makeStatefulDeps()
+      deps.onPlausibility = onPlausibility
+      // First push: steps only (no activity block yet -> no coherence check possible).
+      await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-25', activity: { steps: 15790 } },
+      })
+      expect(onPlausibility).not.toHaveBeenCalled()
+      // Second push: the broken distance/kcal arrive -> merged day is now incoherent.
+      await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-25', activity: { active_kcal: 5, distance_m: 456 } },
+      })
+      expect(onPlausibility).toHaveBeenCalledTimes(1)
+    })
+  })
 })

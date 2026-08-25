@@ -89,4 +89,29 @@ describe('checkSnapshot', () => {
     const alerts = checkSnapshot(snap({ status: 'auth_fail' }), BASE_NOW_MS)
     expect(alerts[0].date).toBe('2026-08-22')
   })
+
+  // card 75337cdc: numeric-plausibility 'suspect' alerts (log-only rollout).
+  describe('plausibility (suspect)', () => {
+    it('raises a suspect alert for physically impossible activity (live 08-25 bug)', () => {
+      const alerts = checkSnapshot(
+        snap({ status: 'ok', steps: 15790, activity: { activeKcal: 5, distanceM: 456 } }),
+        BASE_NOW_MS,
+      )
+      const suspect = alerts.find((a) => a.type === 'suspect')
+      expect(suspect).toBeDefined()
+      expect(suspect!.date).toBe('2026-08-22')
+    })
+
+    it('does NOT raise a suspect alert for a coherent day', () => {
+      const alerts = checkSnapshot(
+        snap({ status: 'ok', steps: 13694, activity: { activeKcal: 1011, distanceM: 12040 } }),
+        BASE_NOW_MS,
+      )
+      expect(alerts.some((a) => a.type === 'suspect')).toBe(false)
+    })
+
+    it('a healthy ok snapshot with no numeric data stays alert-free', () => {
+      expect(checkSnapshot(snap({ status: 'ok' }), BASE_NOW_MS)).toHaveLength(0)
+    })
+  })
 })

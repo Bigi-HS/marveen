@@ -17,6 +17,10 @@ import { readBody, RequestBodyTooLargeError, json } from '../http-helpers.js'
 import { defaultZeppStore } from '../zepp/ingest-store.js'
 import { mergeDailySnapshot } from '../zepp/snapshot-merge.js'
 import { readIngestToken } from '../zepp/ingest-secret.js'
+import {
+  validateHealthPlausibility, hasSuspectViolation, type PlausibilityViolation,
+} from '../zepp/health-plausibility.js'
+import { logger } from '../../logger.js'
 import type {
   ZeppDailySnapshot, ZeppVitals, ZeppSleep, ZeppWorkout, ZeppActivity, ZeppPullStatus,
 } from '../zepp/contract.js'
@@ -45,6 +49,10 @@ export interface HealthIngestDeps {
   readSnapshot: (date: string) => ZeppDailySnapshot | null
   writeSnapshot: (snap: ZeppDailySnapshot) => void
   nowIso: () => string
+  // Called (log-only for now) when the merged snapshot fails a numeric plausibility check
+  // (card 75337cdc). Detection only: the stored snapshot is never mutated. Optional so
+  // callers that do not care can omit it.
+  onPlausibility?: (snapshot: ZeppDailySnapshot, violations: PlausibilityViolation[]) => void
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -381,6 +389,13 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
     const merged = mergeDailySnapshot(existing, snapshot)
     deps.writeSnapshot(merged)
 
+    // Numeric plausibility guard (log-only rollout, card 75337cdc). Run on the MERGED day
+    // so activity+steps are judged together. Detection only -- status is not downgraded.
+    const violations = validateHealthPlausibility(merged)
+    if (hasSuspectViolation(violations)) {
+      deps.onPlausibility?.(merged, violations)
+    }
+
     json(res, { status: merged.status, date, pulledAt: merged.pulledAt })
   }
 }
@@ -392,6 +407,12 @@ export function makeDefaultHealthIngestDeps(): HealthIngestDeps {
     readSnapshot: (date) => defaultZeppStore.read(date),
     writeSnapshot: (snap) => defaultZeppStore.write(snap),
     nowIso: () => new Date().toISOString(),
+    onPlausibility: (snap, violations) => {
+      logger.warn(
+        { date: snap.date, violations },
+        `zepp plausibility: ${violations.filter((v) => v.severity === 'suspect').length} suspect on ${snap.date} -- ${violations.map((v) => v.message).join('; ')}`,
+      )
+    },
   }
 }
 
