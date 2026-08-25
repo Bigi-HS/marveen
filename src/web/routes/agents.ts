@@ -4,7 +4,8 @@ import { homedir, platform } from 'node:os'
 import { execSync } from 'node:child_process'
 import { logger } from '../../logger.js'
 import { MAIN_AGENT_ID, BOT_NAME } from '../../config.js'
-import { createAgentMessage, listPendingChannelRequests, updateChannelRequestStatus } from '../../db.js'
+import { createAgentMessage, listPendingChannelRequests, updateChannelRequestStatus, getPendingMessageCount } from '../../db.js'
+import { shouldSkipSpawnBroadcast } from '../message-router.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
 import { getSecret, setSecret, deleteSecret, listSecrets } from '../vault.js'
 import {
@@ -525,7 +526,16 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
       const allAgents = listAgentNames()
       const runningAgents = allAgents.filter(a => a !== name && isAgentRunning(a))
-      const notifyTargets = [MAIN_AGENT_ID, ...runningAgents]
+      // Broadcast guard (card fee86966): if the pending-message queue is already
+      // deep, skip notifying all running agents -- the backlog would grow faster
+      // than the router can drain it, stalling the event loop past the supervisor's
+      // 8s health-check timeout. MAIN_AGENT_ID always receives the notification;
+      // it can relay to others once the queue drains.
+      const skipBroadcast = shouldSkipSpawnBroadcast(getPendingMessageCount())
+      const notifyTargets = skipBroadcast ? [MAIN_AGENT_ID] : [MAIN_AGENT_ID, ...runningAgents]
+      if (skipBroadcast) {
+        logger.warn({ name, pendingCount: getPendingMessageCount() }, 'Spawn-broadcast suppressed: message queue depth exceeds threshold (card fee86966)')
+      }
       for (const target of notifyTargets) {
         createAgentMessage('system', target, `Uj csapattag erkezett: ${name}. Leirasa: ${description}. Udv neki ha legkozelebb beszeltek!`)
       }
