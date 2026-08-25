@@ -5,8 +5,13 @@
 // (Telegram, kanban card, log-only). No side effects in this module.
 
 import type { ZeppDailySnapshot, ZeppPullStatus } from './contract.js'
+import { validateHealthPlausibility, hasSuspectViolation } from './health-plausibility.js'
 
-export type AlertType = 'auth_fail' | 'endpoint_error' | 'partial' | 'stale'
+// 'suspect' is a numeric-plausibility alert (the pull SUCCEEDED but the numbers are
+// physically implausible -- see health-plausibility.ts). It is NOT a ZeppPullStatus:
+// the stored snapshot is left untouched (log-only rollout, card 75337cdc). Escalation
+// to a status downgrade is a later step once the false-positive rate is known.
+export type AlertType = 'auth_fail' | 'endpoint_error' | 'partial' | 'stale' | 'suspect'
 
 export interface HealthGuardAlert {
   type: AlertType
@@ -58,6 +63,22 @@ export function checkSnapshot(
       type: 'stale',
       date: snapshot.date,
       message: `Zepp data stale: last pull was ${snapshot.pulledAt} (>${Math.round(STALE_THRESHOLD_MS / 3_600_000)}h ago)`,
+    })
+  }
+
+  // Numeric plausibility: a status-ok snapshot can still carry physically impossible
+  // numbers (e.g. activeKcal=5 at 15,790 steps). Surface those as a 'suspect' alert so a
+  // broken aggregate does not silently feed goal-calc. Detection only -- the snapshot is
+  // not mutated.
+  const plausibility = validateHealthPlausibility(snapshot)
+  if (hasSuspectViolation(plausibility)) {
+    alerts.push({
+      type: 'suspect',
+      date: snapshot.date,
+      message: `Zepp data implausible for ${snapshot.date}: ${plausibility
+        .filter((v) => v.severity === 'suspect')
+        .map((v) => v.message)
+        .join('; ')}`,
     })
   }
 
