@@ -5,6 +5,7 @@ import {
   shouldAlertOnAbandon,
   alertInBand,
   abandonAlertContent,
+  senderAbandonAlertContent,
   abandonmentRecord,
   parseAbandonmentSentinel,
   abandonmentRate,
@@ -69,6 +70,44 @@ describe('delivery-dropped alert (d3339db9 defense-in-depth)', () => {
     // the recipient appears twice (parties + "session health"): both resolved
     expect(content).not.toContain('"scout"')
     expect(content).not.toContain('"marveen"')
+  })
+})
+
+// Card 2adc8c5a: sender-facing alert content. When a message is dropped, the
+// SENDER needs to know (they have the context to decide re-send). The orchestrator
+// alert is secondary and circular (if the orchestrator is down, its alert also
+// stalls). The sender alert is sent to msg.from_agent directly.
+describe('senderAbandonAlertContent (card 2adc8c5a)', () => {
+  it('names the id, parties, age, and states the message was NOT delivered', () => {
+    const content = senderAbandonAlertContent(
+      { id: 42, from_agent: 'dave', to_agent: 'scout' },
+      61 * 60 * 1000,
+    )
+    expect(content).toContain('#42')
+    expect(content).toContain('scout')
+    expect(content).toContain('61 min')
+    expect(content).toContain('NOT delivered')
+  })
+
+  it('resolves party names via injected resolver', () => {
+    const resolve = (id: string): string =>
+      ({ scout: 'Dr. Stone' } as Record<string, string>)[id] ?? id
+    const content = senderAbandonAlertContent(
+      { id: 7, from_agent: 'dave', to_agent: 'scout' },
+      60 * 60 * 1000,
+      resolve,
+    )
+    expect(content).toContain('"Dr. Stone"')
+    expect(content).not.toContain('"scout"')
+  })
+
+  it('is distinct from the orchestrator-facing abandonAlertContent', () => {
+    const msg = { id: 1, from_agent: 'dave', to_agent: 'scout' }
+    const ageMs = 60 * 60 * 1000
+    const sender = senderAbandonAlertContent(msg, ageMs)
+    const orchestrator = abandonAlertContent(msg, ageMs)
+    // Both describe the same drop but from different perspectives
+    expect(sender).not.toBe(orchestrator)
   })
 })
 

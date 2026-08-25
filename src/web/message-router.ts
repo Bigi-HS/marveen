@@ -19,6 +19,7 @@ import {
   DELIVERY_ABANDONMENT_SENTINEL,
   alertInBand,
   abandonAlertContent,
+  senderAbandonAlertContent,
   abandonmentRecord,
   type AbandonmentPhase,
 } from './delivery-alert.js'
@@ -176,15 +177,26 @@ export function startMessageRouter(): NodeJS.Timeout {
         if (!markMessageFailed(msg.id, 'Abandoned: recipient session never ready within hard-TTL')) {
           logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
         }
-        // Never drop silently (card d3339db9): surface a PERMANENT drop to the
-        // main agent in-band. alertInBand restricts this to the 'dropped' phase
-        // (card f1ea52c0) and keeps the recursion guard (an abandoned monitor
-        // alert must not spawn another).
+        // Never drop silently (card d3339db9): surface a PERMANENT drop both to
+        // the SENDER (primary, card 2adc8c5a: they have context to re-send and
+        // are on a different session from the failed recipient) and to the main
+        // agent (secondary/orchestrator, kept for observability). alertInBand
+        // restricts both to the 'dropped' phase (card f1ea52c0) and keeps the
+        // recursion guard (an abandoned monitor alert must not spawn another).
         if (alertInBand('dropped', msg.from_agent)) {
+          // Notify sender directly (breaks orchestrator-down circularity).
+          if (msg.from_agent !== MAIN_AGENT_ID) {
+            try {
+              createAgentMessage(DELIVERY_MONITOR_AGENT_ID, msg.from_agent, senderAbandonAlertContent(msg, ageMs, readAgentDisplayName))
+            } catch (err) {
+              logger.warn({ err, id: msg.id }, 'Failed to enqueue delivery-dropped sender alert')
+            }
+          }
+          // Notify orchestrator (secondary; may stall when orchestrator is down).
           try {
             createAgentMessage(DELIVERY_MONITOR_AGENT_ID, MAIN_AGENT_ID, abandonAlertContent(msg, ageMs, readAgentDisplayName))
           } catch (err) {
-            logger.warn({ err, id: msg.id }, 'Failed to enqueue delivery-dropped alert')
+            logger.warn({ err, id: msg.id }, 'Failed to enqueue delivery-dropped orchestrator alert')
           }
         }
         appendAbandonmentSentinel(msg, ageMs, now, 'dropped')
