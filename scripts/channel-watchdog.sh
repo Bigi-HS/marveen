@@ -26,10 +26,11 @@
 # enforced by the fleet-supervisor caller; making it intrinsic here keeps the
 # invariant correct for every invocation path (loop, manual, hypothetical timer).
 #
-# Signal: store/.channel-keepalive mtime. The keep-alive scheduled task does a
-# real Telegram MCP edit_message round-trip every ~6 min and touches that file
-# on success, so a stale file means the session's MCP pipe is no longer doing
-# round-trips (wedged / deaf).
+# Signal: store/.channel-keepalive mtime. The file is advanced by inbound
+# traffic (channel-monitor inbound-advance) and session launch-touch.
+# NOTE (card 2c5d6896): the original ~6-min independent scheduled Telegram
+# round-trip that touched this file is not currently running -- a stale file
+# in an idle-but-healthy session may trigger a false-positive respawn.
 #
 # Recovery: `tmux respawn-pane` of ONLY the <id>-channels pane. NEVER
 # `systemctl restart` -- the tmux SERVER is shared across every agent and lives

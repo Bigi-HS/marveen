@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest'
+import { buildScheduledTaskPrompt } from '../noa-scheduler.js'
 import { readFileSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1017,5 +1018,52 @@ describe('runSweepTick: stuck next_run sentinel', () => {
 
     expect(() => runSweepTick(60000, db)).not.toThrow()
     expect(vi.mocked(sendPromptToSession)).toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// buildScheduledTaskPrompt -- noa-scheduler variant (card 2c5d6896 F2)
+// ---------------------------------------------------------------------------
+
+function makeTask(over: Partial<{ id: string; agent: string; type: 'task' | 'heartbeat'; prompt: string; schedule: string }> = {}) {
+  return {
+    id: 'test-task',
+    agent: 'marveen',
+    type: 'task' as const,
+    description: '',
+    prompt: 'check',
+    schedule: '0 * * * *',
+    next_run: 0,
+    last_run: null,
+    last_result: null,
+    status: 'active' as const,
+    created_at: 0,
+    skip_if_busy: 0,
+    force_send: 0,
+    direct_send: 0,
+    layer2: 0,
+    target_session: null,
+    card_id: null,
+    ...over,
+  }
+}
+
+describe('buildScheduledTaskPrompt (noa-scheduler, card 2c5d6896 F2)', () => {
+  it('heartbeat log path is per-agent, not the old shared marveen path', () => {
+    const p = buildScheduledTaskPrompt(makeTask({ type: 'heartbeat', agent: 'marveen' }), 'marveen')
+    expect(p).toContain('/tmp/keepalive-marveen.log')
+    expect(p).not.toContain('/tmp/marveen-keepalive.log')
+  })
+
+  it('heartbeat log path uses the correct agent name for forge', () => {
+    const p = buildScheduledTaskPrompt(makeTask({ type: 'heartbeat', agent: 'forge' }), 'forge')
+    expect(p).toContain('/tmp/keepalive-forge.log')
+    expect(p).not.toContain('/tmp/marveen-keepalive.log')
+  })
+
+  it('heartbeat-agent gets minimal tag without keepalive directive', () => {
+    const p = buildScheduledTaskPrompt(makeTask({ type: 'heartbeat', agent: 'heartbeat' }), 'heartbeat')
+    expect(p).not.toContain('KOTELEZO ELSO TEENDO')
+    expect(p).not.toContain('/tmp/keepalive-')
   })
 })

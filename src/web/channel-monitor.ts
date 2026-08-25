@@ -425,19 +425,28 @@ export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
 
 // --- Keep-alive staleness watchdog (deafness safety net, decision #3) ---
 //
-// The keep-alive (a scheduled edit_message round-trip from the channels
-// session) touches store/.channel-keepalive on every success. If that file
-// goes stale while the session is otherwise process-alive, the MCP stdio pipe
-// is likely wedged -> respawn the pane.
+// store/.channel-keepalive is advanced by two independent signals:
+//   (a) inbound traffic: shouldRefreshKeepaliveFromInbound() sets mtime to
+//       the last-ingested <channel source=> timestamp (2026-06-01 fix -- see
+//       comment below).
+//   (b) channels.sh launch-touch on every session start.
+//
+// NOTE (card 2c5d6896, 2026-08-25): the original independent ~6-min scheduled
+// Telegram edit_message round-trip (idle-path keepalive) is NOT currently
+// running -- it was removed and never restored. The file is therefore ONLY
+// advanced by (a)+(b). In a truly idle session (no inbound for 18+ min)
+// the file will go stale and trigger a respawn, which is the intended
+// behaviour for a deaf/wedged session. Restoring the dedicated idle keepalive
+// (to reduce false positives in genuinely quiet-but-healthy sessions) is
+// tracked separately; until then, the threshold matches the current reality.
 //
 // LIMITATION (documented on purpose): this staleness net does NOT catch a clean
-// inbound-ONLY deafness, where outbound edit_message still succeeds and keeps the
-// file fresh while server->claude notifications are dropped. The keep-alive
-// PREVENTS that case (warm pipe); the ACTIVE detector for it now ships as
+// inbound-ONLY deafness, where outbound traffic keeps the pipe warm while
+// server->claude notifications are dropped. The ACTIVE detector for it ships as
 // src/web/inbound-probe.ts (2026-06-01) -- a userbot sends a marker the watchdog
 // verifies in the transcript. This staleness path remains the coarse backstop.
 const KEEPALIVE_FILE = join(PROJECT_ROOT, 'store', '.channel-keepalive')
-const KEEPALIVE_STALE_MS = 18 * 60 * 1000 // ~3 missed 6-min cycles
+const KEEPALIVE_STALE_MS = 18 * 60 * 1000 // ~3 cycles at the old 6-min cadence; still matches inbound-driven reality
 const KEEPALIVE_RESPAWN_GRACE_MS = 15 * 60 * 1000 // let a respawned session re-establish the file
 let marveenLastKeepaliveRespawn = 0
 
