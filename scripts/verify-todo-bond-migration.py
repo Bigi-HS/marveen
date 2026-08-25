@@ -22,7 +22,7 @@ import re
 import sqlite3
 import sys
 
-DEFAULT_DB = os.environ.get("VERIFY_TODO_DB", "store/claudeclaw.db")
+DEFAULT_DB = os.environ.get("VERIFY_TODO_DB", "store/noa.db")
 
 
 def main() -> int:
