@@ -605,9 +605,11 @@ describe('W0a: hybridSearch (async RRF)', () => {
     expect(results.map(r => r.agent_id)).not.toContain('claudia')
   })
 
-  it('applegate curator sees cross-agent results', async () => {
+  it('applegate curator sees cross-agent results (requires explicit curator=true, card 0fd4dbd8)', async () => {
+    // curator=true is the opt-in flag; without it the bypass does not fire even for
+    // CURATOR_AGENTS members (prevents HTTP caller spoofing ?agent=applegate).
     const id = seedRaw({ agent_id: 'claudia', content: 'curator hybrid data', keywords: 'curatorhybrid', access_scope: 'claudia', category: 'hot' })
-    const results = await hybridSearch('applegate', 'curatorhybrid')
+    const results = await hybridSearch('applegate', 'curatorhybrid', 10, true)
     expect(results.map(r => r.id)).toContain(id)
   })
 })

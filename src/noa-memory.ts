@@ -631,10 +631,14 @@ export function patchMemory(id: number, patch: MemoryPatch): string[] {
 }
 
 // hybridSearch: RRF fusion of FTS5 + cosine vector rerank (async).
-export async function hybridSearch(agentId: string, query: string, limit = 10): Promise<NoaMemory[]> {
+// curator: opt-in flag that grants cross-agent scope bypass for CURATOR_AGENTS members.
+// Defaults to false so the public HTTP route (which does not pass this flag) cannot
+// trigger the bypass by spoofing agentId='applegate' (card 0fd4dbd8). Internal
+// callers that need full-corpus search must explicitly pass curator=true.
+export async function hybridSearch(agentId: string, query: string, limit = 10, curator = false): Promise<NoaMemory[]> {
   const k = 60
   const db = getNoaDb()
-  const bypass = CURATOR_AGENTS.has(agentId)
+  const bypass = curator && CURATOR_AGENTS.has(agentId)
 
   const ftsResults = searchAgentMemories(agentId, query, limit * 2, bypass)
 
