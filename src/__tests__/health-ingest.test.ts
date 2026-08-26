@@ -849,6 +849,50 @@ describe('POST /api/health/ingest', () => {
     })
   })
 
+  // WELL-028: when the merged day's measured distance is implausibly short for its steps
+  // (the BUG-2 upstream loss), the handler labels distanceSource and stores a step-derived
+  // estimate WITHOUT overwriting the measured distanceM.
+  describe('step-distance estimate remediation', () => {
+    it('labels and estimates a distance-short day (live 08-25: 456m at 15790 steps)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-25', activity: { steps: 15790, distance_m: 456 } },
+      })
+      expect(snap?.activity?.distanceSource).toBe('step_estimated')
+      expect(snap?.activity?.estimatedDistanceM).toBe(12032)
+      expect(snap?.activity?.distanceM).toBe(456) // measured value untouched
+    })
+
+    it('labels a coherent day measured and stores no estimate', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-26', activity: { steps: 13694, distance_m: 12040 } },
+      })
+      expect(snap?.activity?.distanceSource).toBe('measured')
+      expect(snap?.activity?.estimatedDistanceM).toBeUndefined()
+    })
+
+    it('drops a stale estimate once a later push carries the real distance', async () => {
+      const deps = makeStatefulDeps()
+      // First push: only a narrow slice landed -> distance short -> estimate surfaces.
+      let { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-25', activity: { steps: 15790, distance_slices: [{ start: '2026-08-25T21:15:00Z', meters: 456 }], distance_m: 456 } },
+      })
+      expect(snap?.activity?.distanceSource).toBe('step_estimated')
+      // Later pushes accumulate the rest of the day into the ledger -> measured catches up.
+      ;({ snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-25', activity: { distance_slices: [{ start: '2026-08-25T22:00:00Z', meters: 11600 }], distance_m: 11600 } },
+      }))
+      expect(snap?.activity?.distanceM).toBe(12056) // 456 + 11600, ledger sum
+      expect(snap?.activity?.distanceSource).toBe('measured')
+      expect(snap?.activity?.estimatedDistanceM).toBeUndefined()
+    })
+  })
+
   // card 75337cdc: numeric plausibility guard, log-only rollout. The handler flags a
   // suspect merged day via onPlausibility but must NOT mutate the stored status.
   describe('plausibility guard (log-only)', () => {

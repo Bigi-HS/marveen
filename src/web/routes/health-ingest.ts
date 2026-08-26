@@ -16,6 +16,7 @@ import { timingSafeEqual } from 'node:crypto'
 import { readBody, RequestBodyTooLargeError, json } from '../http-helpers.js'
 import { defaultZeppStore } from '../zepp/ingest-store.js'
 import { mergeDailySnapshot } from '../zepp/snapshot-merge.js'
+import { applyDistanceEstimate } from '../zepp/distance-estimate.js'
 import { readIngestToken } from '../zepp/ingest-secret.js'
 import {
   validateHealthPlausibility, hasSuspectViolation, type PlausibilityViolation,
@@ -416,20 +417,26 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
     // existing record) passes through unchanged.
     const existing = deps.readSnapshot(date)
     const merged = mergeDailySnapshot(existing, snapshot)
-    deps.writeSnapshot(merged)
+    // Distance-estimate remediation (WELL-028): when the merged day's measured distance is
+    // implausibly short for its steps (BUG-2 upstream loss), label distanceSource and add a
+    // step-derived estimate. Runs on the MERGED day so it sees the accumulated steps/distance,
+    // and re-runs each push so a later real distance drops a stale estimate. Never overwrites
+    // the measured distanceM.
+    const finalized = applyDistanceEstimate(merged)
+    deps.writeSnapshot(finalized)
 
-    // Numeric plausibility guard (log-only rollout, card 75337cdc). Run on the MERGED day
+    // Numeric plausibility guard (log-only rollout, card 75337cdc). Run on the finalized day
     // so activity+steps are judged together. Detection only -- status is not downgraded.
-    const violations = validateHealthPlausibility(merged)
+    const violations = validateHealthPlausibility(finalized)
     if (hasSuspectViolation(violations)) {
-      deps.onPlausibility?.(merged, violations)
+      deps.onPlausibility?.(finalized, violations)
     }
 
     // Data-date guard (log-only, card 75337cdc Q2). Catches a producer that filed a record
     // under the wrong day (the F1 mis-filing class). Detection only -- no status change.
-    const dateViolations = validateDataDate(merged)
+    const dateViolations = validateDataDate(finalized)
     if (hasDataDateViolation(dateViolations)) {
-      deps.onDataDate?.(merged, dateViolations)
+      deps.onDataDate?.(finalized, dateViolations)
     }
 
     json(res, { status: merged.status, date, pulledAt: merged.pulledAt })
