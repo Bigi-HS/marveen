@@ -1202,5 +1202,88 @@ class PerPieceSanctionTests(unittest.TestCase):
         self.assertFalse(guard.match_env_file_print(self.CANON))
 
 
+class ConfigWriteBypassTests(unittest.TestCase):
+    """Card 369880c7: Bash write bypass for .mcp.json + settings.json.
+
+    Write/Edit tool deny (PR#549) already covers those files.  These tests
+    cover the BASH paths that bypass the tool-level deny:
+      - output redirect  (echo ... > .mcp.json)
+      - tee              (tee .mcp.json)
+      - sed -i           (sed -i 's/x/y/' settings.json)
+      - cp               (cp src.json .mcp.json)
+    """
+
+    # ── BLOCK expected ────────────────────────────────────────────────────────
+
+    BLOCKED = [
+        # redirect
+        ('redirect-echo',           "echo '{\"mcpServers\":{}}' > .mcp.json"),
+        ('redirect-python',         "python3 -c 'import json; print(json.dumps({}))' > .mcp.json"),
+        ('redirect-append',         "echo '{}' >> settings.json"),
+        ('redirect-full-path',      "echo '{}' > /home/domin/marveen/agents/dave/.claude-config/settings.json"),
+        ('redirect-mcp-full-path',  "echo '{}' > /home/domin/.claude/mcp-config/.mcp.json"),
+        # tee
+        ('tee-direct',              "cat src.json | tee .mcp.json"),
+        ('tee-append',              "echo '{}' | tee -a settings.json"),
+        ('tee-full-path',           "tee /home/domin/marveen/.mcp.json < /dev/stdin"),
+        # sed -i
+        ('sed-i-short',             "sed -i 's/oldkey/newkey/' .mcp.json"),
+        ('sed-i-long',              "sed --in-place 's/x/y/' settings.json"),
+        ('sed-i-suffix',            "sed -i.bak 's/x/y/' .mcp.json"),
+        # cp
+        ('cp-to-mcp',               "cp /tmp/inject.json .mcp.json"),
+        ('cp-to-settings',          "cp /tmp/bad.json settings.json"),
+        ('cp-to-full-path',         "cp /tmp/x.json /home/domin/marveen/.mcp.json"),
+    ]
+
+    # ── ALLOW expected ────────────────────────────────────────────────────────
+
+    ALLOWED = [
+        # read-only operations: grep, cat, jq
+        ('grep-mcp',                "grep mcpServers .mcp.json"),
+        ('cat-mcp',                 "cat .mcp.json"),
+        ('jq-settings',             "jq '.permissions' settings.json"),
+        # writing to OTHER files (not the protected names)
+        ('write-other-json',        "echo '{}' > config.json"),
+        ('tee-other',               "echo '{}' | tee /tmp/other-settings.json"),
+        # cp FROM protected (source, not dest)
+        ('cp-from-mcp',             "cp .mcp.json .mcp.json.bak"),
+        # diff reads
+        ('diff-settings',           "diff settings.json settings.json.bak"),
+    ]
+
+    def test_blocked(self):
+        for label, cmd in self.BLOCKED:
+            with self.subTest(case=label):
+                self.assertTrue(
+                    guard.match_config_write(cmd),
+                    f'expected BLOCK for: {cmd!r}',
+                )
+
+    def test_allowed(self):
+        for label, cmd in self.ALLOWED:
+            with self.subTest(case=label):
+                self.assertFalse(
+                    guard.match_config_write(cmd),
+                    f'expected ALLOW for: {cmd!r}',
+                )
+
+    def test_classify_bash_config_write_blocked(self):
+        """classify() wires match_config_write into the RULES list."""
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': "echo '{}' > .mcp.json"},
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'config-write-bypass')
+
+    def test_classify_read_still_allowed(self):
+        denied, _, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'cat .mcp.json'},
+        })
+        self.assertFalse(denied)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
