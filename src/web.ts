@@ -77,6 +77,7 @@ import { tryHandlePublicDigest } from './web/routes/public-digest.js'
 import { tryHandleAnalytics } from './web/routes/analytics.js'
 import { applyAnalyticsMigrations } from './analytics/storage.js'
 import { tryHandleNotify } from './web/routes/notify.js'
+import { tryHandleGmailLabelHealth } from './web/routes/gmail-label-health.js'
 import { tryHandleGithubSearch } from './web/routes/github-search.js'
 import { tryHandleBondSrs } from './web/routes/bond-srs.js'
 import { tryHandleHibikiNutrition } from './web/routes/hibiki-nutrition.js'
@@ -345,6 +346,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandlePublicDigest(routeCtx)) return
       if (await tryHandleAnalytics(routeCtx)) return
       if (await tryHandleNotify(routeCtx)) return
+      if (await tryHandleGmailLabelHealth(routeCtx)) return
       if (await tryHandleGithubSearch(routeCtx)) return
       if (await tryHandleBondSrs(routeCtx)) return
       if (await tryHandleHibikiNutrition(routeCtx)) return
