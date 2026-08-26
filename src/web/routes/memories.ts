@@ -8,6 +8,7 @@ import {
 import { MAIN_AGENT_ID, OLLAMA_URL } from '../../config.js'
 import { logger } from '../../logger.js'
 import { decideMemoryMutation, enforceFromBindingEnabled } from '../agent-identity-binding.js'
+import { recordGuardEvent } from '../guard-event-recorder.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
 
@@ -23,21 +24,51 @@ function memoryOwner(id: number): string | undefined {
 // src/db.ts so the API rejects bad values before they even reach SQLite.
 const MEMORY_CATEGORIES = new Set(['hot', 'warm', 'cold', 'shared'])
 
-const SUSPICIOUS_PATTERNS = [
-  /\bcurl\s+(-[a-zA-Z]\s+)*https?:\/\//i,
-  /\bbash\s+-c\b/i,
-  /\beval\s*\(/i,
-  /\bexec\s*\(/i,
-  /\bimport\s+subprocess\b/i,
-  /ignore\s+(all\s+)?previous\s+instructions/i,
-  /override\s+your\s+(instructions|rules|safety|guidelines)/i,
-  /forget\s+your\s+(instructions|rules|safety|guidelines|training)/i,
-  /new\s+persona/i,
-  /\brm\s+-rf\b/i,
+type FilterSeverity = 'high' | 'critical'
+
+interface MemoryPattern {
+  name: string
+  severity: FilterSeverity
+  rx: RegExp
+}
+
+// Named patterns for measurability (SEC-030b / 6d14fad7). Block behavior is
+// unchanged -- only names and severity are added so guard_events rows carry
+// real identifiers rather than anonymous counts.
+const MEMORY_FILTER_PATTERNS: MemoryPattern[] = [
+  { name: 'curl-external',       severity: 'high',     rx: /\bcurl\s+(-[a-zA-Z]\s+)*https?:\/\//i },
+  { name: 'shell-exec',          severity: 'high',     rx: /\bbash\s+-c\b/i },
+  { name: 'code-eval',           severity: 'high',     rx: /\beval\s*\(/i },
+  { name: 'code-exec',           severity: 'high',     rx: /\bexec\s*\(/i },
+  { name: 'subprocess-import',   severity: 'high',     rx: /\bimport\s+subprocess\b/i },
+  { name: 'prompt-injection',    severity: 'critical', rx: /ignore\s+(all\s+)?previous\s+instructions/i },
+  { name: 'prompt-override',     severity: 'critical', rx: /override\s+your\s+(instructions|rules|safety|guidelines)/i },
+  { name: 'prompt-forget',       severity: 'critical', rx: /forget\s+your\s+(instructions|rules|safety|guidelines|training)/i },
+  { name: 'persona-hijack',      severity: 'critical', rx: /new\s+persona/i },
+  { name: 'destructive-rm',      severity: 'high',     rx: /\brm\s+-rf\b/i },
 ]
 
-function containsSuspiciousContent(content: string): boolean {
-  return SUSPICIOUS_PATTERNS.some((pattern) => pattern.test(content))
+interface MemoryFilterResult {
+  matched: boolean
+  patternIds: string | null
+  maxSeverity: FilterSeverity | null
+  findingCount: number
+}
+
+function scanMemoryContent(content: string): MemoryFilterResult {
+  const hits = MEMORY_FILTER_PATTERNS.filter(p => p.rx.test(content))
+  if (hits.length === 0) return { matched: false, patternIds: null, maxSeverity: null, findingCount: 0 }
+  const RANK: Record<FilterSeverity, number> = { high: 0, critical: 1 }
+  const maxSeverity = hits.reduce<FilterSeverity>(
+    (best, h) => RANK[h.severity] > RANK[best] ? h.severity : best,
+    hits[0].severity,
+  )
+  return {
+    matched: true,
+    patternIds: [...new Set(hits.map(h => h.name))].sort().join(','),
+    maxSeverity,
+    findingCount: hits.length,
+  }
 }
 
 export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
@@ -49,7 +80,19 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     // can tell "field absent" (=> PII auto-scope) from "explicit null" (opt-out).
     const data = JSON.parse(body.toString()) as { agent_id?: string; content: string; tier?: string; category?: string; keywords?: string; access_scope?: string | null }
     if (!data.content?.trim()) { json(res, { error: 'Content is required' }, 400); return true }
-    if (containsSuspiciousContent(data.content)) {
+    const filterResult = scanMemoryContent(data.content.trim())
+    recordGuardEvent({
+      mechanism: 'memories-filter',
+      route: '/api/memories',
+      verdict: filterResult.matched ? 'BLOCK' : 'PASS',
+      fromAgent: data.agent_id ?? null,
+      toAgent: null,
+      patternIds: filterResult.patternIds,
+      maxSeverity: filterResult.maxSeverity,
+      findingCount: filterResult.findingCount,
+      content: data.content.trim(),
+    })
+    if (filterResult.matched) {
       logger.warn({ agent: data.agent_id }, 'Memory content rejected: suspicious pattern')
       json(res, { error: 'Content rejected by security filter' }, 400)
       return true
