@@ -17,6 +17,7 @@ import { readBody, RequestBodyTooLargeError, json } from '../http-helpers.js'
 import { defaultZeppStore } from '../zepp/ingest-store.js'
 import { mergeDailySnapshot } from '../zepp/snapshot-merge.js'
 import { applyDistanceEstimate } from '../zepp/distance-estimate.js'
+import { defaultZeppAnomalyStore } from '../zepp/anomaly-store.js'
 import { readIngestToken } from '../zepp/ingest-secret.js'
 import {
   validateHealthPlausibility, hasSuspectViolation, type PlausibilityViolation,
@@ -61,6 +62,11 @@ export interface HealthIngestDeps {
   // Budapest day than snapshot.date (card 75337cdc Q2) -- a producer mis-filing signal.
   // Detection only: the stored snapshot is never mutated. Optional.
   onDataDate?: (snapshot: ZeppDailySnapshot, violations: DataDateViolation[]) => void
+  // G3 (card 44783957 P0): persist the cross-field anomaly signal as a queryable health flag
+  // instead of only logging it. Called on EVERY push with the current suspect violations
+  // (possibly empty) so a clean push RESOLVES an open flag -- self-correcting, mirroring the
+  // step-estimate remediation. Optional. Never mutates the stored snapshot.
+  recordAnomaly?: (date: string, suspect: PlausibilityViolation[]) => void
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -431,6 +437,10 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
     if (hasSuspectViolation(violations)) {
       deps.onPlausibility?.(finalized, violations)
     }
+    // G3 (card 44783957 P0): persist/resolve the cross-field anomaly flag on EVERY push so the
+    // suspect signal is surfaced to a monitor (not a silent log line), and a later clean push
+    // clears an open flag. Passes only the suspect-severity violations.
+    deps.recordAnomaly?.(finalized.date, violations.filter((v) => v.severity === 'suspect'))
 
     // Data-date guard (log-only, card 75337cdc Q2). Catches a producer that filed a record
     // under the wrong day (the F1 mis-filing class). Detection only -- no status change.
@@ -455,6 +465,11 @@ export function makeDefaultHealthIngestDeps(): HealthIngestDeps {
         { date: snap.date, violations },
         `zepp plausibility: ${violations.filter((v) => v.severity === 'suspect').length} suspect on ${snap.date} -- ${violations.map((v) => v.message).join('; ')}`,
       )
+    },
+    recordAnomaly: (date, suspect) => {
+      // Upsert-or-resolve the persistent cross-field anomaly flag (G3). The store keeps the
+      // detection episode's detectedAt and resolves an open flag when suspect is empty.
+      defaultZeppAnomalyStore.record(date, suspect, new Date().toISOString())
     },
     onDataDate: (snap, violations) => {
       logger.warn(
