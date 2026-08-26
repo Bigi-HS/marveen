@@ -11,7 +11,7 @@
 // Rollout is LOG-ONLY first (no Telegram/status change) so we can watch the false-
 // positive rate for a few days before escalating to a status downgrade.
 
-import type { ZeppDailySnapshot, ZeppVitals } from './contract.js'
+import type { ZeppDailySnapshot, ZeppVitals, ZeppWorkout } from './contract.js'
 
 export interface PlausibilityViolation {
   rule: string
@@ -34,6 +34,11 @@ export function validateHealthPlausibility(snap: ZeppDailySnapshot): Plausibilit
   // Rule 2: distance vs. steps
   if (snap.activity && snap.steps !== undefined) {
     violations.push(...checkDistanceStepsCoherence(snap.steps, snap.activity.distanceM))
+  }
+
+  // Rule 3: activity distance vs workout distance sum coherence
+  if (snap.activity && snap.workouts) {
+    violations.push(...checkWorkoutDistanceCoherence(snap.activity.distanceM, snap.workouts))
   }
 
   // Rule 4: heart rate sanity
@@ -115,6 +120,29 @@ function checkDistanceStepsCoherence(steps: number, distanceM?: number): Plausib
   }
 
   return violations
+}
+
+/**
+ * Rule 3: activity.distanceM must be >= sum(workouts.distanceM).
+ * Workouts are a subset of daily activity; the day total cannot be less than the workout
+ * total (DA C1 anchor: 456m total < 1149m workout sum is physically impossible).
+ * Only fires when both sides are present and the workout sum is non-zero.
+ */
+function checkWorkoutDistanceCoherence(
+  distanceM: number | undefined,
+  workouts: ZeppWorkout[],
+): PlausibilityViolation[] {
+  if (distanceM === undefined || workouts.length === 0) return []
+  const workoutSum = workouts.reduce((acc, w) => acc + (w.distanceM ?? 0), 0)
+  if (workoutSum === 0) return []
+  if (distanceM < workoutSum) {
+    return [{
+      rule: 'workout/activity distance coherence',
+      severity: 'suspect',
+      message: `activity.distanceM ${distanceM}m < sum(workouts.distanceM) ${workoutSum}m (physically impossible)`,
+    }]
+  }
+  return []
 }
 
 /**

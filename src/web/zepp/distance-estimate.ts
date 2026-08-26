@@ -32,6 +32,12 @@ export const LOW_DISTANCE_RATIO = 0.4
 // would only add noise.
 export const MIN_STEPS_FOR_ESTIMATE = 1000
 
+// Defense-in-depth ceiling for the step-derived estimate (G4, card e3197a20 AC#5).
+// No realistic daily distance -- even extreme ultramarathon events -- exceeds 150 km.
+// The cap ensures that a phantom step count that slips past the input-cap (AC#1) cannot
+// lock in a multi-hundred-km estimate via the monotone-max mechanism.
+export const MAX_ESTIMATE_M = 150_000
+
 export interface DistanceEstimateOptions {
   /** Metres per step; defaults to DEFAULT_STRIDE_M. */
   strideM?: number
@@ -60,7 +66,7 @@ export function applyDistanceEstimate(
   const nextActivity: ZeppActivity = { ...activity }
   if (canEstimate && distanceTooShort) {
     nextActivity.distanceSource = 'step_estimated'
-    nextActivity.estimatedDistanceM = Math.round(steps! * strideM)
+    nextActivity.estimatedDistanceM = Math.min(Math.round(steps! * strideM), MAX_ESTIMATE_M)
   } else {
     nextActivity.distanceSource = 'measured'
     // Drop any stale estimate carried forward from a prior push (self-correcting re-eval).

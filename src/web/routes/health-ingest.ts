@@ -149,8 +149,8 @@ function mapDistanceSlices(raw: unknown): ZeppDistanceSlice[] | undefined {
 function mapActivity(a: Record<string, unknown>): ZeppActivity {
   const slices = mapDistanceSlices(a['distance_slices'])
   return {
-    activeKcal: num(a['active_kcal']),
-    distanceM: num(a['distance_m']),
+    activeKcal: numCapped(a['active_kcal'], MAX_KCAL_PER_DAY),
+    distanceM: numCapped(a['distance_m'], MAX_DISTANCE_M_PER_DAY),
     ...(slices && { distanceSlices: slices }),
     floors: num(a['floors']),
     vo2max: num(a['vo2max']),
@@ -327,6 +327,24 @@ function num(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
+// AC#1 (card e3197a20): physiological input caps for fields whose upstream source
+// can produce phantom values (e.g. steps=999,999 -> 762km step-estimate chain).
+// Values outside [0, max] are dropped (undefined) so the anomaly never enters the
+// monotone-max lock or the distance-estimate remediation path.
+const MAX_STEPS_PER_DAY = 100_000
+const MAX_KCAL_PER_DAY = 10_000
+const MAX_DISTANCE_M_PER_DAY = 500_000
+
+function numCapped(v: unknown, max: number): number | undefined {
+  const n = num(v)
+  if (n === undefined) return undefined
+  if (n < 0 || n > max) {
+    logger.warn({ value: n, max }, 'zepp ingest: input value outside sane range, dropping field')
+    return undefined
+  }
+  return n
+}
+
 function str(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined
 }
@@ -395,8 +413,8 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
     }
     if (body['activity'] && typeof body['activity'] === 'object') {
       const a = body['activity'] as Record<string, unknown>
-      steps = num(a['steps'])
-      caloriesTotal = num(a['total_kcal'])
+      steps = numCapped(a['steps'], MAX_STEPS_PER_DAY)
+      caloriesTotal = numCapped(a['total_kcal'], MAX_KCAL_PER_DAY)
       const mapped = mapActivity(a)
       if (isNonEmpty(mapped as Record<string, unknown>)) activity = mapped
     }
