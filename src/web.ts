@@ -52,6 +52,7 @@ import { tryHandleKanban } from './web/routes/kanban.js'
 import { tryHandleKanbanCfd } from './web/routes/kanban-cfd.js'
 import { tryHandleKanbanSla } from './web/routes/kanban-sla.js'
 import { tryHandleKanbanQuery } from './web/routes/kanban-query.js'
+import { tryHandlePipelineRealityGate } from './web/routes/pipeline-reality-gate.js'
 import { tryHandleTodos } from './web/routes/todos.js'
 import { tryHandleSchedules } from './web/routes/schedules.js'
 import { tryHandleConnectors } from './web/routes/connectors.js'
@@ -322,6 +323,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleKanbanCfd(routeCtx)) return
       if (await tryHandleKanbanSla(routeCtx)) return
       if (await tryHandleKanbanQuery(routeCtx)) return
+      if (await tryHandlePipelineRealityGate(routeCtx)) return
       if (await tryHandleTodos(routeCtx)) return
       if (await tryHandleSchedules(routeCtx)) return
       if (await tryHandleConnectors(routeCtx)) return
