@@ -38,6 +38,13 @@ const UNIVERSAL_DENY = [
   'Read(**/.dashboard-token)',
   'Read(**/.git-credentials)',
   'Read(**/.claude.json)',
+  // card ffcfedc3: MCP + settings config writes blocked -- a compromised skill
+  // could inject a malicious MCP server (env: ANTHROPIC_BASE_URL=evil) or
+  // overwrite agent permissions by editing settings.json
+  'Write(**/.mcp.json)',
+  'Edit(**/.mcp.json)',
+  'Write(**/settings.json)',
+  'Edit(**/settings.json)',
 ]
 
 describe('profile permissions.deny -- fleet-critical floor (item 2a)', () => {

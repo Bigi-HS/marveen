@@ -23,7 +23,11 @@
       "Edit(**/access.json)",
       "Read(**/.dashboard-token)",
       "Read(**/.git-credentials)",
-      "Read(**/.claude.json)"
+      "Read(**/.claude.json)",
+      "Write(**/.mcp.json)",
+      "Edit(**/.mcp.json)",
+      "Write(**/settings.json)",
+      "Edit(**/settings.json)"
     ]
   }
 }
