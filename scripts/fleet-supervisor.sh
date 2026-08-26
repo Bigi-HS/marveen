@@ -260,9 +260,16 @@ run() {                        # execute unless dry-run
 # --- liveness predicates ---------------------------------------------------
 dash_alive() {
   # Healthy = HTTP responds on :3420 (any status, incl. 401 = up+auth-gated).
+  # Probe timeout is deliberately generous (20s): under an OPS-137 event-loop
+  # starvation burst (sync tmux capture flood in the router/watchdogs), /api/health
+  # latency can spike past 10s while the server is still ALIVE. An 8s probe read
+  # those spikes as 000 -> DOWN -> kill+relaunch -> the fresh process was still
+  # starved -> self-sustaining restart kill-loop (2026-08-26). Tolerate a slow-but-
+  # -alive server; the async/throttle capture root-fix (OPS-137, Forge) removes the
+  # starvation itself.
   [ -n "$CURL" ] || return 1
   local code
-  code=$("$CURL" -s -m 8 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$DASH_PORT/api/health" 2>/dev/null)
+  code=$("$CURL" -s -m 20 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$DASH_PORT/api/health" 2>/dev/null)
   [ -n "$code" ] && [ "$code" != "000" ]
 }
 session_alive() { [ -n "$TMUX_BIN" ] && "$TMUX_BIN" has-session -t "=$1" 2>/dev/null; }
