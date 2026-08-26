@@ -21,6 +21,8 @@ function card(over: Partial<KanbanCard>): KanbanCard {
     created_at: 0,
     updated_at: 0,
     dispatched_at: null,
+    last_moved: null,
+    priority_score: null,
     ...over,
   }
 }
