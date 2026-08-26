@@ -72,8 +72,17 @@ function mergeActivity(
   const nextFields = next as unknown as Record<string, unknown>
   const mergedFields = merged as unknown as Record<string, unknown>
   for (const key of Object.keys(nextFields)) {
-    if (key === 'distanceSlices' || key === 'distanceM') continue // ledger-projected below
+    if (key === 'distanceSlices' || key === 'distanceM' || key === 'activeKcal') continue // handled below
     if (isPresent(nextFields[key])) mergedFields[key] = nextFields[key]
+  }
+  // activeKcal is a cumulative daily counter: within a day it only grows, so a later push
+  // with a lower value is a rolling-window / sparse-slice artifact, not a real decrease.
+  // Keep the max so a sparse late push (e.g. 5 kcal) cannot clobber a prior full-day value
+  // (1011) -- the same no-clobber-down invariant the ledger gives distanceM (GAP-L1).
+  if (isPresent(next.activeKcal)) {
+    merged.activeKcal = isPresent(prev?.activeKcal)
+      ? Math.max(prev!.activeKcal as number, next.activeKcal as number)
+      : next.activeKcal
   }
   const slices = unionDistanceSlices(prev?.distanceSlices, next.distanceSlices)
   if (slices.length > 0) {
@@ -140,12 +149,22 @@ export function mergeDailySnapshot(
   const incomingFields = incoming as unknown as Record<string, unknown>
 
   for (const key of MERGE_KEYS) {
+    if (key === 'steps') continue // monotone-max below (cumulative daily counter)
     const val = incomingFields[key]
     // present -> replace (scalars/objects overwrite, workouts REPLACE the whole array so
     // the own-date + 48h rolling-window dedup is not undone by an append); absent -> keep.
     if (isPresent(val)) {
       mergedFields[key] = val
     }
+  }
+  // steps is a cumulative daily counter (like activeKcal): a partial rolling-window push
+  // (e.g. 60, yesterday's leftover window) must not clobber a prior full-day total (15790).
+  // Keep the max so a later smaller push cannot lower the day's steps (GAP-L2). Source
+  // selection (device vs multi-source) is a producer/transform concern, upstream of merge.
+  if (isPresent(incoming.steps)) {
+    merged.steps = isPresent(existing.steps)
+      ? Math.max(existing.steps as number, incoming.steps as number)
+      : incoming.steps
   }
 
   // Activity merges sub-field-by-sub-field with an append-only distance ledger (see
