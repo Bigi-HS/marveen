@@ -21,7 +21,12 @@ type Snapshot = {
   vitals?: Record<string, number>
   sleep?: { total_min: number; start?: string; end?: string; stages: Record<string, number> }
   workouts?: Array<{ type: string; start?: string; duration_min?: number; distance_m?: number }>
-  activity?: { steps?: number; active_kcal?: number; distance_m?: number }
+  activity?: {
+    steps?: number
+    active_kcal?: number
+    distance_m?: number
+    distance_slices?: Array<{ start?: string; end?: string; meters: number }>
+  }
 }
 
 function runTransform(body: unknown): Array<{ json: Snapshot }> {
@@ -138,5 +143,27 @@ describe('n8n transform: own-day filing (F1)', () => {
     for (const item of runTransform(SYNTH_PUSH)) {
       expect(item.json.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
     }
+  })
+
+  it('forwards raw distance slices (start + meters) for the server-side ledger', () => {
+    const d = byDay(runTransform(SYNTH_PUSH))
+    const slices = d['2026-08-22'].activity?.distance_slices
+    expect(slices).toEqual([{ start: '2026-08-22T16:30:00Z', end: '2026-08-22T16:45:00Z', meters: 500 }])
+    // distance_m stays the per-push sum (fallback); the ledger is authoritative server-side.
+    expect(d['2026-08-22'].activity?.distance_m).toBe(500)
+  })
+
+  it('emits every same-day distance slice (does not collapse them into one)', () => {
+    // Both slices resolve to 08-25 in CEST (21:15Z=23:15, 21:30Z=23:30) -> same own-day.
+    const out = runTransform({
+      timestamp: '2026-08-25T23:47:00Z',
+      distance: [
+        { meters: 105, start_time: '2026-08-25T21:15:00Z', end_time: '2026-08-25T21:30:00Z' },
+        { meters: 435, start_time: '2026-08-25T21:30:00Z', end_time: '2026-08-25T21:45:00Z' },
+      ],
+    })
+    const d = byDay(out)
+    expect(d['2026-08-25'].activity?.distance_slices).toHaveLength(2)
+    expect(d['2026-08-25'].activity?.distance_m).toBe(540)
   })
 })

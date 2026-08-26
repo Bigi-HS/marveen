@@ -108,6 +108,18 @@ function buildActivity(stepsArr, calsArr, distArr, exArr){
   if (stepsArr && stepsArr.length > 0) activity.steps = stepsArr.reduce((s,x)=>s+(num(x.count)||0),0);
   if (calsArr && calsArr.length > 0) activity.active_kcal = calsArr.reduce((s,x)=>s+(num(x.calories)||0),0);
   const dArr = distArr || [];
+  // Forward each raw distance slice (start + metres) so the server accumulates an append-only
+  // per-day ledger deduped by startAt. Each push carries only the slices still inside its 48h
+  // rolling window, so a scalar sum alone lets a later narrow push clobber the day total down.
+  const slices = [];
+  for (const x of dArr) {
+    const m = pick(x, ['meters','distance_m']);
+    if (m==null) continue;
+    const s = { start: x.start_time, meters: m };
+    if (x.end_time) s.end = x.end_time;
+    slices.push(s);
+  }
+  if (slices.length > 0) activity.distance_slices = slices;
   let distTotal = dArr.reduce((s,x)=>s+(pick(x,['meters','distance_m'])||0),0);
   if (distTotal===0) distTotal = (exArr||[]).reduce((s,e)=>s+(pick(e,['distance_meters','distance'])||0),0);
   if (distTotal>0) activity.distance_m = Math.round(distTotal);

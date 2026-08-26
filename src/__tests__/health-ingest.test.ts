@@ -747,6 +747,61 @@ describe('POST /api/health/ingest', () => {
     })
   })
 
+  // card 75337cdc distance=B: the phone pushes a 48h rolling window, so each push carries
+  // only the distance slices still inside it. The server must accumulate them into an
+  // append-only per-day ledger (deduped by startAt) so distanceM is the true daily sum and
+  // a later narrow-window push cannot clobber it down (the live 456m-for-a-full-day bug).
+  describe('distance slice-ledger (no clobber-down)', () => {
+    it('accumulates disjoint distance slices across pushes into the daily total', async () => {
+      const deps = makeStatefulDeps()
+      await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-25', activity: { distance_slices: [{ start: '2026-08-25T21:15:00Z', end: '2026-08-25T21:30:00Z', meters: 105 }], distance_m: 105 } },
+      })
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-25', activity: { distance_slices: [{ start: '2026-08-25T22:00:00Z', end: '2026-08-25T22:15:00Z', meters: 435 }], distance_m: 435 } },
+      })
+      expect(snap?.activity?.distanceSlices).toHaveLength(2)
+      expect(snap?.activity?.distanceM).toBe(540)
+    })
+
+    it('does NOT clobber the day total when a later push carries a narrower window', async () => {
+      const deps = makeStatefulDeps()
+      // First push: full window (three slices, 947m).
+      await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-25',
+          activity: {
+            distance_slices: [
+              { start: '2026-08-25T21:15:00Z', meters: 105 },
+              { start: '2026-08-25T22:00:00Z', meters: 435 },
+              { start: '2026-08-26T04:30:00Z', meters: 407 },
+            ],
+            distance_m: 947,
+          },
+        },
+      })
+      // Second push: window slid, only the newest slice remains (the live clobber trigger).
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-25', activity: { distance_slices: [{ start: '2026-08-26T04:30:00Z', meters: 407 }], distance_m: 407 } },
+      })
+      expect(snap?.activity?.distanceM).toBe(947) // stays full, not clobbered to 407
+      expect(snap?.activity?.distanceSlices).toHaveLength(3)
+    })
+
+    it('dedups a repeated slice by startAt (no double count across pushes)', async () => {
+      const deps = makeStatefulDeps()
+      const slice = { start: '2026-08-25T21:15:00Z', meters: 105 }
+      await handle(deps, { token: VALID_TOKEN, body: { date: '2026-08-25', activity: { distance_slices: [slice], distance_m: 105 } } })
+      const { snap } = await handle(deps, { token: VALID_TOKEN, body: { date: '2026-08-25', activity: { distance_slices: [slice], distance_m: 105 } } })
+      expect(snap?.activity?.distanceSlices).toHaveLength(1)
+      expect(snap?.activity?.distanceM).toBe(105) // not 210
+    })
+  })
+
   // card 75337cdc: numeric plausibility guard, log-only rollout. The handler flags a
   // suspect merged day via onPlausibility but must NOT mutate the stored status.
   describe('plausibility guard (log-only)', () => {
