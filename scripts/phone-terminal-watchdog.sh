@@ -4,13 +4,21 @@
 # Auth: Tailscale-User-Login header injected by tailscale serve for every
 # authenticated tailnet device -- ttyd delegates the auth decision to tailscale
 # (-H/--auth-header mode) so no static credential ever appears in the process list.
+# Tailscale's serve --https STRIPS any client-supplied Tailscale-User-Login before
+# forwarding, so the header cannot be forged from the internet side. Funnel is OFF.
 #
-# DEPLOY GATE: this change requires a live test before going live.
-# Before deploying: connect to https://bigi.tail1a5fa5.ts.net:8443/terminal/
-# from a tailnet device. If ttyd grants access (200) the header is forwarded
-# correctly. If it returns 401 the header is missing and the fallback approach
-# (unix socket or dedicated OS user) must be used instead.
-# Until that test passes, basic-auth must remain in the live script.
+# DEPLOY GATE -- two tests required before going live:
+# 1) POSITIVE: connect from a tailnet device to :8443/terminal/ -- expect 200.
+#    If 401: header not forwarded, use fallback (unix socket or dedicated OS user).
+# 2) NEGATIVE (fail-closed): curl http://127.0.0.1:7681/terminal/ (loopback, no
+#    Tailscale-User-Login header) -- expect 401, not 200. Confirms fail-closed.
+#
+# LOCAL LOOPBACK EXPOSURE (by design, unchanged): a local process on the same
+# OS user can curl 127.0.0.1:7681 with a forged header and get a shell. This
+# is not a new capability -- that process can already do `tmux attach -t phone`
+# directly. The old basic-auth was bypassable by reading /proc/<pid>/cmdline.
+#
+# CLEANUP after cutover: delete store/phone-terminal.creds (stale credential file).
 #
 # No systemd on WSL2 -- kept alive by this watchdog running in tmux.
 
