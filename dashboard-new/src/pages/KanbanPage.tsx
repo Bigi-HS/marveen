@@ -2,6 +2,7 @@ import { usePolling } from '@/hooks/usePolling'
 import { useEventStream } from '@/hooks/useEventStream'
 import { isAuthError } from '@/lib/auth-error'
 import { KanbanBoard } from '@/components/kanban/KanbanBoard'
+import { KanbanCFDPanel } from '@/components/kanban/KanbanCFD'
 import { AuthRequired } from '@/components/AuthRequired'
 import { Skeleton } from '@/components/Skeleton'
 import type { KanbanCard } from '@/types/api'
@@ -23,5 +24,10 @@ export function KanbanPage() {
     )
   }
 
-  return <KanbanBoard cards={kanban.data ?? []} />
+  return (
+    <>
+      <KanbanCFDPanel />
+      <KanbanBoard cards={kanban.data ?? []} />
+    </>
+  )
 }
