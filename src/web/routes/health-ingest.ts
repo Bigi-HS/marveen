@@ -20,6 +20,9 @@ import { readIngestToken } from '../zepp/ingest-secret.js'
 import {
   validateHealthPlausibility, hasSuspectViolation, type PlausibilityViolation,
 } from '../zepp/health-plausibility.js'
+import {
+  validateDataDate, hasDataDateViolation, type DataDateViolation,
+} from '../zepp/data-date-guard.js'
 import { logger } from '../../logger.js'
 import type {
   ZeppDailySnapshot, ZeppVitals, ZeppSleep, ZeppWorkout, ZeppActivity, ZeppPullStatus,
@@ -53,6 +56,10 @@ export interface HealthIngestDeps {
   // (card 75337cdc). Detection only: the stored snapshot is never mutated. Optional so
   // callers that do not care can omit it.
   onPlausibility?: (snapshot: ZeppDailySnapshot, violations: PlausibilityViolation[]) => void
+  // Called (log-only) when a stored snapshot's timestamped fields resolve to a different
+  // Budapest day than snapshot.date (card 75337cdc Q2) -- a producer mis-filing signal.
+  // Detection only: the stored snapshot is never mutated. Optional.
+  onDataDate?: (snapshot: ZeppDailySnapshot, violations: DataDateViolation[]) => void
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -396,6 +403,13 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
       deps.onPlausibility?.(merged, violations)
     }
 
+    // Data-date guard (log-only, card 75337cdc Q2). Catches a producer that filed a record
+    // under the wrong day (the F1 mis-filing class). Detection only -- no status change.
+    const dateViolations = validateDataDate(merged)
+    if (hasDataDateViolation(dateViolations)) {
+      deps.onDataDate?.(merged, dateViolations)
+    }
+
     json(res, { status: merged.status, date, pulledAt: merged.pulledAt })
   }
 }
@@ -411,6 +425,12 @@ export function makeDefaultHealthIngestDeps(): HealthIngestDeps {
       logger.warn(
         { date: snap.date, violations },
         `zepp plausibility: ${violations.filter((v) => v.severity === 'suspect').length} suspect on ${snap.date} -- ${violations.map((v) => v.message).join('; ')}`,
+      )
+    },
+    onDataDate: (snap, violations) => {
+      logger.warn(
+        { date: snap.date, violations },
+        `zepp data-date: ${violations.length} field(s) mis-filed on ${snap.date} -- ${violations.map((v) => `${v.field} belongs to ${v.actual}`).join('; ')}`,
       )
     },
   }

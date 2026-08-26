@@ -803,4 +803,35 @@ describe('POST /api/health/ingest', () => {
       expect(onPlausibility).toHaveBeenCalledTimes(1)
     })
   })
+
+  // card 75337cdc Q2: data-date guard, log-only. The handler flags a snapshot whose
+  // timestamped fields resolve to a different Budapest day than snapshot.date, but must
+  // NOT mutate the stored status.
+  describe('data-date guard (log-only)', () => {
+    it('calls onDataDate when sleep is filed under the wrong day (F1 mis-filing)', async () => {
+      const onDataDate = vi.fn()
+      const deps = makeDeps({ onDataDate })
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        // date says 08-23 but the sleep wakes on 08-22 -> mis-filed.
+        body: { date: '2026-08-23', sleep: { total_min: 420, start: '2026-08-22T01:46:00Z', end: '2026-08-22T09:54:00Z' } },
+      })
+      expect(onDataDate).toHaveBeenCalledTimes(1)
+      const [, violations] = onDataDate.mock.calls[0]
+      expect(violations[0].field).toBe('sleep')
+      expect(violations[0].actual).toBe('2026-08-22')
+      // log-only: the stored status is untouched.
+      expect(snap?.status).toBe('ok')
+    })
+
+    it('does NOT call onDataDate when the sleep wake-day matches the file date', async () => {
+      const onDataDate = vi.fn()
+      const deps = makeDeps({ onDataDate })
+      await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', sleep: { total_min: 420, start: '2026-08-22T01:46:00Z', end: '2026-08-22T09:54:00Z' } },
+      })
+      expect(onDataDate).not.toHaveBeenCalled()
+    })
+  })
 })
