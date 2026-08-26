@@ -15,11 +15,13 @@ All three follow the existing hook contract:
 - PreToolUse gates: exit `0` = allow, exit `2` = block (the JSON `reason` is shown
   to the agent). PostToolUse hooks are passive and always exit `0`.
 
-| Script | Event | Action |
-|---|---|---|
-| `pii-injection-scan.py` | PreToolUse (Bash) | Blocks an inter-agent `curl .../api/messages` send carrying PII or prompt-injection text; logs to `store/aidefence.log` |
-| `pre-deploy-gate.py` | PreToolUse (Bash) | Blocks a dashboard restart/deploy unless a fresh `store/.typecheck-green` marker exists (< 30 min old) |
-| `post-merge-metrics.py` | PostToolUse (Bash) | Records merge size metrics (files/insertions/deletions) to `store/merge-metrics.log` after a `git merge` / `gh pr merge` |
+**Status** (measured 2026-08-14, card ec0ebd56): `pii-injection-scan.py` is **NOT WIRED** in any agent's `settings.json`. `pre-deploy-gate.py` and `post-merge-metrics.py` status: verify with `grep -r hook` in `agents/*/. claude/settings.json`. Do not read this table as a coverage claim -- it is a script inventory only.
+
+| Script | Event | Action | Wired? |
+|---|---|---|---|
+| `pii-injection-scan.py` | PreToolUse (Bash) | Blocks an inter-agent `curl .../api/messages` send carrying PII or prompt-injection text; logs to `store/aidefence.log` | **NO** -- not in any settings.json (as of 2026-08-14) |
+| `pre-deploy-gate.py` | PreToolUse (Bash) | Blocks a dashboard restart/deploy unless a fresh `store/.typecheck-green` marker exists (< 30 min old) | verify |
+| `post-merge-metrics.py` | PostToolUse (Bash) | Records merge size metrics (files/insertions/deletions) to `store/merge-metrics.log` after a `git merge` / `gh pr merge` | verify |
 
 ---
 
