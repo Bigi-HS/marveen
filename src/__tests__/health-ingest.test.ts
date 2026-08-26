@@ -950,6 +950,45 @@ describe('POST /api/health/ingest', () => {
     })
   })
 
+  // card 44783957 P0 (G3): the cross-field anomaly signal is persisted as a health flag via
+  // recordAnomaly on EVERY push -- with the suspect violations when present, and with [] on a
+  // clean push so an open flag resolves. This closes the silent-observer gap (log-only).
+  describe('anomaly flag emit (G3)', () => {
+    it('records the suspect violations on a physically impossible push (live 08-25)', async () => {
+      const recordAnomaly = vi.fn()
+      const deps = makeDeps({ recordAnomaly })
+      await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-25', activity: { steps: 15790, active_kcal: 5, distance_m: 456 } },
+      })
+      expect(recordAnomaly).toHaveBeenCalledTimes(1)
+      const [date, suspect] = recordAnomaly.mock.calls[0]
+      expect(date).toBe('2026-08-25')
+      expect(suspect.length).toBeGreaterThan(0)
+      expect(suspect.every((v: { severity: string }) => v.severity === 'suspect')).toBe(true)
+    })
+
+    it('records an empty suspect list on a coherent push (so an open flag can resolve)', async () => {
+      const recordAnomaly = vi.fn()
+      const deps = makeDeps({ recordAnomaly })
+      await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-26', activity: { steps: 10000, active_kcal: 450, distance_m: 7600 } },
+      })
+      expect(recordAnomaly).toHaveBeenCalledTimes(1)
+      const [, suspect] = recordAnomaly.mock.calls[0]
+      expect(suspect).toEqual([])
+    })
+
+    it('is called on every push, even a no_new_data push (empty suspect)', async () => {
+      const recordAnomaly = vi.fn()
+      const deps = makeDeps({ recordAnomaly })
+      await handle(deps, { token: VALID_TOKEN, body: { date: '2026-08-26' } })
+      expect(recordAnomaly).toHaveBeenCalledTimes(1)
+      expect(recordAnomaly.mock.calls[0][1]).toEqual([])
+    })
+  })
+
   // card 75337cdc Q2: data-date guard, log-only. The handler flags a snapshot whose
   // timestamped fields resolve to a different Budapest day than snapshot.date, but must
   // NOT mutate the stored status.
