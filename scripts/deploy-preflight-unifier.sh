@@ -264,7 +264,23 @@ else
     fail "C4 dist: dist/index.js predates the last src/ commit -- build is stale, run npm run build"
   else
     pass "C4 dist: dist/index.js is newer than the last src/ commit -- build is current"
-    note "C4 dist: recency only. Provenance is unverifiable until a build stamp exists (store/.dist-built-from), so a dist built off a parked branch would still pass this check (ENG-048, 08-01)"
+    # Provenance check via build stamp (card 90406db5). `npm run build` writes the source SHA
+    # into dist/.built-from so C4 can assert which commit the dist was compiled from, not just
+    # that it is recent. This closes the ENG-048 class: a dist built off a parked branch
+    # passed the recency check because recency proved nothing about the source ref.
+    if [ -f dist/.built-from ]; then
+      built_from=$(tr -d '[:space:]' < dist/.built-from)
+      target_sha=$(git rev-parse "$TARGET" 2>/dev/null)
+      if [ -z "$target_sha" ]; then
+        warn "C4 dist: cannot resolve target SHA for $TARGET -- provenance unverified"
+      elif [ "$built_from" = "$target_sha" ]; then
+        pass "C4 dist: provenance verified -- dist was built from $TARGET (${built_from:0:8})"
+      else
+        fail "C4 dist: provenance mismatch -- dist built from ${built_from:0:8} but target is $TARGET (${target_sha:0:8}). Rebuild from $TARGET: npm run build"
+      fi
+    else
+      note "C4 dist: recency only. Provenance is unverifiable (dist/.built-from absent -- rebuild with current npm run build). A dist built off a parked branch would still pass this check (ENG-048, 08-01)"
+    fi
   fi
 fi
 echo
