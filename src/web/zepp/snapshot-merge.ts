@@ -78,7 +78,19 @@ function mergeActivity(
   const slices = unionDistanceSlices(prev?.distanceSlices, next.distanceSlices)
   if (slices.length > 0) {
     merged.distanceSlices = slices
-    merged.distanceM = Math.round(slices.reduce((sum, s) => sum + (s.meters || 0), 0))
+    const ledgerSum = Math.round(slices.reduce((sum, s) => sum + (s.meters || 0), 0))
+    // DA-L1 (audit-data-integrity-0826): a prior scalar distanceM with NO slice backing (a
+    // legacy write, or a concurrent scalar-only push from the dormant pull path) cannot be
+    // deduped against the ledger. Keep the higher of (prior scalar, ledger sum) so the
+    // scalar is never silently dropped, without additively double-counting a full-day scalar
+    // that already overlaps the incoming tile. Once the ledger exceeds the old scalar, the
+    // more precise accumulation wins. Only applies when prev had no slices -- a prev WITH
+    // slices already holds a ledger projection, so a legitimate down-correction still lands.
+    const priorScalar =
+      prev && !isPresent(prev.distanceSlices) && isPresent(prev.distanceM)
+        ? (prev.distanceM as number)
+        : undefined
+    merged.distanceM = priorScalar !== undefined ? Math.max(ledgerSum, priorScalar) : ledgerSum
   } else if (isPresent(next.distanceM)) {
     // No ledger anywhere -> honour the legacy scalar (present->replace).
     merged.distanceM = next.distanceM

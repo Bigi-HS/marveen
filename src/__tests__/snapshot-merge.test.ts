@@ -176,6 +176,27 @@ describe('mergeDailySnapshot: distance slice-ledger', () => {
     expect(merged.activity?.distanceM).toBe(540)
   })
 
+  // DA-L1 (audit-data-integrity-0826): a prior scalar-only distanceM (legacy write or a
+  // concurrent scalar-only push from the dormant pull path) has no slice identity to dedup
+  // against. When the ledger starts, keep the HIGHER of (prior scalar, ledger sum): the
+  // scalar is never silently dropped, and an overlapping full-day scalar is not additively
+  // double-counted with a slice tile that is part of it (so NOT 2500 -- the tile is inside
+  // the 2000). Once the ledger sum exceeds the old scalar, the more precise ledger wins.
+  it('does not silently drop a prior scalar distanceM when the ledger starts (DA-L1)', () => {
+    const existing = snap({ activity: { distanceM: 2000 } }) // scalar only, no slices
+    const incoming = snap({ activity: { distanceSlices: [S1], distanceM: 105 } })
+    const merged = mergeDailySnapshot(existing, incoming)
+    expect(merged.activity?.distanceM).toBe(2000) // prior scalar preserved (>105), not dropped
+    expect(merged.activity?.distanceSlices).toHaveLength(1)
+  })
+
+  it('lets the ledger sum win once it exceeds a prior unbacked scalar (DA-L1)', () => {
+    const existing = snap({ activity: { distanceM: 400 } })
+    const incoming = snap({ activity: { distanceSlices: [S1, S2], distanceM: 540 } })
+    const merged = mergeDailySnapshot(existing, incoming)
+    expect(merged.activity?.distanceM).toBe(540) // ledger (540) > old scalar (400) -> ledger wins
+  })
+
   // ---------------------------------------------------------------------------
   // Adversarial: coverage gaps found during 2026-08-26 QA sweep (card 75337cdc,
   // 351c80a7 Boss-direktiva). These fixtures document KNOWN GAPS so dave can see
