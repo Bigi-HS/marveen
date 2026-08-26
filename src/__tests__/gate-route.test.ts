@@ -76,13 +76,41 @@ describe('POST /api/gate/approve (MG-AC1, MG-AC2)', () => {
       head_sha: SHA_A,
       reviewer: 'dave',
       verdict: 'approved',
-      recorded_by: 'dave',
+      recorded_by: 'impersonator', // body claim must be IGNORED (card 413a6b56)
       recorded_at: 1, // caller value must be IGNORED
     })
     expect(r.status).toBe(201)
     expect(r.body.id).toBeGreaterThan(0)
     expect(r.body.recorded_at).toBeGreaterThanOrEqual(before)
-    expect(r.body.recorded_by).toBe('dave')
+    // No authenticated identity in this call -> falls back to 'unknown', not 'impersonator'
+    expect(r.body.recorded_by).toBe('unknown')
+  })
+
+  it('card-413a6b56: recorded_by is derived from authenticated identity, not body', async () => {
+    // With a valid identity, the server uses agentId, ignoring any body-supplied recorded_by.
+    const r = await call('POST', '/api/gate/approve', {
+      pr_number: 207,
+      head_sha: SHA_A,
+      reviewer: 'thor',
+      verdict: 'approved',
+      recorded_by: 'impersonator', // must be IGNORED
+    }, thorId)
+    expect(r.status).toBe(201)
+    expect(r.body.recorded_by).toBe('thor') // from identity.agentId, not the body
+  })
+
+  it('card-413a6b56: operator relay uses operator identity as recorded_by', async () => {
+    // An operator (marveen) filling a dave seat records as 'marveen', not 'dave'.
+    // This is correct: recorded_by = who called the endpoint (the recorder), not the reviewer.
+    const r = await call('POST', '/api/gate/approve', {
+      pr_number: 207,
+      head_sha: SHA_A,
+      reviewer: 'dave',
+      verdict: 'approved',
+      recorded_by: 'dave', // operator body claim -- still overridden by identity
+    }, operatorId)
+    expect(r.status).toBe(201)
+    expect(r.body.recorded_by).toBe('marveen') // operatorId.agentId
   })
 })
 
