@@ -803,6 +803,83 @@ def match_external_curl(command: str) -> bool:
     return False
 
 
+# ── R4: Bash write to .mcp.json / settings.json (card 369880c7) ──────────────
+# Write/Edit tool deny (PR#549) already covers these config files for the
+# Write and Edit tools.  This rule closes the Bash bypass: redirect, tee,
+# sed -i, and cp can all overwrite the same files without ever calling Write/Edit.
+# Scope mirrors the profile deny globs: **/.mcp.json and **/settings.json.
+
+_CONFIG_WRITE_FILES_RE = re.compile(
+    r'(?:^|[/\\])(?:\.mcp\.json|settings\.json)$',
+    re.IGNORECASE,
+)
+
+
+def match_config_write(command: str) -> bool:
+    """R4: Bash write to .mcp.json or settings.json via redirect / tee / sed -i / cp.
+
+    These files define MCP server configuration and agent permission floors.
+    Overwriting them through the Bash tool bypasses the Write/Edit deny in
+    the per-agent profiles (PR#549 added those; this is the Bash parity fix).
+
+    Covered write vectors:
+      - output redirect:  echo '...' > .mcp.json
+      - tee:              ... | tee .mcp.json
+      - sed --in-place:   sed -i 's/x/y/' settings.json
+      - cp:               cp src.json .mcp.json
+
+    Explicitly NOT covered (the rules guard is defense-in-depth):
+      - Python/Node/awk writing the file via in-process I/O (no Bash verb to match)
+      - Redirect written without spaces: echo x>.mcp.json (shlex keeps this as one
+        token; the token-based check misses it, which is an accepted narrow gap)
+    """
+    for piece in _split_subcommands(command):
+        tokens = _tokenize(piece)
+        if tokens is _PARSE_FAIL:
+            if _CONFIG_WRITE_FILES_RE.search(piece):
+                return True  # fail-closed on unparseable pieces
+            continue
+        if not tokens:
+            continue
+
+        verb = _command_word(tokens)
+
+        # tee [OPTIONS] FILE...: any non-flag argument is an output file
+        if verb == 'tee':
+            for tok in tokens[1:]:
+                if tok.startswith('-'):
+                    continue
+                if _CONFIG_WRITE_FILES_RE.search(tok):
+                    return True
+
+        # cp [OPTIONS] SOURCE DEST: the LAST non-flag argument is the destination
+        if verb == 'cp':
+            non_flags = [t for t in tokens[1:] if not t.startswith('-')]
+            if len(non_flags) >= 2 and _CONFIG_WRITE_FILES_RE.search(non_flags[-1]):
+                return True
+
+        # sed -i[SUFFIX] [OPTIONS] SCRIPT FILE: -i flag + last non-flag arg is the file
+        if verb == 'sed':
+            in_place = any(
+                t in ('-i', '--in-place') or
+                (t.startswith('-i') and len(t) > 2 and not t[2:].startswith('-'))
+                for t in tokens[1:]
+            )
+            if in_place:
+                non_flags = [t for t in tokens[1:] if not t.startswith('-')]
+                if non_flags and _CONFIG_WRITE_FILES_RE.search(non_flags[-1]):
+                    return True
+
+        # Redirect: shlex returns '>' / '>>' / '>|' as separate tokens when
+        # space-separated (the common form).  Check the token AFTER the redirect op.
+        for i, tok in enumerate(tokens):
+            if tok in ('>', '>>', '>|'):
+                if i + 1 < len(tokens) and _CONFIG_WRITE_FILES_RE.search(tokens[i + 1]):
+                    return True
+
+    return False
+
+
 # ── rule table & classifier ───────────────────────────────────────────────────
 
 class Rule:
@@ -839,6 +916,13 @@ RULES = [
         'Bash curl with a mutating method (POST/PUT/DELETE/PATCH) to a non-localhost '
         'host (exfiltration / unintended external side-effect; read-only GET allowed)',
         lambda tool, inp: match_external_curl(inp) if tool == 'Bash' else False,
+    ),
+    Rule(
+        'config-write-bypass',
+        'Bash write to .mcp.json or settings.json via redirect / tee / sed -i / cp '
+        '(MCP server config + agent permission floor; use the Write tool which the '
+        'per-agent profile already blocks, or ask the operator to apply the change)',
+        lambda tool, inp: match_config_write(inp) if tool == 'Bash' else False,
     ),
 ]
 
