@@ -404,6 +404,17 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
       // before the transform switches to forwarding the session array).
       sleep = mapSleepSession(body['sleep'] as Record<string, unknown>)
     }
+    // Own-date filter for sleep (2f603c1c): mirror of the workout own-day filter.
+    // Use the sleep's wake date (endAt localDateBudapest) as the filing day.
+    // Edge: a midnight push (00:20) where body.date = new_day but the payload still
+    // carries yesterday's sleep (endAt = yesterday) must NOT mis-file under new_day.
+    // Missing/invalid endAt -> keep the sleep on the current snapshot (same as workout).
+    if (sleep !== undefined) {
+      const sleepEndDate = localDateBudapest(sleep.endAt)
+      if (sleepEndDate !== undefined && sleepEndDate !== date) {
+        sleep = undefined
+      }
+    }
     if (Array.isArray(body['workouts']) && body['workouts'].length > 0) {
       const hrBuckets = Array.isArray(body['heart_rate'])
         ? (body['heart_rate'] as Array<{ time?: unknown; avg?: unknown }>)
