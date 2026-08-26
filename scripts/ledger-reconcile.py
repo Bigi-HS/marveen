@@ -39,11 +39,15 @@ import ledger_lib  # noqa: E402
 # --- reconcile targets ------------------------------------------------------
 # One row per channel agent whose transcript we heal. Adding another channel
 # agent (dia / erno-ba / ...) is a one-line addition here.
-# NOTE: generalizing to reconcile ALL channel agents automatically (derive the
-# set from config instead of this static table) is a follow-up, out of scope for
-# card 75fe1e5d.
+# Extended to all channel agents (card bff004ed, ENG-038): gyore, percy, bond,
+# hibiki, claudia in addition to marveen.
 TARGETS = [
     {"agent_id": "marveen", "sess_dir": "/home/domin/.claude/projects/-home-domin-marveen"},
+    {"agent_id": "gyore",   "sess_dir": "/home/domin/.claude/projects/-home-domin-marveen-agents-gyore"},
+    {"agent_id": "percy",   "sess_dir": "/home/domin/.claude/projects/-home-domin-marveen-agents-percy"},
+    {"agent_id": "bond",    "sess_dir": "/home/domin/.claude/projects/-home-domin-marveen-agents-bond"},
+    {"agent_id": "hibiki",  "sess_dir": "/home/domin/.claude/projects/-home-domin-marveen-agents-hibiki"},
+    {"agent_id": "claudia", "sess_dir": "/home/domin/.claude/projects/-home-domin-marveen-agents-claudia"},
 ]
 
 # <channel source="plugin:telegram:telegram" chat_id="X" message_id="Y" ... ts="Z">
