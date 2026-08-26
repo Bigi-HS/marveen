@@ -22,6 +22,13 @@
 #   wd_read_model the archetype map first.
 # ---------------------------------------------------------------------------
 #
+# ROLLOUT-CONTROL (card 1e87e051, OPS-127):
+#   WD_READ_MODEL_ENABLED controls whether the library implementation is active.
+#   Default: 0 (gate CLOSED). A crash-restart does NOT silently activate new
+#   library behavior; the Boss-gated rollout sets this to 1 explicitly for each
+#   canary watchdog before restarting it. Both paths log which branch ran so
+#   the activation is always measurable. See test R1-R3 in watchdog-common.test.sh.
+#
 # set -u SAFETY (F4): every function here is safe under `set -u`. No reference to
 # an unbound variable; all locals are initialised before use and every optional
 # argument uses a `${x:-default}` guard.
@@ -42,10 +49,50 @@
 # F7: the config PATH is passed to python via argv (sys.argv[1]), NEVER string-
 # interpolated into the source, to remove the path-injection surface that
 # open('$ACONF') carried.
+#
+# ROLLOUT GATE (OPS-127): when WD_READ_MODEL_ENABLED != "1" the function runs the
+# legacy-compat path (identical output, but separately tracked/logged) and a crash-
+# restart cannot silently activate the library path. Set WD_READ_MODEL_ENABLED=1 in
+# the watchdog launch env for each canary in the Boss-gated window.
 wd_read_model() {
   local cfg="${1:-}"
   local default_model="${2:-claude-sonnet-4-6}"
   local model rc
+
+  if [ "${WD_READ_MODEL_ENABLED:-0}" != "1" ]; then
+    # ROLLOUT GATE CLOSED. Run the legacy-compat path so a crash-restart outside
+    # the Boss-gated window stays on the pre-migration implementation. Log the
+    # branch so post-restart audits can confirm which path ran.
+    _wd_read_model_warn "INFO wd_read_model: gate CLOSED (WD_READ_MODEL_ENABLED!=1) cfg=$cfg -> legacy-compat path"
+    model="$(python3 -c "import json,sys
+try:
+    m=json.load(open(sys.argv[1])).get('model')
+except Exception:
+    sys.exit(3)
+if not m:
+    sys.exit(4)
+print(m)" "$cfg" 2>/dev/null)"
+    rc=$?
+    case "$rc" in
+      0)
+        printf '%s\n' "$model"
+        return 0
+        ;;
+      3)
+        _wd_read_model_warn "WARN read_model: $cfg missing or unparseable -> defaulting to $default_model"
+        printf '%s\n' "$default_model"
+        return 3
+        ;;
+      *)
+        _wd_read_model_warn "WARN read_model: $cfg has no 'model' field -> defaulting to $default_model"
+        printf '%s\n' "$default_model"
+        return 4
+        ;;
+    esac
+  fi
+
+  # ROLLOUT GATE OPEN. Library path explicitly activated for this watchdog.
+  _wd_read_model_warn "INFO wd_read_model: gate OPEN (WD_READ_MODEL_ENABLED=1) cfg=$cfg -> library path"
   model="$(python3 -c "import json,sys
 try:
     m=json.load(open(sys.argv[1])).get('model')

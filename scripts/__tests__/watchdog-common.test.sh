@@ -199,6 +199,34 @@ for w in thor hibiki bond agent bigben chad claudia dave devil-advocate forge gy
     || bad "${w}-watchdog.sh: wiring incomplete (guard/call/inline-removal)"
 done
 
+# ---- ROLLOUT GATE (card 1e87e051, OPS-127) ---------------------------------
+# R1: gate CLOSED (default) -> reads from config AND logs "gate CLOSED"
+C="$(tmpcfg '{"model":"claude-opus-4-8"}')"
+gate_err="$(WD_READ_MODEL_ENABLED=0 WD_LOG_FILE="" wd_read_model "$C" 2>&1 >/dev/null)"
+gate_out="$(WD_READ_MODEL_ENABLED=0 wd_read_model "$C" 2>/dev/null)"
+{ [ "$gate_out" = "claude-opus-4-8" ] && printf '%s' "$gate_err" | grep -q "gate CLOSED"; } \
+  && ok "R1: gate CLOSED -> reads config model + logs 'gate CLOSED'" \
+  || bad "R1: gate CLOSED (out='$gate_out' log='$gate_err')"
+rm -f "$C"
+
+# R2: gate OPEN -> reads from config AND logs "gate OPEN"
+C="$(tmpcfg '{"model":"claude-haiku-4-5"}')"
+gate_err="$(WD_READ_MODEL_ENABLED=1 WD_LOG_FILE="" wd_read_model "$C" 2>&1 >/dev/null)"
+gate_out="$(WD_READ_MODEL_ENABLED=1 wd_read_model "$C" 2>/dev/null)"
+{ [ "$gate_out" = "claude-haiku-4-5" ] && printf '%s' "$gate_err" | grep -q "gate OPEN"; } \
+  && ok "R2: gate OPEN -> reads config model + logs 'gate OPEN'" \
+  || bad "R2: gate OPEN (out='$gate_out' log='$gate_err')"
+rm -f "$C"
+
+# R3: gate UNSET (no env) -> defaults to CLOSED behaviour (reads config, logs CLOSED)
+C="$(tmpcfg '{"model":"claude-sonnet-4-6"}')"
+gate_err="$(unset WD_READ_MODEL_ENABLED 2>/dev/null; WD_LOG_FILE="" wd_read_model "$C" 2>&1 >/dev/null)"
+gate_out="$(unset WD_READ_MODEL_ENABLED 2>/dev/null; wd_read_model "$C" 2>/dev/null)"
+{ [ "$gate_out" = "claude-sonnet-4-6" ] && printf '%s' "$gate_err" | grep -q "gate CLOSED"; } \
+  && ok "R3: gate UNSET -> defaults to CLOSED (reads config, logs CLOSED)" \
+  || bad "R3: gate UNSET (out='$gate_out' log='$gate_err')"
+rm -f "$C"
+
 echo "----"
 echo "watchdog-common: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
