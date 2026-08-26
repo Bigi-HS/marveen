@@ -109,6 +109,16 @@ export async function tryHandleTodos(ctx: RouteContext): Promise<boolean> {
     if (typeof data.title !== 'string' || data.title.trim() === '') {
       json(res, { error: 'title kötelező' }, 400); return true
     }
+    // Dedup (OPS-093): before inserting, check for a pending task with the same
+    // normalized title for this owner. Return the existing item rather than duplicating.
+    const normalizedTitle = data.title.trim().toLowerCase()
+    const existing = listActiveTodos(data.owner).find(
+      (t) => t.done === 0 && t.kind === 'task' && t.title.trim().toLowerCase() === normalizedTitle,
+    )
+    if (existing) {
+      json(res, { ok: true, id: existing.id, dedup: true })
+      return true
+    }
     const id = randomUUID().slice(0, 8)
     try {
       createTodoItem({ id, owner: data.owner, ...pickWriteFields(data) })
