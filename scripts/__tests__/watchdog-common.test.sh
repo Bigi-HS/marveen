@@ -226,6 +226,60 @@ gate_out="$(unset WD_READ_MODEL_ENABLED 2>/dev/null; wd_read_model "$C" 2>/dev/n
   && ok "R3: gate UNSET -> defaults to CLOSED (reads config, logs CLOSED)" \
   || bad "R3: gate UNSET (out='$gate_out' log='$gate_err')"
 rm -f "$C"
+# ---- Stuck-detection guard (card e6ab511d, OPS-038) -----------------------
+# S1: wd_stuck_count returns 0 for a missing state file.
+STATE="$(mktemp)"
+rm -f "$STATE"  # ensure absent
+[ "$(wd_stuck_count "$STATE")" -eq 0 ] \
+  && ok "S1: wd_stuck_count returns 0 for missing state file" \
+  || bad "S1: expected 0, got $(wd_stuck_count "$STATE")"
+
+# S2: wd_stuck_record increments count for the same error type.
+STATE="$(mktemp)"
+wd_stuck_record "$STATE" "crash"
+wd_stuck_record "$STATE" "crash"
+wd_stuck_record "$STATE" "crash"
+[ "$(wd_stuck_count "$STATE")" -eq 3 ] \
+  && ok "S2: wd_stuck_record increments count for same error type (3x crash)" \
+  || bad "S2: expected 3, got $(wd_stuck_count "$STATE")"
+rm -f "$STATE"
+
+# S3: wd_stuck_record resets count on type change.
+STATE="$(mktemp)"
+wd_stuck_record "$STATE" "crash"
+wd_stuck_record "$STATE" "crash"
+wd_stuck_record "$STATE" "timeout"  # different type -> resets to 1
+[ "$(wd_stuck_count "$STATE")" -eq 1 ] \
+  && ok "S3: wd_stuck_record resets count on error-type change" \
+  || bad "S3: expected 1, got $(wd_stuck_count "$STATE")"
+rm -f "$STATE"
+
+# S4: wd_stuck_reset removes the state file (count -> 0).
+STATE="$(mktemp)"
+wd_stuck_record "$STATE" "crash"
+wd_stuck_reset "$STATE"
+[ "$(wd_stuck_count "$STATE")" -eq 0 ] \
+  && ok "S4: wd_stuck_reset clears state (count returns 0)" \
+  || bad "S4: expected 0 after reset, got $(wd_stuck_count "$STATE")"
+
+# S5: wd_stuck_should_intervene returns true (0) at threshold.
+wd_stuck_should_intervene 3 3 \
+  && ok "S5: wd_stuck_should_intervene fires at count=threshold (3>=3)" \
+  || bad "S5: expected intervention at 3 >= 3"
+
+# S6: wd_stuck_should_intervene returns false (1) below threshold.
+wd_stuck_should_intervene 2 3
+[ $? -ne 0 ] \
+  && ok "S6: wd_stuck_should_intervene does NOT fire below threshold (2<3)" \
+  || bad "S6: should not intervene at 2 < 3"
+
+# S7: set -u safe -- wd_stuck_* with no args must not crash.
+( set -u
+  out1=$(wd_stuck_count "" 2>/dev/null); r1=$?
+  wd_stuck_reset "" 2>/dev/null; r2=$?
+  [ "$r1" -eq 0 ] && [ "$r2" -eq 0 ]
+) && ok "S7: wd_stuck_count/reset safe under set -u with empty args" \
+  || bad "S7: set -u regression on empty args"
 
 echo "----"
 echo "watchdog-common: $PASS passed, $FAIL failed"

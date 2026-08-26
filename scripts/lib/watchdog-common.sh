@@ -133,3 +133,100 @@ _wd_read_model_warn() {
   fi
   echo "$msg" >&2
 }
+
+# ---------------------------------------------------------------------------
+# Stuck-detection guard (card e6ab511d, OPS-038).
+#
+# Tracks consecutive identical-error iterations per agent in a lightweight
+# state file. The caller (watchdog loop) calls wd_stuck_record on each error
+# and wd_stuck_reset on success; wd_stuck_should_intervene decides whether
+# to kill+reassign.
+#
+# State file format (one key=value per line, plain text):
+#   count=N     -- consecutive error count for the current error type
+#   type=TYPE   -- the error-type string from the last wd_stuck_record call
+#
+# WIRING NOTE: these functions are pure helpers -- they do NOT touch
+# fleet-supervisor.sh. The watchdog integration (wiring wd_stuck_* into the
+# actual restart loop) is gated behind DA red-team + Buster/c12 sandbox-proof
+# + Boss deploy-window (card e6ab511d scope constraint). Add that wiring in a
+# separate, separately-gated PR, NOT here.
+#
+# set -u safe: every variable is initialised or guarded.
+# ---------------------------------------------------------------------------
+
+# wd_stuck_record <state_file> <error_type>
+#
+# Record that <error_type> occurred again. If the type matches the previous
+# type, increment count. If the type changed (different error class), reset
+# the count to 1 (the new error starts a fresh streak). Creates the state
+# file if it does not exist.
+#
+# Atomicity: writes to a tmp file then moves into place (prevents partial reads
+# by a concurrent wd_stuck_count call).
+wd_stuck_record() {
+  local state_file="${1:-}"
+  local error_type="${2:-unknown}"
+  if [ -z "$state_file" ]; then return 1; fi
+
+  local prev_count=0
+  local prev_type=""
+  if [ -f "$state_file" ]; then
+    prev_count="$(grep '^count=' "$state_file" 2>/dev/null | cut -d= -f2)"
+    prev_type="$(grep '^type='  "$state_file" 2>/dev/null | cut -d= -f2)"
+    prev_count="${prev_count:-0}"
+  fi
+
+  local new_count
+  if [ "$prev_type" = "$error_type" ] && [ "${prev_count:-0}" -ge 0 ] 2>/dev/null; then
+    new_count=$(( prev_count + 1 ))
+  else
+    new_count=1
+  fi
+
+  local tmp_file="${state_file}.tmp.$$"
+  printf 'count=%s\ntype=%s\n' "$new_count" "$error_type" > "$tmp_file" \
+    && mv -f "$tmp_file" "$state_file"
+}
+
+# wd_stuck_count <state_file>
+#
+# Print the current consecutive error count (integer >= 0). Prints 0 when the
+# state file does not exist or is unreadable. Never fails with a non-zero exit.
+wd_stuck_count() {
+  local state_file="${1:-}"
+  local count=0
+  if [ -n "$state_file" ] && [ -f "$state_file" ]; then
+    count="$(grep '^count=' "$state_file" 2>/dev/null | cut -d= -f2)"
+    count="${count:-0}"
+  fi
+  printf '%s\n' "${count:-0}"
+}
+
+# wd_stuck_reset <state_file>
+#
+# Clear the stuck state (remove the state file). Call on every successful
+# iteration so the error streak starts fresh after recovery.
+wd_stuck_reset() {
+  local state_file="${1:-}"
+  if [ -n "$state_file" ]; then
+    rm -f "$state_file" 2>/dev/null || true
+  fi
+}
+
+# wd_stuck_should_intervene <count> <threshold>
+#
+# Pure decision: returns 0 (shell TRUE = intervention needed) when <count>
+# is >= <threshold>. Returns 1 (shell FALSE = ok, continue) otherwise.
+# Threshold defaults to 3 (the Osmani heuristic: 3+ identical-error iterations).
+#
+# Example usage in a watchdog loop:
+#   if wd_stuck_should_intervene "$(wd_stuck_count "$STATE")" 3; then
+#     log "stuck after 3 errors -- killing and reassigning"
+#     kill_and_reassign "$AGENT"
+#   fi
+wd_stuck_should_intervene() {
+  local count="${1:-0}"
+  local threshold="${2:-3}"
+  [ "${count:-0}" -ge "${threshold:-3}" ]
+}
