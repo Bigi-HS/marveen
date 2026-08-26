@@ -203,35 +203,53 @@ describe('mergeDailySnapshot: distance slice-ledger', () => {
   // exactly what breaks and fix it; each has a comment describing the expected fix.
   // ---------------------------------------------------------------------------
 
-  // GAP-L1: activeKcal clobber-down -- BROKEN STATE (documents current behavior).
-  // The distance ledger protects distanceM but mergeActivity still uses scalar
-  // replace-if-present for activeKcal: a later sparse push (5 kcal) overwrites
-  // a prior full-day record (1011 kcal). This is the same class of bug as the
-  // pre-ledger distanceM clobber (the 456m symptom) but on the calorie axis.
-  // Fix: give activeKcal an accumulate ledger (like distanceSlices/distanceM) OR
-  // add a monotone-max merge (keep the larger value) as an interim guard.
-  it('documents GAP-L1 (broken state): activeKcal sparse push CLOBBERS a prior full-day value -- fix needed', () => {
+  // GAP-L1 (FIXED): activeKcal is a cumulative daily counter, so a later sparse push (5 kcal)
+  // must not clobber a prior full-day value (1011). mergeActivity now keeps the max -- the
+  // same no-clobber-down invariant the distance ledger gives distanceM, on the calorie axis.
+  it('GAP-L1: a sparse activeKcal push does NOT clobber a prior full-day value (monotone-max)', () => {
     const existing = snap({ activity: { activeKcal: 1011, distanceSlices: [S1, S2], distanceM: 540 } })
     const incoming = snap({ activity: { activeKcal: 5, distanceSlices: [S3], distanceM: 407 } }) // late sparse push
     const merged = mergeDailySnapshot(existing, incoming)
-    // BROKEN: activeKcal is clobbered down from 1011 to 5. This is the live 08-25 symptom.
-    // When GAP-L1 fix lands, change this assertion to toBe(1011).
-    expect(merged.activity?.activeKcal).toBe(5) // documents broken state -- should be 1011
-    // distanceM is correctly protected by the ledger (not the bug being tracked here):
-    expect(merged.activity?.distanceM).toBe(947)
+    expect(merged.activity?.activeKcal).toBe(1011) // kept, not clobbered to 5 (live 08-25 symptom)
+    expect(merged.activity?.distanceM).toBe(947) // ledger unchanged
   })
 
-  // GAP-L2: steps skalár clobber-down -- BROKEN STATE.
-  // `steps` is in MERGE_KEYS with scalar replace-if-present. A partial rolling-window
-  // push (steps=60, yesterday's leftover) overwrites a full-day value (steps=15790).
-  // Fix: steps needs the same ledger treatment as distanceM, or a monotone-max guard.
-  it('documents GAP-L2 (broken state): steps scalar push CLOBBERS a prior full-day total', () => {
+  it('GAP-L1: a HIGHER activeKcal push advances the daily total', () => {
+    const existing = snap({ activity: { activeKcal: 200 } })
+    const incoming = snap({ activity: { activeKcal: 350 } })
+    const merged = mergeDailySnapshot(existing, incoming)
+    expect(merged.activity?.activeKcal).toBe(350) // cumulative counter grows
+  })
+
+  it('GAP-L1: a push without activeKcal keeps the prior value', () => {
+    const existing = snap({ activity: { activeKcal: 1011, distanceSlices: [S1], distanceM: 105 } })
+    const incoming = snap({ activity: { distanceSlices: [S2], distanceM: 435 } }) // no activeKcal
+    const merged = mergeDailySnapshot(existing, incoming)
+    expect(merged.activity?.activeKcal).toBe(1011) // preserved
+  })
+
+  // GAP-L2 (FIXED): steps is a cumulative daily counter; a partial rolling-window push
+  // (steps=60, yesterday's leftover) must not clobber a prior full-day total (15790).
+  // Keep the max -- the same interim monotone guard as activeKcal.
+  it('GAP-L2: a partial steps push does NOT clobber a prior full-day total (monotone-max)', () => {
     const existing = snap({ steps: 15790, activity: { distanceSlices: [S1, S2], distanceM: 540 } })
     const incoming = snap({ steps: 60, activity: { distanceSlices: [S3], distanceM: 407 } }) // partial window
     const merged = mergeDailySnapshot(existing, incoming)
-    // BROKEN: steps is clobbered from 15790 to 60 (rolling-window partial hit).
-    // When GAP-L2 fix lands, change this assertion to toBe(15790).
-    expect(merged.steps).toBe(60) // documents broken state -- should be 15790
+    expect(merged.steps).toBe(15790) // kept, not clobbered to 60
+  })
+
+  it('GAP-L2: a HIGHER steps push advances the daily total', () => {
+    const existing = snap({ steps: 8000 })
+    const incoming = snap({ steps: 12500 })
+    const merged = mergeDailySnapshot(existing, incoming)
+    expect(merged.steps).toBe(12500) // cumulative counter grows
+  })
+
+  it('GAP-L2: a push without steps keeps the prior total', () => {
+    const existing = snap({ steps: 15790 })
+    const incoming = snap({ vitals: { restingHr: 55 } }) // no steps
+    const merged = mergeDailySnapshot(existing, incoming)
+    expect(merged.steps).toBe(15790) // preserved
   })
 
   // GAP-L3: zero-meter slice -- should not corrupt the total.
