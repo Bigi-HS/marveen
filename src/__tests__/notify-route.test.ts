@@ -86,3 +86,49 @@ describe('POST /api/notify/telegram (route guard + validation)', () => {
     expect(r.body.error).toMatch(/chat_id and text/)
   })
 })
+
+// FIX-001 (820753e1): 409 pass-through -- per-agent bot-probe blind-spot.
+// The route returned 502 for ALL non-200 Telegram responses. A 409 Conflict
+// (bot already polling) was indistinguishable from a real upstream failure.
+// Fix: return 409 verbatim when Telegram returns 409; all other errors -> 502.
+import { vi } from 'vitest'
+
+describe('POST /api/notify/telegram -- 409 pass-through (FIX-001)', () => {
+  afterEach(() => __setBotTokenReader(null))
+
+  it('returns 409 when Telegram API returns 409 (bot conflict not masked as 502)', async () => {
+    __setBotTokenReader(() => 'test-token')
+    // Stub fetch to return a 409 response
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      text: () => Promise.resolve(JSON.stringify({ ok: false, error_code: 409, description: 'Conflict: terminated by other getUpdates request' })),
+    })
+    const origFetch = globalThis.fetch
+    globalThis.fetch = mockFetch as typeof fetch
+    try {
+      const r = await call('POST', '/api/notify/telegram', JSON.stringify({ chat_id: '123', text: 'hi' }))
+      expect(r.status).toBe(409)
+      expect(r.body.error).toMatch(/409/)
+    } finally {
+      globalThis.fetch = origFetch
+    }
+  })
+
+  it('returns 502 for non-409 Telegram errors (unchanged behaviour)', async () => {
+    __setBotTokenReader(() => 'test-token')
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      text: () => Promise.resolve('Too Many Requests'),
+    })
+    const origFetch = globalThis.fetch
+    globalThis.fetch = mockFetch as typeof fetch
+    try {
+      const r = await call('POST', '/api/notify/telegram', JSON.stringify({ chat_id: '123', text: 'hi' }))
+      expect(r.status).toBe(502)
+    } finally {
+      globalThis.fetch = origFetch
+    }
+  })
+})
