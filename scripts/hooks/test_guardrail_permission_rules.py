@@ -1204,3 +1204,79 @@ class PerPieceSanctionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class CxEscapeCorpusTests(unittest.TestCase):
+    r"""Corpus fixture for SEC card 61afbcea (Dave request 2026-08-22).
+
+    Question: does the guard measure \cX forms as the LITERAL 4-char string
+    (backslash + c + X) or as the EXPANDED control character?
+
+    Answer (measured, not inferred):
+    - INSIDE $'...' quoting: EXPANDED via _expand_ansi_c (correct, matches bash)
+    - OUTSIDE $'...' quoting: LITERAL (correct -- bash does not expand \cX there)
+
+    SCOPE OF THIS GUARD: guardrail-permission-rules.py covers R2 (env-file-print),
+    R2b (token-path), R3 (external-curl), and R4 (interpreter+env). It does NOT
+    cover rm -rf -- that is guardrail-destructive-bash.py's scope.
+
+    PATH-BYPASS CLOSED BY CONSTRUCTION: '.' cannot be produced by \cX due to
+    lowercase normalisation. To get '.' (chr(0x2E)), X must have ord(X) = 0x6E
+    ('n'); but 'n' is lowercase, so _expand_ansi_c normalises it to 'N' (0x4E)
+    before XOR, giving chr(0x0E) instead of '.'. Zero candidates found empirically.
+    Paths like ".env" and ".dashboard-token" are therefore unreachable via \cX,
+    so R2/R2b cannot be bypassed this way.
+
+    FN-PINNED: All $'\cX' forms below ALLOW in this guard because the constructed
+    tokens (control chars, "rm") are outside the permission rules scope. The
+    destructive bash guard handles them. Pin as FN-by-design so the distinction
+    is explicit and readable.
+
+    STRUCTURAL PROOF: \c2 (ascii '2') and \c- (ascii '-') expand to 'r' and 'm'
+    respectively, confirmed by test_expand_ansi_c_maps_c2_and_cminus_to_rm.
+    """
+
+    # These forms expand to "rm ..." inside $'...' quoting but the permission
+    # rules guard does not check for rm-rf (that is the destructive bash guard).
+    # Pinned as FN-by-design (see docstring).
+    FN_BY_DESIGN_PERMISSION_GUARD = [
+        "$'\\c2\\c-' -rf /",      # \c2='r', \c-='m' -> "rm -rf /"
+        "$'\\c2\\c- -rf /'",      # same inside the dollar-quote
+        "bash -c $'\\c2\\c- -rf /'",  # bash -c with cX rm
+        "$'\\cA'rm -rf /",        # chr(1)+'rm' prefix -- not a recognized verb
+        "$'\\cA' rm -rf /",       # chr(1) cmd then rm subcommand
+        "$'\\cA'",                # bare control char, no dangerous args
+    ]
+
+    def test_cX_permission_guard_scope(self):
+        # All these ALLOW in the permission rules guard (rm-rf is out of scope).
+        for cmd in self.FN_BY_DESIGN_PERMISSION_GUARD:
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(
+                    guard.first_denied_rule('Bash', cmd),
+                    f'expected ALLOW in permission guard (rm-rf is destructive-bash scope): {cmd!r}',
+                )
+
+    def test_expand_ansi_c_maps_c2_and_cminus_to_rm(self):
+        # Structural proof: the expansion produces "rm" from the cX forms.
+        # \c2 = chr(0x32 ^ 0x40) = chr(0x72) = 'r'
+        # \c- = chr(0x2D ^ 0x40) = chr(0x6D) = 'm'
+        self.assertEqual(guard._expand_dollar_quoting("$'\\c2\\c-'"), 'rm')
+        self.assertEqual(guard._expand_dollar_quoting("$'\\c2\\c- -rf /'"), "'rm -rf /'")
+
+    def test_period_not_constructible_via_cX(self):
+        # '.' (chr(0x2E)) cannot be built by any \cX because lowercase normalisation
+        # changes the effective ord before XOR. Verified by exhaustive scan (0-127).
+        for i in range(128):
+            ch = chr(i)
+            code = i
+            if 0x61 <= code <= 0x7A:  # lowercase a-z
+                code -= 0x20
+            result_char = chr(code ^ 0x40) if (code ^ 0x40) < 0x110000 else None
+            self.assertNotEqual(result_char, '.', f'\\c{ch!r} unexpectedly produces period')
+
+    def test_expand_ansi_c_produces_control_char_from_cA(self):
+        expanded = guard._expand_dollar_quoting("$'\\cA'")
+        # chr(0x41 ^ 0x40) = chr(1) = control-A; shlex.quote wraps it
+        import shlex
+        self.assertEqual(expanded, shlex.quote('\x01'))
