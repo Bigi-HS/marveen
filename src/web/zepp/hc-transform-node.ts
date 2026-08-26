@@ -56,24 +56,30 @@ const spo2ByDay  = bucket(body.oxygen_saturation, timeDay);
 const rrByDay    = bucket(body.respiratory_rate, timeDay);
 const hrByDay    = bucket(body.heart_rate, timeDay);
 
+// R1 (DA audit-data-integrity-0826): forward ALL same-day sessions as an ARRAY, never
+// collapse to sleepArr[0]. F1 own-day bucketing files a daytime nap and the main night
+// under the same wake-day, and the server's mapSleepList picks the longest as the main
+// night (naps surface separately). Collapsing to sleepArr[0] here let an early-listed nap
+// win over the real night (durationMin=45 instead of 360).
 function buildSleep(sleepArr){
   if (!sleepArr || sleepArr.length === 0) return undefined;
-  const s = sleepArr[0];
-  const stages = s.stages || [];
-  const startAt = s.session_start_time || s.start_time || (stages.length ? stages[0].start_time : undefined);
-  const endAt   = s.session_end_time   || s.end_time   || (stages.length ? stages[stages.length-1].end_time : undefined);
   const STAGE = { '1':'awake','4':'light','5':'deep','6':'rem','7':'awake','deep':'deep','light':'light','rem':'rem','awake':'awake' };
-  const acc = { deep_min:0, light_min:0, rem_min:0, awake_min:0 };
-  let asleepMin = 0;
-  for (const st of stages) {
-    const durMin = (num(st.duration_seconds)!=null) ? num(st.duration_seconds)/60 : (num(st.duration)||0);
-    const name = STAGE[String(st.stage)];
-    if (name === 'awake') { acc.awake_min += durMin; }
-    else { asleepMin += durMin; if (name) acc[name+'_min'] += durMin; }
-  }
-  if (asleepMin === 0 && num(s.duration_seconds)!=null) asleepMin = num(s.duration_seconds)/60;
-  return { total_min: Math.round(asleepMin), start: startAt, end: endAt,
-           stages: { deep_min:Math.round(acc.deep_min), light_min:Math.round(acc.light_min), rem_min:Math.round(acc.rem_min), awake_min:Math.round(acc.awake_min) } };
+  return sleepArr.map(function(s){
+    const stages = s.stages || [];
+    const startAt = s.session_start_time || s.start_time || (stages.length ? stages[0].start_time : undefined);
+    const endAt   = s.session_end_time   || s.end_time   || (stages.length ? stages[stages.length-1].end_time : undefined);
+    const acc = { deep_min:0, light_min:0, rem_min:0, awake_min:0 };
+    let asleepMin = 0;
+    for (const st of stages) {
+      const durMin = (num(st.duration_seconds)!=null) ? num(st.duration_seconds)/60 : (num(st.duration)||0);
+      const name = STAGE[String(st.stage)];
+      if (name === 'awake') { acc.awake_min += durMin; }
+      else { asleepMin += durMin; if (name) acc[name+'_min'] += durMin; }
+    }
+    if (asleepMin === 0 && num(s.duration_seconds)!=null) asleepMin = num(s.duration_seconds)/60;
+    return { total_min: Math.round(asleepMin), start: startAt, end: endAt,
+             stages: { deep_min:Math.round(acc.deep_min), light_min:Math.round(acc.light_min), rem_min:Math.round(acc.rem_min), awake_min:Math.round(acc.awake_min) } };
+  });
 }
 function buildVitals(rhrArr, hrvArr, spo2Arr, rrArr, hrArr){
   const vitals = {};
@@ -108,6 +114,18 @@ function buildActivity(stepsArr, calsArr, distArr, exArr){
   if (stepsArr && stepsArr.length > 0) activity.steps = stepsArr.reduce((s,x)=>s+(num(x.count)||0),0);
   if (calsArr && calsArr.length > 0) activity.active_kcal = calsArr.reduce((s,x)=>s+(num(x.calories)||0),0);
   const dArr = distArr || [];
+  // Forward each raw distance slice (start + metres) so the server accumulates an append-only
+  // per-day ledger deduped by startAt. Each push carries only the slices still inside its 48h
+  // rolling window, so a scalar sum alone lets a later narrow push clobber the day total down.
+  const slices = [];
+  for (const x of dArr) {
+    const m = pick(x, ['meters','distance_m']);
+    if (m==null) continue;
+    const s = { start: x.start_time, meters: m };
+    if (x.end_time) s.end = x.end_time;
+    slices.push(s);
+  }
+  if (slices.length > 0) activity.distance_slices = slices;
   let distTotal = dArr.reduce((s,x)=>s+(pick(x,['meters','distance_m'])||0),0);
   if (distTotal===0) distTotal = (exArr||[]).reduce((s,e)=>s+(pick(e,['distance_meters','distance'])||0),0);
   if (distTotal>0) activity.distance_m = Math.round(distTotal);

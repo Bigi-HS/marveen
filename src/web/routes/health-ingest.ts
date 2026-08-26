@@ -25,7 +25,7 @@ import {
 } from '../zepp/data-date-guard.js'
 import { logger } from '../../logger.js'
 import type {
-  ZeppDailySnapshot, ZeppVitals, ZeppSleep, ZeppWorkout, ZeppActivity, ZeppPullStatus,
+  ZeppDailySnapshot, ZeppVitals, ZeppSleep, ZeppWorkout, ZeppActivity, ZeppDistanceSlice, ZeppPullStatus,
 } from '../zepp/contract.js'
 import type { RouteContext } from './types.js'
 
@@ -119,10 +119,30 @@ function mapSleepList(list: unknown[]): ZeppSleep | undefined {
   return naps.length > 0 ? { ...main, naps } : main
 }
 
+// Map the raw HC distance slices (start/end/meters) into ledger slices. Each slice needs a
+// startAt (the ledger dedup key) and a finite meters; malformed entries are dropped rather
+// than poisoning the day's sum.
+function mapDistanceSlices(raw: unknown): ZeppDistanceSlice[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const slices: ZeppDistanceSlice[] = []
+  for (const r of raw) {
+    if (!r || typeof r !== 'object') continue
+    const rec = r as Record<string, unknown>
+    const startAt = str(rec['start']) ?? str(rec['startAt'])
+    const meters = num(rec['meters']) ?? num(rec['distance_m'])
+    if (startAt === undefined || meters === undefined) continue
+    const endAt = str(rec['end']) ?? str(rec['endAt'])
+    slices.push({ startAt, ...(endAt !== undefined && { endAt }), meters })
+  }
+  return slices.length > 0 ? slices : undefined
+}
+
 function mapActivity(a: Record<string, unknown>): ZeppActivity {
+  const slices = mapDistanceSlices(a['distance_slices'])
   return {
     activeKcal: num(a['active_kcal']),
     distanceM: num(a['distance_m']),
+    ...(slices && { distanceSlices: slices }),
     floors: num(a['floors']),
     vo2max: num(a['vo2max']),
   }

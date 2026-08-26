@@ -52,12 +52,30 @@ export interface ZeppVitals {
   hrMax?: number
 }
 
+/** One HC distance record for the day: a disjoint ~15-min intraday slice. */
+export interface ZeppDistanceSlice {
+  /** ISO start timestamp -- the append-only ledger's dedup key (stable across pushes) */
+  startAt: string
+  /** ISO end timestamp, when the source provided one */
+  endAt?: string
+  /** Distance metres for this slice */
+  meters: number
+}
+
 /** Activity / steps summary for the day (HC "Tevekenysegek" category) */
 export interface ZeppActivity {
   /** Active calories burned kcal */
   activeKcal?: number
-  /** Distance metres */
+  /** Distance metres -- the projected sum of distanceSlices when the ledger is present,
+   *  otherwise a plain scalar from a legacy/cumulative producer. */
   distanceM?: number
+  /**
+   * Append-only per-day distance ledger (card 75337cdc distance=B). HC distance arrives as
+   * disjoint intraday slices, and each push carries only the slices still inside its 48h
+   * rolling window; accumulating them here (deduped by startAt) lets distanceM be the true
+   * daily sum instead of clobbering down to the last narrow push's subset.
+   */
+  distanceSlices?: ZeppDistanceSlice[]
   /** Floors climbed */
   floors?: number
   /** VO2max ml/kg/min */

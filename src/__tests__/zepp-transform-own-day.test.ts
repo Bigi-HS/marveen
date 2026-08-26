@@ -19,9 +19,14 @@ type Snapshot = {
   date: string
   synced_at: string
   vitals?: Record<string, number>
-  sleep?: { total_min: number; start?: string; end?: string; stages: Record<string, number> }
+  sleep?: Array<{ total_min: number; start?: string; end?: string; stages: Record<string, number> }>
   workouts?: Array<{ type: string; start?: string; duration_min?: number; distance_m?: number }>
-  activity?: { steps?: number; active_kcal?: number; distance_m?: number }
+  activity?: {
+    steps?: number
+    active_kcal?: number
+    distance_m?: number
+    distance_slices?: Array<{ start?: string; end?: string; meters: number }>
+  }
 }
 
 function runTransform(body: unknown): Array<{ json: Snapshot }> {
@@ -72,7 +77,7 @@ describe('n8n transform: own-day filing (F1)', () => {
 
   it('files sleep under its WAKE day (08-22), never the push day (08-23)', () => {
     const d = byDay(runTransform(SYNTH_PUSH))
-    expect(d['2026-08-22'].sleep?.end).toBe('2026-08-22T09:54:00Z')
+    expect(d['2026-08-22'].sleep?.[0]?.end).toBe('2026-08-22T09:54:00Z')
     expect(d['2026-08-23'].sleep).toBeUndefined()
   })
 
@@ -138,5 +143,56 @@ describe('n8n transform: own-day filing (F1)', () => {
     for (const item of runTransform(SYNTH_PUSH)) {
       expect(item.json.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
     }
+  })
+
+  it('forwards raw distance slices (start + meters) for the server-side ledger', () => {
+    const d = byDay(runTransform(SYNTH_PUSH))
+    const slices = d['2026-08-22'].activity?.distance_slices
+    expect(slices).toEqual([{ start: '2026-08-22T16:30:00Z', end: '2026-08-22T16:45:00Z', meters: 500 }])
+    // distance_m stays the per-push sum (fallback); the ledger is authoritative server-side.
+    expect(d['2026-08-22'].activity?.distance_m).toBe(500)
+  })
+
+  it('forwards ALL same-day sleep sessions as an array (never collapses to sleepArr[0]) [R1]', () => {
+    // R1 regression (DA audit-data-integrity-0826): a daytime nap listed FIRST plus the
+    // main night both file under the same wake-day (F1 own-day bucketing). buildSleep must
+    // forward BOTH sessions so the server's mapSleepList can pick the longest as the main
+    // night. Collapsing to sleepArr[0] here lets the 45-min nap win over the 360-min night.
+    const out = runTransform({
+      timestamp: '2026-08-25T13:00:00Z',
+      sleep: [
+        // nap listed first: 45 min, ends 08-25T12:00Z (14:00 CEST) -> own-day 08-25
+        {
+          session_start_time: '2026-08-25T11:15:00Z',
+          session_end_time: '2026-08-25T12:00:00Z',
+          stages: [{ stage: '4', start_time: '2026-08-25T11:15:00Z', end_time: '2026-08-25T12:00:00Z', duration_seconds: 2700 }],
+        },
+        // main night: 360 min, ends 08-25T07:00Z (09:00 CEST) -> own-day 08-25
+        {
+          session_start_time: '2026-08-25T01:00:00Z',
+          session_end_time: '2026-08-25T07:00:00Z',
+          stages: [{ stage: '5', start_time: '2026-08-25T01:00:00Z', end_time: '2026-08-25T07:00:00Z', duration_seconds: 21600 }],
+        },
+      ],
+    })
+    const d = byDay(out)
+    const sleeps = d['2026-08-25'].sleep
+    expect(sleeps).toHaveLength(2)
+    // both sessions present; the longest (night, 360 min) is recoverable by the server
+    expect(sleeps!.map((s) => s.total_min).sort((a, b) => a - b)).toEqual([45, 360])
+  })
+
+  it('emits every same-day distance slice (does not collapse them into one)', () => {
+    // Both slices resolve to 08-25 in CEST (21:15Z=23:15, 21:30Z=23:30) -> same own-day.
+    const out = runTransform({
+      timestamp: '2026-08-25T23:47:00Z',
+      distance: [
+        { meters: 105, start_time: '2026-08-25T21:15:00Z', end_time: '2026-08-25T21:30:00Z' },
+        { meters: 435, start_time: '2026-08-25T21:30:00Z', end_time: '2026-08-25T21:45:00Z' },
+      ],
+    })
+    const d = byDay(out)
+    expect(d['2026-08-25'].activity?.distance_slices).toHaveLength(2)
+    expect(d['2026-08-25'].activity?.distance_m).toBe(540)
   })
 })
