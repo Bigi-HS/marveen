@@ -33,10 +33,12 @@ import {
 import { listAgentNames, readFileOr } from './agent-config.js'
 import {
   agentSessionName,
+  capturePane,
   isAgentRunning,
   isSessionReadyForPrompt,
   sendPromptToSession,
 } from './agent-process.js'
+import { detectPaneState } from '../pane-state.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { sendTelegramMessage } from './telegram.js'
 import { evaluateEmergencyRouting } from './emergency-routing-policy.js'
@@ -292,7 +294,7 @@ export function buildScheduledTaskPrompt(task: ScheduledTask, agentName: string)
 }
 
 // pendingTaskRetries loop and the normal cron loop share one code path.
-function attemptFireTask(task: ScheduledTask, agentName: string, now: number): 'fired' | 'busy' | 'missing' | 'error' | 'paused' {
+function attemptFireTask(task: ScheduledTask, agentName: string, now: number): 'fired' | 'busy' | 'missing' | 'error' | 'paused' | 'parked' | 'unknown' {
   // Token-outage bypass (card 92f07145): when the agent is usage-limited and
   // the task opts into directSend, deliver the pre-written reminder model-free
   // instead of injecting into the frozen Claude session. AC-7: when not limited
@@ -388,7 +390,42 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
 
   try {
     const fullPrompt = buildScheduledTaskPrompt(task, agentName)
-    sendPromptToSession(session, fullPrompt)
+    const verdict = sendPromptToSession(session, fullPrompt)
+
+    // Parked = MEASURED non-delivery: prompt stayed in composer, never submitted.
+    // Do NOT call appendTaskRun -- recording a run that never happened is what
+    // caused the 78-hour freeze (card ENG-089, verbatim from noa-scheduler.ts).
+    if (verdict === 'parked') {
+      logger.warn({ task: task.name, agent: agentName, session },
+        'schedule-runner: prompt parked in composer, residue cleared -- not counted as fired')
+      return 'parked'
+    }
+
+    if (verdict === 'unknown') {
+      // Re-probe once: most 'unknown' is transient redraw and resolves quickly.
+      const reprobePaneText = capturePane(session)
+      const reprobeState = reprobePaneText != null ? detectPaneState(reprobePaneText) : 'unknown'
+      if (reprobeState === 'idle') {
+        logger.info({ task: task.name, agent: agentName, session },
+          'schedule-runner: unknown resolved to idle on re-probe -- treating as submitted')
+        // fall through to appendTaskRun
+      } else if (reprobeState === 'typing') {
+        logger.warn({ task: task.name, agent: agentName, session },
+          'schedule-runner: unknown resolved to typing on re-probe -- treating as parked')
+        return 'parked'
+      } else {
+        // Still unknown: heartbeat is safe to defer; effect-bearing task escalates.
+        if (task.type === 'heartbeat') {
+          logger.warn({ task: task.name, agent: agentName, session },
+            'schedule-runner: unknown unresolved for heartbeat -- deferring')
+          return 'parked'
+        }
+        logger.warn({ task: task.name, agent: agentName, session },
+          'schedule-runner: unknown unresolved for effect-bearing task -- escalating operator')
+        return 'unknown'
+      }
+    }
+
     appendTaskRun(task.name, agentName)
     logger.info({ task: task.name, agent: agentName, session }, 'Scheduled task fired')
 
