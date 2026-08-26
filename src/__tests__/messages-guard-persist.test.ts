@@ -75,6 +75,26 @@ describe('SEC-030a -- PASS verdict persisted via route', () => {
   })
 })
 
+// ── AC3-route: FLAG verdict recorded and message still created (200) ─────────
+
+describe('SEC-030a -- FLAG verdict persisted via route', () => {
+  it('records a guard_events row for PII-flagged content (FLAG) and message still created', async () => {
+    // An email address triggers FLAG (medium-severity PII), not BLOCK.
+    const { ctx, captured } = fakePostCtx('scout', 'marveen', 'Contact dominik@example.com for details.')
+    await tryHandleMessages(ctx)
+    // FLAG allows the message through (not a 400)
+    expect(captured.status).toBe(200)
+
+    const rows = getGuardEvents(10)
+    const row = rows.find(r => r.verdict === 'FLAG' && r.route === '/api/messages')
+    expect(row).toBeDefined()
+    expect(row!.mechanism).toBe('messages-guard')
+    expect(row!.from_agent).toBe('scout')
+    expect(row!.finding_count).toBeGreaterThan(0)
+    expect(row!.pattern_ids).not.toBeNull()
+  })
+})
+
 // ── AC3-route: BLOCK verdict recorded and route still returns 400 ─────────────
 
 describe('SEC-030a -- BLOCK verdict persisted via route', () => {
