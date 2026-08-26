@@ -67,8 +67,23 @@ export interface ZeppActivity {
   /** Active calories burned kcal */
   activeKcal?: number
   /** Distance metres -- the projected sum of distanceSlices when the ledger is present,
-   *  otherwise a plain scalar from a legacy/cumulative producer. */
+   *  otherwise a plain scalar from a legacy/cumulative producer. This is the MEASURED
+   *  value and is never overwritten by the step-estimate remediation below. */
   distanceM?: number
+  /**
+   * Which distance a consumer should surface (WELL-028, Boss-requested remediation).
+   * 'measured' -> use distanceM as-is; 'step_estimated' -> the measured distance was
+   * implausibly short for the day's steps (the BUG-2 upstream loss), so use
+   * estimatedDistanceM and present it AS AN ESTIMATE. An estimate is never shown as a
+   * measured number (absence-of-errors discipline). Set by applyDistanceEstimate.
+   */
+  distanceSource?: 'measured' | 'step_estimated'
+  /**
+   * Step-derived distance estimate in metres (steps * calibrated stride), populated ONLY
+   * when distanceSource === 'step_estimated'. A remediation for the upstream distance loss,
+   * kept alongside -- never replacing -- the measured distanceM.
+   */
+  estimatedDistanceM?: number
   /**
    * Append-only per-day distance ledger (card 75337cdc distance=B). HC distance arrives as
    * disjoint intraday slices, and each push carries only the slices still inside its 48h
