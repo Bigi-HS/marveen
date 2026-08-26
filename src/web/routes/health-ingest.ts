@@ -120,8 +120,10 @@ function mapSleepList(list: unknown[]): ZeppSleep | undefined {
 }
 
 // Map the raw HC distance slices (start/end/meters) into ledger slices. Each slice needs a
-// startAt (the ledger dedup key) and a finite meters; malformed entries are dropped rather
-// than poisoning the day's sum.
+// startAt (the ledger dedup key) and a finite, NON-NEGATIVE meters; malformed entries are
+// dropped rather than poisoning the day's sum. num() accepts negative finite values, so a
+// negative meters slice would drag the ledger sum DOWN -- the exact clobber-down the ledger
+// exists to prevent -- hence the explicit meters < 0 drop (chad gate FLAG seat 801).
 function mapDistanceSlices(raw: unknown): ZeppDistanceSlice[] | undefined {
   if (!Array.isArray(raw)) return undefined
   const slices: ZeppDistanceSlice[] = []
@@ -130,7 +132,7 @@ function mapDistanceSlices(raw: unknown): ZeppDistanceSlice[] | undefined {
     const rec = r as Record<string, unknown>
     const startAt = str(rec['start']) ?? str(rec['startAt'])
     const meters = num(rec['meters']) ?? num(rec['distance_m'])
-    if (startAt === undefined || meters === undefined) continue
+    if (startAt === undefined || meters === undefined || meters < 0) continue
     const endAt = str(rec['end']) ?? str(rec['endAt'])
     slices.push({ startAt, ...(endAt !== undefined && { endAt }), meters })
   }
