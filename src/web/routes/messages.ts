@@ -8,7 +8,8 @@ import { logger } from '../../logger.js'
 import { COORDINATOR_AGENT_ID } from '../../channel-coordinator/ingest.js'
 import { sanitizeAgentIdent } from '../../prompt-safety.js'
 import { normalizeRecipient } from '../agent-config.js'
-import { aiDefenceGuard } from '../../aidefence-guard.js'
+import { aiDefenceGuard, type Severity } from '../../aidefence-guard.js'
+import { recordGuardEvent } from '../guard-event-recorder.js'
 import { decideMessageFrom, enforceFromBindingEnabled, logFromMismatch } from '../agent-identity-binding.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
@@ -82,6 +83,24 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     }
     const effectiveFrom = fromDecision.from.trim()
     const guard = aiDefenceGuard(effectiveFrom, content.trim())
+    // Persist every verdict (PASS included) so block-rate denominators survive
+    // the 7-day agent_messages sweep. guard_events has its own 90-day retention.
+    const SEVERITY_RANK: Record<Severity, number> = { low: 0, medium: 1, high: 2, critical: 3 }
+    const maxSev = guard.findings.reduce<Severity | null>(
+      (best, f) => best === null || SEVERITY_RANK[f.severity] > SEVERITY_RANK[best] ? f.severity : best,
+      null,
+    )
+    recordGuardEvent({
+      mechanism: 'messages-guard',
+      route: '/api/messages',
+      verdict: guard.verdict,
+      fromAgent: effectiveFrom,
+      toAgent: to.trim(),
+      patternIds: guard.findings.length > 0 ? [...new Set(guard.findings.map(f => f.pattern))].sort().join(',') : null,
+      maxSeverity: maxSev,
+      findingCount: guard.findings.length,
+      content: content.trim(),
+    })
     if (guard.verdict === 'BLOCK') {
       logger.warn(
         { from: effectiveFrom, to: to.trim(), findings: guard.findings },
