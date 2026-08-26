@@ -1,23 +1,27 @@
 #!/bin/bash
 # Watchdog for phone-terminal (ttyd on 127.0.0.1:7681 + tailscale serve).
 # Binds ONLY to loopback -- tailscale serve provides TLS + tailnet-only access.
-# Credentials in store/phone-terminal.creds (0600, gitignored via store/).
+# Auth: Tailscale-User-Login header injected by tailscale serve for every
+# authenticated tailnet device -- ttyd delegates the auth decision to tailscale
+# (-H/--auth-header mode) so no static credential ever appears in the process list.
+#
+# DEPLOY GATE: this change requires a live test before going live.
+# Before deploying: connect to https://bigi.tail1a5fa5.ts.net:8443/terminal/
+# from a tailnet device. If ttyd grants access (200) the header is forwarded
+# correctly. If it returns 401 the header is missing and the fallback approach
+# (unix socket or dedicated OS user) must be used instead.
+# Until that test passes, basic-auth must remain in the live script.
+#
 # No systemd on WSL2 -- kept alive by this watchdog running in tmux.
 
 INSTALL_DIR=/home/domin/marveen
 TTYD="$INSTALL_DIR/store/bin/ttyd"
-CREDS_FILE="$INSTALL_DIR/store/phone-terminal.creds"
 PORT=7681
 SESSION_NAME=phone
 LOG="$INSTALL_DIR/store/phone-terminal-watchdog.log"
 COOLDOWN=10
 
 log() { echo "$(date -Is) $*" | tee -a "$LOG"; }
-
-read_cred() {
-  local key="$1"
-  grep "^${key}=" "$CREDS_FILE" | cut -d= -f2-
-}
 
 check_ttyd() {
   # Returns 0 if ttyd is listening on 127.0.0.1:7681
@@ -26,20 +30,16 @@ check_ttyd() {
 }
 
 start_ttyd() {
-  local user pass
-  user="$(read_cred user)"
-  pass="$(read_cred pass)"
-  if [ -z "$user" ] || [ -z "$pass" ]; then
-    log "ERROR: cannot read credentials from $CREDS_FILE -- aborting"
-    exit 1
-  fi
-  log "Starting ttyd on 127.0.0.1:$PORT (basic-auth user=$user, base-path=/terminal/)"
-  # -i = interface bind, -c = basic-auth user:pass, -b = base-path for reverse-proxy
-  # Command: attach or create tmux session named $SESSION_NAME
+  log "Starting ttyd on 127.0.0.1:$PORT (auth-header=Tailscale-User-Login, base-path=/terminal/)"
+  # -i = interface bind, -H = header name for auth proxy (tailscale injects this
+  # for every authenticated tailnet device), -b = base-path for reverse-proxy.
+  # No --credential flag: the static user:pass is gone from the process list.
+  # Tailscale serve on port 8443 (tailnet-only) injects Tailscale-User-Login for
+  # authenticated devices; ttyd accepts any non-empty value as authorized.
   nohup "$TTYD" \
     --interface 127.0.0.1 \
     --port "$PORT" \
-    --credential "${user}:${pass}" \
+    --auth-header Tailscale-User-Login \
     --base-path /terminal/ \
     --writable \
     tmux new-session -A -s "$SESSION_NAME" \
