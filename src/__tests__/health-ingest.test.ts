@@ -800,6 +800,53 @@ describe('POST /api/health/ingest', () => {
       expect(snap?.activity?.distanceSlices).toHaveLength(1)
       expect(snap?.activity?.distanceM).toBe(105) // not 210
     })
+
+    // The ledger's no-clobber-down guarantee only holds if every slice contributes a
+    // non-negative distance. num() accepts a negative finite value, so without a guard a
+    // negative meters slice would DRAG the day sum DOWN -- the exact clobber the ledger
+    // exists to prevent (chad gate FLAG seat 801). A negative slice is malformed: drop it.
+    it('drops a slice with negative meters (never reduces the day total) [seat 801]', async () => {
+      const deps = makeStatefulDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-25',
+          activity: {
+            distance_slices: [
+              { start: '2026-08-25T21:15:00Z', meters: 105 },
+              { start: '2026-08-25T22:00:00Z', meters: -500 },
+            ],
+            distance_m: 105,
+          },
+        },
+      })
+      expect(snap?.activity?.distanceSlices).toHaveLength(1)
+      expect(snap?.activity?.distanceM).toBe(105) // not -395
+    })
+
+    // The DROP branch (malformed entries silently skipped) had no dedicated coverage before
+    // (chad gate INFO). A slice with no startAt (the ledger dedup key) or a non-finite meters
+    // is dropped rather than poisoning the sum; the valid sibling in the same push survives.
+    it('drops malformed slices (missing startAt / non-finite meters), keeps the valid one', async () => {
+      const deps = makeStatefulDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: {
+          date: '2026-08-25',
+          activity: {
+            distance_slices: [
+              { meters: 200 }, // no startAt -> dropped
+              { start: '2026-08-25T22:00:00Z', meters: 'not-a-number' }, // non-finite -> dropped
+              { start: '2026-08-25T21:15:00Z', meters: 105 }, // valid
+            ],
+            distance_m: 105,
+          },
+        },
+      })
+      expect(snap?.activity?.distanceSlices).toHaveLength(1)
+      expect(snap?.activity?.distanceSlices?.[0]?.startAt).toBe('2026-08-25T21:15:00Z')
+      expect(snap?.activity?.distanceM).toBe(105)
+    })
   })
 
   // card 75337cdc: numeric plausibility guard, log-only rollout. The handler flags a
