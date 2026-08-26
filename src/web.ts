@@ -76,6 +76,7 @@ import { tryHandleAdmin } from './web/routes/admin.js'
 import { tryHandlePublicDigest } from './web/routes/public-digest.js'
 import { tryHandleAnalytics } from './web/routes/analytics.js'
 import { applyAnalyticsMigrations } from './analytics/storage.js'
+import { tryHandleRules, applyRuleMigrations } from './web/routes/rules.js'
 import { tryHandleNotify } from './web/routes/notify.js'
 import { tryHandleGithubSearch } from './web/routes/github-search.js'
 import { tryHandleBondSrs } from './web/routes/bond-srs.js'
@@ -344,6 +345,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleGithub(routeCtx)) return
       if (await tryHandlePublicDigest(routeCtx)) return
       if (await tryHandleAnalytics(routeCtx)) return
+      if (await tryHandleRules(routeCtx)) return
       if (await tryHandleNotify(routeCtx)) return
       if (await tryHandleGithubSearch(routeCtx)) return
       if (await tryHandleBondSrs(routeCtx)) return
@@ -477,6 +479,8 @@ export function startWebServer(port = 3420): http.Server {
   // on the next boot without a destructive rebuild.
   applyAnalyticsMigrations()
   logger.info('Analytics migrations applied (analytics_snapshots)')
+  applyRuleMigrations()
+  logger.info('Rule engine migrations applied (kanban_rules, DASH-031)')
 
   const scheduleInterval = startScheduleRunner()
   logger.info('Schedule runner started (60s poll)')
