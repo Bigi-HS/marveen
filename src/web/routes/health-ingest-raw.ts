@@ -13,6 +13,7 @@
 
 import { IncomingMessage, ServerResponse } from 'node:http'
 import { readBody, RequestBodyTooLargeError, json } from '../http-helpers.js'
+import { logger } from '../../logger.js'
 import type { RouteContext } from './types.js'
 
 const MAX_RAW_BYTES = 64 * 1024
@@ -46,6 +47,16 @@ export async function tryHandleHealthIngestRaw(ctx: RouteContext): Promise<boole
     })
   } catch {
     json(ctx.res, { error: 'n8n transform unavailable' }, 502)
+    return true
+  }
+
+  // Do NOT reflect n8n's response body to this unauthenticated public caller on failure:
+  // the transform's internal error detail (node names, stack, file paths) is a zero-auth
+  // info leak. Log the real status server-side; return a generic error. (Chad medium, PR#541
+  // follow-up.) A 2xx reply is our own /api/health/ingest response, safe to forward.
+  if (!n8nRes.ok) {
+    logger.warn({ status: n8nRes.status }, 'health ingest-raw: n8n transform returned non-2xx')
+    json(ctx.res, { error: 'transform failed' }, n8nRes.status >= 500 ? 502 : 400)
     return true
   }
 
