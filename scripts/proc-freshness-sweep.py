@@ -246,7 +246,7 @@ def _sweep_python(root, boot, stale, unknown, suspect):
     return seen_pids
 
 
-def _sweep_node(root, boot, stale, unknown, suspect):
+def _sweep_node(root, boot, stale, unknown, suspect, prior_seen_pids: set | None = None):
     """Classify node processes via cmdline + mtime-heuristic.
 
     Node loads its entry-point .js file at startup but holds no open fd to it
@@ -262,9 +262,12 @@ def _sweep_node(root, boot, stale, unknown, suspect):
     Only the interpreter name and first .js path in argv are examined.  Args
     beyond the script name are never read or reported (may contain credentials).
 
+    prior_seen_pids: PIDs already handled by _sweep_bash/_sweep_python -- skip
+    them here to avoid cross-sweep double-reporting (OPS-155, card 3b46fc4a).
+
     Returns seen_pids so the caller can avoid double-reporting.
     """
-    seen_pids = {str(os.getpid())}
+    seen_pids = {str(os.getpid())} | (prior_seen_pids or set())
     for proc_dir in glob.glob("/proc/[0-9]*"):
         pid = os.path.basename(proc_dir)
 
@@ -350,7 +353,9 @@ def sweep(root):
 
     fresh, bash_pids = _sweep_bash(root, boot, stale, unknown, suspect, supervisors_ref)
     python_pids = _sweep_python(root, boot, stale, unknown, suspect)
-    _sweep_node(root, boot, stale, unknown, suspect)
+    # Wire cross-sweep dedup: pass bash+python seen_pids so _sweep_node skips
+    # already-classified processes (OPS-155, card 3b46fc4a).
+    _sweep_node(root, boot, stale, unknown, suspect, bash_pids | python_pids)
 
     return stale, unknown, suspect, fresh, supervisors_ref[0]
 
