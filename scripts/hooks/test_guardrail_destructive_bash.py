@@ -1220,5 +1220,84 @@ class SiblingSourceIdentityTests(unittest.TestCase):
                             self._code_shape(guard._tokenize))
 
 
+class DestructiveGitCleanTests(unittest.TestCase):
+    """Card a0b78305: git clean -fd / -fdx is functionally fleet rm-rf.
+
+    A single `git clean -fdx` from the repo root deletes 327 paths including
+    agent stores, credentials, and vault files.  Any `git clean` with the force
+    flag (-f/--force) must be blocked; dry-run (-n/--dry-run) and interactive
+    (-i/--interactive) modes are safe and must remain allowed.
+    """
+
+    # ── BLOCK expected ────────────────────────────────────────────────────────
+
+    BLOCKED = [
+        # basic force-delete
+        ("force-only",        "git clean -f"),
+        ("force-dirs",        "git clean -fd"),
+        ("force-dirs-ignored","git clean -fdx"),
+        ("force-dirs-X",      "git clean -fdX"),
+        ("long-force",        "git clean --force"),
+        ("force-then-dirs",   "git clean -f -d"),
+        ("force-quiet",       "git clean -fq"),
+        ("force-path",        "git clean -fd /home/domin/marveen"),
+        # compound commands
+        ("and-chained",       "npm run build && git clean -fdx"),
+        ("semicolon",         "git fetch; git clean -fdx"),
+        # git with explicit path prefix
+        ("git-C-prefix",      "git -C /home/domin/marveen clean -fdx"),
+    ]
+
+    # ── ALLOW expected ────────────────────────────────────────────────────────
+
+    ALLOWED = [
+        # dry-run / interactive -- safe
+        ("dry-run-short",     "git clean -n"),
+        ("dry-run-dirs",      "git clean -nd"),
+        ("dry-run-long",      "git clean --dry-run"),
+        ("interactive",       "git clean -i"),
+        ("interactive-dirs",  "git clean -di"),
+        # read-only git commands
+        ("git-status",        "git status"),
+        ("git-diff",          "git diff"),
+        ("git-log",           "git log --oneline"),
+        # not git clean
+        ("find-delete",       "find . -name '*.tmp' -delete"),  # not git clean
+        # echo about git clean (not running it)
+        ("echo-about",        "echo 'run git clean -fdx to clean'"),
+    ]
+
+    def test_blocked(self):
+        for label, cmd in self.BLOCKED:
+            with self.subTest(case=label):
+                self.assertTrue(
+                    guard.match_git_clean_force(cmd),
+                    f"expected BLOCK for: {cmd!r}",
+                )
+
+    def test_allowed(self):
+        for label, cmd in self.ALLOWED:
+            with self.subTest(case=label):
+                self.assertFalse(
+                    guard.match_git_clean_force(cmd),
+                    f"expected ALLOW for: {cmd!r}",
+                )
+
+    def test_classify_blocks_git_clean_force(self):
+        denied, name, _ = guard.classify({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git clean -fdx"},
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, "git-clean-force")
+
+    def test_classify_allows_dry_run(self):
+        denied, _, _ = guard.classify({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git clean -nd"},
+        })
+        self.assertFalse(denied)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
