@@ -81,6 +81,7 @@ import { tryHandlePublicDigest } from './web/routes/public-digest.js'
 import { tryHandleAnalytics } from './web/routes/analytics.js'
 import { applyAnalyticsMigrations } from './analytics/storage.js'
 import { tryHandleRules, applyRuleMigrations } from './web/routes/rules.js'
+import { tryHandleResearchSearch, applyResearchFtsMigrations } from './web/routes/research-search.js'
 import { tryHandleNotify } from './web/routes/notify.js'
 import { tryHandleGmailLabelHealth } from './web/routes/gmail-label-health.js'
 import { tryHandleGithubSearch } from './web/routes/github-search.js'
@@ -355,6 +356,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandlePublicDigest(routeCtx)) return
       if (await tryHandleAnalytics(routeCtx)) return
       if (await tryHandleRules(routeCtx)) return
+      if (await tryHandleResearchSearch(routeCtx)) return
       if (await tryHandleNotify(routeCtx)) return
       if (await tryHandleGmailLabelHealth(routeCtx)) return
       if (await tryHandleGithubSearch(routeCtx)) return
@@ -491,6 +493,8 @@ export function startWebServer(port = 3420): http.Server {
   logger.info('Analytics migrations applied (analytics_snapshots)')
   applyRuleMigrations()
   logger.info('Rule engine migrations applied (kanban_rules, DASH-031)')
+  applyResearchFtsMigrations()
+  logger.info('Research FTS migrations applied (research_fts, MEM-012)')
 
   const scheduleInterval = startScheduleRunner()
   logger.info('Schedule runner started (60s poll)')
