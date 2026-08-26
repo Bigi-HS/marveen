@@ -9,10 +9,12 @@ export function KanbanColumn({
   status,
   cards,
   onSelect,
+  nowSec,
 }: {
   status: KanbanStatus
   cards: KanbanCard[]
   onSelect: (card: KanbanCard) => void
+  nowSec: number
 }) {
   return (
     <div className="flex w-72 shrink-0 flex-col rounded-lg border border-border bg-bg-surface">
@@ -26,7 +28,7 @@ export function KanbanColumn({
         {cards.length === 0 ? (
           <EmptyState message="Üres" compact />
         ) : (
-          cards.map((c) => <KanbanCardChip key={c.id} card={c} onClick={() => onSelect(c)} />)
+          cards.map((c) => <KanbanCardChip key={c.id} card={c} onClick={() => onSelect(c)} nowSec={nowSec} />)
         )}
       </div>
     </div>

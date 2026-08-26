@@ -12,10 +12,12 @@ export function KanbanProjectColumn({
   project,
   cards,
   onSelect,
+  nowSec,
 }: {
   project: string | null
   cards: KanbanCard[]
   onSelect: (card: KanbanCard) => void
+  nowSec: number
 }) {
   const label = project ?? PROJECT_GROUP_OTHER_LABEL
   return (
@@ -28,7 +30,7 @@ export function KanbanProjectColumn({
         {cards.length === 0 ? (
           <EmptyState message="Üres" compact />
         ) : (
-          cards.map((c) => <KanbanCardChip key={c.id} card={c} onClick={() => onSelect(c)} />)
+          cards.map((c) => <KanbanCardChip key={c.id} card={c} onClick={() => onSelect(c)} nowSec={nowSec} />)
         )}
       </div>
     </div>

@@ -22,6 +22,8 @@ function card(status: KanbanStatus, id: string = status): KanbanCard {
     created_at: 1_700_000_000,
     updated_at: 1_700_000_000,
     dispatched_at: null,
+    last_moved: null,
+    priority_score: null,
   }
 }
 

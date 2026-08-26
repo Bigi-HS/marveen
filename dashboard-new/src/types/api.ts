@@ -52,6 +52,10 @@ export interface KanbanCard {
   created_at: number
   updated_at: number
   dispatched_at: number | null
+  /** Epoch-seconds of last meaningful movement (status/assignee change). NULL = unmeasured. */
+  last_moved: number | null
+  /** Fine-grained attention rank 1-10 (card 65afc67e). NULL for icebox cards. */
+  priority_score: number | null
 }
 
 /** GET /api/messages?limit=N -- inter-agent activity (epoch SECONDS). */
