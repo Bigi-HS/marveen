@@ -11,7 +11,7 @@ import type { KanbanCard } from '@/types/api'
 type GroupBy = 'status' | 'project'
 
 const GROUP_MODES: ReadonlyArray<{ key: GroupBy; label: string }> = [
-  { key: 'status', label: 'Statusz' },
+  { key: 'status', label: 'Státusz' },
   { key: 'project', label: 'Projekt' },
 ]
 
@@ -83,7 +83,7 @@ export function KanbanBoard({ cards }: { cards: KanbanCard[] }) {
         </div>
       )}
 
-      <div className="mb-3 flex items-center gap-1" role="group" aria-label="Csoportositas">
+      <div className="mb-3 flex items-center gap-1" role="group" aria-label="Csoportosítás">
         {GROUP_MODES.map((mode) => (
           <button
             key={mode.key}
