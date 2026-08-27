@@ -50,6 +50,7 @@ import { tryHandleMemories } from './web/routes/memories.js'
 import { tryHandleMigrate } from './web/routes/migrate.js'
 import { tryHandleKanban } from './web/routes/kanban.js'
 import { tryHandleKanbanCfd } from './web/routes/kanban-cfd.js'
+import { tryHandleKanbanSla } from './web/routes/kanban-sla.js'
 import { tryHandleTodos } from './web/routes/todos.js'
 import { tryHandleSchedules } from './web/routes/schedules.js'
 import { tryHandleConnectors } from './web/routes/connectors.js'
@@ -318,6 +319,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleMigrate(routeCtx)) return
       if (await tryHandleKanban(routeCtx)) return
       if (await tryHandleKanbanCfd(routeCtx)) return
+      if (await tryHandleKanbanSla(routeCtx)) return
       if (await tryHandleTodos(routeCtx)) return
       if (await tryHandleSchedules(routeCtx)) return
       if (await tryHandleConnectors(routeCtx)) return
