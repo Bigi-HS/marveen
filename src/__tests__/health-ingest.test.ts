@@ -993,20 +993,23 @@ describe('POST /api/health/ingest', () => {
   // timestamped fields resolve to a different Budapest day than snapshot.date, but must
   // NOT mutate the stored status.
   describe('data-date guard (log-only)', () => {
-    it('calls onDataDate when sleep is filed under the wrong day (F1 mis-filing)', async () => {
+    it('does NOT call onDataDate for a wrong-day INCOMING sleep (2f603c1c own-date filter drops it first)', async () => {
+      // With the sleep own-date filter (2f603c1c), a wrong-day push is DROPPED before
+      // it enters the snapshot, so the data-date guard never fires for incoming mis-filings.
+      // (The data-date guard still catches HISTORICAL mis-filings already in the store from
+      // before the filter was deployed -- those can't be re-filtered on merge.)
       const onDataDate = vi.fn()
       const deps = makeDeps({ onDataDate })
       const { snap } = await handle(deps, {
         token: VALID_TOKEN,
-        // date says 08-23 but the sleep wakes on 08-22 -> mis-filed.
+        // body.date says 08-23 but sleep wakes on 08-22 -> own-date filter drops the sleep.
         body: { date: '2026-08-23', sleep: { total_min: 420, start: '2026-08-22T01:46:00Z', end: '2026-08-22T09:54:00Z' } },
       })
-      expect(onDataDate).toHaveBeenCalledTimes(1)
-      const [, violations] = onDataDate.mock.calls[0]
-      expect(violations[0].field).toBe('sleep')
-      expect(violations[0].actual).toBe('2026-08-22')
-      // log-only: the stored status is untouched.
-      expect(snap?.status).toBe('ok')
+      // Sleep was dropped by the own-date filter -> no sleep in snapshot, status=no_new_data
+      expect(snap?.sleep).toBeUndefined()
+      expect(snap?.status).toBe('no_new_data')
+      // The data-date guard has nothing to report (no mis-filed sleep in the snapshot)
+      expect(onDataDate).not.toHaveBeenCalled()
     })
 
     it('does NOT call onDataDate when the sleep wake-day matches the file date', async () => {
@@ -1101,6 +1104,57 @@ describe('POST /api/health/ingest', () => {
         body: { date: '2026-08-22', activity: { distance_m: 12_040, steps: 15_790 } },
       })
       expect(snap?.activity?.distanceM).toBe(12_040)
+    })
+  })
+
+  // 2f603c1c: sleep own-date guard.
+  // Mirror of the workout own-day filter (line ~265): only accept a sleep session into
+  // this snapshot if the sleep's wake date (endAt localDateBudapest) matches body.date.
+  // Edge case: a midnight push (00:20) where body.date = new day but the sleep payload
+  // still carries yesterday's session (endAt = yesterday) would mis-file the sleep.
+  describe('sleep own-date guard (2f603c1c)', () => {
+    // S1: normal case -- sleep ends on the same day as body.date -> filed
+    it('S1: files sleep when sleep.endAt local date matches body.date', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        // 2026-08-22T06:00:00Z = 2026-08-22T08:00:00 Budapest (CEST+2) -> day 08-22
+        body: { date: '2026-08-22', sleep: { total_min: 420, start: '2026-08-21T23:00:00Z', end: '2026-08-22T06:00:00Z' } },
+      })
+      expect(snap?.sleep).toBeDefined()
+      expect(snap?.sleep?.durationMin).toBe(420)
+    })
+
+    // S2: midnight push edge -- body.date = next day but sleep woke on previous day -> NOT filed
+    it('S2: does NOT file sleep when sleep.endAt belongs to a different day than body.date', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        // body.date = 08-23, but sleep endAt = 2026-08-22T07:00:00Z (Budapest 09:00 on 08-22)
+        body: { date: '2026-08-23', sleep: { total_min: 420, start: '2026-08-21T23:00:00Z', end: '2026-08-22T07:00:00Z' } },
+      })
+      // Sleep belongs to 08-22, not 08-23 -> not included in the 08-23 snapshot
+      expect(snap?.sleep).toBeUndefined()
+    })
+
+    // S3: missing or invalid endAt -> keep-on-current (no filtering, same as undatable workout)
+    it('S3: keeps sleep when endAt is absent (cannot determine day, file conservatively)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', sleep: { total_min: 420, start: '2026-08-21T23:00:00Z' } },
+      })
+      // No endAt -> no own-day filtering -> sleep is included
+      expect(snap?.sleep).toBeDefined()
+    })
+
+    it('S3: keeps sleep when endAt is invalid (non-parseable timestamp)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', sleep: { total_min: 420, start: '2026-08-21T23:00:00Z', end: 'not-a-date' } },
+      })
+      expect(snap?.sleep).toBeDefined()
     })
   })
 })
