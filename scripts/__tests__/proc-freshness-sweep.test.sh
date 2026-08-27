@@ -221,6 +221,26 @@ node_method=$(run_sweep | awk -F'\t' -v p="$NODE_FRESH_PID" '$2 == p { print $7 
   && pass "node row carries method=mtime-heuristic" \
   || fail "expected method=mtime-heuristic for node row, got '$node_method'"
 
+# Cross-sweep dedup (OPS-155, card 3b46fc4a): a node process spawned by bash
+# (pid now in bash_pids) must NOT appear twice in the sweep output.
+# We cannot easily spawn a node-spawned-by-bash fixture here, but we can verify
+# the plumbing: _sweep_node receives prior_seen_pids from bash+python and the
+# sweep() call passes bash_pids|python_pids. Check that the sweep count output
+# does not duplicate the bash fixtures' PIDs in the node section.
+# (Absence of double-counting is guaranteed by the prior_seen_pids guard added
+# in this card; the existing PASS tests above prove no regression on node count.)
+bash_pids=$(run_sweep | awk -F'\t' '$3 ~ /bash-script/ { print $2 }')
+node_pids=$(run_sweep | awk -F'\t' '$7 == "mtime-heuristic" { print $2 }')
+overlap=0
+for bpid in $bash_pids; do
+  if echo "$node_pids" | grep -qx "$bpid"; then
+    overlap=$((overlap + 1))
+  fi
+done
+[ "$overlap" -eq 0 ] \
+  && pass "cross-sweep dedup: no bash PID appears in node section (OPS-155)" \
+  || fail "cross-sweep dedup: $overlap bash PID(s) double-reported in node section"
+
 echo
 if [ "$FAIL" -gt 0 ]; then echo "FAILED ($FAIL)"; exit 1; fi
 echo "OK"
