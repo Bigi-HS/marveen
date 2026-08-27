@@ -146,6 +146,27 @@ export function isSecuritySensitivePath(filename: string): boolean {
   if (f === 'src/web/routes/codetree.ts') return true         // DIFF_REF_RE / AGENT_RE validation guard
   if (f === 'src/web/codetree-impact-io.ts') return true      // execFileSync('git', argv) sink
 
+  // Security-defining config (card ca22e3dc): files that establish the permission
+  // floor for agents. PR #549 demonstrated the gap: templates/profiles/ defines the
+  // deny-list provisioned to every new agent of that role, yet that PR merged without
+  // auto-requiring Chad. Principle: any file that can weaken what agents are denied
+  // fleet-wide, or that controls which operations bypass auth, must require security
+  // review. Conservative by design -- a false positive only adds a harmless Chad seat.
+  //
+  // templates/profiles/ -- per-role deny-list definitions (default.json,
+  //   developer-senior.json, etc.). The whole directory; new profiles auto-covered.
+  if (f.startsWith('templates/profiles/')) return true
+  // templates/settings.json.template -- fleet-wide default settings with PreCompact
+  //   hooks and deny-rules provisioned to every new agent at creation time.
+  if (f === 'templates/settings.json.template') return true
+  // src/web/public-paths.ts -- defines which API routes bypass the dashboard auth
+  //   layer. Weakening it lets unauthenticated callers reach guarded endpoints.
+  if (f === 'src/web/public-paths.ts') return true
+  // seed-config/autonomy-config.json -- governs which operations agents may perform
+  //   without per-step operator approval, including locked=true categories
+  //   (payment, data_delete, permission_change).
+  if (f === 'seed-config/autonomy-config.json') return true
+
   const base = f.split('/').pop() ?? f
 
   // **/.env* -- any dotenv file at any depth.

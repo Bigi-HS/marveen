@@ -157,6 +157,43 @@ describe('isSecuritySensitivePath (MG-AC4)', () => {
     expect(isSecuritySensitivePath('src/web/routes/analytics.ts')).toBe(false)
     expect(isSecuritySensitivePath('src/__tests__/analytics-labels.test.ts')).toBe(false)
   })
+
+  // Security-defining config (card ca22e3dc): files that establish the permission
+  // floor for agents. PR #549 (ffcfedc3) demonstrated the gap: templates/profiles/
+  // defines the deny-list provisioned to every new agent of that role, yet touched
+  // templates/profiles/default.json without auto-requiring Chad.
+  //
+  // Principle: any file that defines which Bash/Read/Write operations agents are
+  // denied fleet-wide must require security review. False-positive policy is the
+  // same as elsewhere -- a false positive only adds a harmless Chad requirement.
+  it('matches templates/profiles/ permission-floor definitions (card ca22e3dc)', () => {
+    expect(isSecuritySensitivePath('templates/profiles/default.json')).toBe(true)
+    expect(isSecuritySensitivePath('templates/profiles/developer-senior.json')).toBe(true)
+    expect(isSecuritySensitivePath('templates/profiles/developer-junior.json')).toBe(true)
+    expect(isSecuritySensitivePath('templates/profiles/researcher.json')).toBe(true)
+  })
+
+  it('matches templates/settings.json.template (deny-rules + hook defaults, card ca22e3dc)', () => {
+    expect(isSecuritySensitivePath('templates/settings.json.template')).toBe(true)
+  })
+
+  it('matches src/web/public-paths.ts (auth-bypass control, card ca22e3dc)', () => {
+    expect(isSecuritySensitivePath('src/web/public-paths.ts')).toBe(true)
+  })
+
+  it('matches seed-config/autonomy-config.json (locked autonomy levels, card ca22e3dc)', () => {
+    expect(isSecuritySensitivePath('seed-config/autonomy-config.json')).toBe(true)
+  })
+
+  it('does NOT match non-permission templates/ files (false-positive guard, card ca22e3dc)', () => {
+    // CLAUDE.md.template and SOUL.md.template define agent persona/behavior, not deny-lists.
+    expect(isSecuritySensitivePath('templates/CLAUDE.md.template')).toBe(false)
+    expect(isSecuritySensitivePath('templates/SOUL.md.template')).toBe(false)
+    // scheduled-tasks/ holds cron task definitions, not permission policies.
+    expect(isSecuritySensitivePath('templates/scheduled-tasks/morning-briefing.json')).toBe(false)
+    // agent-categories.json classifies agents by role, does not define deny-lists.
+    expect(isSecuritySensitivePath('seed-config/agent-categories.json')).toBe(false)
+  })
 })
 
 describe('runGateCheck requires chad for a gate-code PR (card 88eb6120)', () => {
