@@ -92,6 +92,7 @@ import { readAutoRestartConfig, writeAutoRestartConfig } from '../auto-restart-s
 import type { AutoRestartConfig } from '../../auto-restart.js'
 import { attemptChannelMcpReconnect } from '../channel-mcp-reconnect.js'
 import { getChannelHealth } from '../channel-health-monitor.js'
+import { readAgentState } from '../per-agent-pipe-watchdog.js'
 import {
   loadProfileTemplate,
   resolveProfilePlaceholders,
@@ -297,6 +298,18 @@ interface AgentSummary {
   channelHealthy: boolean | null
   /** How many auto-reconnect attempts the monitor has made for this agent. */
   channelReconnectAttempts: number
+  /**
+   * Telegram MCP capability health from the per-agent-pipe-watchdog (OPS-126).
+   * Reads the watchdog's state file (store/pipe-watchdog.<name>.state.json):
+   *   true  = consecutiveDead===0 and state file is fresh (watchdog has checked recently)
+   *   false = consecutiveDead > 0 (at least one failed 409 probe = bot not polling)
+   *   null  = state file absent or stale (watchdog not running or never ran)
+   * Unlike channelHealthy (transport-level, plugin-pane failures), this is a
+   * CAPABILITY-level check: does the bot token actively hold the getUpdates slot?
+   */
+  pipeHealthy: boolean | null
+  /** Epoch-ms of the last pipe watchdog check, or null if unknown. */
+  pipeLastCheckedTs: number | null
 }
 
 interface AgentDetail extends AgentSummary {
@@ -364,6 +377,22 @@ function getAgentSummary(name: string): AgentSummary {
     reauthReason: reauth.reason,
     channelHealthy: channelHealth ? channelHealth.healthy : null,
     channelReconnectAttempts: channelHealth ? channelHealth.reconnectAttempts : 0,
+    ...computePipeHealth(name),
+  }
+}
+
+// Pipe-health stale window: if the watchdog hasn't checked in > 20 min, treat as null.
+const PIPE_HEALTH_STALE_MS = 20 * 60 * 1000
+
+function computePipeHealth(agentName: string): { pipeHealthy: boolean | null; pipeLastCheckedTs: number | null } {
+  try {
+    const state = readAgentState(agentName)
+    const lastCheckedTs = state.lastCheckedTs ?? null
+    if (lastCheckedTs === null) return { pipeHealthy: null, pipeLastCheckedTs: null }
+    if (Date.now() - lastCheckedTs > PIPE_HEALTH_STALE_MS) return { pipeHealthy: null, pipeLastCheckedTs: lastCheckedTs }
+    return { pipeHealthy: state.consecutiveDead === 0, pipeLastCheckedTs: lastCheckedTs }
+  } catch {
+    return { pipeHealthy: null, pipeLastCheckedTs: null }
   }
 }
 
