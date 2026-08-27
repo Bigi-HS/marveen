@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { Readable } from 'node:stream'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { tryHandleHealthIngestRaw } from '../web/routes/health-ingest-raw.js'
+import { tryHandleHealthIngestRaw, makeHealthIngestRawHandler } from '../web/routes/health-ingest-raw.js'
 import type { RouteContext } from '../web/routes/types.js'
 
 function makeReq(body: string): IncomingMessage {
@@ -104,5 +104,56 @@ describe('POST /api/health/ingest-raw error-mirror leak guard', () => {
     const out = written()
     expect(out.status).toBe(502)
     expect(out.body).not.toContain('ECONNREFUSED')
+  })
+})
+
+// AC-1 handler integration: raw body retained on every successful push
+describe('POST /api/health/ingest-raw retention integration (AC-1)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('calls retain with the raw body on a 2xx response', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })))
+
+    const retained: string[] = []
+    const handler = makeHealthIngestRawHandler({ retain: (b) => retained.push(b) })
+    const { ctx } = makeCtx('{"date":"2026-08-27","activity":{"steps":10000}}')
+    await handler(ctx.req, ctx.res)
+
+    expect(retained).toHaveLength(1)
+    expect(retained[0]).toBe('{"date":"2026-08-27","activity":{"steps":10000}}')
+  })
+
+  it('still calls retain even when n8n returns a non-2xx (body is preserved for debugging)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response('{"error":"bad"}', { status: 422, headers: { 'content-type': 'application/json' } })))
+
+    const retained: string[] = []
+    const handler = makeHealthIngestRawHandler({ retain: (b) => retained.push(b) })
+    const { ctx } = makeCtx('{"date":"2026-08-27"}')
+    await handler(ctx.req, ctx.res)
+
+    // Body still captured even though n8n rejected it -- useful for diagnosing bad payloads.
+    expect(retained).toHaveLength(1)
+  })
+
+  it('does NOT call retain when the body read itself fails (no body to retain)', async () => {
+    // Simulate a read error
+    const req = {
+      on: (ev: string, cb: (e?: Error) => void) => {
+        if (ev === 'error') cb(new Error('socket hang up'))
+      },
+      emit: () => false,
+    } as unknown as import('node:http').IncomingMessage
+    req.method = 'POST'
+    ;(req as any).headers = {}
+
+    const retained: string[] = []
+    const handler = makeHealthIngestRawHandler({ retain: (b) => retained.push(b) })
+    const { res } = makeRes()
+    const ctx = { req, res, path: '/api/health/ingest-raw', method: 'POST', url: new URL('http://localhost:3420/api/health/ingest-raw'), identity: null } as unknown as RouteContext
+    await handler(ctx.req, ctx.res)
+
+    expect(retained).toHaveLength(0)
   })
 })
