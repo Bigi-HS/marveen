@@ -28,7 +28,7 @@ export class RawPushBuffer {
     const next = [...existing, rawBody]
     const capped = next.length > this.cap ? next.slice(next.length - this.cap) : next
     try {
-      writeFileSync(this.filePath, capped.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8')
+      writeFileSync(this.filePath, capped.map((e) => JSON.stringify(e)).join('\n') + '\n', { encoding: 'utf8', mode: 0o600 })
     } catch (err) {
       logger.warn({ err, filePath: this.filePath }, 'raw-push-buffer: failed to write retention file')
     }

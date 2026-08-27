@@ -3,7 +3,7 @@
 // PII note: payloads contain health data; the buffer file lives in store/ (gitignored).
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { RawPushBuffer, BUFFER_CAP } from '../web/zepp/raw-push-buffer.js'
