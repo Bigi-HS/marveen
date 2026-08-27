@@ -1019,4 +1019,88 @@ describe('POST /api/health/ingest', () => {
       expect(onDataDate).not.toHaveBeenCalled()
     })
   })
+
+  // AC#1 (card e3197a20): physiological input-cap for steps/kcal/distanceM.
+  // Values outside the sane range are DROPPED (undefined) at parse time, not just flagged.
+  // This prevents an inflated step count from propagating into the monotone-max lock that
+  // drives the distance estimate (Chad FN fixture: steps=999999 -> 762km estimate blocked).
+  describe('AC#1 input-cap: steps / kcal / distanceM sane range', () => {
+    // Steps
+    it('[FN] drops steps above the cap (999,999 -> undefined, prevents 762km estimate)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', activity: { steps: 999_999, distance_m: undefined } },
+      })
+      // steps exceeds cap -> dropped; NO distance estimate from phantom steps
+      expect(snap?.steps).toBeUndefined()
+      expect(snap?.activity?.estimatedDistanceM).toBeUndefined()
+    })
+
+    it('[FP] keeps steps within the cap (20,000 is a legitimate high-activity day)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', activity: { steps: 20_000, distance_m: 15_000 } },
+      })
+      expect(snap?.steps).toBe(20_000)
+    })
+
+    it('[opposing-clean] reference day passes cap unchanged (15,790 steps, 12,040m)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', activity: { steps: 15_790, distance_m: 12_040 } },
+      })
+      expect(snap?.steps).toBe(15_790)
+      expect(snap?.activity?.distanceM).toBe(12_040)
+    })
+
+    it('drops negative steps (non-negative invariant)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', activity: { steps: -500 } },
+      })
+      expect(snap?.steps).toBeUndefined()
+    })
+
+    // activeKcal
+    it('drops impossibly high activeKcal (above sane cap)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', activity: { active_kcal: 50_000, steps: 10_000, distance_m: 8_000 } },
+      })
+      expect(snap?.activity?.activeKcal).toBeUndefined()
+    })
+
+    it('keeps a plausible activeKcal (600 kcal, normal athletic day)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', activity: { active_kcal: 600, steps: 10_000, distance_m: 8_000 } },
+      })
+      expect(snap?.activity?.activeKcal).toBe(600)
+    })
+
+    // activity.distanceM
+    it('drops impossibly high activity distanceM (above sane cap)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', activity: { distance_m: 900_000, steps: 10_000 } },
+      })
+      expect(snap?.activity?.distanceM).toBeUndefined()
+    })
+
+    it('keeps a plausible activity distanceM (12,040m)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', activity: { distance_m: 12_040, steps: 15_790 } },
+      })
+      expect(snap?.activity?.distanceM).toBe(12_040)
+    })
+  })
 })

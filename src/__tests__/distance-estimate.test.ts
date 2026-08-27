@@ -13,6 +13,7 @@ import {
   DEFAULT_STRIDE_M,
   LOW_DISTANCE_RATIO,
   MIN_STEPS_FOR_ESTIMATE,
+  MAX_ESTIMATE_M,
 } from '../web/zepp/distance-estimate.js'
 import type { ZeppDailySnapshot } from '../web/zepp/contract.js'
 
@@ -123,6 +124,36 @@ describe('applyDistanceEstimate', () => {
       snap({ steps: 15790, activity: { distanceM: 456, distanceSlices: slices } }),
     )
     expect(out.activity?.distanceSlices).toEqual(slices)
+  })
+
+  // AC#5 (G4 defense-in-depth): the derived estimate must be capped at MAX_ESTIMATE_M
+  // even if the input step-count somehow slips past the input-cap (AC#1). This ensures
+  // a monotone-max lock never preserves a 100+km phantom distance.
+  describe('AC#5: derived estimate ceiling (defense-in-depth)', () => {
+    it('caps estimatedDistanceM at MAX_ESTIMATE_M when steps * stride exceeds it', () => {
+      // steps = 200,000 with 0.762 stride = 152,400m > MAX_ESTIMATE_M; must be clamped.
+      const out = applyDistanceEstimate(
+        snap({ steps: 200_000, activity: { distanceM: 0 } }),
+      )
+      expect(out.activity?.distanceSource).toBe('step_estimated')
+      expect(out.activity?.estimatedDistanceM).toBe(MAX_ESTIMATE_M)
+    })
+
+    it('does NOT cap a plausible estimate below MAX_ESTIMATE_M', () => {
+      // 15,790 steps * 0.762 = 12,032m -- well below the cap
+      const out = applyDistanceEstimate(
+        snap({ steps: 15790, activity: { distanceM: 456 } }),
+      )
+      expect(out.activity?.estimatedDistanceM).toBe(12032)
+      expect((out.activity?.estimatedDistanceM ?? 0)).toBeLessThan(MAX_ESTIMATE_M)
+    })
+
+    it('is idempotent with the cap: re-applying on a capped snapshot stays capped', () => {
+      const first = applyDistanceEstimate(snap({ steps: 200_000, activity: { distanceM: 0 } }))
+      expect(first.activity?.estimatedDistanceM).toBe(MAX_ESTIMATE_M)
+      const second = applyDistanceEstimate(first)
+      expect(second.activity?.estimatedDistanceM).toBe(MAX_ESTIMATE_M)
+    })
   })
 })
 
