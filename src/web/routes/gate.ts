@@ -192,7 +192,8 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
       }
     }
     const num = (v: unknown): number | null => (typeof v === 'number' && Number.isInteger(v) ? v : null)
-    const recordedBy = typeof body['recorded_by'] === 'string' ? (body['recorded_by'] as string) : (identity?.agentId ?? CI_RUNNER)
+    // recorded_by from authenticated identity (card 413a6b56 consistency, PR #552 follow-up).
+    const recordedBy = identity?.agentId ?? CI_RUNNER
     const note = typeof body['note'] === 'string' ? (body['note'] as string) : null
     const row = insertCiRun(
       getDb(),
@@ -247,6 +248,7 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
 
   // MG-AC7 -- Boss-level emergency override.
   if (path === '/api/gate/override' && method === 'POST') {
+    const { identity } = ctx
     const body = await parseJsonBody(req)
     if (!body) {
       json(res, { error: 'invalid JSON body' }, 400)
@@ -265,7 +267,8 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'reason is required' }, 400)
       return true
     }
-    const recordedBy = typeof body['recorded_by'] === 'string' ? (body['recorded_by'] as string) : 'unknown'
+    // recorded_by from authenticated identity (card 413a6b56 consistency, PR #552 follow-up).
+    const recordedBy = identity?.agentId ?? 'unknown'
     const { id } = insertOverride(getDb(), { pr_number, head_sha, reason, recorded_by: recordedBy }, nowEpoch())
     json(res, { id, active: true }, 201)
     return true
