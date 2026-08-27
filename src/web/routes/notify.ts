@@ -68,7 +68,12 @@ export async function tryHandleNotify(ctx: RouteContext): Promise<boolean> {
     if (!resp.ok) {
       const errBody = await resp.text().catch(() => '')
       logger.warn({ status: resp.status, chat_id, path: '/api/notify/telegram' }, 'Telegram API error')
-      json(res, { error: `Telegram API ${resp.status}`, detail: errBody.slice(0, 200) }, 502)
+      // 409 Conflict pass-through (FIX-001, 820753e1): callers (per-agent bot-probe)
+      // need to distinguish a bot-conflict 409 from other API errors to avoid
+      // silently treating a conflict as a generic upstream failure. Return 409
+      // verbatim so the per-agent probe can surface it; all other errors -> 502.
+      const httpStatus = resp.status === 409 ? 409 : 502
+      json(res, { error: `Telegram API ${resp.status}`, detail: errBody.slice(0, 200) }, httpStatus)
       return true
     }
     const result = await resp.json() as { ok: boolean; result?: { message_id: number } }
