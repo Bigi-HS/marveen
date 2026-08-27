@@ -612,6 +612,80 @@ def match_sensitive_file_print(command):
     return False
 
 
+# ── R5: git clean with force flag (card a0b78305) ────────────────────────────
+# `git clean -fdx` from the repo root deletes 327 paths (218 under agents/,
+# 109 credential/vault paths, 29 agent directories). This is functionally the
+# fleet `rm -rf` -- not the Unix `rm` command, but the outcome is identical.
+# Dry-run (`-n`/`--dry-run`) and interactive (`-i`/`--interactive`) are safe
+# and remain allowed. Only the FORCE flag enables actual deletion.
+
+
+def _git_flag_contains(token: str, char: str) -> bool:
+    """True if `token` is a short-form flag group containing `char`
+    (e.g. '-fdx' contains 'f'), or the long-form '--force' when char='f'."""
+    if char == "f" and token == "--force":
+        return True
+    if token.startswith("-") and not token.startswith("--") and char in token[1:]:
+        return True
+    return False
+
+
+def match_git_clean_force(command: str) -> bool:
+    """R5: `git clean` with a force flag (-f / --force).
+
+    Without `-f`, git refuses to clean (its own safety interlock). With `-f`,
+    a single invocation from the repo root can remove the entire fleet's state.
+    Dry-run (-n/--dry-run) and interactive (-i/--interactive) variants are
+    deliberately left allowed: they produce no side-effects.
+    """
+    for piece in _split_subcommands(command):
+        tokens = _tokenize(piece)
+        if tokens is _PARSE_FAIL or not tokens:
+            continue
+
+        word = _command_word(tokens)
+        if word != "git":
+            continue
+
+        # Find the git sub-command, skipping git's own options (e.g. -C <path>).
+        i = 1
+        while i < len(tokens) and tokens[i].startswith("-"):
+            # -C <path> and --git-dir=<path> carry an argument token
+            if tokens[i] in ("-C", "--git-dir", "--work-tree") and i + 1 < len(tokens):
+                i += 2
+            else:
+                i += 1
+        if i >= len(tokens):
+            continue
+        sub = tokens[i]
+        if sub != "clean":
+            continue
+
+        # Scan the flags after 'clean'.
+        has_force = False
+        has_safe = False
+        for tok in tokens[i + 1:]:
+            if not tok.startswith("-"):
+                continue  # path or other non-flag arg
+            if tok in ("-n", "--dry-run"):
+                has_safe = True
+            elif tok in ("-i", "--interactive"):
+                has_safe = True
+            elif _git_flag_contains(tok, "n") or _git_flag_contains(tok, "i"):
+                # combined -nd, -ndf etc. contain n/i alongside other flags
+                if not _git_flag_contains(tok, "f"):
+                    has_safe = True
+            if _git_flag_contains(tok, "f"):
+                has_force = True
+
+        # Dry-run/interactive wins over force: `git clean -fn` is safe (shows
+        # what WOULD be removed). Fail-safe: force without any safe modifier blocks.
+        if has_force and not has_safe:
+            return True
+
+    return False
+
+
 class Rule:
     __slots__ = ("name", "reason", "matcher")
 
@@ -651,6 +725,15 @@ RULES = [
         "credentials, dashboard signing secret, or OAuth token file) -- "
         "exfiltration / log-leak risk",
         match_sensitive_file_print,
+    ),
+    Rule(
+        "git-clean-force",
+        "git clean with a force flag (-f / --force) deletes all untracked files "
+        "and directories; from the repo root this removes agent stores, credentials, "
+        "and vault files -- functionally equivalent to fleet rm -rf (card a0b78305). "
+        "Use git clean -n (dry-run) or git clean -i (interactive) to preview, "
+        "or ask the operator to run the force-clean manually.",
+        match_git_clean_force,
     ),
 ]
 
