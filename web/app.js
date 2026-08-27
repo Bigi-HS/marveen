@@ -8239,8 +8239,14 @@ function trainingChipClass(status) {
   return 'todo-chip-grey' // rest or unset: never a failure color
 }
 
+// DASH-025 (86e578c6): empty/null status means "not yet logged today" -- distinct
+// from skipped (intentional) and from 0 (logged as zero). Returns a dimmer class.
 function trainingLabel(status) {
-  return status === 'done' ? 'Edzés kész' : status === 'skipped' ? 'Edzés kihagyva' : status === 'rest' ? 'Pihenőnap' : 'Edzés'
+  if (!status) return 'Még nincs'     // unset: not measured yet today
+  if (status === 'done') return 'Edzés kész'
+  if (status === 'skipped') return 'Edzés kihagyva'
+  if (status === 'rest') return 'Pihenőnap'
+  return 'Edzés'
 }
 
 // A task item with an instant-feedback checkbox (CO-AC1).
@@ -8287,15 +8293,24 @@ function renderFitnessItem(item) {
   const chip = document.createElement('span')
   chip.className = 'todo-chip'
   if (item.kind === 'metric') {
-    chip.classList.add(calorieChipClass(item.actual_val, item.target_val))
-    let txt = item.title || 'Kalória'
-    if (item.actual_val != null && item.target_val != null) {
-      const diff = Math.round(item.actual_val - item.target_val)
-      txt += `  ${diff >= 0 ? '+' : ''}${diff} kcal`
+    // DASH-025 (86e578c6): null actual_val = NOT measured (unknown), 0 = explicitly logged as zero.
+    // Show "Nem naplózott" in grey for null so it is visually distinct from 0 kcal.
+    if (item.actual_val == null || item.actual_val === '') {
+      chip.classList.add('todo-chip-grey')
+      chip.textContent = (item.title || 'Kalória') + '  Nem naplózott'
+    } else {
+      chip.classList.add(calorieChipClass(item.actual_val, item.target_val))
+      let txt = item.title || 'Kalória'
+      if (item.target_val != null) {
+        const diff = Math.round(item.actual_val - item.target_val)
+        txt += `  ${diff >= 0 ? '+' : ''}${diff} kcal`
+      } else {
+        txt += `  ${Math.round(item.actual_val)} kcal`
+      }
+      chip.textContent = txt
     }
-    chip.textContent = txt
   } else {
-    // habit (training)
+    // habit (training): empty/null status = "Még nincs" (DASH-025)
     chip.classList.add(trainingChipClass(item.status))
     chip.textContent = item.title && item.title !== 'training' ? item.title : trainingLabel(item.status)
   }
