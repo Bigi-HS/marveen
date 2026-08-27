@@ -60,14 +60,26 @@ function ownerEnvelope(owner: TodoOwner, nowBucket: number): OwnerEnvelope {
   return view
 }
 
+// Per-owner stale thresholds (OPS-139, b7ae67ee). null = no time-based
+// threshold (claudia/bond write only on state changes, not periodically).
+// Hibiki's fitness widget writes ~7h/cycle; 8h gives a small slack buffer.
+const OWNER_STALE_THRESHOLD_SECONDS: Record<TodoOwner, number | null> = {
+  claudia: null,
+  hibiki: 8 * 3600,  // 8 hours: fitness widget write cadence ~7h
+  bond: null,
+}
+
 export function buildTodosResponse(only?: TodoOwner): Record<string, unknown> {
   const nowBucket = dayBucket(nowEpochS())
   const owners = only ? [only] : OWNERS
   const out: Record<string, unknown> = {}
-  const freshness: Record<string, { last_write_ago_seconds: number | null }> = {}
+  const freshness: Record<string, { last_write_ago_seconds: number | null; threshold_seconds: number | null; stale: boolean }> = {}
   for (const o of owners) {
     out[o] = ownerEnvelope(o, nowBucket)
-    freshness[o] = { last_write_ago_seconds: todoLastWriteAgoSeconds(o) }
+    const ago = todoLastWriteAgoSeconds(o)
+    const threshold = OWNER_STALE_THRESHOLD_SECONDS[o]
+    const stale = threshold !== null && ago !== null && ago > threshold
+    freshness[o] = { last_write_ago_seconds: ago, threshold_seconds: threshold, stale }
   }
   out.freshness = freshness
   return out
