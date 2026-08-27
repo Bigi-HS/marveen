@@ -134,10 +134,11 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
       json(res, { error: "verdict must be one of 'approved', 'blocked'" }, 400)
       return true
     }
-    // recorded_by is advisory (see boundary note above): caller-supplied, no
-    // per-agent HTTP identity under the shared token. recorded_at is hard
-    // server-side.
-    const recordedBy = typeof body['recorded_by'] === 'string' ? (body['recorded_by'] as string) : 'unknown'
+    // recorded_by is derived from the authenticated token identity (card 413a6b56).
+    // Body-supplied values are ignored: the ledger must reflect who actually called
+    // the endpoint, not who the caller claims to be. Absent identity (unit tests or
+    // pre-auth paths) falls back to 'unknown'.
+    const recordedBy = identity?.agentId ?? 'unknown'
     const note = typeof body['note'] === 'string' ? (body['note'] as string) : null
     const row = insertApproval(
       getDb(),
