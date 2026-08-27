@@ -63,3 +63,37 @@ describe('file sink always creates its dir', () => {
     }
   })
 })
+
+// AC: path traversal guard on LOG_DIR (card a49270c0, gauge gate finding).
+// LOG_DIR is an env var that is used directly in path construction with mkdir:true.
+// A traversal sequence (../) in an injected LOG_DIR would cause the logger to create
+// and write to arbitrary directories. The guard rejects such paths.
+describe('LOG_DIR path traversal guard (a49270c0)', () => {
+  it('throws on LOG_DIR containing a ../ traversal sequence', () => {
+    expect(() => buildLoggerOptions({ LOG_DIR: '../../etc' } as NodeJS.ProcessEnv)).toThrow()
+  })
+
+  it('throws on LOG_DIR containing an embedded traversal (prefix/../../etc)', () => {
+    expect(() => buildLoggerOptions({ LOG_DIR: 'logs/../../etc' } as NodeJS.ProcessEnv)).toThrow()
+  })
+
+  it('throws on LOG_DIR with a leading ../ (relative escape)', () => {
+    expect(() => buildLoggerOptions({ LOG_DIR: '../sibling' } as NodeJS.ProcessEnv)).toThrow()
+  })
+
+  it('[FP-catch] accepts a plain relative path without traversal (logs)', () => {
+    expect(() => buildLoggerOptions({ LOG_DIR: 'logs' } as NodeJS.ProcessEnv)).not.toThrow()
+    const ts = targets({ LOG_DIR: 'logs' })
+    expect(fileTarget(ts, 'logs/server.log')).toBeDefined()
+  })
+
+  it('[FP-catch] accepts an absolute path without traversal (/var/log/noa)', () => {
+    expect(() => buildLoggerOptions({ LOG_DIR: '/var/log/noa' } as NodeJS.ProcessEnv)).not.toThrow()
+    const ts = targets({ LOG_DIR: '/var/log/noa' })
+    expect(fileTarget(ts, '/var/log/noa/server.log')).toBeDefined()
+  })
+
+  it('[FP-catch] accepts a path that contains the word "dotdot" without being a traversal', () => {
+    expect(() => buildLoggerOptions({ LOG_DIR: 'logs-dotdot-test' } as NodeJS.ProcessEnv)).not.toThrow()
+  })
+})

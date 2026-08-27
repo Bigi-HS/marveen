@@ -12,8 +12,18 @@ import pino from 'pino'
 // Rotation is intentionally NOT handled here: pino/file appends to a fixed path, so the
 // deploy side must rotate with logrotate `copytruncate` (or swap in pino-roll) -- a plain
 // rename would leave this stream writing to the moved inode.
+// Reject LOG_DIR values containing path traversal sequences (card a49270c0, gauge MEDIUM).
+// mkdir:true amplifies the risk: the logger will CREATE the directory, so a traversal
+// sequence injected via env could write server.log to an arbitrary location on the host.
+function validateLogDir(dir: string): string {
+  if (dir.includes('../') || dir.endsWith('..')) {
+    throw new Error(`LOG_DIR contains path traversal sequence: ${JSON.stringify(dir)}`)
+  }
+  return dir
+}
+
 export function buildLoggerOptions(env: NodeJS.ProcessEnv = process.env) {
-  const logDir = env.LOG_DIR ?? 'logs'
+  const logDir = validateLogDir(env.LOG_DIR ?? 'logs')
 
   const terminalTarget =
     env.NODE_ENV !== 'production'
