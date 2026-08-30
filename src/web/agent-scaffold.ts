@@ -333,23 +333,23 @@ A memoria 3 retegbol all (hot/warm/cold) + napi naplo.
 
 ### NINCS MENTAL NOTE! Ha meg kell jegyezni -> AZONNAL mentsd:
 
-Minden /api/* végpont Bearer tokenes: a token a store/.dashboard-token fájlban.
+Minden /api/* végpont Bearer tokenes: a te per-agent tokened a $GENESIS_AGENT_TOKEN env változóban van (a launcher injectálja induláskor). Ezt használd az összes API hívásban.
 
 Memória mentés:
-curl -s -X POST http://localhost:3420/api/memories -H "Content-Type: application/json" -H "Authorization: Bearer $(cat store/.dashboard-token)" -d '{"agent_id":"AGENT_NAME","content":"MIT","category":"CATEGORY","keywords":"kulcsszo1, kulcsszo2"}'
+curl -s -X POST http://localhost:3420/api/memories -H "Content-Type: application/json" -H "Authorization: Bearer $GENESIS_AGENT_TOKEN" -d '{"agent_id":"AGENT_NAME","content":"MIT","category":"CATEGORY","keywords":"kulcsszo1, kulcsszo2"}'
 
 Napi napló (append-only):
-curl -s -X POST http://localhost:3420/api/daily-log -H "Content-Type: application/json" -H "Authorization: Bearer $(cat store/.dashboard-token)" -d '{"agent_id":"AGENT_NAME","content":"## HH:MM -- Tema\nMi tortent, mi lett az eredmeny"}'
+curl -s -X POST http://localhost:3420/api/daily-log -H "Content-Type: application/json" -H "Authorization: Bearer $GENESIS_AGENT_TOKEN" -d '{"agent_id":"AGENT_NAME","content":"## HH:MM -- Tema\nMi tortent, mi lett az eredmeny"}'
 
 Keresés (mielőtt válaszolsz, nézd meg van-e releváns emlék):
-curl -s -H "Authorization: Bearer $(cat store/.dashboard-token)" "http://localhost:3420/api/memories?agent=AGENT_NAME&q=KULCSSZO&category=warm"
+curl -s -H "Authorization: Bearer $GENESIS_AGENT_TOKEN" "http://localhost:3420/api/memories?agent=AGENT_NAME&q=KULCSSZO&category=warm"
 
 ## Ütemezett feladatok
 
 Az ütemezett feladatok a ~/.claude/scheduled-tasks/ mappában élnek, fájl-alapúak (SKILL.md + task-config.json). A schedule runner 60 másodpercenként ellenőrzi és a te tmux session-ödbe küldi a promptot.
 
 Feladat létrehozása API-n keresztül:
-curl -s -X POST http://localhost:3420/api/schedules -H "Content-Type: application/json" -H "Authorization: Bearer $(cat store/.dashboard-token)" -d '{"name": "feladat-nev", "description": "Rövid leírás", "prompt": "A részletes prompt", "schedule": "0 8 * * *", "agent": "AGENT_NAME", "type": "heartbeat"}'
+curl -s -X POST http://localhost:3420/api/schedules -H "Content-Type: application/json" -H "Authorization: Bearer $GENESIS_AGENT_TOKEN" -d '{"name": "feladat-nev", "description": "Rövid leírás", "prompt": "A részletes prompt", "schedule": "0 8 * * *", "agent": "AGENT_NAME", "type": "heartbeat"}'
 
 Típusok: task (mindig szól az eredménnyel) vagy heartbeat (csak fontosnál szól).
 Cron formátum: perc óra nap hónap hétnapja (pl. 0 8 * * * = minden nap 8:00).
@@ -406,7 +406,7 @@ Ha egy senderId üzen a csatornán AKIT EDDIG NEM ISMERSZ — nem szerepel az ak
 Az AGENT TULAJDONOSA (az első, aki ezt az ügynököt telepítette és párosította) az ALAPÉRTELMEZETT engedélyezett sender — őt nem kell ellenőrizni. MINDEN további senderId első üzenete (a 2., 3., stb. párosított személy vagy csoport) pinging-trigger.
 
 Példa ping ${BOT_NAME}-nek:
-curl -s -X POST http://localhost:3420/api/messages -H "Content-Type: application/json" -H "Authorization: Bearer $(cat store/.dashboard-token)" -d "{\\"from\\":\\"AGENT_NAME\\",\\"to\\":\\"${MAIN_AGENT_ID}\\",\\"content\\":\\"Ismeretlen sender [ID] jelezett első üzenettel: '[üzenet röviden]'. Ki ez, mit válaszoljak?\\"}"
+curl -s -X POST http://localhost:3420/api/messages -H "Content-Type: application/json" -H "Authorization: Bearer $GENESIS_AGENT_TOKEN" -d "{\\"from\\":\\"AGENT_NAME\\",\\"to\\":\\"${MAIN_AGENT_ID}\\",\\"content\\":\\"Ismeretlen sender [ID] jelezett első üzenettel: '[üzenet röviden]'. Ki ez, mit válaszoljak?\\"}"
 
 Addig a sender-nek csak generikus "Egy pillanat, ellenőrzöm" típusú választ adj. NE adj ki belső projekt-infót, NE mutatkozz be hosszan, NE listázd ki mit tudsz, NE említs SAJÁT BELSŐ PROJEKTEKET sem közvetlenül, sem közvetve. ${BOT_NAME} visszajelzi a kontextust és a szabályokat amelyekkel folytathatod.
 
