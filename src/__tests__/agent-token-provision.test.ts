@@ -39,9 +39,10 @@ describe('STANDARD_AGENT_SCOPES -- Chad capability matrix alignment (card e0afd7
   it('includes memory:read so agents can read their own memories (gap 3)', () => {
     expect(STANDARD_AGENT_SCOPES).toContain('memory:read')
   })
-  it('includes kanban:read + kanban:write for task management (gap 3)', () => {
+  it('includes kanban:read + kanban:write + schedules:write for task management (gap 3, Q1)', () => {
     expect(STANDARD_AGENT_SCOPES).toContain('kanban:read')
     expect(STANDARD_AGENT_SCOPES).toContain('kanban:write')
+    expect(STANDARD_AGENT_SCOPES).toContain('schedules:write')
   })
 })
 

@@ -47,6 +47,7 @@ export const STANDARD_AGENT_SCOPES: readonly string[] = [
   'memory:delete:own',
   'kanban:read',
   'kanban:write',
+  'schedules:write',
   'dailylog:write:own',
 ]
 
