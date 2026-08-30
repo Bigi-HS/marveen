@@ -4,9 +4,13 @@ import { mkdirSync, writeFileSync, rmSync, symlinkSync, statSync, lstatSync, rea
 import { join } from 'node:path'
 import {
   provisionAgentToken,
+  refreshTokenIfNeeded,
+  needsRefresh,
+  readTokenFileExpiry,
   scopesForAgent,
   STANDARD_AGENT_SCOPES,
   DEFAULT_AGENT_TOKEN_TTL_MS,
+  TOKEN_REFRESH_THRESHOLD_MS,
 } from '../web/agent-token-provision.js'
 import { migrateAgentTokenTable, resolveAgentIdentity, ADMIN_SCOPE } from '../web/agent-token-registry.js'
 
@@ -151,5 +155,103 @@ describe('provisionAgentToken', () => {
 
     // The victim's admin token file is untouched.
     expect(readFileSync(victimToken, 'utf-8')).toBe('MARVEEN-ADMIN-TOKEN\n9999999999\n')
+  })
+})
+
+describe('needsRefresh (card 02da7bb2)', () => {
+  it('returns true when token is already expired', () => {
+    expect(needsRefresh(NOW - 1, { nowMs: NOW })).toBe(true)
+  })
+
+  it('returns true when token expires exactly at the threshold boundary', () => {
+    expect(needsRefresh(NOW + TOKEN_REFRESH_THRESHOLD_MS, { nowMs: NOW })).toBe(true)
+  })
+
+  it('returns true when token is within the threshold window', () => {
+    expect(needsRefresh(NOW + TOKEN_REFRESH_THRESHOLD_MS - 1, { nowMs: NOW })).toBe(true)
+  })
+
+  it('returns false when token has more time remaining than the threshold', () => {
+    expect(needsRefresh(NOW + TOKEN_REFRESH_THRESHOLD_MS + 1, { nowMs: NOW })).toBe(false)
+  })
+
+  it('returns false for non-expiring tokens (null expiry)', () => {
+    expect(needsRefresh(null, { nowMs: NOW })).toBe(false)
+  })
+
+  it('respects a custom threshold', () => {
+    const oneHourMs = 60 * 60 * 1000
+    expect(needsRefresh(NOW + oneHourMs - 1, { nowMs: NOW, thresholdMs: oneHourMs })).toBe(true)
+    expect(needsRefresh(NOW + oneHourMs + 1, { nowMs: NOW, thresholdMs: oneHourMs })).toBe(false)
+  })
+})
+
+describe('readTokenFileExpiry (card 02da7bb2)', () => {
+  it('reads the epoch-seconds expiry from line 2 and converts to ms', () => {
+    const file = join(TEST_DIR, 'agents', 'dave', '.genesis-token')
+    provisionAgentToken(db, 'dave', file, { now: NOW })
+    const expiresAtMs = readTokenFileExpiry(file)
+    expect(expiresAtMs).toBe(Math.floor((NOW + DEFAULT_AGENT_TOKEN_TTL_MS) / 1000) * 1000)
+  })
+
+  it('returns null when the file does not exist', () => {
+    expect(readTokenFileExpiry(join(TEST_DIR, 'nonexistent'))).toBeNull()
+  })
+
+  it('returns null when line 2 is empty (non-expiring token)', () => {
+    const file = join(TEST_DIR, 'noexpiry')
+    writeFileSync(file, 'a'.repeat(64) + '\n\n')
+    expect(readTokenFileExpiry(file)).toBeNull()
+  })
+})
+
+describe('refreshTokenIfNeeded (card 02da7bb2)', () => {
+  it('rotates an expired token: new token resolves, old one revoked', () => {
+    const file = join(TEST_DIR, 'agents', 'dave', '.genesis-token')
+    // Provision a token that is already expired at NOW
+    provisionAgentToken(db, 'dave', file, { now: NOW - DEFAULT_AGENT_TOKEN_TTL_MS - 1, ttlMs: DEFAULT_AGENT_TOKEN_TTL_MS })
+    const oldToken = readToken(file).token
+    expect(resolveAgentIdentity(db, oldToken, SHARED, NOW).kind).toBe('expired')
+
+    const { refreshed } = refreshTokenIfNeeded(db, 'dave', file, { now: NOW })
+
+    expect(refreshed).toBe(true)
+    const newToken = readToken(file).token
+    expect(newToken).not.toBe(oldToken)
+    expect(resolveAgentIdentity(db, newToken, SHARED, NOW).kind).toBe('ok')
+    expect(resolveAgentIdentity(db, oldToken, SHARED, NOW).kind).toBe('unknown')
+  })
+
+  it('rotates a token within the refresh threshold (proactive rotation)', () => {
+    const file = join(TEST_DIR, 'agents', 'thor', '.genesis-token')
+    // Provision a token expiring in 1h (within the 2h threshold)
+    const oneHourMs = 60 * 60 * 1000
+    provisionAgentToken(db, 'thor', file, { now: NOW - DEFAULT_AGENT_TOKEN_TTL_MS + oneHourMs, ttlMs: DEFAULT_AGENT_TOKEN_TTL_MS })
+    const oldToken = readToken(file).token
+    expect(resolveAgentIdentity(db, oldToken, SHARED, NOW).kind).toBe('ok') // still valid
+
+    const { refreshed } = refreshTokenIfNeeded(db, 'thor', file, { now: NOW })
+
+    expect(refreshed).toBe(true)
+    const newToken = readToken(file).token
+    expect(newToken).not.toBe(oldToken)
+    expect(resolveAgentIdentity(db, newToken, SHARED, NOW).kind).toBe('ok')
+  })
+
+  it('does not rotate when token has comfortable time remaining', () => {
+    const file = join(TEST_DIR, 'agents', 'chad', '.genesis-token')
+    provisionAgentToken(db, 'chad', file, { now: NOW, ttlMs: DEFAULT_AGENT_TOKEN_TTL_MS })
+    const oldToken = readToken(file).token
+
+    const { refreshed } = refreshTokenIfNeeded(db, 'chad', file, { now: NOW })
+
+    expect(refreshed).toBe(false)
+    expect(readToken(file).token).toBe(oldToken)
+  })
+
+  it('no-ops when the token file is absent (agent not yet launched)', () => {
+    const file = join(TEST_DIR, 'agents', 'ghost', '.genesis-token')
+    const { refreshed } = refreshTokenIfNeeded(db, 'ghost', file, { now: NOW })
+    expect(refreshed).toBe(false)
   })
 })

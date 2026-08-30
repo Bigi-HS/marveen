@@ -22,7 +22,7 @@
 // write access to the fleet root, which already grants direct token overwrite --
 // out of the Tier-1 single-user threat model (design §5.5 note).
 
-import { mkdirSync, lstatSync } from 'node:fs'
+import { mkdirSync, lstatSync, existsSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { mintAgentToken, revokeAgentTokens, ADMIN_SCOPE } from './agent-token-registry.js'
@@ -32,6 +32,13 @@ import type Database from 'better-sqlite3'
 // token, re-minted on the normal daily relaunch cycle. Overridable so the
 // rollout can tune it (open decision §8.5).
 export const DEFAULT_AGENT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000
+
+// Proactive rotation window (card 02da7bb2): tokens within this window of their
+// expiry are rotated by refreshTokenIfNeeded, so a running agent's file is
+// updated before the token the server holds becomes stale. 2h: large enough to
+// survive a supervisor restart + cold boot gap; small enough not to extend the
+// blast-radius window unnecessarily.
+export const TOKEN_REFRESH_THRESHOLD_MS = 2 * 60 * 60 * 1000
 
 // The baseline capability set every agent gets (design §5.3). Coarse and few --
 // not a full RBAC.
@@ -115,4 +122,57 @@ export function provisionAgentToken(
   }
   atomicWriteFileSync(tokenFile, serializeTokenFile(token, expiresAt), { mode: 0o600 })
   return { tokenSha256, expiresAt, scopes }
+}
+
+// Read the expiry epoch from line 2 of the on-disk token file and return it in
+// milliseconds (matching the DB's expires_at unit). Returns null when the file
+// is absent, unreadable, or has an empty expiry line (non-expiring token).
+// Never reads or returns the raw token value -- only the metadata line.
+export function readTokenFileExpiry(tokenFile: string): number | null {
+  if (!existsSync(tokenFile)) return null
+  try {
+    const [, expiryLine] = readFileSync(tokenFile, 'utf-8').split('\n')
+    const s = expiryLine?.trim()
+    if (!s) return null
+    const n = Number(s)
+    return Number.isFinite(n) && n > 0 ? n * 1000 : null // file stores seconds; convert to ms
+  } catch {
+    return null
+  }
+}
+
+// Returns true when a token needs proactive rotation: already expired OR within
+// TOKEN_REFRESH_THRESHOLD_MS of its expiry. Non-expiring tokens (null) never
+// need refresh. Callers supply nowMs to keep the function pure / testable.
+export function needsRefresh(
+  expiresAtMs: number | null,
+  opts: { nowMs?: number; thresholdMs?: number } = {},
+): boolean {
+  if (expiresAtMs == null) return false
+  const now = opts.nowMs ?? Date.now()
+  const threshold = opts.thresholdMs ?? TOKEN_REFRESH_THRESHOLD_MS
+  return now >= expiresAtMs - threshold
+}
+
+export interface RefreshResult {
+  refreshed: boolean
+}
+
+// Rotate the token iff the on-disk token file indicates the current token is
+// expired or within the refresh threshold. No-ops when the file is absent
+// (agent never launched) or when the token is still healthy. Callers that need
+// full ProvisionResult on a refresh can call provisionAgentToken directly.
+export function refreshTokenIfNeeded(
+  db: Database.Database,
+  agentId: string,
+  tokenFile: string,
+  opts: ProvisionOptions & { thresholdMs?: number } = {},
+): RefreshResult {
+  const expiresAtMs = readTokenFileExpiry(tokenFile)
+  const now = opts.now ?? Date.now()
+  if (!needsRefresh(expiresAtMs, { nowMs: now, thresholdMs: opts.thresholdMs })) {
+    return { refreshed: false }
+  }
+  provisionAgentToken(db, agentId, tokenFile, { now, ttlMs: opts.ttlMs })
+  return { refreshed: true }
 }
