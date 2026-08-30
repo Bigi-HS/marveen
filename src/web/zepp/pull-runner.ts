@@ -9,6 +9,8 @@
 import type { ZeppCreds, ZeppTokens } from './auth.js'
 import type { ZeppSleep, ZeppVitals, ZeppWorkout, ZeppDailySnapshot, ZeppPullStatus } from './contract.js'
 import { checkSnapshot, type HealthGuardAlert } from './health-guard.js'
+import { writeValidatedSnapshot } from './validated-ingest.js'
+import type { PlausibilityViolation } from './health-plausibility.js'
 
 export interface PullRunnerDeps {
   readCreds: () => Promise<ZeppCreds>
@@ -17,6 +19,9 @@ export interface PullRunnerDeps {
   pullVitals: (date: string, token: string) => Promise<ZeppVitals | null>
   pullWorkouts: (date: string, token: string) => Promise<ZeppWorkout[]>
   writeSnapshot: (snap: ZeppDailySnapshot) => void
+  // Persist the cross-field anomaly flag for the pulled day (WELL-027 WS1). Called with the
+  // suspect-severity violations on every write; an empty list resolves an open flag.
+  recordAnomaly: (date: string, suspect: PlausibilityViolation[]) => void
   onAlerts: (alerts: HealthGuardAlert[]) => void
   nowIso: () => string
 }
@@ -88,8 +93,13 @@ export async function runZeppPull(date: string, deps: PullRunnerDeps): Promise<Z
     ...(error !== undefined && { error }),
   }
 
-  // Always write -- a failed pull must be visible (silent-guard discipline).
-  deps.writeSnapshot(snapshot)
+  // Always write -- a failed pull must be visible (silent-guard discipline). Route through the
+  // shared validated funnel so the pull path persists an anomaly flag too (WELL-027 WS1), not
+  // just the log-only alert below.
+  writeValidatedSnapshot(snapshot, {
+    writeSnapshot: deps.writeSnapshot,
+    recordAnomaly: deps.recordAnomaly,
+  })
 
   const alerts = checkSnapshot(snapshot, new Date(pulledAt).getTime())
   if (alerts.length > 0) {
@@ -104,6 +114,7 @@ import { readZeppCreds, DEFAULT_CREDS_PATH } from './creds-reader.js'
 import { zeppLogin, DEFAULT_AUTH_CONFIG } from './auth.js'
 import { pullSleep, pullVitals, pullWorkouts, DEFAULT_API_BASE_URL } from './puller.js'
 import { defaultZeppStore } from './ingest-store.js'
+import { defaultZeppAnomalyStore } from './anomaly-store.js'
 import { logger } from '../../logger.js'
 
 export function makeDefaultPullRunnerDeps(): PullRunnerDeps {
@@ -114,6 +125,9 @@ export function makeDefaultPullRunnerDeps(): PullRunnerDeps {
     pullVitals: (date, token) => pullVitals(date, { apiBaseUrl: DEFAULT_API_BASE_URL, accessToken: token, fetch: globalThis.fetch }),
     pullWorkouts: (date, token) => pullWorkouts(date, { apiBaseUrl: DEFAULT_API_BASE_URL, accessToken: token, fetch: globalThis.fetch }),
     writeSnapshot: (snap) => defaultZeppStore.write(snap),
+    recordAnomaly: (date, suspect) => {
+      defaultZeppAnomalyStore.record(date, suspect, new Date().toISOString())
+    },
     onAlerts: (alerts) => {
       for (const a of alerts) {
         logger.warn({ alert: a }, `zepp health-guard: ${a.type} on ${a.date} -- ${a.message}`)

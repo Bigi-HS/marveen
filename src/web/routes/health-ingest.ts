@@ -19,8 +19,9 @@ import { mergeDailySnapshot } from '../zepp/snapshot-merge.js'
 import { applyDistanceEstimate } from '../zepp/distance-estimate.js'
 import { defaultZeppAnomalyStore } from '../zepp/anomaly-store.js'
 import { readIngestToken } from '../zepp/ingest-secret.js'
+import { writeValidatedSnapshot } from '../zepp/validated-ingest.js'
 import {
-  validateHealthPlausibility, hasSuspectViolation, type PlausibilityViolation,
+  hasSuspectViolation, type PlausibilityViolation,
 } from '../zepp/health-plausibility.js'
 import {
   validateDataDate, hasDataDateViolation, type DataDateViolation,
@@ -458,18 +459,21 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
     // and re-runs each push so a later real distance drops a stale estimate. Never overwrites
     // the measured distanceM.
     const finalized = applyDistanceEstimate(merged)
-    deps.writeSnapshot(finalized)
 
     // Numeric plausibility guard (log-only rollout, card 75337cdc). Run on the finalized day
     // so activity+steps are judged together. Detection only -- status is not downgraded.
-    const violations = validateHealthPlausibility(finalized)
+    // Write + validate + persist the anomaly flag go through the shared validated funnel
+    // (WELL-027 WS1) so the push and pull paths cannot drift on which writes get flagged.
+    // G3 (card 44783957 P0): the anomaly flag is persisted/resolved on EVERY push so the
+    // suspect signal reaches a monitor (not a silent log line), and a later clean push clears
+    // an open flag.
+    const violations = writeValidatedSnapshot(finalized, {
+      writeSnapshot: deps.writeSnapshot,
+      recordAnomaly: (date, suspect) => deps.recordAnomaly?.(date, suspect),
+    })
     if (hasSuspectViolation(violations)) {
       deps.onPlausibility?.(finalized, violations)
     }
-    // G3 (card 44783957 P0): persist/resolve the cross-field anomaly flag on EVERY push so the
-    // suspect signal is surfaced to a monitor (not a silent log line), and a later clean push
-    // clears an open flag. Passes only the suspect-severity violations.
-    deps.recordAnomaly?.(finalized.date, violations.filter((v) => v.severity === 'suspect'))
 
     // Data-date guard (log-only, card 75337cdc Q2). Catches a producer that filed a record
     // under the wrong day (the F1 mis-filing class). Detection only -- no status change.
