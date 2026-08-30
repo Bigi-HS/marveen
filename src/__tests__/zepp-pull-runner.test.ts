@@ -14,6 +14,7 @@ function makeDeps(over: Partial<PullRunnerDeps> = {}): PullRunnerDeps {
     pullVitals: vi.fn(async () => VITALS),
     pullWorkouts: vi.fn(async () => WORKOUTS),
     writeSnapshot: vi.fn(),
+    recordAnomaly: vi.fn(),
     onAlerts: vi.fn(),
     nowIso: () => '2026-08-22T10:00:00.000Z',
     ...over,
@@ -76,5 +77,35 @@ describe('runZeppPull', () => {
     await runZeppPull('2026-08-22', deps)
     expect(deps.writeSnapshot).toHaveBeenCalledTimes(1)
     expect((deps.writeSnapshot as any).mock.calls[0][0].status).toBe('auth_fail')
+  })
+
+  // WELL-027 WS1: the pull path must persist an anomaly flag, not just log it. Rule 4
+  // (heart-rate sanity) fires on vitals -- a field the pull writes -- so an implausible
+  // vitals pull is the reproducer for the guard-only-as-good-as-its-wiring gap.
+  it('persists a suspect anomaly when pulled vitals are implausible (restingHr >= hrAvg)', async () => {
+    const badVitals: ZeppVitals = { restingHr: 80, hrAvg: 74, hrMax: 150 }
+    const deps = makeDeps({ pullVitals: vi.fn(async () => badVitals) })
+    await runZeppPull('2026-08-25', deps)
+    expect(deps.recordAnomaly).toHaveBeenCalledTimes(1)
+    const [date, suspect] = (deps.recordAnomaly as any).mock.calls[0]
+    expect(date).toBe('2026-08-25')
+    expect(suspect.some((v: any) => v.rule === 'heart rate ordering')).toBe(true)
+    expect(suspect.every((v: any) => v.severity === 'suspect')).toBe(true)
+  })
+
+  it('records an empty anomaly list on a clean pull so an open flag can resolve', async () => {
+    const deps = makeDeps()
+    await runZeppPull('2026-08-22', deps)
+    expect(deps.recordAnomaly).toHaveBeenCalledWith('2026-08-22', [])
+  })
+
+  it('writes the snapshot before recording its anomaly (durability ordering)', async () => {
+    const order: string[] = []
+    const deps = makeDeps({
+      writeSnapshot: vi.fn(() => { order.push('write') }),
+      recordAnomaly: vi.fn(() => { order.push('record') }),
+    })
+    await runZeppPull('2026-08-22', deps)
+    expect(order).toEqual(['write', 'record'])
   })
 })
