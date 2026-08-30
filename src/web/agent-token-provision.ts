@@ -35,19 +35,37 @@ export const DEFAULT_AGENT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000
 
 // The baseline capability set every agent gets (design §5.3). Coarse and few --
 // not a full RBAC.
+//
+// Chad capability matrix audit (card e0afd7e9, 2026-08-30) aligned these names
+// and added missing read/write scopes that were in the matrix but absent here:
+//   - 'messages:send' (was 'message:send') -- exact-match requires plural form
+//   - 'memory:read', 'kanban:read', 'kanban:write' -- agents need read/write access
 export const STANDARD_AGENT_SCOPES: readonly string[] = [
-  'message:send',
+  'messages:send',
+  'memory:read',
   'memory:write:own',
   'memory:delete:own',
+  'kanban:read',
+  'kanban:write',
   'dailylog:write:own',
 ]
 
 // Scope assignment per agent (design §5.3). marveen is the operator/admin;
-// applegate is the memory curator (cross-agent delete). Everyone else gets the
-// owner-bound standard set.
+// applegate is the memory curator (cross-agent delete).
+//
+// Chad capability matrix audit (card e0afd7e9, 2026-08-30):
+//   - chad/thor: + 'gate:approve' (gap 2)
+//   - dave:      + 'gate:approve', 'gate:ci', 'agents:lifecycle' (gaps 2, 4)
+//
+// LOCKED DECISION (operator): gate:approve enforcement = scope AND recusal
+// (both checks must pass). Recusal is orthogonal -- scope alone does not
+// prevent self-approval. Phase B route enforcement must check both.
 export function scopesForAgent(agentId: string): string[] {
   if (agentId === 'marveen') return [ADMIN_SCOPE]
   if (agentId === 'applegate') return [...STANDARD_AGENT_SCOPES, 'memory:delete:any']
+  if (agentId === 'chad') return [...STANDARD_AGENT_SCOPES, 'gate:approve']
+  if (agentId === 'thor') return [...STANDARD_AGENT_SCOPES, 'gate:approve']
+  if (agentId === 'dave') return [...STANDARD_AGENT_SCOPES, 'gate:approve', 'gate:ci', 'agents:lifecycle']
   return [...STANDARD_AGENT_SCOPES]
 }
 
