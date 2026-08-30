@@ -13,7 +13,7 @@ import {
 import { join } from 'node:path'
 import { execFileSync, execSync } from 'node:child_process'
 import type { Server as HttpServer } from 'node:http'
-import { STORE_DIR, PID_FILENAME, WEB_PORT, MAIN_AGENT_ID, RESPAWN_ENABLED } from './config.js'
+import { PROJECT_ROOT, STORE_DIR, PID_FILENAME, WEB_PORT, MAIN_AGENT_ID, RESPAWN_ENABLED } from './config.js'
 import { initDatabase, deleteOldMessages, deleteOldGuardEvents } from './db.js'
 import { initCodetreeDatabase } from './web/codetree-db.js'
 import { startMessageRetentionSweep } from './web/message-retention.js'
@@ -28,6 +28,7 @@ import { startInviteMonitor, stopInviteMonitor } from './web/channel-invites.js'
 import { ensureDiscordChannelGroup } from './web/discord-group-bootstrap.js'
 import { startChannelRequestWatcher, stopChannelRequestWatcher } from './web/channel-request-watcher.js'
 import { AGENTS_BASE_DIR } from './web/agent-config.js'
+import { syncDeployedTip } from './deployed-tip.js'
 import {
   acquirePortLock,
   acquirePidfileLock,
@@ -455,6 +456,8 @@ async function main(): Promise<void> {
   }
 
   await acquireLock()
+
+  syncDeployedTip(PROJECT_ROOT)
 
   // Database
   initDatabase()
