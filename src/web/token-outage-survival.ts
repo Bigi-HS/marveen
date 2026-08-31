@@ -29,8 +29,15 @@ const SURVIVAL_STATE_PATH = join(STORE, 'token-outage-survival-state.json')
 const OUTAGE_STATE_PATH = join(STORE, 'token-outage-state.json')
 const ALERT_CHAT_ID = process.env.WATCHDOG_ALERT_CHAT_ID ?? '8643929442'
 
-// Minimum gap between repeat health-issue alerts to avoid 30s spam.
-const HEALTH_ALERT_THROTTLE_MS = 5 * 60 * 1000
+// Escalate-once-then-backoff for a PERSISTENT health issue. The first alert for a
+// new issue-set fires immediately; each subsequent repeat of the SAME set waits an
+// exponentially growing interval (base * factor^(n-1)) capped at MAX. A genuinely
+// new issue resets the backoff and re-alerts at once. This replaces the old fixed
+// 5-min throttle, whose `|| throttleExpired` re-fired the same stuck issue every
+// 5 min for the whole outage (incident 2026-08-22: ~100x spam over 9h).
+const HEALTH_ALERT_BASE_MS = 5 * 60 * 1000
+const HEALTH_ALERT_BACKOFF_FACTOR = 3
+const HEALTH_ALERT_MAX_MS = 2 * 60 * 60 * 1000
 
 // Key tmux sessions to probe during an outage.
 const KEY_SESSIONS = ['marveen', 'marveen-channels', 'agent-dave', 'agent-thor']
@@ -46,6 +53,9 @@ export interface SurvivalState {
   notifiedTaskIds: string[]
   lastHealthIssues: string[]
   lastHealthAlertTs: number
+  // Number of consecutive alerts already sent for the CURRENT issue-set; drives the
+  // backoff interval. Optional for backward-compat with pre-migration state files.
+  healthAlertCount?: number
 }
 
 export interface SurvivalResult {
@@ -68,13 +78,21 @@ export interface SurvivalDeps {
 // ---- pure helpers ---------------------------------------------------------
 
 function emptyState(): SurvivalState {
-  return { notifiedTaskIds: [], lastHealthIssues: [], lastHealthAlertTs: 0 }
+  return { notifiedTaskIds: [], lastHealthIssues: [], lastHealthAlertTs: 0, healthAlertCount: 0 }
 }
 
 // Returns true only when issues contain something not already in lastKnown.
 export function hasNewIssues(issues: string[], lastKnown: string[]): boolean {
   const known = new Set(lastKnown)
   return issues.some((i) => !known.has(i))
+}
+
+// Interval to wait before the next repeat alert, given how many alerts have already
+// been sent for the current issue-set. base * factor^(n-1), capped at MAX.
+export function healthAlertBackoffMs(alertsSent: number): number {
+  const n = Math.max(1, alertsSent)
+  const ms = HEALTH_ALERT_BASE_MS * Math.pow(HEALTH_ALERT_BACKOFF_FACTOR, n - 1)
+  return Math.min(ms, HEALTH_ALERT_MAX_MS)
 }
 
 // ---- default IO -----------------------------------------------------------
@@ -202,7 +220,12 @@ export async function runSurvivalCycle(deps: SurvivalDeps = DEFAULT_DEPS): Promi
     // Not in outage: clear survival state so next outage starts fresh.
     const state = deps.readState()
     if (state.notifiedTaskIds.length > 0) {
-      deps.writeState({ ...emptyState(), lastHealthIssues: state.lastHealthIssues, lastHealthAlertTs: state.lastHealthAlertTs })
+      deps.writeState({
+        ...emptyState(),
+        lastHealthIssues: state.lastHealthIssues,
+        lastHealthAlertTs: state.lastHealthAlertTs,
+        healthAlertCount: state.healthAlertCount ?? 0,
+      })
     }
     return { skipped: true, healthIssues: [], healthAlertSent: false, remindersDelivered: 0 }
   }
@@ -214,19 +237,21 @@ export async function runSurvivalCycle(deps: SurvivalDeps = DEFAULT_DEPS): Promi
 
   // --- health check ---
   const issues = await Promise.resolve(deps.checkHealth())
-  const throttleExpired = now - state.lastHealthAlertTs >= HEALTH_ALERT_THROTTLE_MS
-  if (
-    issues.length > 0 &&
-    (hasNewIssues(issues, state.lastHealthIssues) || throttleExpired)
-  ) {
+  const issuesChanged = hasNewIssues(issues, state.lastHealthIssues)
+  const alertsSent = state.healthAlertCount ?? 0
+  const backoffExpired = now - state.lastHealthAlertTs >= healthAlertBackoffMs(alertsSent)
+  if (issues.length > 0 && (issuesChanged || backoffExpired)) {
     const text = `[Health-check token-outage] Problemak:\n${issues.map((i) => `- ${i}`).join('\n')}`
     healthAlertSent = await deps.sendAlert(text).catch(() => false)
     if (healthAlertSent) {
       state.lastHealthIssues = issues
       state.lastHealthAlertTs = now
+      // A new issue restarts the backoff; a repeat of the same set advances it.
+      state.healthAlertCount = issuesChanged ? 1 : alertsSent + 1
     }
   } else if (issues.length === 0) {
     state.lastHealthIssues = []
+    state.healthAlertCount = 0
   }
 
   // --- reminder fire ---

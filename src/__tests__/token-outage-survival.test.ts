@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   runSurvivalCycle,
   hasNewIssues,
+  healthAlertBackoffMs,
   type SurvivalDeps,
   type SurvivalState,
   type OverdueTask,
@@ -124,6 +125,89 @@ describe('runSurvivalCycle -- health issues', () => {
     await runSurvivalCycle(deps)
     expect(deps._state().lastHealthIssues).toEqual(['session:thor:down'])
     expect(deps._state().lastHealthAlertTs).toBe(NOW)
+  })
+})
+
+// ---- healthAlertBackoffMs ----
+
+describe('healthAlertBackoffMs', () => {
+  it('returns base (5min) for the first repeat (1 alert sent)', () => {
+    expect(healthAlertBackoffMs(1)).toBe(5 * 60 * 1000)
+  })
+
+  it('treats 0/undefined-ish counts as the base interval', () => {
+    expect(healthAlertBackoffMs(0)).toBe(5 * 60 * 1000)
+  })
+
+  it('grows exponentially: 5min -> 15min -> 45min', () => {
+    expect(healthAlertBackoffMs(2)).toBe(15 * 60 * 1000)
+    expect(healthAlertBackoffMs(3)).toBe(45 * 60 * 1000)
+  })
+
+  it('caps at 2h regardless of how many alerts were sent', () => {
+    expect(healthAlertBackoffMs(4)).toBe(2 * 60 * 60 * 1000)
+    expect(healthAlertBackoffMs(20)).toBe(2 * 60 * 60 * 1000)
+  })
+})
+
+describe('runSurvivalCycle -- health alert escalate-once-then-backoff', () => {
+  it('sets healthAlertCount to 1 on the first alert', async () => {
+    const deps = makeDeps({ limited: true, issues: ['dashboard:down'] })
+    await runSurvivalCycle(deps)
+    expect(deps._state().healthAlertCount).toBe(1)
+  })
+
+  it('does NOT re-alert at 10min when 2 alerts already sent (needs 15min)', async () => {
+    const deps = makeDeps({ limited: true, issues: ['dashboard:down'] })
+    deps.writeState({
+      notifiedTaskIds: [], lastHealthIssues: ['dashboard:down'],
+      lastHealthAlertTs: NOW - 10 * 60 * 1000, healthAlertCount: 2,
+    })
+    const r = await runSurvivalCycle(deps)
+    expect(r.healthAlertSent).toBe(false)
+    expect(deps.sendAlert).not.toHaveBeenCalled()
+  })
+
+  it('re-alerts at 20min when 2 alerts already sent (past 15min backoff) and increments count', async () => {
+    const deps = makeDeps({ limited: true, issues: ['dashboard:down'] })
+    deps.writeState({
+      notifiedTaskIds: [], lastHealthIssues: ['dashboard:down'],
+      lastHealthAlertTs: NOW - 20 * 60 * 1000, healthAlertCount: 2,
+    })
+    const r = await runSurvivalCycle(deps)
+    expect(r.healthAlertSent).toBe(true)
+    expect(deps._state().healthAlertCount).toBe(3)
+  })
+
+  it('resets healthAlertCount to 1 when a genuinely new issue appears', async () => {
+    const deps = makeDeps({ limited: true, issues: ['dashboard:down', 'session:dave:down'] })
+    deps.writeState({
+      notifiedTaskIds: [], lastHealthIssues: ['dashboard:down'],
+      lastHealthAlertTs: NOW - 60_000, healthAlertCount: 4,
+    })
+    const r = await runSurvivalCycle(deps)
+    expect(r.healthAlertSent).toBe(true)
+    expect(deps._state().healthAlertCount).toBe(1)
+  })
+
+  it('honours the 2h cap: re-alerts only after 2h once backoff is saturated', async () => {
+    const deps = makeDeps({ limited: true, issues: ['dashboard:down'] })
+    deps.writeState({
+      notifiedTaskIds: [], lastHealthIssues: ['dashboard:down'],
+      lastHealthAlertTs: NOW - 119 * 60 * 1000, healthAlertCount: 8,
+    })
+    const r = await runSurvivalCycle(deps)
+    expect(r.healthAlertSent).toBe(false)
+  })
+
+  it('resets healthAlertCount to 0 when issues clear', async () => {
+    const deps = makeDeps({ limited: true, issues: [] })
+    deps.writeState({
+      notifiedTaskIds: [], lastHealthIssues: ['dashboard:down'],
+      lastHealthAlertTs: NOW - 60_000, healthAlertCount: 3,
+    })
+    await runSurvivalCycle(deps)
+    expect(deps._state().healthAlertCount).toBe(0)
   })
 })
 
