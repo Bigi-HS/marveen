@@ -66,6 +66,15 @@ export interface ZeppDistanceSlice {
 export interface ZeppActivity {
   /** Active calories burned kcal */
   activeKcal?: number
+  /**
+   * True when activeKcal is implausibly low for the day's steps (card 75337cdc, the raw
+   * upstream loss: 5 kcal at 15,790 steps). A LABEL only -- activeKcal itself is never
+   * overwritten, because active burn cannot be reliably re-derived from steps alone. The
+   * dynamic calorie-goal consumer (Hibiki's '1800 + activeKcal' formula) reads this flag and
+   * substitutes its floor estimate instead of building a target off the garbage value. The
+   * plausibility Rule 1 DETECTS the same anomaly; this flag carries it onto the stored
+   * snapshot for the consumer. Set by applyKcalSuspectLabel; absent when plausible. */
+  activeKcalSuspect?: boolean
   /** Distance metres -- the projected sum of distanceSlices when the ledger is present,
    *  otherwise a plain scalar from a legacy/cumulative producer. This is the MEASURED
    *  value and is never overwritten by the step-estimate remediation below. */
