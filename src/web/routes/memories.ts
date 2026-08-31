@@ -55,17 +55,32 @@ interface MemoryFilterResult {
   findingCount: number
 }
 
+// Combo escalation: two individually-high patterns that together form an
+// exfiltration-capable payload (fetch remote resource + pipe to shell).
+// Neither pattern alone warrants blocking; the combination does (SEC-054).
+const COMBO_ESCALATIONS: ReadonlyArray<[string, string]> = [
+  ['curl-external', 'shell-exec'],
+]
+
 function scanMemoryContent(content: string): MemoryFilterResult {
   const hits = MEMORY_FILTER_PATTERNS.filter(p => p.rx.test(content))
   if (hits.length === 0) return { matched: false, patternIds: null, maxSeverity: null, findingCount: 0 }
   const RANK: Record<FilterSeverity, number> = { high: 0, critical: 1 }
-  const maxSeverity = hits.reduce<FilterSeverity>(
+  let maxSeverity = hits.reduce<FilterSeverity>(
     (best, h) => RANK[h.severity] > RANK[best] ? h.severity : best,
     hits[0].severity,
   )
+  // Escalate when a dangerous combo matches the same content (SEC-054/067).
+  const hitNames = new Set(hits.map(h => h.name))
+  for (const [a, b] of COMBO_ESCALATIONS) {
+    if (hitNames.has(a) && hitNames.has(b)) {
+      maxSeverity = 'critical'
+      break
+    }
+  }
   return {
     matched: true,
-    patternIds: [...new Set(hits.map(h => h.name))].sort().join(','),
+    patternIds: [...hitNames].sort().join(','),
     maxSeverity,
     findingCount: hits.length,
   }
