@@ -60,33 +60,49 @@ export function hasSuspectViolation(violations: PlausibilityViolation[]): boolea
  * For >=3,000 steps the daily active kcal should sit in [steps*0.03, steps*0.20]; below
  * 3,000 steps a sedentary day is allowed up to 200 kcal.
  */
+// Bounds for the activeKcal/steps ratio (gauge, health-ingest-plausibility-rules.md).
+const KCAL_STEPS_MIN = 100 // below this many steps a near-zero active burn is normal
+const KCAL_ACTIVE_STEP_FLOOR = 3000 // at/above this the active-day band applies
+const KCAL_LOWER_RATIO = 0.03 // kcal/step: walking floor
+const KCAL_UPPER_RATIO = 0.2 // kcal/step: running ceiling
+const KCAL_SEDENTARY_MAX = 200 // max active kcal allowed on a <3k-step day
+
+/**
+ * True when the measured activeKcal cannot be reconciled with the day's steps -- the raw
+ * upstream loss class (5 kcal at 15,790 steps, 2026-08-25). Shared source of truth for both
+ * the detection Rule 1 below and the kcal-suspect label (kcal-suspect.ts) so the two never
+ * drift on where the plausible band sits.
+ */
+export function isActiveKcalImplausible(steps: number, activeKcal?: number): boolean {
+  if (activeKcal === undefined || activeKcal === null) return false
+  if (steps < KCAL_STEPS_MIN) return false // ignore days with almost no movement
+  if (steps >= KCAL_ACTIVE_STEP_FLOOR) {
+    return activeKcal < steps * KCAL_LOWER_RATIO || activeKcal > steps * KCAL_UPPER_RATIO
+  }
+  return activeKcal > KCAL_SEDENTARY_MAX
+}
+
 function checkKcalStepsRatio(steps: number, activeKcal?: number): PlausibilityViolation[] {
-  if (activeKcal === undefined || activeKcal === null) return []
-  if (steps < 100) return [] // ignore days with almost no movement
+  if (!isActiveKcalImplausible(steps, activeKcal)) return []
 
-  const violations: PlausibilityViolation[] = []
-  const ratio = activeKcal / steps
+  const kcal = activeKcal as number
+  const ratio = kcal / steps
 
-  if (steps >= 3000) {
-    const lowerBound = steps * 0.03
-    const upperBound = steps * 0.2
-    if (activeKcal < lowerBound || activeKcal > upperBound) {
-      violations.push({
-        rule: 'activeKcal/steps ratio',
-        severity: 'suspect',
-        message: `activeKcal ${activeKcal} implausible for ${steps} steps (ratio ${ratio.toFixed(4)}, expected [${lowerBound.toFixed(0)}, ${upperBound.toFixed(0)}])`,
-      })
-    }
-  } else if (activeKcal > 200) {
-    // Sedentary day: allow up to 200 kcal for <3k steps
-    violations.push({
+  if (steps >= KCAL_ACTIVE_STEP_FLOOR) {
+    const lowerBound = steps * KCAL_LOWER_RATIO
+    const upperBound = steps * KCAL_UPPER_RATIO
+    return [{
       rule: 'activeKcal/steps ratio',
       severity: 'suspect',
-      message: `activeKcal ${activeKcal} implausible for only ${steps} steps`,
-    })
+      message: `activeKcal ${kcal} implausible for ${steps} steps (ratio ${ratio.toFixed(4)}, expected [${lowerBound.toFixed(0)}, ${upperBound.toFixed(0)}])`,
+    }]
   }
-
-  return violations
+  // Sedentary day: allow up to KCAL_SEDENTARY_MAX kcal for <3k steps
+  return [{
+    rule: 'activeKcal/steps ratio',
+    severity: 'suspect',
+    message: `activeKcal ${kcal} implausible for only ${steps} steps`,
+  }]
 }
 
 /**

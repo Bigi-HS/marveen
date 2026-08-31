@@ -17,6 +17,7 @@ import { readBody, RequestBodyTooLargeError, json } from '../http-helpers.js'
 import { defaultZeppStore } from '../zepp/ingest-store.js'
 import { mergeDailySnapshot } from '../zepp/snapshot-merge.js'
 import { applyDistanceEstimate } from '../zepp/distance-estimate.js'
+import { applyKcalSuspectLabel } from '../zepp/kcal-suspect.js'
 import { defaultZeppAnomalyStore } from '../zepp/anomaly-store.js'
 import { readIngestToken } from '../zepp/ingest-secret.js'
 import { writeValidatedSnapshot } from '../zepp/validated-ingest.js'
@@ -458,7 +459,11 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
     // step-derived estimate. Runs on the MERGED day so it sees the accumulated steps/distance,
     // and re-runs each push so a later real distance drops a stale estimate. Never overwrites
     // the measured distanceM.
-    const finalized = applyDistanceEstimate(merged)
+    // Then label activeKcal suspect when it is implausibly low for the merged day's steps
+    // (card 75337cdc, the raw upstream loss). A LABEL only -- activeKcal is never overwritten;
+    // Hibiki's dynamic calorie goal reads activeKcalSuspect and falls back to its floor. Runs
+    // on the finalized day and re-evaluates each push so a later plausible value clears it.
+    const finalized = applyKcalSuspectLabel(applyDistanceEstimate(merged))
 
     // Numeric plausibility guard (log-only rollout, card 75337cdc). Run on the finalized day
     // so activity+steps are judged together. Detection only -- status is not downgraded.
