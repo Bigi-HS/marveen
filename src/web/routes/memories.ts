@@ -81,10 +81,14 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     const data = JSON.parse(body.toString()) as { agent_id?: string; content: string; tier?: string; category?: string; keywords?: string; access_scope?: string | null }
     if (!data.content?.trim()) { json(res, { error: 'Content is required' }, 400); return true }
     const filterResult = scanMemoryContent(data.content.trim())
+    // Only critical-severity patterns block (actual injection vectors). High-severity
+    // patterns (curl-external, shell-exec, destructive-rm, etc.) appear legitimately
+    // in security lesson content -- they are logged but not rejected (SEC-053/cf2665c0).
+    const willBlock = filterResult.maxSeverity === 'critical'
     recordGuardEvent({
       mechanism: 'memories-filter',
       route: '/api/memories',
-      verdict: filterResult.matched ? 'BLOCK' : 'PASS',
+      verdict: willBlock ? 'BLOCK' : 'PASS',
       fromAgent: data.agent_id ?? null,
       toAgent: null,
       patternIds: filterResult.patternIds,
@@ -92,8 +96,8 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
       findingCount: filterResult.findingCount,
       content: data.content.trim(),
     })
-    if (filterResult.matched) {
-      logger.warn({ agent: data.agent_id }, 'Memory content rejected: suspicious pattern')
+    if (willBlock) {
+      logger.warn({ agent: data.agent_id }, 'Memory content rejected: critical injection pattern')
       json(res, { error: 'Content rejected by security filter' }, 400)
       return true
     }
