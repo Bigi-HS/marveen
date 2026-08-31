@@ -21,7 +21,10 @@ import { logger } from '../../logger.js'
 import { defaultRawPushBuffer } from '../zepp/raw-push-buffer.js'
 import type { RouteContext } from './types.js'
 
-const MAX_RAW_BYTES = 64 * 1024
+// 512KB (not 64KB) so a post-outage multi-day backlog replay (~100KB) is retained
+// rather than 413-rejected; still far below the generic 20MB default. See the
+// MAX_INGEST_BYTES rationale in health-ingest.ts.
+const MAX_RAW_BYTES = 512 * 1024
 const N8N_ZEPP_WEBHOOK = 'http://127.0.0.1:5678/webhook/zepp-hc'
 
 export interface HealthIngestRawDeps {

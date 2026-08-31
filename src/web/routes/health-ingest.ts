@@ -33,10 +33,13 @@ import type {
 } from '../zepp/contract.js'
 import type { RouteContext } from './types.js'
 
-// HC daily payloads are small structured JSON (vitals/sleep/activity). Cap the
-// read well below the generic default: the endpoint is public via the Cloudflare
-// tunnel, so an unbounded body is a memory-exhaustion surface (chad FLAG medium).
-const MAX_INGEST_BYTES = 64 * 1024
+// HC daily payloads are normally small structured JSON (vitals/sleep/activity),
+// but after a tunnel/ingest outage the phone replays a multi-day BACKLOG in one
+// POST (~100KB observed 2026-08-31). The old 64KB cap rejected that backlog with
+// 413, so days silently never landed. 512KB covers the backlog while staying far
+// below the generic default (20MB): the endpoint is public via the tunnel, so an
+// unbounded body is a memory-exhaustion surface (chad FLAG medium).
+const MAX_INGEST_BYTES = 512 * 1024
 
 // Constant-time secret comparison so the token gate does not leak byte-position
 // via response timing (chad INFO low). Length is compared first (a length leak is
