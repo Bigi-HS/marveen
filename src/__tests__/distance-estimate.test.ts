@@ -10,6 +10,8 @@ import { describe, it, expect } from 'vitest'
 import {
   applyDistanceEstimate,
   distanceForDisplay,
+  buildDistanceForDisplay,
+  applyDistanceForDisplay,
   DEFAULT_STRIDE_M,
   LOW_DISTANCE_RATIO,
   MIN_STEPS_FOR_ESTIMATE,
@@ -173,5 +175,80 @@ describe('distanceForDisplay', () => {
   it('returns undefined when there is no distance to show', () => {
     expect(distanceForDisplay(undefined)).toBeUndefined()
     expect(distanceForDisplay({ activeKcal: 100 })).toBeUndefined()
+  })
+})
+
+// WELL-031, Option A (hibiki contract feedback): the canonical Boss-facing distance render
+// is COMPUTED ONCE at write time (buildDistanceForDisplay) and stored on the snapshot
+// (applyDistanceForDisplay), so no consumer re-derives which value to show or how to label
+// it. Pushing the "measured vs estimate" choice onto each reader lets renders diverge (one
+// shows the broken 456 m, another the estimate). The stored field carries a ready km + text
+// label; the raw distanceM / estimatedDistanceM / distanceSource stay for debug.
+describe('buildDistanceForDisplay', () => {
+  it('renders the estimate as an estimate with the becsult label (BUG-2 day)', () => {
+    const out = applyDistanceEstimate(snap({ steps: 15790, activity: { distanceM: 456 } }))
+    const d = buildDistanceForDisplay(out.activity)
+    expect(d).toEqual({
+      meters: 12032,
+      km: 12.0,
+      source: 'step_estimated',
+      text: '~12.0 km (becsült, lépésből)',
+    })
+  })
+
+  it('renders a measured distance as a bare km with NO estimate label', () => {
+    const out = applyDistanceEstimate(snap({ steps: 13694, activity: { distanceM: 12040 } }))
+    const d = buildDistanceForDisplay(out.activity)
+    expect(d).toEqual({ meters: 12040, km: 12.0, source: 'measured', text: '12.0 km' })
+    expect(d!.text).not.toMatch(/becsült|~/)
+  })
+
+  it('returns undefined when there is no distance to show', () => {
+    expect(buildDistanceForDisplay(undefined)).toBeUndefined()
+    expect(buildDistanceForDisplay({ activeKcal: 100 })).toBeUndefined()
+  })
+})
+
+describe('applyDistanceForDisplay', () => {
+  it('stores the canonical display field on the snapshot (estimate day)', () => {
+    const finalized = applyDistanceForDisplay(
+      applyDistanceEstimate(snap({ steps: 15790, activity: { distanceM: 456 } })),
+    )
+    expect(finalized.activity?.distanceForDisplay).toEqual({
+      meters: 12032,
+      km: 12.0,
+      source: 'step_estimated',
+      text: '~12.0 km (becsült, lépésből)',
+    })
+    // never mutates the measured value
+    expect(finalized.activity?.distanceM).toBe(456)
+  })
+
+  it('stores a measured display field on a normal day', () => {
+    const finalized = applyDistanceForDisplay(
+      applyDistanceEstimate(snap({ steps: 13694, activity: { distanceM: 12040 } })),
+    )
+    expect(finalized.activity?.distanceForDisplay).toEqual({
+      meters: 12040,
+      km: 12.0,
+      source: 'measured',
+      text: '12.0 km',
+    })
+  })
+
+  it('leaves a snapshot without activity untouched', () => {
+    const s = snap({ steps: 500 })
+    expect(applyDistanceForDisplay(s)).toEqual(s)
+  })
+
+  it('is pure: does not mutate the input snapshot', () => {
+    const s = applyDistanceEstimate(snap({ steps: 15790, activity: { distanceM: 456 } }))
+    applyDistanceForDisplay(s)
+    expect(s.activity?.distanceForDisplay).toBeUndefined()
+  })
+
+  it('omits distanceForDisplay when there is no distance at all', () => {
+    const finalized = applyDistanceForDisplay(snap({ steps: 500, activity: { activeKcal: 100 } }))
+    expect(finalized.activity?.distanceForDisplay).toBeUndefined()
   })
 })
