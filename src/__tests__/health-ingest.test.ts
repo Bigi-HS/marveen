@@ -105,9 +105,9 @@ describe('POST /api/health/ingest', () => {
   })
 
   describe('body size (DoS guard)', () => {
-    it('rejects an oversized (>64KB) body with 413 and does not write a snapshot', async () => {
+    it('rejects an oversized (>512KB) body with 413 and does not write a snapshot', async () => {
       const deps = makeDeps()
-      const big = 'x'.repeat(70 * 1024) // pushes the JSON body past the 64KB cap
+      const big = 'x'.repeat(520 * 1024) // pushes the JSON body past the 512KB cap
       const { status, snap } = await handle(deps, {
         token: VALID_TOKEN,
         body: { date: '2026-08-22', filler: big },
@@ -115,6 +115,19 @@ describe('POST /api/health/ingest', () => {
       expect(status).toBe(413)
       expect(snap).toBeNull()
       expect(deps.writeSnapshot).not.toHaveBeenCalled()
+    })
+
+    it('accepts a post-outage backlog payload (~100KB) that the old 64KB cap 413-rejected', async () => {
+      // Regression guard for the 2026-08-31 ingest gap: after a tunnel outage the
+      // phone replays a multi-day backlog in one POST. At 64KB this returned 413
+      // and the days never landed; 512KB must accept it.
+      const deps = makeDeps()
+      const backlog = 'x'.repeat(100 * 1024)
+      const { status } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', vitals: { resting_hr_bpm: 52 }, filler: backlog },
+      })
+      expect(status).toBe(200)
     })
 
     it('accepts a normal-sized HC payload', async () => {
