@@ -223,7 +223,7 @@ function defaultWriteState(s: OutageState): void {
 // permanently wedged on the modal until a human intervenes.
 function defaultDismissModal(): void {
   try {
-    execFileSync(TMUX, ['send-keys', '-t', MAIN_CHANNELS_SESSION, '1', 'Enter'], { timeout: 5000 })
+    execFileSync(TMUX, ['send-keys', '-t', `=${MAIN_CHANNELS_SESSION}:`, '1', 'Enter'], { timeout: 5000 })
     logger.info('token-outage: limit modal dismissed (Stop and wait selected)')
   } catch (err) {
     logger.warn({ err }, 'token-outage: modal dismiss send-keys failed')

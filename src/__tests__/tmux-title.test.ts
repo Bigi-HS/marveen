@@ -40,14 +40,14 @@ describe('formatWindowTitle', () => {
 })
 
 describe('renameWindowArgs / disableAutoRenameArgs', () => {
-  it('builds the tmux rename-window argv for the session', () => {
+  it('builds the tmux rename-window argv for the session (OPS-110: anchored =NAME: target)', () => {
     expect(renameWindowArgs('agent-dave', 'dave busy 47%')).toEqual([
-      'rename-window', '-t', 'agent-dave', 'dave busy 47%',
+      'rename-window', '-t', '=agent-dave:', 'dave busy 47%',
     ])
   })
   it('builds the automatic-rename off argv (so our name is not overwritten)', () => {
     expect(disableAutoRenameArgs('agent-dave')).toEqual([
-      'set-window-option', '-t', 'agent-dave', 'automatic-rename', 'off',
+      'set-window-option', '-t', '=agent-dave:', 'automatic-rename', 'off',
     ])
   })
 })
@@ -80,13 +80,13 @@ describe('updateAgentWindowTitle', () => {
       run,
     }))
     // disable auto-rename first, then rename.
-    expect(run).toHaveBeenCalledWith(['set-window-option', '-t', 'agent-dave', 'automatic-rename', 'off'])
-    expect(run).toHaveBeenCalledWith(['rename-window', '-t', 'agent-dave', 'dave busy 50%'])
+    expect(run).toHaveBeenCalledWith(['set-window-option', '-t', '=agent-dave:', 'automatic-rename', 'off'])
+    expect(run).toHaveBeenCalledWith(['rename-window', '-t', '=agent-dave:', 'dave busy 50%'])
   })
 
   it('falls back to unknown state when the pane capture fails', async () => {
     const run = vi.fn()
     await updateAgentWindowTitle('dave', fakeDeps({ capture: async () => null, tokens: () => null, run }))
-    expect(run).toHaveBeenCalledWith(['rename-window', '-t', 'agent-dave', 'dave unknown'])
+    expect(run).toHaveBeenCalledWith(['rename-window', '-t', '=agent-dave:', 'dave unknown'])
   })
 })

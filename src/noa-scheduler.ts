@@ -561,7 +561,7 @@ function attemptFireTask(
     const resubmit = (attempt: number) => {
       try {
         const pane = execFileSync(
-          getTmux(), ['capture-pane', '-t', session, '-p'],
+          getTmux(), ['capture-pane', '-t', `=${session}:`, '-p'],
           { timeout: 3000, encoding: 'utf-8' }
         )
         const stuck = /❯\s+\S/.test(pane) && pane.includes(marker)
@@ -570,7 +570,7 @@ function attemptFireTask(
           logger.warn({ task: task.id, session }, 'scheduler: prompt stuck after 5 Enter retries -- giving up')
           return
         }
-        execFileSync(getTmux(), ['send-keys', '-t', session, 'Enter'], { timeout: 3000 })
+        execFileSync(getTmux(), ['send-keys', '-t', `=${session}:`, 'Enter'], { timeout: 3000 })
         setTimeout(() => resubmit(attempt + 1), 3000)
       } catch (err) {
         logger.warn({ err, task: task.id }, 'scheduler: post-send resubmit failed')

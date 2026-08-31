@@ -92,7 +92,7 @@ export async function tryHandleAgentTerminal(ctx: RouteContext): Promise<boolean
       // tick, freezing all other HTTP requests. The arg array also avoids shell
       // interpolation of `session`. -e keeps ANSI so xterm renders faithfully;
       // -p prints; the frontend repaints (clear+home) each frame (full snapshot).
-      execFile(TMUX, ['capture-pane', '-t', session, '-e', '-p'], { timeout: 3000, encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+      execFile(TMUX, ['capture-pane', '-t', `=${session}:`, '-e', '-p'], { timeout: 3000, encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
         inFlight = false
         if (closed) return
         const pane = err ? '' : (stdout ?? '')

@@ -394,7 +394,7 @@ describe('attemptChannelMcpReconnect', () => {
 
     expect(mockExecFileSync).toHaveBeenCalledWith(
       '/usr/local/bin/tmux',
-      ['send-keys', '-t', 'agent-slacker', 'Escape'],
+      ['send-keys', '-t', '=agent-slacker:', 'Escape'],
       expect.any(Object),
     )
   })
