@@ -221,6 +221,30 @@ describe('GET /api/guard-events/summary', () => {
     expect(captured.status).toBe(200)
     expect(captured.body.byMechanismVerdict).toBeDefined()
   })
+
+  it('SEC-068: highSevPass field counts PASS+high-sev events in the window', async () => {
+    // High-sev PASS events are the detective-logging gap (SEC-055/068):
+    // persisted but not surfaced in the summary -- "theater" without active alerting.
+    const now = Math.floor(Date.now() / 1000)
+    // Clean PASS (null severity) -- should NOT count
+    insertGuardEvent({ created_at: now, mechanism: 'memories-filter', route: '/api/memories', verdict: 'PASS', from_agent: 'dave', to_agent: null, pattern_ids: null, max_severity: null, finding_count: 0, content_hash: 'h10', content_len: 5 })
+    // BLOCK (high) -- should NOT count (it's a BLOCK)
+    insertGuardEvent({ created_at: now, mechanism: 'memories-filter', route: '/api/memories', verdict: 'BLOCK', from_agent: 'rogue', to_agent: null, pattern_ids: 'destructive-rm', max_severity: 'high', finding_count: 1, content_hash: 'h11', content_len: 10 })
+    // PASS + high severity -- MUST count (SEC-068 target)
+    insertGuardEvent({ created_at: now, mechanism: 'memories-filter', route: '/api/memories', verdict: 'PASS', from_agent: 'scout', to_agent: null, pattern_ids: 'curl-external', max_severity: 'high', finding_count: 1, content_hash: 'h12', content_len: 20 })
+    insertGuardEvent({ created_at: now, mechanism: 'memories-filter', route: '/api/memories', verdict: 'PASS', from_agent: 'gelim', to_agent: null, pattern_ids: 'shell-exec', max_severity: 'high', finding_count: 1, content_hash: 'h13', content_len: 15 })
+
+    const { ctx, captured } = fakeRouteCtx('GET', '/api/guard-events/summary')
+    await tryHandleGuardEvents(ctx)
+    expect(captured.status).toBe(200)
+    // Must expose high-sev PASS count and pattern breakdown
+    expect(captured.body.highSevPass).toBeDefined()
+    expect(captured.body.highSevPass.count).toBe(2)
+    expect(captured.body.highSevPass.byPattern).toHaveLength(2)
+    const patternNames = captured.body.highSevPass.byPattern.map((p: { pattern_ids: string }) => p.pattern_ids)
+    expect(patternNames).toContain('curl-external')
+    expect(patternNames).toContain('shell-exec')
+  })
 })
 
 // ── Raw endpoint access control ───────────────────────────────────────────────

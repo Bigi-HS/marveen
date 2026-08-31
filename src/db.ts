@@ -1555,10 +1555,20 @@ export interface GuardEventSenderSummary {
   count: number
 }
 
+// High-severity PASS summary: rows where the filter matched a high-sev pattern
+// but let the write through (technique description in a lesson, SEC-053). These
+// are persisted for audit but not surfaced in the daily report without this
+// field -- "detective logging without active alerting is theater" (SEC-055/068).
+interface HighSevPassSummary {
+  count: number
+  byPattern: Array<{ pattern_ids: string; count: number }>
+}
+
 export function getGuardEventSummary(days = 14): {
   byMechanismVerdict: GuardEventSummary[]
   byPattern: GuardEventSummary[]
   bySender: GuardEventSenderSummary[]
+  highSevPass: HighSevPassSummary
 } {
   const since = Math.floor(Date.now() / 1000) - days * 86400
   const byMechanismVerdict = db.prepare(
@@ -1578,6 +1588,17 @@ export function getGuardEventSummary(days = 14): {
        FROM guard_events WHERE verdict = 'BLOCK' AND created_at >= ?
        GROUP BY from_agent ORDER BY count DESC`
   ).all(since) as GuardEventSenderSummary[]
-  return { byMechanismVerdict, byPattern, bySender }
+  // SEC-055/068: high-severity PASS events (technique descriptions in lesson content
+  // that matched a high-sev pattern but were not blocked per SEC-053). Surfaced here
+  // so the daily security summary can alert on unusual spikes.
+  const highSevPassRows = db.prepare(
+    `SELECT pattern_ids, COUNT(*) as count
+       FROM guard_events
+       WHERE verdict = 'PASS' AND max_severity = 'high' AND pattern_ids IS NOT NULL AND created_at >= ?
+       GROUP BY pattern_ids ORDER BY count DESC`
+  ).all(since) as Array<{ pattern_ids: string; count: number }>
+  const highSevPassCount = highSevPassRows.reduce((sum, r) => sum + r.count, 0)
+  const highSevPass: HighSevPassSummary = { count: highSevPassCount, byPattern: highSevPassRows }
+  return { byMechanismVerdict, byPattern, bySender, highSevPass }
 }
 
