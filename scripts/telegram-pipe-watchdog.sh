@@ -45,6 +45,38 @@ while true; do
     out="$(cd "$ROOT" && timeout 60 "$NODE" dist/web/telegram-pipe-watchdog-cli.js 2>>"$LOG")"
     log "cycle: ${out:-<no output / timeout>}"
 
+    # AUTO-HEAL TRIGGER (card telegram-n8n-auto-heal, Boss 2026-08-31): when the
+    # pipe is CONFIRMED dead, POST the n8n `telegram-heal` webhook so the
+    # telegram-pipe-healer workflow drives a RELIABLE hard respawn (via the
+    # dashboard /api/marveen/restart) instead of relying on the flaky in-CLI /mcp
+    # menu-nav reconnect that leaves the Boss mute (2026-08-31 2h outage). Two
+    # INDEPENDENT death signals feed it, covering complementary failure modes:
+    #   (1) the CLI's own 409/slot-free verdict (catches "alive-but-deaf", RCA
+    #       vector #1 -- bun present but not polling), and
+    #   (2) heal-telegram-channel.sh --check-confirm process-presence (catches a
+    #       lost bun bridge, RCA vectors #3/#4 -- independent of the self-blinding
+    #       409 probe that went inconclusive for 60h on 07-02).
+    # Debounced downstream by the dashboard's 6-min post-respawn grace, so a
+    # repeat POST during recovery is absorbed (no restart storm).
+    heal_dead=0
+    case "$out" in
+      *verdict=dead*|*escalated=true*) heal_dead=1 ;;
+    esac
+    if [ "$heal_dead" = 0 ] && printf '%s' "$out" | grep -qE 'consecutiveDead=[2-9]'; then
+      heal_dead=1
+    fi
+    if [ "$heal_dead" = 0 ]; then
+      bash "$ROOT/scripts/heal-telegram-channel.sh" --check-confirm >/dev/null 2>&1
+      [ "$?" = 3 ] && heal_dead=1
+    fi
+    if [ "$heal_dead" = 1 ]; then
+      code=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST \
+        http://127.0.0.1:5678/webhook/telegram-heal \
+        -H 'Content-Type: application/json' \
+        -d '{"reason":"telegram-pipe-watchdog: pipe confirmed dead","source":"pipe-watchdog"}' 2>/dev/null)
+      log "auto-heal: pipe CONFIRMED dead -> POSTed n8n telegram-heal webhook (http=${code:-000})"
+    fi
+
     # SUB-AGENT sweep (card 31ab64fe Part 2): recover the channel sub-agents'
     # pipes too, but ONLY while the dashboard is DOWN (the CLI self-gates on
     # that; when the dashboard is up the in-process channel-health-monitor owns
