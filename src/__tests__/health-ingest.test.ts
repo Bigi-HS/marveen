@@ -1107,6 +1107,81 @@ describe('POST /api/health/ingest', () => {
     })
   })
 
+  // AC#1 (card e3197a20) vitals extension: physiological bounds for pulse-ox and heart rate.
+  // The steps/kcal/distance caps landed first; the vitals the card named explicitly
+  // (spo2 0-100, hr 30-230) still flowed through the bound-less num() and could persist an
+  // impossible reading (e.g. a sensor glitch spo2=150 or hr=300) into the snapshot the
+  // plausibility guard and goal-calc read. Out-of-range -> dropped (undefined), like the caps.
+  describe('AC#1 input-bound: spo2 / heart-rate physiological range', () => {
+    // spo2 in [0, 100]
+    it('[FN] drops spo2 above 100 (sensor glitch 150 -> undefined)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', vitals: { spo2_pct: 150 } },
+      })
+      expect(snap?.vitals?.spo2).toBeUndefined()
+    })
+
+    it('[FP] keeps a valid spo2 (97%)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', vitals: { spo2_pct: 97 } },
+      })
+      expect(snap?.vitals?.spo2).toBe(97)
+    })
+
+    it('keeps the spo2 upper boundary (100%)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', vitals: { spo2_pct: 100 } },
+      })
+      expect(snap?.vitals?.spo2).toBe(100)
+    })
+
+    it('drops negative spo2', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', vitals: { spo2_pct: -3 } },
+      })
+      expect(snap?.vitals?.spo2).toBeUndefined()
+    })
+
+    // heart rate in [30, 230] across resting / avg / min / max
+    it('[FN] drops an impossible hr_avg (300 -> undefined)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', vitals: { hr_avg_bpm: 300 } },
+      })
+      expect(snap?.vitals?.hrAvg).toBeUndefined()
+    })
+
+    it('drops a sub-physiological resting hr (10 -> undefined)', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', vitals: { resting_hr_bpm: 10 } },
+      })
+      expect(snap?.vitals?.restingHr).toBeUndefined()
+    })
+
+    it('keeps the hr boundaries (30 resting, 230 max) and a normal avg', async () => {
+      const deps = makeDeps()
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-22', vitals: { resting_hr_bpm: 30, hr_max_bpm: 230, hr_avg_bpm: 72, hr_min_bpm: 48 } },
+      })
+      expect(snap?.vitals?.restingHr).toBe(30)
+      expect(snap?.vitals?.hrMax).toBe(230)
+      expect(snap?.vitals?.hrAvg).toBe(72)
+      expect(snap?.vitals?.hrMin).toBe(48)
+    })
+  })
+
   // 2f603c1c: sleep own-date guard.
   // Mirror of the workout own-day filter (line ~265): only accept a sleep session into
   // this snapshot if the sleep's wake date (endAt localDateBudapest) matches body.date.

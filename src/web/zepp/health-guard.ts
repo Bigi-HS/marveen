@@ -28,6 +28,29 @@ const STATUS_ALERT: Record<Exclude<ZeppPullStatus, 'ok' | 'stale' | 'no_new_data
   partial: 'partial',
 }
 
+// #6 (card e3197a20): snapshot.error originates in the pull layer (the Zepp API response).
+// Before it rides into an alert message (Telegram / kanban / log) collapse it to a single
+// bounded, printable line: replace control chars so a newline cannot inject a fake line, and
+// cap the length so a leaked blob cannot dump into the surface. Empty-after-sanitize ->
+// undefined (no ": " suffix appended).
+const MAX_ERROR_LEN = 200
+
+function sanitizeErrorForAlert(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  // Replace ASCII control chars (code < 0x20, incl. newlines/tabs, and DEL 0x7f) with a
+  // space via charCode inspection -- deliberately NOT a control-char regex literal, which
+  // would embed a NUL byte in this source file (no-nul-in-tracked-sources guard). Then
+  // collapse whitespace and cap the length.
+  let out = ''
+  for (const ch of raw) {
+    const code = ch.charCodeAt(0)
+    out += code < 0x20 || code === 0x7f ? ' ' : ch
+  }
+  const oneLine = out.replace(/\s+/g, ' ').trim()
+  if (oneLine.length === 0) return undefined
+  return oneLine.length > MAX_ERROR_LEN ? oneLine.slice(0, MAX_ERROR_LEN) + '...' : oneLine
+}
+
 export function checkSnapshot(
   snapshot: ZeppDailySnapshot,
   nowMs: number = Date.now(),
@@ -38,10 +61,11 @@ export function checkSnapshot(
   if (snapshot.status !== 'ok' && snapshot.status !== 'stale') {
     const type = STATUS_ALERT[snapshot.status as keyof typeof STATUS_ALERT]
     if (type) {
+      const err = sanitizeErrorForAlert(snapshot.error)
       alerts.push({
         type,
         date: snapshot.date,
-        message: `Zepp pull ${snapshot.status} on ${snapshot.date}${snapshot.error ? ': ' + snapshot.error : ''}`,
+        message: `Zepp pull ${snapshot.status} on ${snapshot.date}${err ? ': ' + err : ''}`,
       })
     }
   }
