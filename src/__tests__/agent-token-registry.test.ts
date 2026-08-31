@@ -6,6 +6,7 @@ import {
   resolveAgentIdentity,
   safeResolveAgentIdentity,
   revokeAgentTokens,
+  revokeAgentTokensExcept,
   pruneExpiredTokens,
   hashToken,
   hasScope,
@@ -163,6 +164,17 @@ describe('revokeAgentTokens / pruneExpiredTokens (rotation lifecycle)', () => {
     expect(n).toBe(2)
     // A second revoke is a no-op (already revoked).
     expect(revokeAgentTokens(db, 'dave', NOW)).toBe(0)
+  })
+
+  it('revokeAgentTokensExcept revokes all live tokens except the named sha (SEC-066)', () => {
+    const t1 = mintAgentToken(db, 'dave', ['message:send'], { now: NOW })
+    const t2 = mintAgentToken(db, 'dave', ['message:send'], { now: NOW })
+    // Revoke all except t2 (the freshly minted token).
+    const n = revokeAgentTokensExcept(db, 'dave', t2.tokenSha256, NOW)
+    expect(n).toBe(1)
+    // t1 revoked, t2 still live.
+    expect(resolveAgentIdentity(db, t1.token, 'f'.repeat(64), NOW).kind).toBe('unknown')
+    expect(resolveAgentIdentity(db, t2.token, 'f'.repeat(64), NOW).kind).toBe('ok')
   })
 
   it('pruneExpiredTokens deletes only rows past expiry, keeps live and no-expiry rows', () => {
