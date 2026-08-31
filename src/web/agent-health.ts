@@ -121,7 +121,7 @@ function sessionCreatedMs(session: string): number | null {
   try {
     const out = execFileSync(
       TMUX,
-      ['display-message', '-p', '-t', session, '#{session_created}'],
+      ['display-message', '-p', '-t', `=${session}:`, '#{session_created}'],
       { timeout: 3000, encoding: 'utf-8' },
     ).trim()
     const secs = parseInt(out, 10)

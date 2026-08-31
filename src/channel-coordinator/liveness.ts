@@ -35,7 +35,7 @@ export const RESPAWN_STAMP_FILE = join(PROJECT_ROOT, 'store', '.channel-last-res
 
 export function getClaudePidForSession(session: string): number | null {
   try {
-    const out = execFileSync(TMUX, ['list-panes', '-t', session, '-F', '#{pane_pid}'], { timeout: 3000, encoding: 'utf-8' })
+    const out = execFileSync(TMUX, ['list-panes', '-t', `=${session}:`, '-F', '#{pane_pid}'], { timeout: 3000, encoding: 'utf-8' })
     const panePid = parseInt(out.trim().split('\n')[0], 10)
     if (!panePid) return null
     const cmd = execFileSync('/bin/ps', ['-p', String(panePid), '-o', 'comm='], { timeout: 3000, encoding: 'utf-8' }).trim()

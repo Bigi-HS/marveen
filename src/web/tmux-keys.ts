@@ -3,6 +3,18 @@
 // the mapping (the part most likely to drift) is unit-testable without spawning
 // tmux. The actual execFile lives in routes/agent-terminal.ts.
 
+/**
+ * Anchored tmux target: '=NAME:' prevents prefix-fallback to a sibling session
+ * when the named session is absent. Without '=', tmux falls back to prefix
+ * matching -- so '-t marveen' in a two-session setup reaches 'marveen-channels'
+ * at rc=0 and silently injects keystrokes there (OPS-110/043b3ca5).
+ * The trailing ':' selects the first window's first pane (harmless if the
+ * session has exactly one pane, which is the fleet standard).
+ */
+export function tmuxTarget(session: string): string {
+  return `=${session}:`
+}
+
 // Named special keys the web terminal may send (xterm captures these and posts
 // {special}). tmux understands these key names directly in send-keys.
 const SPECIAL_KEYS: Record<string, string[]> = {
@@ -48,7 +60,7 @@ export function literalKeyArgs(session: string, text: string): string[] | null {
   if (!text) return null
   // `-l` sends the keys literally (no key-name interpretation), so text like
   // "Enter" or "C-c" typed by the user is inserted as characters, not actions.
-  return ['send-keys', '-t', session, '-l', '--', text]
+  return ['send-keys', '-t', tmuxTarget(session), '-l', '--', text]
 }
 
 /**
@@ -57,7 +69,7 @@ export function literalKeyArgs(session: string, text: string): string[] | null {
 export function specialKeyArgs(session: string, name: string): string[] | null {
   const keys = resolveSpecialKey(name)
   if (!keys) return null
-  return ['send-keys', '-t', session, ...keys]
+  return ['send-keys', '-t', tmuxTarget(session), ...keys]
 }
 
 // The scripted /login flow, split into the two phases Szabi described

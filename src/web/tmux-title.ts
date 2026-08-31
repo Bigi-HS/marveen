@@ -54,7 +54,7 @@ export function formatWindowTitle(
 
 /** tmux argv: rename the session's current window to `title`. */
 export function renameWindowArgs(session: string, title: string): string[] {
-  return ['rename-window', '-t', session, title]
+  return ['rename-window', '-t', `=${session}:`, title]
 }
 
 /**
@@ -63,7 +63,7 @@ export function renameWindowArgs(session: string, title: string): string[] {
  * off, which would otherwise stomp our title moments after we set it.
  */
 export function disableAutoRenameArgs(session: string): string[] {
-  return ['set-window-option', '-t', session, 'automatic-rename', 'off']
+  return ['set-window-option', '-t', `=${session}:`, 'automatic-rename', 'off']
 }
 
 // Side effects the sweep depends on, behind a seam so updateAgentWindowTitle is
@@ -84,7 +84,7 @@ function capturePaneAsync(session: string): Promise<string | null> {
   return new Promise((resolve) => {
     execFile(
       TMUX,
-      ['capture-pane', '-t', session, '-p'],
+      ['capture-pane', '-t', `=${session}:`, '-p'],
       { timeout: 3000, encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024 },
       (err, stdout) => resolve(err ? null : stdout),
     )

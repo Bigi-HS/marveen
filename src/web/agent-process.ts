@@ -128,7 +128,7 @@ export function getAgentRunningSince(name: string): number | null {
   try {
     const out = execFileSync(
       TMUX,
-      ['display-message', '-p', '-t', agentSessionName(name), '#{session_created}'],
+      ['display-message', '-p', '-t', `=${agentSessionName(name)}:`, '#{session_created}'],
       { timeout: 3000, encoding: 'utf-8' },
     ).trim()
     const ts = parseInt(out, 10)
@@ -513,9 +513,9 @@ const SURVEY_MODAL_RX = /How is Claude doing this session/
 
 function dismissSurveyModalIfPresent(session: string): void {
   try {
-    const pane = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
+    const pane = execFileSync(TMUX, ['capture-pane', '-t', `=${session}:`, '-p'], { timeout: 3000, encoding: 'utf-8' })
     if (!SURVEY_MODAL_RX.test(pane)) return
-    execFileSync(TMUX, ['send-keys', '-t', session, '0'], { timeout: 5000 })
+    execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, '0'], { timeout: 5000 })
     // Modal close is one frame; settle window so the next send-keys lands in
     // the prompt input, not the now-stale modal handler.
     execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 })
@@ -535,11 +535,11 @@ const RESUME_SUMMARY_MODAL_RX = /Resume from summary/
 
 export function dismissResumeSummaryModalIfPresent(session: string): void {
   try {
-    const pane = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
+    const pane = execFileSync(TMUX, ['capture-pane', '-t', `=${session}:`, '-p'], { timeout: 3000, encoding: 'utf-8' })
     if (!RESUME_SUMMARY_MODAL_RX.test(pane)) return
-    execFileSync(TMUX, ['send-keys', '-t', session, '1'], { timeout: 5000 })
+    execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, '1'], { timeout: 5000 })
     execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+    execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Enter'], { timeout: 5000 })
     // /compact starts immediately and can run for minutes; we only need to
     // unblock the modal so detectPaneState can transition off 'unknown'.
     execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 })
@@ -590,9 +590,9 @@ export function scheduleResumeMenuWatch(
     }
     if (action === 'dismiss') {
       try {
-        execFileSync(TMUX, ['send-keys', '-t', session, '1'], { timeout: 5000 })
+        execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, '1'], { timeout: 5000 })
         execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
-        execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+        execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Enter'], { timeout: 5000 })
         logger.info({ session }, 'resume-menu watch: answered resume-from-summary -> 1')
       } catch (err) {
         logger.warn({ err, session }, 'resume-menu watch: failed to send dismiss')
@@ -658,7 +658,7 @@ function answerResumeMenuWhenReady(session: string, onReady: () => void, attempt
   }
   let pane: string | null = null
   try {
-    pane = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
+    pane = execFileSync(TMUX, ['capture-pane', '-t', `=${session}:`, '-p'], { timeout: 3000, encoding: 'utf-8' })
   } catch {
     // session likely gone; nothing more to do
     onReady()
@@ -672,9 +672,9 @@ function answerResumeMenuWhenReady(session: string, onReady: () => void, attempt
   }
   if (decision === 'answer-resume') {
     try {
-      execFileSync(TMUX, ['send-keys', '-t', session, '1'], { timeout: 5000 })
+      execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, '1'], { timeout: 5000 })
       execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+      execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Enter'], { timeout: 5000 })
       logger.info({ session, attempt }, 'resume-menu poll: answered Resume-from-summary (1)')
     } catch (err) {
       logger.warn({ err, session }, 'resume-menu poll: answer send failed')
@@ -704,7 +704,7 @@ export function scheduleIdentitySetup(session: string, displayName: string): voi
       setTimeout(() => {
         try {
           for (const cmd of identitySlashCommands(displayName)) {
-            execFileSync(TMUX, ['send-keys', '-t', session, cmd, 'Enter'], { timeout: 5000 })
+            execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, cmd, 'Enter'], { timeout: 5000 })
             execFileSync('/bin/sleep', ['1'], { timeout: 2000 })
           }
           logger.info({ session, displayName }, 'Set session /name')
@@ -745,7 +745,7 @@ const CLEAR_BUFFER_PRESSES = 40
 function clearInputBuffer(session: string, presses = 1): void {
   try {
     for (let i = 0; i < presses; i++) {
-      execFileSync(TMUX, ['send-keys', '-t', session, 'C-u'], { timeout: 5000 })
+      execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'C-u'], { timeout: 5000 })
     }
     // Settle briefly so the next send-keys lands in the freshly cleared
     // buffer rather than racing the Ctrl-U.
@@ -807,7 +807,7 @@ export function sendPromptToSession(session: string, text: string): SubmitVerdic
   // prove the buffer is clean, but proceeding without the clear is no
   // worse than the pre-fix status quo.
   try {
-    const preCapture = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
+    const preCapture = execFileSync(TMUX, ['capture-pane', '-t', `=${session}:`, '-p'], { timeout: 3000, encoding: 'utf-8' })
     if (shouldClearTruncatedPreamble(preCapture)) {
       logger.info({ session }, 'Cleared stale preamble from input buffer before sending prompt')
       clearInputBuffer(session)
@@ -834,11 +834,11 @@ export function sendPromptToSession(session: string, text: string): SubmitVerdic
     }
     let chunk = oneLine.slice(i, end)
     if (chunk.startsWith('-')) chunk = ' ' + chunk
-    execFileSync(TMUX, ['send-keys', '-t', session, '-l', chunk], { timeout: 5000 })
+    execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, '-l', chunk], { timeout: 5000 })
     i = end
     if (i < oneLine.length) execFileSync('/bin/sleep', ['0.03'], { timeout: 1000 })
   }
-  execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+  execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Enter'], { timeout: 5000 })
 
   // Post-send retry loop. The payload hint is the first chunk of oneLine
   // (truncated to a safe length) so the verbatim-stuck path has something
@@ -865,7 +865,7 @@ export function sendPromptToSession(session: string, text: string): SubmitVerdic
     }
     // action === 'retry-enter'
     try {
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+      execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Enter'], { timeout: 5000 })
     } catch (err) {
       // The retry-Enter itself failed (tmux gone, timeout). We know the
       // pane was stuck, but not whether this Enter landed -- unknown.
@@ -899,7 +899,7 @@ const QUIESCENCE_SAMPLE_GAP_S = '0.6'
 // tmux failure is logged and swallowed so the watcher loop keeps going.
 export function sendEnterToSession(session: string): boolean {
   try {
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+    execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Enter'], { timeout: 5000 })
     return true
   } catch (err) {
     logger.warn({ err, session }, 'sendEnterToSession: failed to send recovery Enter')
@@ -915,7 +915,7 @@ export function sendEnterToSession(session: string): boolean {
 // is logged and swallowed, mirroring sendEnterToSession.
 export function sendEscapeToSession(session: string): boolean {
   try {
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 5000 })
+    execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Escape'], { timeout: 5000 })
     return true
   } catch (err) {
     logger.warn({ err, session }, 'sendEscapeToSession: failed to send interrupt Escape')
@@ -927,7 +927,7 @@ export function sendEscapeToSession(session: string): boolean {
 // the caller can treat "capture failed" as "not ready".
 export function capturePane(session: string): string | null {
   try {
-    return execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
+    return execFileSync(TMUX, ['capture-pane', '-t', `=${session}:`, '-p'], { timeout: 3000, encoding: 'utf-8' })
   } catch {
     return null
   }
@@ -945,7 +945,7 @@ export function captureCursor(session: string): { x: number; y: number } | null 
   try {
     const raw = execFileSync(
       TMUX,
-      ['display-message', '-p', '-t', session, '#{cursor_x},#{cursor_y}'],
+      ['display-message', '-p', '-t', `=${session}:`, '#{cursor_x},#{cursor_y}'],
       { timeout: 3000, encoding: 'utf-8' },
     ).trim()
     const m = /^(\d+),(\d+)$/.exec(raw)

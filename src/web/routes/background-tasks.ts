@@ -32,7 +32,7 @@ function isBgSessionAlive(session: string): boolean {
 
 function captureSession(session: string): string | null {
   try {
-    return execFileSync(TMUX, ['capture-pane', '-t', session, '-p', '-S', '-500'], { timeout: 5000, encoding: 'utf-8' })
+    return execFileSync(TMUX, ['capture-pane', '-t', `=${session}:`, '-p', '-S', '-500'], { timeout: 5000, encoding: 'utf-8' })
   } catch {
     return null
   }

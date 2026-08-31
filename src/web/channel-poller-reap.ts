@@ -304,7 +304,7 @@ function snapshotProcs(): ProcRow[] {
 // session (`-t <gone>`) exits non-zero -> null too, which the caller treats as
 // "no panes from this source", never as a reason to widen the kill set.
 function livePanePids(tmuxPath: string, session?: string): Set<number> | null {
-  const target = session ? ['-t', session] : ['-a']
+  const target = session ? ['-t', `=${session}:`] : ['-a']
   try {
     const out = execFileSync(tmuxPath, ['list-panes', ...target, '-F', '#{pane_pid}'], { timeout: 5000, encoding: 'utf-8' })
     const s = new Set<number>()

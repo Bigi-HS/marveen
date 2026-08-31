@@ -211,24 +211,24 @@ export function attemptChannelMcpReconnect(agentName: string): ReconnectResult {
       return { ok: false, message: 'Pane not idle (busy/unknown) -- deferred /mcp drive', deferred: true }
     }
 
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
+    execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Escape'], { timeout: 3000 })
     execFileSync('/bin/sleep', ['1'], { timeout: 2000 })
 
-    execFileSync(TMUX, ['send-keys', '-t', session, '/mcp', 'Enter'], { timeout: 3000 })
+    execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, '/mcp', 'Enter'], { timeout: 3000 })
     execFileSync('/bin/sleep', ['1'], { timeout: 3000 })
 
     const pane1 = capturePane(session)
     if (!pane1) {
       logger.warn({ agentName, session }, 'channel-mcp-reconnect: capture failed after /mcp')
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
+      execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Escape'], { timeout: 3000 })
       return { ok: false, message: 'Failed to capture pane after /mcp' }
     }
 
     let matchedAt = -1
     for (let upCount = 1; upCount <= MAX_UP_ATTEMPTS; upCount++) {
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Up'], { timeout: 3000 })
+      execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Up'], { timeout: 3000 })
       execFileSync('/bin/sleep', ['0.2'], { timeout: 1000 })
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 3000 })
+      execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Enter'], { timeout: 3000 })
       execFileSync('/bin/sleep', ['1'], { timeout: 3000 })
 
       const pane = capturePane(session)
@@ -236,7 +236,7 @@ export function attemptChannelMcpReconnect(agentName: string): ReconnectResult {
         matchedAt = upCount
         break
       }
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
+      execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Escape'], { timeout: 3000 })
       execFileSync('/bin/sleep', ['0.5'], { timeout: 1000 })
     }
 
@@ -245,7 +245,7 @@ export function attemptChannelMcpReconnect(agentName: string): ReconnectResult {
         { agentName, session, maxUpAttempts: MAX_UP_ATTEMPTS, pluginPattern: pluginPattern.source },
         'channel-mcp-reconnect: plugin submenu not found',
       )
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
+      execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Escape'], { timeout: 3000 })
       return { ok: false, message: `Plugin not found within ${MAX_UP_ATTEMPTS} Up attempts` }
     }
 
@@ -255,14 +255,14 @@ export function attemptChannelMcpReconnect(agentName: string): ReconnectResult {
     let submenu = capturePane(session)
     if (!submenu) {
       logger.warn({ agentName, session }, 'channel-mcp-reconnect: capture failed in submenu')
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
+      execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Escape'], { timeout: 3000 })
       return { ok: false, message: 'Failed to capture submenu pane' }
     }
 
     const target = chooseSubmenuTarget(submenu)
     if (!target) {
       logger.warn({ agentName, session }, 'channel-mcp-reconnect: no Reconnect/Enable option in submenu')
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
+      execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Escape'], { timeout: 3000 })
       return { ok: false, message: 'No Reconnect/Enable option in submenu' }
     }
 
@@ -273,7 +273,7 @@ export function attemptChannelMcpReconnect(agentName: string): ReconnectResult {
         onTarget = true
         break
       }
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Down'], { timeout: 3000 })
+      execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Down'], { timeout: 3000 })
       execFileSync('/bin/sleep', ['0.3'], { timeout: 1000 })
       submenu = capturePane(session) ?? ''
     }
@@ -283,20 +283,20 @@ export function attemptChannelMcpReconnect(agentName: string): ReconnectResult {
         { agentName, session, target: target.source, maxSteps: SUBMENU_MAX_STEPS },
         'channel-mcp-reconnect: could not place cursor on target option',
       )
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
+      execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Escape'], { timeout: 3000 })
       return { ok: false, message: `Could not select ${target.source} within ${SUBMENU_MAX_STEPS} steps` }
     }
 
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 3000 })
+    execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Enter'], { timeout: 3000 })
     execFileSync('/bin/sleep', ['2'], { timeout: 4000 })
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
+    execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Escape'], { timeout: 3000 })
 
     const action = target === RECONNECT_RX ? 'Reconnect' : 'Enable'
     logger.info({ agentName, session, matchedAt, action, provider: providerType }, 'channel-mcp-reconnect: completed')
     return { ok: true, message: `Activated ${action} via /mcp (Up x${matchedAt})` }
   } catch (err) {
     logger.warn({ err, agentName, session }, 'channel-mcp-reconnect failed')
-    try { execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 }) } catch { /* best effort */ }
+    try { execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Escape'], { timeout: 3000 }) } catch { /* best effort */ }
     return { ok: false, message: err instanceof Error ? err.message : String(err) }
   }
 }

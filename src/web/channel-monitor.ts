@@ -242,7 +242,7 @@ export function resumeMarveenSession(): boolean {
       model: readConfiguredMainModel(),
       continueSession: true,
     })
-    execFileSync(TMUX, ['respawn-pane', '-k', '-t', MAIN_CHANNELS_SESSION, claudeCmd], { timeout: 15000 })
+    execFileSync(TMUX, ['respawn-pane', '-k', '-t', `=${MAIN_CHANNELS_SESSION}:`, claudeCmd], { timeout: 15000 })
 
     // --continue replays the last conversation. When the prior session is large
     // (>200k tokens) Claude Code opens with a "Resume from summary" modal that
@@ -375,7 +375,7 @@ function respawnMarveenSessionFresh(): boolean {
       model: readConfiguredMainModel(),
       continueSession: false,
     })
-    execFileSync(TMUX, ['respawn-pane', '-k', '-t', MAIN_CHANNELS_SESSION, claudeCmd], { timeout: 15000 })
+    execFileSync(TMUX, ['respawn-pane', '-k', '-t', `=${MAIN_CHANNELS_SESSION}:`, claudeCmd], { timeout: 15000 })
     logger.warn({ provider: provider.type }, 'Hard restart: marveen session respawned fresh (no --continue)')
     // Re-establish /name on the fresh process (see note in resumeMarveenSession).
     scheduleIdentitySetup(MAIN_CHANNELS_SESSION, BOT_NAME)

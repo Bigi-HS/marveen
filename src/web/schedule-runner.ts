@@ -440,14 +440,14 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
       : `[Utemezett feladat: ${task.name}]`
     const resubmit = (attempt: number) => {
       try {
-        const pane = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], { timeout: 3000, encoding: 'utf-8' })
+        const pane = execFileSync(TMUX, ['capture-pane', '-t', `=${session}:`, '-p'], { timeout: 3000, encoding: 'utf-8' })
         const stuck = /❯\s+\S/.test(pane) && pane.includes(marker)
         if (!stuck) return
         if (attempt >= 5) {
           logger.warn({ task: task.name, session }, 'Scheduled prompt still stuck after 5 Enter retries -- giving up')
           return
         }
-        execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 3000 })
+        execFileSync(TMUX, ['send-keys', '-t', `=${session}:`, 'Enter'], { timeout: 3000 })
         setTimeout(() => resubmit(attempt + 1), 3000)
       } catch (err) {
         logger.warn({ err, task: task.name }, 'Post-send resubmit failed')
