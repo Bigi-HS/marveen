@@ -39,6 +39,70 @@ describe('validateDataDate', () => {
     expect(hasDataDateViolation(v)).toBe(false)
   })
 
+  it('passes when every distance slice starts on snapshot.date (DA U6)', () => {
+    // Both slices land on 08-26 Budapest (20:00 and 21:15 CEST), matching date.
+    const v = validateDataDate(
+      snap({
+        date: '2026-08-26',
+        activity: {
+          distanceM: 900,
+          distanceSlices: [
+            { startAt: '2026-08-26T18:00:00Z', meters: 456 },
+            { startAt: '2026-08-26T19:15:00Z', meters: 444 },
+          ],
+        },
+      }),
+    )
+    expect(hasDataDateViolation(v)).toBe(false)
+  })
+
+  it('flags a distance slice from the previous day misfiled on the next (DA U6 dead-zone)', () => {
+    // The 00:00-02:00 CEST dead-zone: an after-midnight sync files the previous
+    // local day's slice under the next file. slice startAt 08-25T20:00 CEST
+    // (Budapest day 08-25) filed on the 08-26 snapshot -> violation.
+    const v = validateDataDate(
+      snap({
+        date: '2026-08-26',
+        activity: {
+          distanceM: 456,
+          distanceSlices: [{ startAt: '2026-08-25T18:00:00Z', meters: 456 }],
+        },
+      }),
+    )
+    expect(hasDataDateViolation(v)).toBe(true)
+    expect(v[0].field).toBe('activity.distanceSlices[0]')
+    expect(v[0].expected).toBe('2026-08-26')
+    expect(v[0].actual).toBe('2026-08-25')
+  })
+
+  it('flags only the mis-dated slice when others are correct', () => {
+    const v = validateDataDate(
+      snap({
+        date: '2026-08-26',
+        activity: {
+          distanceM: 900,
+          distanceSlices: [
+            { startAt: '2026-08-26T18:00:00Z', meters: 456 },
+            { startAt: '2026-08-25T18:00:00Z', meters: 444 },
+          ],
+        },
+      }),
+    )
+    expect(v).toHaveLength(1)
+    expect(v[0].field).toBe('activity.distanceSlices[1]')
+    expect(v[0].actual).toBe('2026-08-25')
+  })
+
+  it('tolerates an unparseable slice timestamp (no false violation)', () => {
+    const v = validateDataDate(
+      snap({
+        date: '2026-08-26',
+        activity: { distanceM: 456, distanceSlices: [{ startAt: 'not-a-date', meters: 456 }] },
+      }),
+    )
+    expect(hasDataDateViolation(v)).toBe(false)
+  })
+
   it('ignores sourceSyncedAt entirely (keying off it is the original F1 bug)', () => {
     // sourceSyncedAt on a different day must NOT raise a violation.
     const v = validateDataDate(
