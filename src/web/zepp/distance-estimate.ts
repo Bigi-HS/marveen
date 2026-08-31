@@ -13,7 +13,7 @@
 // estimatedDistanceM. Pure and idempotent: re-running on a later push that carries real
 // distance drops the stale estimate and flips the label back to 'measured'.
 
-import type { ZeppActivity, ZeppDailySnapshot } from './contract.js'
+import type { DistanceDisplay, ZeppActivity, ZeppDailySnapshot } from './contract.js'
 
 // Calibrated from Boss's known-good day (distanceM 12040 / steps 15790 = 0.7625 m/step),
 // which is also a typical adult walking stride. Calibratable via the strideM option so a
@@ -99,4 +99,37 @@ export function distanceForDisplay(
     return { meters: activity.distanceM, source: 'measured' }
   }
   return undefined
+}
+
+/**
+ * Build the canonical Boss-facing distance render (WELL-031, Option A). Wraps the
+ * distanceForDisplay selector and formats km + a localized label so a consumer -- code
+ * renderer OR the LLM delegate that reads the stored daily-*.json -- echoes ONE ready value
+ * instead of re-deriving the number-choice and the label (which is how renders diverge). An
+ * estimated distance is ALWAYS marked (the 'becsult, lepesbol' label + '~' prefix); a
+ * measured one is a bare km. Returns undefined when there is no distance to show.
+ */
+export function buildDistanceForDisplay(
+  activity: ZeppActivity | undefined,
+): DistanceDisplay | undefined {
+  const picked = distanceForDisplay(activity)
+  if (!picked) return undefined
+  const km = Math.round(picked.meters / 100) / 10 // one decimal, e.g. 12032 m -> 12.0 km
+  const kmStr = km.toFixed(1)
+  const text = picked.source === 'step_estimated' ? `~${kmStr} km (becsült, lépésből)` : `${kmStr} km`
+  return { meters: picked.meters, km, source: picked.source, text }
+}
+
+/**
+ * Return a copy of `snap` with the canonical activity.distanceForDisplay populated (or left
+ * absent when there is no distance to show). Pure -- the input is not mutated; a snapshot
+ * with no activity block is returned unchanged. Runs in the write-path finalize chain after
+ * applyDistanceEstimate so the stored snapshot carries the ready render.
+ */
+export function applyDistanceForDisplay(snap: ZeppDailySnapshot): ZeppDailySnapshot {
+  const activity = snap.activity
+  if (!activity) return snap
+  const display = buildDistanceForDisplay(activity)
+  if (!display) return snap
+  return { ...snap, activity: { ...activity, distanceForDisplay: display } }
 }

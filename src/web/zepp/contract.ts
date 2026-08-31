@@ -62,6 +62,18 @@ export interface ZeppDistanceSlice {
   meters: number
 }
 
+/**
+ * Canonical Boss-facing distance render (WELL-031). `meters`/`km` is the value to show,
+ * `source` its kind, `text` the ready localized label. Built once at write time so every
+ * consumer echoes the same number + label instead of re-deriving.
+ */
+export interface DistanceDisplay {
+  meters: number
+  km: number
+  source: 'measured' | 'step_estimated'
+  text: string
+}
+
 /** Activity / steps summary for the day (HC "Tevekenysegek" category) */
 export interface ZeppActivity {
   /** Active calories burned kcal */
@@ -93,6 +105,17 @@ export interface ZeppActivity {
    * kept alongside -- never replacing -- the measured distanceM.
    */
   estimatedDistanceM?: number
+  /**
+   * Canonical Boss-facing distance render (WELL-031, Option A per hibiki contract feedback).
+   * Computed ONCE at write time (applyDistanceForDisplay) so no consumer re-derives which
+   * value to surface or how to label it -- pushing that choice onto each reader lets renders
+   * diverge (one shows the broken 456 m, another the estimate). `meters`/`km` is the value to
+   * show, `source` its kind, `text` a ready localized label ("12.0 km" measured,
+   * "~12.0 km (becsult, lepesbol)" estimated). The raw distanceM / estimatedDistanceM /
+   * distanceSource stay for debug; this is the display-path canonical. Absent when there is
+   * no distance to show.
+   */
+  distanceForDisplay?: DistanceDisplay
   /**
    * Append-only per-day distance ledger (card 75337cdc distance=B). HC distance arrives as
    * disjoint intraday slices, and each push carries only the slices still inside its 48h
