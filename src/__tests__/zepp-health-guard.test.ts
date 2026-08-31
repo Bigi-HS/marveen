@@ -31,6 +31,37 @@ describe('checkSnapshot', () => {
     expect(alerts[0].type).toBe('endpoint_error')
   })
 
+  // #6 (card e3197a20): snapshot.error is pull-layer origin (Zepp API). Sanitize before it
+  // enters the alert message so a leaked blob / newline-injected payload cannot ride into
+  // the Telegram/kanban surface. Keep a normal short error readable.
+  describe('error message sanitization (#6)', () => {
+    it('keeps a normal short error readable', () => {
+      const alerts = checkSnapshot(snap({ status: 'endpoint_error', error: 'HTTP 503' }), BASE_NOW_MS)
+      expect(alerts[0].message).toContain('HTTP 503')
+    })
+
+    it('strips newlines and control chars (no alert-injection via the error field)', () => {
+      const alerts = checkSnapshot(
+        snap({ status: 'endpoint_error', error: 'HTTP 503\nInjected: SECRET=abc\r\n\tmore' }),
+        BASE_NOW_MS,
+      )
+      expect(alerts[0].message).not.toMatch(/[\r\n\t]/)
+    })
+
+    it('truncates an oversized error blob', () => {
+      const huge = 'x'.repeat(5000)
+      const alerts = checkSnapshot(snap({ status: 'endpoint_error', error: huge }), BASE_NOW_MS)
+      // message = prefix + sanitized error; the error portion must be bounded well under the blob
+      expect(alerts[0].message.length).toBeLessThan(300)
+    })
+
+    it('does not append an error suffix when error is absent', () => {
+      const alerts = checkSnapshot(snap({ status: 'endpoint_error' }), BASE_NOW_MS)
+      expect(alerts[0].message).not.toMatch(/: $/)
+      expect(alerts[0].message).toContain('endpoint_error')
+    })
+  })
+
   it('raises stale alert when pulledAt is >26h ago', () => {
     const staleMs = BASE_NOW_MS - 27 * 60 * 60 * 1000
     const alerts = checkSnapshot(

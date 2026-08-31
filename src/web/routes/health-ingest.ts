@@ -75,14 +75,14 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
 function mapVitals(v: Record<string, unknown>): ZeppVitals {
   return {
-    restingHr: num(v['resting_hr_bpm']),
+    restingHr: numBounded(v['resting_hr_bpm'], MIN_HR_BPM, MAX_HR_BPM),
     hrv: num(v['hrv_rmssd_ms']),
-    spo2: num(v['spo2_pct']),
+    spo2: numBounded(v['spo2_pct'], MIN_SPO2_PCT, MAX_SPO2_PCT),
     breathingRate: num(v['respiratory_rate_bpm']),
     skinTemp: num(v['skin_temp_c']),
-    hrAvg: num(v['hr_avg_bpm']),
-    hrMin: num(v['hr_min_bpm']),
-    hrMax: num(v['hr_max_bpm']),
+    hrAvg: numBounded(v['hr_avg_bpm'], MIN_HR_BPM, MAX_HR_BPM),
+    hrMin: numBounded(v['hr_min_bpm'], MIN_HR_BPM, MAX_HR_BPM),
+    hrMax: numBounded(v['hr_max_bpm'], MIN_HR_BPM, MAX_HR_BPM),
   }
 }
 
@@ -329,22 +329,33 @@ function num(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
-// AC#1 (card e3197a20): physiological input caps for fields whose upstream source
-// can produce phantom values (e.g. steps=999,999 -> 762km step-estimate chain).
-// Values outside [0, max] are dropped (undefined) so the anomaly never enters the
-// monotone-max lock or the distance-estimate remediation path.
+// AC#1 (card e3197a20): physiological input bounds for fields whose upstream source
+// can produce phantom values (e.g. steps=999,999 -> 762km step-estimate chain; a sensor
+// glitch spo2=150 or hr=300). Values outside [min, max] are dropped (undefined) so the
+// anomaly never enters the monotone-max lock, the distance-estimate remediation path, or
+// the plausibility guard / goal-calc downstream.
 const MAX_STEPS_PER_DAY = 100_000
 const MAX_KCAL_PER_DAY = 10_000
 const MAX_DISTANCE_M_PER_DAY = 500_000
+// Pulse-ox is a percentage; heart rate spans resting-athlete (~30) to peak-effort (~230).
+const MIN_SPO2_PCT = 0
+const MAX_SPO2_PCT = 100
+const MIN_HR_BPM = 30
+const MAX_HR_BPM = 230
 
-function numCapped(v: unknown, max: number): number | undefined {
+function numBounded(v: unknown, min: number, max: number): number | undefined {
   const n = num(v)
   if (n === undefined) return undefined
-  if (n < 0 || n > max) {
-    logger.warn({ value: n, max }, 'zepp ingest: input value outside sane range, dropping field')
+  if (n < min || n > max) {
+    logger.warn({ value: n, min, max }, 'zepp ingest: input value outside sane range, dropping field')
     return undefined
   }
   return n
+}
+
+// Non-negative sane cap: the common [0, max] case.
+function numCapped(v: unknown, max: number): number | undefined {
+  return numBounded(v, 0, max)
 }
 
 function str(v: unknown): string | undefined {
