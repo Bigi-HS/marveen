@@ -46,6 +46,9 @@ export function applyRuleMigrations(db: Database.Database = getNoaDb()): void {
 export type TriggerType = 'staleness' | 'status_change' | 'manual'
 export type ActionType = 'inter_agent_nudge' | 'telegram_escalate' | 'reassign'
 
+const VALID_TRIGGER_TYPES: readonly string[] = ['staleness', 'status_change', 'manual']
+const VALID_ACTION_TYPES: readonly string[] = ['inter_agent_nudge', 'telegram_escalate', 'reassign']
+
 export interface Rule {
   id: string
   name: string
@@ -240,6 +243,14 @@ export async function tryHandleRules(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'name, trigger_type, action_type required' }, 400)
       return true
     }
+    if (!VALID_TRIGGER_TYPES.includes(body.trigger_type)) {
+      json(res, { error: `invalid trigger_type; valid: ${VALID_TRIGGER_TYPES.join(', ')}` }, 400)
+      return true
+    }
+    if (!VALID_ACTION_TYPES.includes(body.action_type)) {
+      json(res, { error: `invalid action_type; valid: ${VALID_ACTION_TYPES.join(', ')}` }, 400)
+      return true
+    }
     const rule = createRule({
       name: body.name.trim(),
       enabled: body.enabled !== false,
@@ -264,6 +275,14 @@ export async function tryHandleRules(ctx: RouteContext): Promise<boolean> {
     }
     if (method === 'PUT') {
       const body = JSON.parse((await readBody(req)).toString()) as Partial<Rule>
+      if (body.trigger_type !== undefined && !VALID_TRIGGER_TYPES.includes(body.trigger_type)) {
+        json(res, { error: `invalid trigger_type; valid: ${VALID_TRIGGER_TYPES.join(', ')}` }, 400)
+        return true
+      }
+      if (body.action_type !== undefined && !VALID_ACTION_TYPES.includes(body.action_type)) {
+        json(res, { error: `invalid action_type; valid: ${VALID_ACTION_TYPES.join(', ')}` }, 400)
+        return true
+      }
       const updated = updateRule(id, body)
       if (!updated) { json(res, { error: 'Not found' }, 404); return true }
       json(res, updated)

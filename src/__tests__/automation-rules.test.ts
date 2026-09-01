@@ -198,4 +198,40 @@ describe('POST /api/rules validation', () => {
     expect(r.status).toBe(200)
     expect(Array.isArray(r.body)).toBe(true)
   })
+
+  it('rejects unknown trigger_type', async () => {
+    const r = await callRoute('POST', '/api/rules', {
+      name: 'X', trigger_type: 'invalid_trigger', action_type: 'inter_agent_nudge',
+    })
+    expect(r.status).toBe(400)
+    expect(r.body.error).toMatch(/trigger_type/)
+  })
+
+  it('rejects unknown action_type', async () => {
+    const r = await callRoute('POST', '/api/rules', {
+      name: 'X', trigger_type: 'staleness', action_type: 'drop_table',
+    })
+    expect(r.status).toBe(400)
+    expect(r.body.error).toMatch(/action_type/)
+  })
+})
+
+describe('PUT /api/rules/:id validation', () => {
+  it('rejects unknown trigger_type in update', async () => {
+    const created = await callRoute('POST', '/api/rules', {
+      name: 'R', trigger_type: 'staleness', action_type: 'inter_agent_nudge',
+    })
+    const r = await callRoute('PUT', `/api/rules/${created.body.id}`, { trigger_type: 'bad_type' })
+    expect(r.status).toBe(400)
+    expect(r.body.error).toMatch(/trigger_type/)
+  })
+
+  it('rejects unknown action_type in update', async () => {
+    const created = await callRoute('POST', '/api/rules', {
+      name: 'R', trigger_type: 'staleness', action_type: 'inter_agent_nudge',
+    })
+    const r = await callRoute('PUT', `/api/rules/${created.body.id}`, { action_type: 'xss_inject' })
+    expect(r.status).toBe(400)
+    expect(r.body.error).toMatch(/action_type/)
+  })
 })
