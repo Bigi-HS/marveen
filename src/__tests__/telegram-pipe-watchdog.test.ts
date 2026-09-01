@@ -8,6 +8,7 @@ import {
   shouldEscalate,
   nextState,
   formatRecoveryEvent,
+  shouldStampTransportAlive,
   INITIAL_STATE,
   type WatchdogState,
 } from '../web/telegram-pipe-watchdog.js'
@@ -62,6 +63,36 @@ describe('needsRecovery', () => {
     expect(needsRecovery('dead')).toBe(true)
     expect(needsRecovery('healthy')).toBe(false)
     expect(needsRecovery('inconclusive')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// shouldStampTransportAlive -- token-free transport-liveness marker (card edc8b7f8)
+// ---------------------------------------------------------------------------
+
+describe('shouldStampTransportAlive', () => {
+  it('stamps only on a 409-proven healthy verdict (the poller holds the slot)', () => {
+    expect(shouldStampTransportAlive('healthy', true)).toBe(true)
+  })
+
+  it('does NOT stamp a healthy verdict that came from a network-error (status 0), not a 409', () => {
+    // assessPipeLiveness returns healthy for present===true && status===0 (the
+    // false-blind fix). That is process-present evidence, NOT proof the poller
+    // holds the Telegram slot -- the marker means "409 proven", so do not stamp.
+    expect(shouldStampTransportAlive('healthy', false)).toBe(false)
+  })
+
+  it('does NOT stamp when the verdict is dead even if a 409 was seen (coordinator poll, card 8b07e17b)', () => {
+    // present===false + conflicted 409 -> verdict dead: the slot is held by the
+    // dashboard coordinator polling the SAME token, not our orchestrator child.
+    // Stamping here would write a fresh-but-lying marker that suppresses a real
+    // channel-watchdog respawn once the dashboard goes down.
+    expect(shouldStampTransportAlive('dead', true)).toBe(false)
+  })
+
+  it('does NOT stamp on inconclusive or plain dead', () => {
+    expect(shouldStampTransportAlive('inconclusive', false)).toBe(false)
+    expect(shouldStampTransportAlive('dead', false)).toBe(false)
   })
 })
 

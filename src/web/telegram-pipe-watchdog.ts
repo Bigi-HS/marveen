@@ -89,6 +89,28 @@ export function needsRecovery(verdict: PipeLiveness): boolean {
 }
 
 /**
+ * Pure decision: should this cycle stamp the token-free transport-liveness
+ * marker (store/.channel-transport-alive, card edc8b7f8)?
+ *
+ * The marker's contract is "the native bun poller holds the Telegram getUpdates
+ * slot => transport alive", and the ONLY proof of that is a 409 conflict. So we
+ * stamp iff the verdict is 'healthy' AND it was reached via a real 409:
+ *   - 'healthy' + conflicted  -> stamp (409 proven, and present !== false).
+ *   - 'healthy' + !conflicted -> do NOT stamp: this is the present===true &&
+ *     status===0 false-blind path (process present, Telegram unreachable). We
+ *     have process evidence but no slot-ownership proof.
+ *   - 'dead' + conflicted     -> do NOT stamp: present===false with a 409 means
+ *     the slot is held by the dashboard coordinator polling the SAME token
+ *     (card 8b07e17b), NOT our orchestrator child. Stamping would write a
+ *     fresh-but-lying marker that suppresses a legitimate channel-watchdog
+ *     respawn once the dashboard goes down.
+ *   - anything else           -> do NOT stamp.
+ */
+export function shouldStampTransportAlive(verdict: PipeLiveness, conflicted: boolean): boolean {
+  return verdict === 'healthy' && conflicted
+}
+
+/**
  * Aggregate several conflict probes issued within one cycle into a single
  * verdict, tolerant of the native long-poll's brief inter-cycle gap.
  *
@@ -212,6 +234,29 @@ function logPath(): string {
   return join(PROJECT_ROOT, 'store', 'telegram-pipe-watchdog.log')
 }
 
+/**
+ * Path of the token-free transport-liveness marker (card edc8b7f8). Shares the
+ * store dir with the keepalive file so the independent channel-watchdog.sh
+ * (STORE=$INSTALL_DIR/store) reads the exact file this loop writes.
+ */
+export function transportAliveMarkerPath(): string {
+  return join(PROJECT_ROOT, 'store', '.channel-transport-alive')
+}
+
+/**
+ * Advance the transport-liveness marker's mtime. Best-effort: a failed stamp
+ * must never crash the watchdog cycle (the marker just ages and the dual-gate
+ * falls back to the existing recovery path -- fail toward respawn). Deliberately
+ * never touches .channel-keepalive (the TUI-liveness / wedge-detector signal).
+ */
+export function stampTransportAlive(now: number = Date.now()): void {
+  try {
+    writeFileSync(transportAliveMarkerPath(), String(Math.floor(now / 1000)), 'utf-8')
+  } catch (err) {
+    logger.warn({ err }, 'telegram-pipe-watchdog: failed to stamp transport-alive marker')
+  }
+}
+
 export function readState(): WatchdogState {
   try {
     const raw = readFileSync(statePath(), 'utf-8')
@@ -327,6 +372,14 @@ export async function runCycle(now: number = Date.now()): Promise<CycleResult> {
   const verdict = assessPipeLiveness({ present, conflicted, probeStatus })
   let recovered = false
   let escalated = false
+
+  // Token-free transport-liveness marker (card edc8b7f8): on a 409-proven
+  // healthy verdict, advance store/.channel-transport-alive so the independent
+  // channel-watchdog.sh can tell "token-starved idle transport" (skip respawn)
+  // from a genuinely dead pipe. Never touches .channel-keepalive.
+  if (shouldStampTransportAlive(verdict, conflicted)) {
+    stampTransportAlive(now)
+  }
 
   if (verdict === 'inconclusive') {
     logRecoveryEvent({ ts: now, kind: 'inconclusive', detail: `present=${present} status=${probeStatus}` })

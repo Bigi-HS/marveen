@@ -49,13 +49,27 @@ INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # store. Live runs leave it unset and use the install store.
 STORE="${CHANNEL_WATCHDOG_STORE:-$INSTALL_DIR/store}"
 KEEPALIVE_FILE="$STORE/.channel-keepalive"
+# Token-free transport-liveness marker (card edc8b7f8). Advanced ONLY by the 409
+# conflict probe via the telegram-pipe-watchdog (a raw getUpdates HTTP call, ZERO
+# Opus tokens). A 409 proves the native bun poller holds the Telegram slot =>
+# transport alive. This is a SEPARATE channel from .channel-keepalive (which is
+# TUI-liveness and goes stale on token-starvation of a perfectly healthy pipe).
+TRANSPORT_ALIVE_FILE="$STORE/.channel-transport-alive"
 RESPAWN_STAMP="$STORE/.channel-last-respawn"
 RESPAWN_COUNT_FILE="$STORE/.channel-watchdog-respawns"
 LOG_TAG="channel-watchdog"
 
-STALE_SECONDS=$(( 15 * 60 ))   # keepalive older than this => wedged/deaf
-GRACE_SECONDS=$(( 15 * 60 ))   # don't respawn again within this window
-MAX_CONSECUTIVE=3              # after this many respawns w/o recovery, back off + alert
+STALE_SECONDS=$(( 15 * 60 ))         # keepalive older than this => wedged/deaf
+TRANSPORT_FRESH_SECONDS=$(( 6 * 60 )) # transport marker fresher than this => transport alive
+GRACE_SECONDS=$(( 15 * 60 ))         # don't respawn again within this window
+MAX_CONSECUTIVE=3                    # after this many respawns w/o recovery, back off + alert
+
+# Main channels session transcript dir (Claude Code encodes the cwd by replacing
+# every '/' with '-'). Mirrors src/web/inbound-probe.ts TRANSCRIPT_DIR so the
+# token-free wedge discriminator reads the same log the in-process detector does.
+# Env-overridable for tests.
+TRANSCRIPT_DIR="${CHANNEL_WATCHDOG_TRANSCRIPT_DIR:-$HOME/.claude/projects/${INSTALL_DIR//\//-}}"
+PYTHON="$(command -v python3 || command -v python || true)"
 
 DASH_PORT="${DASH_PORT:-3420}"                       # dashboard health port (env-overridable for tests)
 LOOP_INTERVAL="${CHANNEL_WATCHDOG_INTERVAL:-300}"    # --loop cadence; matches the old systemd-timer 5-min cadence
@@ -82,6 +96,82 @@ dash_alive() {
   local code
   code=$("$CURL" -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$DASH_PORT/api/health" 2>/dev/null)
   [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+# Transport-liveness gate (card edc8b7f8). Returns 0 (alive) when the 409-probe
+# marker exists AND is fresher than TRANSPORT_FRESH_SECONDS, else 1 (dead/absent
+# => transport not proven alive). A missing marker is DEAD, never alive, so an
+# environment where the pipe-watchdog never stamped falls straight to the
+# existing recovery path (fail toward respawn).
+transport_alive() {
+  local m_mtime now
+  [ -f "$TRANSPORT_ALIVE_FILE" ] || return 1
+  m_mtime=$(stat -c %Y "$TRANSPORT_ALIVE_FILE" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  [ $(( now - m_mtime )) -lt "$TRANSPORT_FRESH_SECONDS" ]
+}
+
+# Token-free wedge discriminator: read the newest session transcript and echo
+# one of pending|idle|unknown.
+#   pending = last inbound ingestion (<channel source=) is NEWER than the last
+#             assistant activity => queued-but-no-progress (a genuine wedge).
+#   idle    = last assistant activity is at/after the last inbound, OR no inbound
+#             at all => the TUI processed everything / is quiet (token-starved
+#             idle is this case).
+#   unknown = no transcript / no timestamps / no python => cannot prove idle.
+# ISO-8601 UTC timestamps sort lexically == chronologically, so we compare the
+# raw strings and never parse dates. PII-safe: only the verdict word is emitted,
+# never transcript contents (mirrors inbound-probe.ts).
+transcript_pending_state() {
+  [ -n "$PYTHON" ] || { echo unknown; return; }
+  [ -d "$TRANSCRIPT_DIR" ] || { echo unknown; return; }
+  "$PYTHON" - "$TRANSCRIPT_DIR" <<'PY' 2>/dev/null || echo unknown
+import sys, os, glob, json
+d = sys.argv[1]
+files = glob.glob(os.path.join(d, '*.jsonl'))
+if not files:
+    print('unknown'); sys.exit(0)
+try:
+    newest = max(files, key=lambda f: os.stat(f).st_mtime)
+except Exception:
+    print('unknown'); sys.exit(0)
+TAIL = 262144  # 256 KB, mirrors readLastIngestionTimestamp tail-read
+try:
+    size = os.path.getsize(newest)
+    with open(newest, 'rb') as fh:
+        off = max(0, size - TAIL)
+        fh.seek(off)
+        raw = fh.read().decode('utf-8', 'replace')
+except Exception:
+    print('unknown'); sys.exit(0)
+if size > TAIL:
+    nl = raw.find('\n')
+    raw = raw[nl + 1:] if nl > 0 else raw
+last_in = None
+last_as = None
+for line in raw.split('\n'):
+    if '<channel source=' in line:
+        try:
+            t = json.loads(line).get('timestamp')
+            if isinstance(t, str) and (last_in is None or t > last_in):
+                last_in = t
+        except Exception:
+            pass
+    if '"type":"assistant"' in line:
+        try:
+            o = json.loads(line)
+            t = o.get('timestamp')
+            if o.get('type') == 'assistant' and isinstance(t, str) and (last_as is None or t > last_as):
+                last_as = t
+        except Exception:
+            pass
+if last_in is None:
+    print('idle')
+elif last_as is not None and last_as >= last_in:
+    print('idle')
+else:
+    print('pending')
+PY
 }
 
 # One supervision pass. Returns 0 always (a watchdog tick never fails the loop).
@@ -120,6 +210,24 @@ run_once() {
     # Healthy round-trips -> reset the consecutive-respawn counter.
     rm -f "$RESPAWN_COUNT_FILE" 2>/dev/null || true
     return 0
+  fi
+
+  # --- gate 3.5: transport-liveness dual-gate (card edc8b7f8) ---
+  # .channel-keepalive is stale here, but it is a TUI-liveness signal that ALSO
+  # ages on token-starvation of a perfectly healthy transport (the visible
+  # disconnect). Before respawning, consult the token-free transport marker (409
+  # probe) plus a token-free transcript wedge discriminator. Only skip when we
+  # have POSITIVE proof of both: transport alive AND no queued-but-unprocessed
+  # inbound. Any other combination (transport dead/unknown, or a real wedge, or
+  # an unreadable transcript) falls through to the existing recovery path.
+  if transport_alive; then
+    local pending
+    pending=$(transcript_pending_state)
+    if [ "$pending" = "idle" ]; then
+      log "keepalive stale ${age}s BUT transport-alive (409 marker fresh) and no pending inbound (transcript idle) -- token-starved idle TUI, skip respawn"
+      return 0
+    fi
+    log "keepalive stale ${age}s, transport-alive, transcript=$pending -- not a token-starved idle (wedge or unreadable), proceeding to recovery"
   fi
 
   # --- gate 4: respawn grace (shared with the dashboard watchdog) ---
