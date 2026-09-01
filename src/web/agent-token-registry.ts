@@ -188,6 +188,22 @@ export function revokeAgentTokens(db: Database.Database, agentId: string, now: n
     .run(now, agentId).changes
 }
 
+// Revoke all live tokens for an agent EXCEPT the one identified by exceptSha256.
+// Used in write-then-revoke rotation (SEC-066): the freshly minted token is
+// written to disk first; then only the old tokens are revoked, leaving the new
+// token valid. Avoids the 401 gap that revokeAgentTokens+mintAgentToken ordering
+// had when revoke preceded the file write.
+export function revokeAgentTokensExcept(
+  db: Database.Database,
+  agentId: string,
+  exceptSha256: string,
+  now: number = Date.now(),
+): number {
+  return db
+    .prepare('UPDATE agent_tokens SET revoked_at = ? WHERE agent_id = ? AND revoked_at IS NULL AND token_sha256 != ?')
+    .run(now, agentId, exceptSha256).changes
+}
+
 // Drop rows whose absolute expiry has passed. A non-expiring token (expires_at
 // NULL) is never pruned. Returns the number removed.
 export function pruneExpiredTokens(db: Database.Database, now: number = Date.now()): number {

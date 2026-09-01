@@ -25,7 +25,7 @@
 import { mkdirSync, lstatSync, existsSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { atomicWriteFileSync } from './atomic-write.js'
-import { mintAgentToken, revokeAgentTokens, ADMIN_SCOPE } from './agent-token-registry.js'
+import { mintAgentToken, revokeAgentTokens, revokeAgentTokensExcept, ADMIN_SCOPE } from './agent-token-registry.js'
 import type Database from 'better-sqlite3'
 
 // 24h default (design §5.6): short enough to bound the blast-radius of a stolen
@@ -97,8 +97,10 @@ function serializeTokenFile(token: string, expiresAt: number | null): string {
 }
 
 // Mint + persist a fresh token for an agent and write its 0600 token file.
-// Revokes the agent's prior live tokens first (clean rotation -- one live token
-// per agent). `tokenFile` is the absolute path the launch helper will read.
+// Rotation order: mint -> write to disk -> revoke old tokens. This guarantees
+// the running agent's old token stays valid until the new one is fully on disk,
+// eliminating the 401 gap that occurred when revoke ran before the file write
+// (SEC-066/8811dfce, Thor finding on PR #597).
 export function provisionAgentToken(
   db: Database.Database,
   agentId: string,
@@ -108,8 +110,6 @@ export function provisionAgentToken(
   const now = opts.now ?? Date.now()
   const ttlMs = opts.ttlMs ?? DEFAULT_AGENT_TOKEN_TTL_MS
   const scopes = scopesForAgent(agentId)
-  // Rotate: kill any previous live token so only the freshly-minted one resolves.
-  revokeAgentTokens(db, agentId, now)
   const { token, tokenSha256, expiresAt } = mintAgentToken(db, agentId, scopes, { now, ttlMs })
   const tokenDir = dirname(tokenFile)
   mkdirSync(tokenDir, { recursive: true })
@@ -120,7 +120,11 @@ export function provisionAgentToken(
       `agent-token-provision: refusing to write ${tokenFile}: parent directory ${tokenDir} is a symlink`,
     )
   }
+  // Write first, then revoke: the file is fully replaced before the old token
+  // is invalidated, so the agent can always read a valid token from disk.
   atomicWriteFileSync(tokenFile, serializeTokenFile(token, expiresAt), { mode: 0o600 })
+  // Revoke only the OLD tokens -- exclude the freshly minted one so it stays valid.
+  revokeAgentTokensExcept(db, agentId, tokenSha256, now)
   return { tokenSha256, expiresAt, scopes }
 }
 

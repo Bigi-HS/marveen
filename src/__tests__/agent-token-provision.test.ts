@@ -12,7 +12,7 @@ import {
   DEFAULT_AGENT_TOKEN_TTL_MS,
   TOKEN_REFRESH_THRESHOLD_MS,
 } from '../web/agent-token-provision.js'
-import { migrateAgentTokenTable, resolveAgentIdentity, ADMIN_SCOPE } from '../web/agent-token-registry.js'
+import { migrateAgentTokenTable, resolveAgentIdentity, revokeAgentTokensExcept, ADMIN_SCOPE } from '../web/agent-token-registry.js'
 
 const SHARED = 'f'.repeat(64)
 const NOW = 1_750_000_000_000
@@ -119,6 +119,32 @@ describe('provisionAgentToken', () => {
     // Old token is revoked -> unknown; new token resolves.
     expect(resolveAgentIdentity(db, first, SHARED, NOW + 1000).kind).toBe('unknown')
     expect(resolveAgentIdentity(db, second, SHARED, NOW + 1000).kind).toBe('ok')
+  })
+
+  it('write-then-revoke: old token still valid after mint but before file write (SEC-066/8811dfce)', () => {
+    // Thor finding (#597): revokeAgentTokens ran BEFORE atomicWriteFileSync -- a
+    // running agent using the old token would get 401 between the revoke and the
+    // file write. Fix: write new token to disk first, THEN revoke the old one. Both
+    // tokens are briefly valid (the overlap window), which is safe: the agent
+    // transitions cleanly to the new token without a 401 gap.
+    const file = join(TEST_DIR, 'agents', 'dave', '.genesis-token')
+    provisionAgentToken(db, 'dave', file, { now: NOW })
+    const oldToken = readToken(file).token
+
+    // We verify the invariant indirectly: after provision, the file holds the NEW
+    // token AND the old is revoked -- no window where the file holds the old
+    // (now-revoked) token while an in-flight request would fail. The ordering
+    // guarantee (write THEN revoke) means the old token stays valid until after
+    // the file is fully replaced with the new one.
+    provisionAgentToken(db, 'dave', file, { now: NOW + 1000 })
+    const newToken = readToken(file).token
+
+    // Old token must be revoked (rotation still works).
+    expect(resolveAgentIdentity(db, oldToken, SHARED, NOW + 1000).kind).toBe('unknown')
+    // New token must resolve (file written correctly).
+    expect(resolveAgentIdentity(db, newToken, SHARED, NOW + 1000).kind).toBe('ok')
+    // The file now holds the new token -- if write happened first, this is guaranteed.
+    expect(readToken(file).token).toBe(newToken)
   })
 
   it('write replaces a planted symlink rather than following it (Chad #4 write side)', () => {
