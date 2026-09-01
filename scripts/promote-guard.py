@@ -90,6 +90,84 @@ def _require_committed(source, repo_root):
                                'first, then promote' % rel)
 
 
+def _blob_sha_on_ref(ref, rel, repo_root):
+    """Git blob SHA of `rel` on `ref`, or None if absent.  Parses ls-tree output."""
+    r = _git(['ls-tree', ref, '--', rel], repo_root)
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    # output format: "<mode> <type> <sha>\t<path>"
+    parts = r.stdout.strip().split()
+    return parts[2] if len(parts) >= 3 else None
+
+
+def _local_blob_sha(source, repo_root):
+    """Git blob SHA of the local file as git would hash it (git hash-object)."""
+    r = _git(['hash-object', source], repo_root)
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def _require_on_develop(source, repo_root, *, force=False):
+    """The real review gate: the source blob MUST be present on origin/develop.
+
+    Only a guard that has been through the PR+gate process (Thor+Dave approval)
+    and merged to origin/develop is eligible for promotion.  A committed-but-
+    unreviewed file -- or one reviewed in a PR that has not yet merged -- fails
+    this check.
+
+    force=True (``--force-promote`` CLI flag) allows promoting a guard that is
+    ahead of develop, e.g. reviewed in a gate-cleared PR but not yet merged.
+    The override is logged to stderr loudly; it does not bypass _require_committed.
+    Use only for the brief window between gate-clear and merge -- never in steady
+    state.
+    """
+    rel = os.path.relpath(source, repo_root)
+
+    # Always fetch so origin/develop reflects current state.
+    _git(['fetch', 'origin', 'develop'], repo_root)
+
+    local_sha = _local_blob_sha(source, repo_root)
+    if local_sha is None:
+        raise PromotionRefused('could not compute blob SHA for %s -- cannot verify '
+                               'it is on origin/develop' % rel)
+
+    develop_sha = _blob_sha_on_ref('origin/develop', rel, repo_root)
+
+    if develop_sha is None:
+        # File not on origin/develop at all.
+        if force:
+            sys.stderr.write(
+                'PROMOTE OVERRIDE (--force-promote): %s is not present on '
+                'origin/develop -- it has not been merged yet.  Promoting anyway '
+                'as requested.  Ensure the PR is gate-cleared before using this '
+                'override in production.  Override is logged here for audit.\n' % rel
+            )
+            return
+        raise PromotionRefused(
+            '%s is not present on origin/develop -- the guard has not been '
+            'through the PR+review gate and merged.  Merge the PR first, then '
+            'promote.  To promote ahead of merge (gate-cleared PRs only), pass '
+            '--force-promote (override is logged).' % rel
+        )
+
+    if develop_sha != local_sha:
+        # File is on develop but the local copy is ahead (or diverged).
+        if force:
+            sys.stderr.write(
+                'PROMOTE OVERRIDE (--force-promote): %s local blob (%s) differs '
+                'from origin/develop blob (%s) -- local is ahead of or diverged '
+                'from develop.  Promoting anyway as requested.  Ensure the PR '
+                'is gate-cleared and the diff is intentional.  Override logged.\n'
+                % (rel, local_sha[:12], develop_sha[:12])
+            )
+            return
+        raise PromotionRefused(
+            '%s local blob (%s) does not match origin/develop blob (%s) -- the '
+            'local copy is ahead of or diverged from develop.  Merge the PR '
+            'first, or pass --force-promote to override (logged).'
+            % (rel, local_sha[:12], develop_sha[:12])
+        )
+
+
 def _run_gate(kind, script, target, repo_root, pass_target=True):
     """Run one gate script.  `pass_target` is False for the unit suite, because
     unittest.main() parses sys.argv and would read the target path as a test
@@ -107,18 +185,22 @@ def _run_gate(kind, script, target, repo_root, pass_target=True):
     return os.path.relpath(script, repo_root)
 
 
-def promote(name, repo_root=REPO_ROOT, guard_dir=None):
+def promote(name, repo_root=REPO_ROOT, guard_dir=None, *, force=False):
     """Run both gates against the SOURCE, then publish it atomically.
 
     The gates deliberately run on the source rather than on the live copy: a
     canary pointed at what is already deployed certifies the old code and waves
-    the new one through without ever looking at it."""
+    the new one through without ever looking at it.
+
+    force=True corresponds to ``--force-promote``: allows promoting a guard ahead
+    of origin/develop (gate-cleared PR, not yet merged).  Override is logged."""
     guard_dir = guard_dir or os.path.join(repo_root, GUARD_DIRNAME)
     p = _paths(name, repo_root, guard_dir)
 
     if not os.path.isfile(p['source']):
         raise PromotionRefused('%s not found in scripts/hooks' % name)
     _require_committed(p['source'], repo_root)
+    _require_on_develop(p['source'], repo_root, force=force)
     suite = _run_gate('suite', p['suite'], p['source'], repo_root, pass_target=False)
     canary = _run_gate('canary', p['canary'], p['source'], repo_root)
 
@@ -184,6 +266,7 @@ def verify(name, repo_root=REPO_ROOT, guard_dir=None):
 def main(argv):
     args = [a for a in argv if not a.startswith('--')]
     names = args or DEFAULT_GUARDS
+    force = '--force-promote' in argv
     if '--verify' in argv:
         bad = 0
         for name in names:
@@ -200,7 +283,7 @@ def main(argv):
     failed = 0
     for name in names:
         try:
-            man = promote(name)
+            man = promote(name, force=force)
         except PromotionRefused as exc:
             failed += 1
             print('REFUSED %s\n  %s' % (name, exc))

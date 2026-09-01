@@ -46,26 +46,41 @@ def sha256(path):
 
 class PromoterFixture(unittest.TestCase):
     """A throwaway repo laid out exactly like ours: scripts/hooks/<guard>,
-    scripts/hooks/test_<guard>.py, scripts/hooks/canary_guardrail_example.py."""
+    scripts/hooks/test_<guard>.py, scripts/hooks/canary_guardrail_example.py.
+
+    Includes a bare 'origin' with a 'develop' branch so that the blob-presence
+    gate (_require_on_develop, card 8c754df8 Part 2) passes for the initial
+    guard files.  Tests that exercise canary/suite failures can rely on the blob
+    gate having already cleared, because the guard IS on origin/develop."""
 
     NAME = 'guardrail-example.py'
 
+    ENV = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t',
+               GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@t')
+
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix='promote-guard-test-')
-        self.addCleanup(shutil.rmtree, self.root, True)
+        tmp = tempfile.mkdtemp(prefix='promote-guard-test-')
+        self.addCleanup(shutil.rmtree, tmp, True)
+        origin = os.path.join(tmp, 'origin.git')
+        self.root = os.path.join(tmp, 'clone')
         self.hooks = os.path.join(self.root, 'scripts', 'hooks')
-        os.makedirs(self.hooks)
         self.guard_dir = os.path.join(self.root, '.guard')
+
+        subprocess.run(['git', 'init', '-q', '--bare', origin],
+                       env=self.ENV, check=True, capture_output=True)
+        subprocess.run(['git', 'clone', '-q', origin, self.root],
+                       env=self.ENV, check=True, capture_output=True)
+        os.makedirs(self.hooks)
 
         self.write('scripts/hooks/' + self.NAME, GUARD_V2)
         self.write('scripts/hooks/test_guardrail_example.py', EXIT_OK)
         self.write('scripts/hooks/canary_guardrail_example.py', EXIT_OK)
 
-        env = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t',
-                   GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@t')
-        for cmd in (['git', 'init', '-q'], ['git', 'add', '-A'],
-                    ['git', 'commit', '-q', '-m', 'seed']):
-            subprocess.run(cmd, cwd=self.root, env=env, check=True,
+        for cmd in (['git', 'add', '-A'],
+                    ['git', 'commit', '-q', '-m', 'seed'],
+                    ['git', 'push', '-q', 'origin', 'HEAD:develop'],
+                    ['git', 'fetch', 'origin']):
+            subprocess.run(cmd, cwd=self.root, env=self.ENV, check=True,
                            capture_output=True)
 
     def write(self, rel, content):
@@ -251,6 +266,169 @@ class VerifyTests(PromoterFixture):
         self.assertFalse(report['live_matches_source'])
 
 
+class BlobGateFixture(unittest.TestCase):
+    """Temp-repo fixture with a bare 'origin' so _require_on_develop can be
+    tested without touching the live develop branch (card 8c754df8 Part 2).
+
+    Layout:
+        self.origin  -- bare repo acting as the remote
+        self.root    -- working clone with 'origin' remote pointing at it
+        origin/develop is created in setUp with the guard file committed.
+    """
+
+    NAME = 'guardrail-example.py'
+
+    ENV = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t',
+               GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@t')
+
+    def _git(self, args, cwd=None):
+        return subprocess.run(['git'] + args, cwd=cwd or self.root,
+                              env=self.ENV, capture_output=True, text=True, check=True)
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp(prefix='promote-blob-test-')
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.origin = os.path.join(tmp, 'origin.git')
+        self.root = os.path.join(tmp, 'clone')
+        self.hooks = os.path.join(self.root, 'scripts', 'hooks')
+        self.guard_dir = os.path.join(self.root, '.guard')
+
+        # bare origin
+        subprocess.run(['git', 'init', '-q', '--bare', self.origin],
+                       env=self.ENV, check=True, capture_output=True)
+
+        # working clone
+        subprocess.run(['git', 'clone', '-q', self.origin, self.root],
+                       env=self.ENV, check=True, capture_output=True)
+
+        # seed files + commit + push to origin/develop
+        os.makedirs(self.hooks)
+        self._write('scripts/hooks/' + self.NAME, GUARD_V2)
+        self._write('scripts/hooks/test_guardrail_example.py', EXIT_OK)
+        self._write('scripts/hooks/canary_guardrail_example.py', EXIT_OK)
+        self._git(['add', '-A'])
+        self._git(['commit', '-q', '-m', 'seed'])
+        self._git(['push', '-q', 'origin', 'HEAD:develop'])
+        self._git(['fetch', 'origin'])
+
+    def _write(self, rel, content):
+        path = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as fh:
+            fh.write(content)
+
+    def _promote(self, **kwargs):
+        return promote_guard.promote(self.NAME, repo_root=self.root,
+                                     guard_dir=self.guard_dir, **kwargs)
+
+    def _require_on_develop(self, source=None, **kwargs):
+        if source is None:
+            source = os.path.join(self.root, 'scripts', 'hooks', self.NAME)
+        return promote_guard._require_on_develop(source, self.root, **kwargs)
+
+
+class BlobGateRefusalTests(BlobGateFixture):
+    """_require_on_develop refuses when the blob is not on origin/develop (SEC-049 Part 2)."""
+
+    def test_passes_when_blob_matches_origin_develop(self):
+        """Guard committed + pushed to develop -> gate passes, promote succeeds."""
+        self._promote()   # must not raise
+
+    def test_refuses_when_file_absent_from_develop(self):
+        """A guard committed locally but NOT on develop fails the blob gate."""
+        # Write and commit a new guard that was never pushed to origin/develop.
+        new_name = 'guardrail-new.py'
+        self._write('scripts/hooks/' + new_name, GUARD_V2)
+        self._write('scripts/hooks/test_guardrail_new.py', EXIT_OK)
+        self._write('scripts/hooks/canary_guardrail_new.py', EXIT_OK)
+        self._git(['add', '-A'])
+        self._git(['commit', '-q', '-m', 'add new guard (not pushed)'])
+        # Do NOT push -- file is tracked+clean but absent from origin/develop.
+        source = os.path.join(self.root, 'scripts', 'hooks', new_name)
+        with self.assertRaises(promote_guard.PromotionRefused) as ctx:
+            promote_guard._require_on_develop(source, self.root, force=False)
+        self.assertIn('not present on origin/develop', str(ctx.exception))
+
+    def test_refuses_when_local_blob_ahead_of_develop(self):
+        """Guard is on develop but local copy has uncommitted-to-develop edits."""
+        guard_path = os.path.join(self.root, 'scripts', 'hooks', self.NAME)
+        with open(guard_path, 'w') as fh:
+            fh.write('# guard v3 -- ahead of develop\nimport sys\nsys.exit(0)\n')
+        self._git(['add', guard_path])
+        self._git(['commit', '-q', '-m', 'local bump, not pushed to develop'])
+        # Local blob differs from origin/develop blob.
+        with self.assertRaises(promote_guard.PromotionRefused) as ctx:
+            self._require_on_develop()
+        self.assertIn('does not match origin/develop blob', str(ctx.exception))
+
+    def test_force_logs_and_allows_when_file_absent_from_develop(self):
+        """--force-promote bypasses refusal and logs to stderr when file absent."""
+        new_name = 'guardrail-force.py'
+        self._write('scripts/hooks/' + new_name, GUARD_V2)
+        self._write('scripts/hooks/test_guardrail_force.py', EXIT_OK)
+        self._write('scripts/hooks/canary_guardrail_force.py', EXIT_OK)
+        self._git(['add', '-A'])
+        self._git(['commit', '-q', '-m', 'force guard (not pushed)'])
+        source = os.path.join(self.root, 'scripts', 'hooks', new_name)
+        import io
+        old_stderr, sys.stderr = sys.stderr, io.StringIO()
+        try:
+            promote_guard._require_on_develop(source, self.root, force=True)
+            log = sys.stderr.getvalue()
+        finally:
+            sys.stderr = old_stderr
+        self.assertIn('PROMOTE OVERRIDE', log)
+        self.assertIn('--force-promote', log)
+
+    def test_force_logs_and_allows_when_blob_ahead_of_develop(self):
+        """--force-promote bypasses refusal and logs when local blob differs."""
+        guard_path = os.path.join(self.root, 'scripts', 'hooks', self.NAME)
+        with open(guard_path, 'w') as fh:
+            fh.write('# guard v3 -- ahead\nimport sys\nsys.exit(0)\n')
+        self._git(['add', guard_path])
+        self._git(['commit', '-q', '-m', 'local bump'])
+        import io
+        old_stderr, sys.stderr = sys.stderr, io.StringIO()
+        try:
+            self._require_on_develop(force=True)
+            log = sys.stderr.getvalue()
+        finally:
+            sys.stderr = old_stderr
+        self.assertIn('PROMOTE OVERRIDE', log)
+        self.assertIn('differs from origin/develop blob', log)
+
+    def test_full_promote_fails_when_not_on_develop(self):
+        """End-to-end: promote() raises when the blob is absent from develop."""
+        # Write a second guard, commit but don't push.
+        name2 = 'guardrail-b.py'
+        self._write('scripts/hooks/' + name2, GUARD_V2)
+        self._write('scripts/hooks/test_guardrail_b.py', EXIT_OK)
+        self._write('scripts/hooks/canary_guardrail_b.py', EXIT_OK)
+        self._git(['add', '-A'])
+        self._git(['commit', '-q', '-m', 'b not pushed'])
+        with self.assertRaises(promote_guard.PromotionRefused):
+            promote_guard.promote(name2, repo_root=self.root, guard_dir=self.guard_dir)
+
+
+def _hook_pinning_deployed():
+    """True when the settings.json hook-pinning from card e571e67 is on develop.
+
+    LiveWiringTests require that pinning; they are skipped on branches that
+    cherry-picked promote-guard.py without the settings.json repointing (e.g.
+    SEC-049, card 8c754df8) and will re-activate once the pinning PR lands."""
+    repo = os.path.dirname(os.path.dirname(_HERE))
+    template = os.path.join(repo, 'templates', 'settings.json.template')
+    try:
+        with open(template) as fh:
+            text = fh.read()
+        return '.guard/guardrail-permission-rules.py' in text
+    except OSError:
+        return False
+
+
+@unittest.skipUnless(_hook_pinning_deployed(),
+                     'settings.json hook-pinning (card e571e67) not yet on '
+                     'develop -- LiveWiringTests activate after that PR lands')
 class LiveWiringTests(unittest.TestCase):
     """Assertions about THIS repo rather than a fixture, because the wiring IS
     the deployment: if a hook config drifts back to the checkout copy, the
