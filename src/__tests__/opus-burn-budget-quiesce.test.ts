@@ -9,7 +9,7 @@
  *   - resume: rollover epoch -> marker expired -> agent un-quiesced
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -55,6 +55,38 @@ describe('budgetPauseMarkerPath', () => {
   it('uses dotfile convention (leading dot)', () => {
     const p = budgetPauseMarkerPath('radar', storeDir)
     expect(p.split('/').at(-1)).toMatch(/^\./)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// agentName slug validation (path-traversal guard)
+// ---------------------------------------------------------------------------
+describe('writeBudgetPauseMarker slug guard', () => {
+  it('rejects path-traversal agentName (../escape)', () => {
+    writeBudgetPauseMarker('../escape', NOW, storeDir)
+    // No marker file should have been written in storeDir or parent
+    const p = budgetPauseMarkerPath('../escape', storeDir)
+    expect(existsSync(p)).toBe(false)
+  })
+
+  it('rejects agentName with uppercase letters', () => {
+    writeBudgetPauseMarker('Dave', NOW, storeDir)
+    expect(existsSync(budgetPauseMarkerPath('Dave', storeDir))).toBe(false)
+  })
+
+  it('rejects agentName with spaces', () => {
+    writeBudgetPauseMarker('my agent', NOW, storeDir)
+    expect(existsSync(budgetPauseMarkerPath('my agent', storeDir))).toBe(false)
+  })
+
+  it('accepts valid lowercase-slug agentName', () => {
+    writeBudgetPauseMarker('dave', NOW, storeDir)
+    expect(isBudgetPauseMarkerActive('dave', NOW, storeDir)).toBe(true)
+  })
+
+  it('accepts agentName with hyphens and digits', () => {
+    writeBudgetPauseMarker('agent-42', NOW, storeDir)
+    expect(isBudgetPauseMarkerActive('agent-42', NOW, storeDir)).toBe(true)
   })
 })
 

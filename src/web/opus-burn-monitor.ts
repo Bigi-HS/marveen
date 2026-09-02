@@ -283,15 +283,23 @@ export interface AgentBudgetDecision {
   shouldQuiesce: boolean
 }
 
+// Agent name slug validation: [a-z0-9-]+ only. Guards against path-traversal
+// (e.g. '../other') when constructing the marker path. Agent names entering
+// writeBudgetPauseMarker come from token_usage DB rows (server-controlled), but
+// we validate defensively so a corrupt DB row cannot escape the store/ directory.
+const AGENT_SLUG_RE = /^[a-z0-9-]+$/
+
 export function budgetPauseMarkerPath(agentName: string, storeDir = STORE_DIR): string {
   return join(storeDir, `.${agentName}-budget-pause`)
 }
 
 export function writeBudgetPauseMarker(agentName: string, nowMs: number, storeDir = STORE_DIR): void {
+  // Reject any name that is not a safe slug. Fail-safe: no marker written.
+  // This is the only write path; dashboard-server is sole caller.
+  if (!AGENT_SLUG_RE.test(agentName)) return
   const weekStartMs = currentWeekStartMs(nowMs)
   const expiresAt = weekStartMs + 7 * 24 * 3600 * 1000
-  const burnPct = 0 // caller may pass; we keep it simple -- the monitor sets this
-  const marker: BudgetPauseMarker = { expiresAt, weekStartMs, triggeredAtPct: burnPct }
+  const marker: BudgetPauseMarker = { expiresAt, weekStartMs, triggeredAtPct: 0 }
   try {
     mkdirSync(storeDir, { recursive: true })
     atomicWriteFileSync(budgetPauseMarkerPath(agentName, storeDir), JSON.stringify(marker), { mode: 0o600 })
