@@ -73,6 +73,48 @@ describe('computeFreshness', () => {
     })
   })
 
+  describe('daysBehind', () => {
+    it('is 0 when latest is today', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => ({ date: '2026-08-24' }),
+        nowBudapest: () => ({ date: '2026-08-24', hours: 14, minutes: 0 }),
+      }))
+      expect(r.daysBehind).toBe(0)
+    })
+
+    it('is 1 when latest is yesterday (normal morning state)', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => ({ date: '2026-08-23' }),
+        nowBudapest: () => ({ date: '2026-08-24', hours: 9, minutes: 0 }),
+      }))
+      expect(r.daysBehind).toBe(1)
+    })
+
+    it('is 6 across a real multi-day gap (08-25 -> 08-31)', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => ({ date: '2026-08-25' }),
+        nowBudapest: () => ({ date: '2026-08-31', hours: 9, minutes: 0 }),
+      }))
+      expect(r.daysBehind).toBe(6)
+    })
+
+    it('is null when store is empty', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => null,
+        nowBudapest: () => ({ date: '2026-08-24', hours: 9, minutes: 0 }),
+      }))
+      expect(r.daysBehind).toBeNull()
+    })
+
+    it('spans a month boundary correctly (07-31 -> 08-02 = 2)', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => ({ date: '2026-07-31' }),
+        nowBudapest: () => ({ date: '2026-08-02', hours: 9, minutes: 0 }),
+      }))
+      expect(r.daysBehind).toBe(2)
+    })
+  })
+
   describe('alert logic', () => {
     it('no alert when data is today even if many blocks elapsed', () => {
       const r = computeFreshness(makeDeps({
@@ -82,24 +124,49 @@ describe('computeFreshness', () => {
       expect(r.alert).toBe(false)
     })
 
-    it('no alert when data is stale but fewer than 3 blocks elapsed (too early)', () => {
-      const r = computeFreshness(makeDeps({
-        latestSnapshot: () => ({ date: '2026-08-23', sourceSyncedAt: '2026-08-23T20:00:00Z' }),
-        nowBudapest: () => ({ date: '2026-08-24', hours: 2, minutes: 0 }),
-      }))
-      expect(r.blocksSince1am).toBe(2)
-      expect(r.alert).toBe(false)
-    })
-
-    it('alerts when data is stale and exactly 3 blocks elapsed (02:30)', () => {
+    // The false positive this fix kills: latest = yesterday is the normal
+    // morning state (ingest finalizes the previous day, today not yet complete)
+    // and must NOT alert, no matter how many blocks have elapsed.
+    it('no alert when latest is yesterday, even at 02:30 (3 blocks)', () => {
       const r = computeFreshness(makeDeps({
         latestSnapshot: () => ({ date: '2026-08-23', sourceSyncedAt: '2026-08-23T20:00:00Z' }),
         nowBudapest: () => ({ date: '2026-08-24', hours: 2, minutes: 30 }),
       }))
+      expect(r.daysBehind).toBe(1)
+      expect(r.blocksSince1am).toBe(3)
+      expect(r.alert).toBe(false)
+      expect(r.alertReason).toBeNull()
+    })
+
+    it('no alert when latest is yesterday, late in the day (22:00)', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => ({ date: '2026-08-23', sourceSyncedAt: '2026-08-23T20:00:00Z' }),
+        nowBudapest: () => ({ date: '2026-08-24', hours: 22, minutes: 0 }),
+      }))
+      expect(r.alert).toBe(false)
+    })
+
+    // Real gap (>=2 days behind) must still fire -- the 08-26 outage regression guard.
+    it('alerts when latest is 2 days behind and 3 blocks elapsed (02:30)', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => ({ date: '2026-08-22', sourceSyncedAt: '2026-08-22T20:00:00Z' }),
+        nowBudapest: () => ({ date: '2026-08-24', hours: 2, minutes: 30 }),
+      }))
+      expect(r.daysBehind).toBe(2)
       expect(r.blocksSince1am).toBe(3)
       expect(r.alert).toBe(true)
-      expect(r.alertReason).toContain('2026-08-23')
+      expect(r.alertReason).toContain('2026-08-22')
       expect(r.alertReason).toContain('2026-08-24')
+    })
+
+    it('no alert on a real gap when fewer than 3 blocks elapsed (too early, 02:00)', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => ({ date: '2026-08-22', sourceSyncedAt: '2026-08-22T20:00:00Z' }),
+        nowBudapest: () => ({ date: '2026-08-24', hours: 2, minutes: 0 }),
+      }))
+      expect(r.daysBehind).toBe(2)
+      expect(r.blocksSince1am).toBe(2)
+      expect(r.alert).toBe(false)
     })
 
     it('alerts when store is empty and 3+ blocks elapsed', () => {
@@ -113,7 +180,7 @@ describe('computeFreshness', () => {
 
     it('alert includes block count in reason', () => {
       const r = computeFreshness(makeDeps({
-        latestSnapshot: () => ({ date: '2026-08-23', sourceSyncedAt: '2026-08-23T20:00:00Z' }),
+        latestSnapshot: () => ({ date: '2026-08-22', sourceSyncedAt: '2026-08-22T20:00:00Z' }),
         nowBudapest: () => ({ date: '2026-08-24', hours: 14, minutes: 0 }),
       }))
       // 14:00 -> minutesSince1am = 780, blocks = 26. Assert on "26 30-min blocks"
