@@ -27,8 +27,21 @@ import urllib.error
 
 BASE = "http://localhost:3420"
 TOKEN_PATH = "/home/domin/marveen/store/.dashboard-token"
-# The only hosts the Bearer token is ever allowed to reach.
-_LOCAL_HOSTS = {"localhost:3420", "127.0.0.1:3420", "localhost", "127.0.0.1"}
+# The only hosts the Bearer token is ever allowed to reach. Explicit :3420 only --
+# bare 'localhost'/'127.0.0.1' would allow any port, which is a needless widening.
+_LOCAL_HOSTS = {"localhost:3420", "127.0.0.1:3420"}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow 3xx. urllib follows redirects by default, so a dashboard
+    endpoint answering 301/302 to an external URL would leak the Bearer token on the
+    redirected request -- _is_local() only vets the INITIAL URL (PR#624 Chad review)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(newurl, code, "redirect blocked (token safety)", headers, fp)
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect())
 
 
 def _is_local(path):
@@ -76,7 +89,7 @@ def main(argv):
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with _OPENER.open(req, timeout=15) as r:
             sys.stdout.write(r.read().decode())
             print()
             return 0
