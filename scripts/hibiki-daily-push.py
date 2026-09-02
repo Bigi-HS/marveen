@@ -297,8 +297,22 @@ def build_session_message(session: dict, nutrition: dict, supp_overview: list[tu
     if nutrition:
         cal = nutrition.get("calories")
         prot = nutrition.get("protein_g")
+        carbs = nutrition.get("carbs_g")
+        fat = nutrition.get("fat_g")
+        fiber = nutrition.get("fiber_g")
         if cal is not None or prot is not None:
-            lines.append(f"Taplalkozasi cel: {cal} kcal / {prot} g feherje")
+            macro_parts = []
+            if cal is not None:
+                macro_parts.append(f"{cal} kcal")
+            if prot is not None:
+                macro_parts.append(f"{prot}g F")
+            if carbs is not None:
+                macro_parts.append(f"{carbs}g SZH")
+            if fat is not None:
+                macro_parts.append(f"{fat}g ZS")
+            if fiber is not None:
+                macro_parts.append(f"{fiber}g rost")
+            lines.append("Taplalkozasi cel: " + " / ".join(macro_parts))
     if supp_overview:
         agenda = ", ".join(f"{n} ({t})" for n, t in supp_overview)
         lines.append(f"Mai bevitel-terv: {agenda}")
