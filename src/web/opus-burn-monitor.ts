@@ -17,7 +17,7 @@
 
 import { readFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { PROJECT_ROOT } from '../config.js'
+import { PROJECT_ROOT, STORE_DIR } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { isOpusModel } from './opus-fallback.js'
 import { getDb } from '../db.js'
@@ -251,4 +251,97 @@ export function writeBurnAlertState(state: BurnAlertState, path = BURN_ALERT_STA
   } catch {
     /* best-effort */
   }
+}
+
+// ---------------------------------------------------------------------------
+// Per-agent budget quiesce (card e6ab511d)
+//
+// The opus-burn-monitor (dashboard-server process) is the sole WRITER of the
+// budget-pause marker. Watchdog and heartbeat/scheduled runners are readers
+// only. This follows the measurer-writes principle: the monitor already has
+// the token_usage query and per-agent burn data.
+//
+// Fail-safe: missing / unreadable / expired marker -> NOT paused. An agent is
+// never silenced from uncertainty. Same principle as edc8b7f8 transport marker.
+// ---------------------------------------------------------------------------
+
+// Fleet-wide per-agent weekly budget default (MTok). Agents may override with
+// budget.weeklyOutputMtok in their agent-config.json.
+export const AGENT_WEEKLY_BUDGET_MTOK = 50
+
+export interface BudgetPauseMarker {
+  expiresAt: number
+  weekStartMs: number
+  triggeredAtPct: number
+}
+
+export interface AgentBudgetDecision {
+  agentName: string
+  burnTokens: number
+  limitTokens: number
+  burnPct: number
+  shouldQuiesce: boolean
+}
+
+export function budgetPauseMarkerPath(agentName: string, storeDir = STORE_DIR): string {
+  return join(storeDir, `.${agentName}-budget-pause`)
+}
+
+export function writeBudgetPauseMarker(agentName: string, nowMs: number, storeDir = STORE_DIR): void {
+  const weekStartMs = currentWeekStartMs(nowMs)
+  const expiresAt = weekStartMs + 7 * 24 * 3600 * 1000
+  const burnPct = 0 // caller may pass; we keep it simple -- the monitor sets this
+  const marker: BudgetPauseMarker = { expiresAt, weekStartMs, triggeredAtPct: burnPct }
+  try {
+    mkdirSync(storeDir, { recursive: true })
+    atomicWriteFileSync(budgetPauseMarkerPath(agentName, storeDir), JSON.stringify(marker), { mode: 0o600 })
+  } catch {
+    /* best-effort: if write fails, no pause is written -- fail-safe direction */
+  }
+}
+
+export function readBudgetPauseMarker(
+  agentName: string,
+  _nowMs: number,
+  storeDir = STORE_DIR,
+): BudgetPauseMarker | null {
+  try {
+    const raw = JSON.parse(readFileSync(budgetPauseMarkerPath(agentName, storeDir), 'utf-8')) as unknown
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+    const r = raw as Record<string, unknown>
+    if (typeof r['expiresAt'] !== 'number' || typeof r['weekStartMs'] !== 'number') return null
+    return {
+      expiresAt: r['expiresAt'],
+      weekStartMs: r['weekStartMs'],
+      triggeredAtPct: typeof r['triggeredAtPct'] === 'number' ? r['triggeredAtPct'] : 0,
+    }
+  } catch {
+    return null // missing or corrupt -> fail-safe: no pause
+  }
+}
+
+export function isBudgetPauseMarkerActive(agentName: string, nowMs: number, storeDir = STORE_DIR): boolean {
+  const marker = readBudgetPauseMarker(agentName, nowMs, storeDir)
+  if (!marker) return false
+  // expiresAt is exclusive: marker is active only while nowMs < expiresAt
+  return nowMs < marker.expiresAt
+}
+
+export function decideAgentQuiesce(
+  perAgent: Record<string, number>,
+  agentBudgetsMtok: Record<string, number>,
+  _nowMs: number,
+): AgentBudgetDecision[] {
+  return Object.entries(perAgent).map(([agentName, burnTokens]) => {
+    const limitMtok = agentBudgetsMtok[agentName] ?? AGENT_WEEKLY_BUDGET_MTOK
+    const limitTokens = limitMtok * 1_000_000
+    const burnPct = limitTokens > 0 ? (burnTokens / limitTokens) * 100 : 0
+    return {
+      agentName,
+      burnTokens,
+      limitTokens,
+      burnPct,
+      shouldQuiesce: burnTokens > limitTokens,
+    }
+  })
 }
