@@ -80,11 +80,12 @@ class FormatReadinessMessageTests(unittest.TestCase):
         }
 
     def test_suspect_shows_warning_not_number(self):
-        """AC-4: calorie_suspect=True -> warning line, NO kcal number in output."""
+        """AC-4: calorie_suspect=True -> warning line, NO digit+kcal in output."""
+        import re
         r = self._minimal_readiness()
         msg = mod.format_readiness_message(r, None, "", calorie_goal=None, calorie_suspect=True)
         self.assertIn("gyanús", msg)
-        self.assertNotIn("kcal", msg.split("gyanús")[0] + msg.split("gyanús")[-1].split("\n")[0])
+        self.assertIsNone(re.search(r'\d+\s*kcal', msg))
 
     def test_normal_goal_shown_as_number(self):
         """Normal case: calorie_goal present -> kcal number shown."""
