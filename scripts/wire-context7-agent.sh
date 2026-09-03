@@ -20,6 +20,14 @@ INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOOK_PATH="$INSTALL_DIR/scripts/hooks/context7_log.py"
 MATCHER="mcp__context7__.*"
 
+# PINNED version -- never float to npm 'latest'. A floating `-y @upstash/context7-mcp`
+# re-fetches whatever is latest at launch, silently invalidating the supply-chain
+# audit. Bump this ONLY after re-auditing the new tarball (self-contained payload,
+# no install scripts, no exec sinks, egress = context7 docs API). Audited 4.0.4 on
+# 2026-09-01 (Dave), integrity sha512-7SO1no1tabPvC8OK8j1BBrUTysoCoUP/wHhzBTD53CD...
+C7_VERSION="4.0.4"
+C7_SPEC="@upstash/context7-mcp@${C7_VERSION}"
+
 AGENT="${1:-}"
 DRY_RUN=0
 [ "${2:-}" = "--dry-run" ] && DRY_RUN=1
@@ -101,11 +109,12 @@ PY
 # Top-level mcpServers in the PER-AGENT config dir scopes context7 to this agent
 # only. We touch exactly one key and preserve everything else (incl. the file's
 # 0600 mode and all credentials/history), writing atomically.
-DRY_RUN="$DRY_RUN" python3 - "$CLAUDE_JSON" <<'PY'
+DRY_RUN="$DRY_RUN" C7_SPEC="$C7_SPEC" python3 - "$CLAUDE_JSON" <<'PY'
 import json, os, sys, tempfile
 
 path = sys.argv[1]
 dry = os.environ["DRY_RUN"] == "1"
+spec = os.environ["C7_SPEC"]
 
 with open(path, encoding="utf-8") as f:
     cfg = json.load(f)
@@ -114,7 +123,7 @@ servers = cfg.get("mcpServers")
 if not isinstance(servers, dict):
     servers = {}
 
-desired = {"command": "npx", "args": ["-y", "@upstash/context7-mcp"]}
+desired = {"command": "npx", "args": ["-y", spec]}
 if servers.get("context7") == desired:
     print("  ⊙ .claude.json mcpServers.context7 already present -- skip")
     sys.exit(0)
@@ -123,7 +132,7 @@ servers["context7"] = desired
 cfg["mcpServers"] = servers
 
 if dry:
-    print("  [dry-run] would add mcpServers.context7 = npx -y @upstash/context7-mcp")
+    print(f"  [dry-run] would add mcpServers.context7 = npx -y {spec}")
     sys.exit(0)
 
 mode = os.stat(path).st_mode & 0o777
@@ -133,7 +142,7 @@ with os.fdopen(fd, "w", encoding="utf-8") as f:
     f.write("\n")
 os.chmod(tmp, mode)
 os.replace(tmp, path)
-print("  ✓ .claude.json mcpServers.context7 added (npx -y @upstash/context7-mcp)")
+print(f"  ✓ .claude.json mcpServers.context7 added (npx -y {spec})")
 PY
 
 echo "✓ context7 wiring complete for '$AGENT'$([ "$DRY_RUN" = 1 ] && echo ' (dry-run, no writes)')"
