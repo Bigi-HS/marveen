@@ -1,20 +1,21 @@
 #!/bin/bash
-# Watchdog for agent-bigben (content-production support agent, per-agent Telegram channel).
+# Watchdog for agent-blackbart (Product Manager / Product Owner agent, per-agent
+# Telegram channel).
 #
-# Like thor-watchdog (and unlike dave-watchdog): bigben is a CHANNEL agent, so a
-# --continue relaunch would lose the --channels activation ("server not in
-# --channels list") and can hit the "No deferred tool marker" immediate-exit.
-# Big Ben is ALWAYS relaunched FRESH with --channels + its own TELEGRAM_STATE_DIR.
-# Durable state lives in the memory system, not the session transcript.
+# Like thor-watchdog: Black Bart is a CHANNEL agent, so it is ALWAYS relaunched
+# FRESH with --channels + its own TELEGRAM_STATE_DIR. A --continue relaunch loses
+# the --channels activation ("server not in --channels list") and can hit the
+# "No deferred tool marker" immediate-exit. Black Bart's durable state lives in
+# the memory system, not the session transcript, so a fresh session is safe.
 #
 # Model is read from agent-config.json on every (re)launch.
 
-SESSION=agent-bigben
-AGENT_DIR=/home/domin/marveen/agents/bigben
+SESSION=agent-blackbart
+AGENT_DIR=/home/domin/marveen/agents/blackbart
 CFG="$AGENT_DIR/.claude-config"
 STATE="$AGENT_DIR/.claude/channels/telegram"
 ACONF="$AGENT_DIR/agent-config.json"
-LOG=/home/domin/marveen/store/bigben-watchdog.log
+LOG=/home/domin/marveen/store/blackbart-watchdog.log
 COOLDOWN=60
 MAX_PER_HOUR=8
 
@@ -25,10 +26,6 @@ log() { echo "$(date -Is) $*" >> "$LOG"; }
 . "$(dirname "$0")/lib/watchdog-common.sh" || { log "FATAL: watchdog-common.sh source failed"; exit 1; }
 WD_LOG_FILE="$LOG"
 
-# read_model: thin wrapper over the shared wd_read_model (keeps the call sites
-# below unchanged). Reads the explicit `.model` from $ACONF; LOUD-warns (log +
-# stderr) and defaults to claude-sonnet-4-6 on a missing/unparseable config or
-# absent model field.
 read_model() { wd_read_model "$ACONF"; }
 
 # Fresh channel launch + first-run dialog guard (mirrors channels.sh). No
@@ -54,7 +51,7 @@ launch() {
   log "WARN: $SESSION did not reach channel-listening within 20s"
 }
 
-log "bigben-watchdog started (pid $$)"
+log "blackbart-watchdog started (pid $$)"
 
 # Relaunch-rate cap with hourly window.
 declare -a STAMPS=()
