@@ -132,9 +132,10 @@ def agent_id_from_cwd(cwd):
         return rel.split(os.sep)[0] or main_agent_id()
     if cwd == install:
         return main_agent_id()
-    # Fallback: last path component (best effort), else main.
-    base = os.path.basename(cwd)
-    return base or main_agent_id()
+    # Fallback: cwd is outside the known install tree. Return main_agent_id()
+    # rather than os.path.basename(cwd), which generated phantom agent IDs
+    # ('store', 'agents', 'n8n-workflows') in the conversation_log (FIX-002, 3e331d41).
+    return main_agent_id()
 
 
 def connect():
