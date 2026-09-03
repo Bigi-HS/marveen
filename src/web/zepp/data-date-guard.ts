@@ -26,10 +26,14 @@ function budapestLocalDate(iso: string): string | undefined {
 // pre-F1 producer still keying the date off the push time) -- surface it so the goal-calc
 // never silently reads a snapshot whose real data belongs to another day.
 //
-// Sleep is validated on its WAKE day (endAt); workouts on their startAt. Activity/steps
-// carry no timestamp once the transform has summed them, so they are correct by construction
-// upstream and are not re-checked here. sourceSyncedAt is deliberately NOT consulted --
-// keying the date off the sync time is the original F1 bug this whole line fixes.
+// Sleep is validated on its WAKE day (endAt); workouts on their startAt; each activity
+// distance slice on its own HC-window startAt (card e3197a20 / WELL-029 DA U6). The
+// dead-zone case: HC's day boundary is UTC-midnight (= 02:00 CEST), so an after-midnight
+// sync can file the previous local day's slices under the next day's snapshot -- a slice
+// whose own Budapest day differs from snapshot.date is that mis-filing. A bare summed
+// activity (distanceM only, no slices) still carries no timestamp and is not re-checkable
+// here. sourceSyncedAt is deliberately NOT consulted -- keying the date off the sync time
+// is the original F1 bug this whole line fixes.
 export function validateDataDate(snap: ZeppDailySnapshot): DataDateViolation[] {
   const out: DataDateViolation[] = []
   if (snap.sleep?.endAt) {
@@ -41,6 +45,15 @@ export function validateDataDate(snap: ZeppDailySnapshot): DataDateViolation[] {
       if (!w.startAt) return
       const d = budapestLocalDate(w.startAt)
       if (d && d !== snap.date) out.push({ field: `workout[${i}]`, expected: snap.date, actual: d })
+    })
+  }
+  if (snap.activity?.distanceSlices) {
+    snap.activity.distanceSlices.forEach((s, i) => {
+      if (!s.startAt) return
+      const d = budapestLocalDate(s.startAt)
+      if (d && d !== snap.date) {
+        out.push({ field: `activity.distanceSlices[${i}]`, expected: snap.date, actual: d })
+      }
     })
   }
   return out
