@@ -7,7 +7,10 @@ This eliminated phantom PII hits (e.g. "taj" in "listaja", "zip" in "gzip"). But
 memories already scoped by the old classifier still carry the restricted access_scope.
 
 This script identifies memories where:
-  - access_scope IS NOT NULL (was scoped, presumably by PII auto-scope)
+  - access_scope = agent_id (the PII auto-scope shape: resolveAccessScope narrows a
+    PII memory to scope==owning-agent). This intentionally EXCLUDES explicit
+    caller-supplied cross-agent scopes (memories.ts:128), which the PII auto-scoper
+    never produces and which must not be silently unscoped.
   - the CONTENT does NOT match the NEW classifier
   -> safe to re-scope to NULL (broader, unscoped)
 
@@ -83,8 +86,12 @@ CREATE TABLE IF NOT EXISTS migration_log (
 
 
 def find_candidates(conn: sqlite3.Connection, agent_filter: str | None) -> list[dict]:
-    """Return memories with access_scope set that no longer match the new PII classifier."""
-    q = "SELECT id, agent_id, content, keywords, access_scope FROM memories WHERE access_scope IS NOT NULL"
+    """Return memories PII-auto-scoped (access_scope = agent_id) that no longer match the new classifier.
+
+    Restricted to access_scope = agent_id (the auto-scope shape) so explicit caller-supplied
+    cross-agent scopes are never touched -- unscoping those would be a privacy regression.
+    """
+    q = "SELECT id, agent_id, content, keywords, access_scope FROM memories WHERE access_scope IS NOT NULL AND access_scope = agent_id"
     params = []
     if agent_filter:
         q += " AND agent_id = ?"

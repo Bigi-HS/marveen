@@ -87,15 +87,28 @@ class TestNewPiiClassifier(unittest.TestCase):
 
 class TestFindCandidates(unittest.TestCase):
 
-    # F6: scoped memory with phantom-PII content is a candidate for re-scope
+    # F6: auto-scoped (access_scope == agent_id) memory with phantom-PII content is a candidate
     def test_phantom_pii_found_as_candidate(self):
         path, con = make_db([
-            {'content': 'listaja a feladatnak', 'access_scope': 'test_agent', 'agent_id': 'test'},
+            {'content': 'listaja a feladatnak', 'access_scope': 'test', 'agent_id': 'test'},
         ])
         try:
             candidates = mod.find_candidates(con, None)
             self.assertGreater(len(candidates), 0)
             self.assertEqual(candidates[0]['agent_id'], 'test')
+        finally:
+            con.close()
+            os.unlink(path)
+
+    # F6b: explicit cross-agent scope (access_scope != agent_id) is NEVER a candidate,
+    # even with phantom-PII content -- guards against silently unscoping caller-set scopes.
+    def test_explicit_cross_agent_scope_not_candidate(self):
+        path, con = make_db([
+            {'content': 'listaja a feladatnak', 'access_scope': 'other_agent', 'agent_id': 'test'},
+        ])
+        try:
+            candidates = mod.find_candidates(con, None)
+            self.assertEqual(len(candidates), 0)
         finally:
             con.close()
             os.unlink(path)
@@ -115,7 +128,7 @@ class TestFindCandidates(unittest.TestCase):
     # F8: real PII content (matching new classifier) stays scoped
     def test_real_pii_stays_scoped(self):
         path, con = make_db([
-            {'content': 'a tajszamom: 123456789', 'access_scope': 'marveen'},
+            {'content': 'a tajszamom: 123456789', 'access_scope': 'test', 'agent_id': 'test'},
         ])
         try:
             candidates = mod.find_candidates(con, None)
@@ -130,14 +143,14 @@ class TestApplyRescope(unittest.TestCase):
     # F9: dry_run=True does not change access_scope but logs the row
     def test_dry_run_does_not_change_scope(self):
         path, con = make_db([
-            {'content': 'listaja', 'access_scope': 'test_agent'},
+            {'content': 'listaja', 'access_scope': 'test', 'agent_id': 'test'},
         ])
         try:
             candidates = mod.find_candidates(con, None)
             mod.apply_rescope(con, candidates, 0, dry_run=True)
             scope = con.execute("SELECT access_scope FROM memories").fetchone()[0]
             log = con.execute("SELECT dry_run FROM migration_log").fetchone()
-            self.assertEqual(scope, 'test_agent')  # unchanged
+            self.assertEqual(scope, 'test')  # unchanged
             self.assertEqual(log[0], 1)  # dry_run=1
         finally:
             con.close()
