@@ -284,19 +284,20 @@ export interface AgentBudgetDecision {
 }
 
 // Agent name slug validation: [a-z0-9-]+ only. Guards against path-traversal
-// (e.g. '../other') when constructing the marker path. Agent names entering
-// writeBudgetPauseMarker come from token_usage DB rows (server-controlled), but
-// we validate defensively so a corrupt DB row cannot escape the store/ directory.
+// (e.g. '../other') when constructing the marker path. Agent names come from
+// token_usage DB rows (server-controlled), but we validate defensively so a
+// corrupt DB row cannot escape the store/ directory. Applied in
+// budgetPauseMarkerPath so ALL callers (read + write) are covered.
 const AGENT_SLUG_RE = /^[a-z0-9-]+$/
 
 export function budgetPauseMarkerPath(agentName: string, storeDir = STORE_DIR): string {
+  if (!AGENT_SLUG_RE.test(agentName)) throw new Error(`invalid agent slug: ${agentName}`)
   return join(storeDir, `.${agentName}-budget-pause`)
 }
 
 export function writeBudgetPauseMarker(agentName: string, nowMs: number, storeDir = STORE_DIR): void {
-  // Reject any name that is not a safe slug. Fail-safe: no marker written.
-  // This is the only write path; dashboard-server is sole caller.
-  if (!AGENT_SLUG_RE.test(agentName)) return
+  // budgetPauseMarkerPath throws on invalid slug; catch -> fail-safe (no marker written).
+  // Dashboard-server is sole caller -- export is intentional (30-min monitor only).
   const weekStartMs = currentWeekStartMs(nowMs)
   const expiresAt = weekStartMs + 7 * 24 * 3600 * 1000
   const marker: BudgetPauseMarker = { expiresAt, weekStartMs, triggeredAtPct: 0 }

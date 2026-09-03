@@ -9,7 +9,7 @@
  *   - resume: rollover epoch -> marker expired -> agent un-quiesced
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -64,19 +64,22 @@ describe('budgetPauseMarkerPath', () => {
 describe('writeBudgetPauseMarker slug guard', () => {
   it('rejects path-traversal agentName (../escape)', () => {
     writeBudgetPauseMarker('../escape', NOW, storeDir)
-    // No marker file should have been written in storeDir or parent
-    const p = budgetPauseMarkerPath('../escape', storeDir)
-    expect(existsSync(p)).toBe(false)
+    // budgetPauseMarkerPath itself throws on invalid slug -- verify via toThrow
+    expect(() => budgetPauseMarkerPath('../escape', storeDir)).toThrow('invalid agent slug')
+    // Also confirm no budget-pause file landed in the store dir
+    expect(readdirSync(storeDir).some(f => f.includes('budget-pause'))).toBe(false)
   })
 
   it('rejects agentName with uppercase letters', () => {
     writeBudgetPauseMarker('Dave', NOW, storeDir)
-    expect(existsSync(budgetPauseMarkerPath('Dave', storeDir))).toBe(false)
+    expect(() => budgetPauseMarkerPath('Dave', storeDir)).toThrow('invalid agent slug')
+    expect(readdirSync(storeDir).some(f => f.includes('budget-pause'))).toBe(false)
   })
 
   it('rejects agentName with spaces', () => {
     writeBudgetPauseMarker('my agent', NOW, storeDir)
-    expect(existsSync(budgetPauseMarkerPath('my agent', storeDir))).toBe(false)
+    expect(() => budgetPauseMarkerPath('my agent', storeDir)).toThrow('invalid agent slug')
+    expect(readdirSync(storeDir).some(f => f.includes('budget-pause'))).toBe(false)
   })
 
   it('accepts valid lowercase-slug agentName', () => {
