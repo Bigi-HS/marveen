@@ -1,20 +1,21 @@
 #!/bin/bash
-# Watchdog for agent-bigben (content-production support agent, per-agent Telegram channel).
+# Watchdog for agent-inkwell (creative-writing memory agent, per-agent Telegram channel).
 #
-# Like thor-watchdog (and unlike dave-watchdog): bigben is a CHANNEL agent, so a
-# --continue relaunch would lose the --channels activation ("server not in
-# --channels list") and can hit the "No deferred tool marker" immediate-exit.
-# Big Ben is ALWAYS relaunched FRESH with --channels + its own TELEGRAM_STATE_DIR.
-# Durable state lives in the memory system, not the session transcript.
+# Unlike dave-watchdog (which relaunches with --continue for task continuity),
+# Claudia is a CHANNEL agent: a --continue relaunch loses the --channels activation
+# state ("server not in --channels list") and can hit the "No deferred tool
+# marker" immediate-exit. So Claudia is ALWAYS relaunched FRESH with --channels +
+# its own TELEGRAM_STATE_DIR. Claudia's durable state lives in the memory system,
+# not the session transcript, so a fresh session is safe.
 #
 # Model is read from agent-config.json on every (re)launch.
 
-SESSION=agent-bigben
-AGENT_DIR=/home/domin/marveen/agents/bigben
+SESSION=agent-inkwell
+AGENT_DIR=/home/domin/marveen/agents/inkwell
 CFG="$AGENT_DIR/.claude-config"
 STATE="$AGENT_DIR/.claude/channels/telegram"
 ACONF="$AGENT_DIR/agent-config.json"
-LOG=/home/domin/marveen/store/bigben-watchdog.log
+LOG=/home/domin/marveen/store/inkwell-watchdog.log
 COOLDOWN=60
 MAX_PER_HOUR=8
 
@@ -54,7 +55,7 @@ launch() {
   log "WARN: $SESSION did not reach channel-listening within 20s"
 }
 
-log "bigben-watchdog started (pid $$)"
+log "inkwell-watchdog started (pid $$)"
 
 # Relaunch-rate cap with hourly window.
 declare -a STAMPS=()
