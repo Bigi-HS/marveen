@@ -5,7 +5,7 @@ import { execSync, execFileSync } from 'node:child_process'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, PROJECT_ROOT, RESPAWN_ENABLED } from '../config.js'
-import { agentDir, listAgentNames, readAgentChannelProviderSafe, readAgentModel, writeAgentModel } from './agent-config.js'
+import { agentDir, listAgentNames, readAgentChannelProviderSafe, readAgentModel, writeAgentModel, readAgentConfig } from './agent-config.js'
 import {
   OPUS_FALLBACK_AGENTS,
   SONNET_FALLBACK,
@@ -21,6 +21,9 @@ import {
   decideBurnAlerts,
   readBurnAlertState,
   writeBurnAlertState,
+  decideAgentQuiesce,
+  isBudgetPauseMarkerActive,
+  writeBudgetPauseMarker,
 } from './opus-burn-monitor.js'
 import { createAgentMessage } from '../db.js'
 import {
@@ -826,9 +829,11 @@ function shouldEscalateMarveenDown(): boolean {
 // Opus burn early-warning (card 1584cad7). Called every 30 min from
 // startChannelPluginMonitor. Sends inter-agent messages to marveen at
 // 70% / 90% of the weekly Opus credit limit (deduped per week via file state).
+// Also checks per-agent budgets and writes budget-pause markers (card e6ab511d).
 function checkOpusBurnThresholds(): void {
   try {
-    const result = aggregateOpusBurn(Date.now())
+    const now = Date.now()
+    const result = aggregateOpusBurn(now)
     const state = readBurnAlertState()
     const alerts = decideBurnAlerts(result, state)
     for (const alert of alerts) {
@@ -848,8 +853,57 @@ function checkOpusBurnThresholds(): void {
       // silently marking the alert as sent.
       if (sent) writeBurnAlertState(alert.nextState)
     }
+
+    // Per-agent budget quiesce check (card e6ab511d).
+    // Reads optional budget.weeklyOutputMtok from each agent's agent-config.json;
+    // falls back to AGENT_WEEKLY_BUDGET_MTOK fleet default. Writes a budget-pause
+    // marker only if the agent is over budget AND not already paused this week.
+    // The dashboard-server is the sole WRITER; watchdog + runners are readers only.
+    checkPerAgentBudgetPause(result.perAgent, now)
   } catch (err) {
     logger.warn({ err }, '[opus-burn] threshold check failed -- non-fatal')
+  }
+}
+
+function checkPerAgentBudgetPause(perAgent: Record<string, number>, nowMs: number): void {
+  try {
+    const agentBudgetsMtok: Record<string, number> = {}
+    for (const agentName of Object.keys(perAgent)) {
+      const cfg = readAgentConfig(agentName)
+      const budget = cfg['budget']
+      if (budget && typeof budget === 'object' && !Array.isArray(budget)) {
+        const b = budget as Record<string, unknown>
+        if (typeof b['weeklyOutputMtok'] === 'number' && b['weeklyOutputMtok'] > 0) {
+          agentBudgetsMtok[agentName] = b['weeklyOutputMtok']
+        }
+      }
+    }
+
+    const decisions = decideAgentQuiesce(perAgent, agentBudgetsMtok, nowMs)
+    for (const d of decisions) {
+      if (!d.shouldQuiesce) continue
+      if (isBudgetPauseMarkerActive(d.agentName, nowMs)) continue // already paused this week
+      logger.warn(
+        { agent: d.agentName, burnPct: d.burnPct.toFixed(1), burnTokens: d.burnTokens, limitTokens: d.limitTokens },
+        `[opus-burn] agent ${d.agentName} exceeded budget (${d.burnPct.toFixed(1)}%) -- writing budget-pause marker`,
+      )
+      writeBudgetPauseMarker(d.agentName, nowMs)
+      try {
+        createAgentMessage(
+          'server',
+          MAIN_AGENT_ID,
+          `[Budget quiesce] ${d.agentName} heti Opus-felhasznalasa tullepte a limitet (${d.burnPct.toFixed(1)}%). ` +
+            `Budget-pause marker irva -- az agent proaktiv/utemezett Opus-burnjet felfuggesztve a heti reset-ig. ` +
+            `Boss-DM-re valaszol, pipe el marad.`,
+          false,
+          'urgent',
+        )
+      } catch {
+        /* non-fatal: marker is written even if the inter-agent message fails */
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, '[opus-burn] per-agent budget check failed -- non-fatal')
   }
 }
 
