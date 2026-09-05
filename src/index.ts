@@ -23,7 +23,7 @@ import { initHeartbeat, stopHeartbeat } from './heartbeat.js'
 import { ensureHeartbeatAgent, HEARTBEAT_AGENT_NAME } from './web/heartbeat-agent-scaffold.js'
 import { startAgentProcess } from './web/agent-process.js'
 import { startWebServer } from './web.js'
-import { logger } from './logger.js'
+import { logger, logCrashSync } from './logger.js'
 import { startInviteMonitor, stopInviteMonitor } from './web/channel-invites.js'
 import { ensureDiscordChannelGroup } from './web/discord-group-bootstrap.js'
 import { startChannelRequestWatcher, stopChannelRequestWatcher } from './web/channel-request-watcher.js'
@@ -426,13 +426,19 @@ async function main(): Promise<void> {
   // us mid-init with no chance to flush SQLite WAL or drop the pidfile.
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
-  process.on('uncaughtException', (err) => {
-    logger.error({ err }, 'uncaughtException')
+  process.on('uncaughtException', (err, origin) => {
+    // Durable trace FIRST and synchronously: the graceful shutdown() below exits
+    // through pino's worker-thread transport, which frequently does not flush
+    // before process.exit(), so logCrashSync guarantees the crash reaches
+    // server.log even when the async logger loses it (card 0cc1e31b).
+    logCrashSync('uncaughtException', err, { origin })
+    logger.fatal({ err, origin }, 'uncaughtException: server crash')
     exitCode = 1
     shutdown()
   })
   process.on('unhandledRejection', (reason) => {
-    logger.error({ err: reason }, 'unhandledRejection')
+    logCrashSync('unhandledRejection', reason, { level: 50 })
+    logger.error({ err: reason }, 'unhandledRejection: check promise chain')
   })
 
   // W5 cutover dry-run: a SAFE non-live boot smoke. When NOA_BOOT_SMOKE=<port> is

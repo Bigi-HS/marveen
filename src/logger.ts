@@ -1,4 +1,6 @@
 import pino from 'pino'
+import { appendFileSync, mkdirSync } from 'node:fs'
+import { hostname } from 'node:os'
 
 // SRE L1a durable log sink (fleet-expansion Phase 1, card fleet-expansion-plan-0822).
 // Before this, pino wrote only to stdout -> tmux scrollback, so a restart wiped the
@@ -42,3 +44,55 @@ export function buildLoggerOptions(env: NodeJS.ProcessEnv = process.env) {
 }
 
 export const logger = pino(buildLoggerOptions())
+
+// Last-gasp SYNCHRONOUS crash logger (card 0cc1e31b). The pino logger above fans
+// the log out through a multi-target transport that runs in a WORKER THREAD
+// (thread-stream). On a fatal crash the main process calls process.exit() before
+// that worker drains its buffer, so a plain logger.fatal() is routinely LOST from
+// server.log -- which is why every prior silent server death was a black box.
+//
+// This bypasses the async transport entirely: it serialises the crash record to
+// the SAME <LOG_DIR>/server.log with a synchronous O_APPEND write (atomic for a
+// single sub-PIPE_BUF line on Linux, so it never interleaves mid-line with the
+// transport's own output) and returns only once the bytes are handed to the
+// kernel. The record is shaped like a pino line (level/time/pid/hostname/msg) so
+// existing log tooling parses it unchanged. Best-effort and NEVER throws: a
+// failed durable write must not mask the original crash, so it falls back to
+// stderr and gives up quietly. LOG_DIR is re-read (and re-validated) on each call
+// so the path always matches the live logger config.
+export function logCrashSync(
+  event: string,
+  err: unknown,
+  opts: { origin?: string; level?: number } = {},
+): void {
+  const level = opts.level ?? 60 // pino fatal
+  try {
+    const e = err as { name?: string; message?: string; stack?: string }
+    const serialisedErr =
+      err instanceof Error
+        ? { type: e.name, message: e.message, stack: e.stack }
+        : { message: String(err) }
+    const rec = {
+      level,
+      time: Date.now(),
+      pid: process.pid,
+      hostname: hostname(),
+      event,
+      ...(opts.origin ? { origin: opts.origin } : {}),
+      err: serialisedErr,
+      msg: `${event}: server crash trace (last-gasp sync flush)`,
+    }
+    const logDir = validateLogDir(process.env.LOG_DIR ?? 'logs')
+    mkdirSync(logDir, { recursive: true })
+    appendFileSync(`${logDir}/server.log`, JSON.stringify(rec) + '\n')
+  } catch (writeErr) {
+    // Truly last-gasp: never let the durable-log write itself mask the crash.
+    try {
+      process.stderr.write(
+        `FATAL ${event} (durable log failed: ${String(writeErr)}): ${String(err)}\n`,
+      )
+    } catch {
+      /* give up */
+    }
+  }
+}
