@@ -106,5 +106,23 @@ export async function tryHandleMetrics(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  if (path === '/api/metrics/listener-status' && method === 'GET') {
+    try {
+      const stateFile = join(METRICS_DIR, '.listener-state.json')
+      const stateText = readFileSync(stateFile, 'utf-8')
+      const state = JSON.parse(stateText)
+      json(res, state)
+      return true
+    } catch (err) {
+      if ((err as any)?.code === 'ENOENT') {
+        json(res, { error: 'Listener state file not found', status: 'offline' }, 503)
+        return true
+      }
+      logger.error({ err }, 'Failed to read listener state')
+      json(res, { error: 'Internal server error' }, 500)
+      return true
+    }
+  }
+
   return false
 }
