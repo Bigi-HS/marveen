@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+<meta charset="UTF-8">
+<title>{{ title }}</title>
+<style>
+/* ── CSS custom properties (adjust per flyer) ───────────────────────── */
+:root {
+  --brand-color:   #1a1a2e;
+  --accent-color:  #e94560;
+  --text-color:    #222222;
+  --muted-color:   #666666;
+  --bg-color:      #ffffff;
+  --font-heading:  Georgia, "Times New Roman", serif;
+  --font-body:     "Helvetica Neue", Arial, sans-serif;
+  --font-size-h1:  36pt;
+  --font-size-h2:  20pt;
+  --font-size-body: 11pt;
+  --margin-top:    18mm;
+  --margin-right:  16mm;
+  --margin-bottom: 18mm;
+  --margin-left:   16mm;
+}
+
+/* ── Print page setup ───────────────────────────────────────────────── */
+@page {
+  size: A4 portrait;
+  margin: var(--margin-top) var(--margin-right) var(--margin-bottom) var(--margin-left);
+  @bottom-center {
+    content: string(footer-text);
+    font-family: var(--font-body);
+    font-size: 7.5pt;
+    color: var(--muted-color);
+  }
+}
+
+/* ── Base reset ─────────────────────────────────────────────────────── */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { background: var(--bg-color); }
+body {
+  font-family: var(--font-body);
+  font-size: var(--font-size-body);
+  color: var(--text-color);
+  line-height: 1.55;
+  background: var(--bg-color);
+}
+
+/* ── Screen preview wrapper ─────────────────────────────────────────── */
+@media screen {
+  body { background: #e0e0e0; padding: 24px; }
+  .page-wrapper {
+    width: 210mm;
+    min-height: 297mm;
+    margin: 0 auto;
+    background: white;
+    padding: var(--margin-top) var(--margin-right) var(--margin-bottom) var(--margin-left);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+  }
+}
+@media print {
+  .page-wrapper { padding: 0; }
+}
+
+/* ── Header band ────────────────────────────────────────────────────── */
+.flyer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 3px solid var(--accent-color);
+  padding-bottom: 6mm;
+  margin-bottom: 8mm;
+}
+.logo-placeholder {
+  width: 32mm;
+  height: 14mm;
+  border: 1.5px dashed #bbb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 7.5pt;
+  color: #bbb;
+  border-radius: 2px;
+}
+.header-meta {
+  text-align: right;
+  font-size: 8.5pt;
+  color: var(--muted-color);
+  line-height: 1.4;
+}
+.header-meta strong {
+  color: var(--brand-color);
+  font-size: 9pt;
+}
+
+/* ── Hero section ───────────────────────────────────────────────────── */
+.hero {
+  margin-bottom: 8mm;
+}
+.hero-image-placeholder {
+  width: 100%;
+  height: 52mm;
+  background: #f0f0f0;
+  border: 1.5px dashed #ccc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8pt;
+  color: #aaa;
+  border-radius: 3px;
+  margin-bottom: 6mm;
+}
+.hero h1 {
+  font-family: var(--font-heading);
+  font-size: var(--font-size-h1);
+  color: var(--brand-color);
+  line-height: 1.15;
+  margin-bottom: 3mm;
+  letter-spacing: -0.5pt;
+}
+.hero .subtitle {
+  font-size: 14pt;
+  color: var(--accent-color);
+  font-weight: 500;
+  margin-bottom: 4mm;
+}
+.hero .lead {
+  font-size: 11.5pt;
+  color: var(--text-color);
+  line-height: 1.6;
+  max-width: 148mm;
+}
+
+/* ── Divider ────────────────────────────────────────────────────────── */
+.divider {
+  border: none;
+  border-top: 1px solid #ddd;
+  margin: 6mm 0;
+}
+
+/* ── Body columns ───────────────────────────────────────────────────── */
+.body-content {
+  column-count: 2;
+  column-gap: 10mm;
+  column-rule: 1px solid #e8e8e8;
+  margin-bottom: 8mm;
+}
+.body-content.single-col {
+  column-count: 1;
+}
+.body-content h2 {
+  font-family: var(--font-heading);
+  font-size: var(--font-size-h2);
+  color: var(--brand-color);
+  margin-bottom: 3mm;
+  break-after: avoid;
+  column-span: none;
+}
+.body-content p {
+  margin-bottom: 3mm;
+  orphans: 3;
+  widows: 3;
+}
+.body-content ul, .body-content ol {
+  margin-left: 5mm;
+  margin-bottom: 3mm;
+}
+.body-content li { margin-bottom: 1mm; }
+
+/* ── Highlight box ──────────────────────────────────────────────────── */
+.highlight-box {
+  background: var(--brand-color);
+  color: white;
+  padding: 5mm 6mm;
+  border-radius: 3px;
+  margin-bottom: 6mm;
+  break-inside: avoid;
+}
+.highlight-box p { margin-bottom: 2mm; color: white; }
+.highlight-box p:last-child { margin-bottom: 0; }
+.highlight-box strong { color: #ffd700; }
+
+/* ── CTA section ────────────────────────────────────────────────────── */
+.cta-section {
+  background: var(--accent-color);
+  color: white;
+  padding: 5mm 7mm;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6mm;
+  break-inside: avoid;
+}
+.cta-section .cta-text {
+  font-size: 12pt;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.cta-section .cta-detail {
+  font-size: 9pt;
+  opacity: 0.9;
+  margin-top: 1mm;
+}
+.cta-section .cta-link {
+  font-size: 10pt;
+  font-weight: 700;
+  background: white;
+  color: var(--accent-color);
+  padding: 3mm 6mm;
+  border-radius: 2px;
+  text-decoration: none;
+  white-space: nowrap;
+  margin-left: 6mm;
+}
+
+/* ── Contact row ────────────────────────────────────────────────────── */
+.contact-row {
+  display: flex;
+  gap: 8mm;
+  flex-wrap: wrap;
+  font-size: 8.5pt;
+  color: var(--muted-color);
+  border-top: 1px solid #eee;
+  padding-top: 3mm;
+  break-inside: avoid;
+}
+.contact-row .contact-item {
+  display: flex;
+  align-items: center;
+  gap: 2mm;
+}
+.contact-row .contact-label {
+  font-weight: 600;
+  color: var(--brand-color);
+}
+
+/* ── Footer string (used by @page @bottom-center) ───────────────────── */
+.footer-text-src {
+  string-set: footer-text content();
+  display: none;
+}
+
+/* ── Print utilities ────────────────────────────────────────────────── */
+@media print {
+  a { color: inherit; text-decoration: none; }
+  .logo-placeholder, .hero-image-placeholder { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .highlight-box, .cta-section { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+}
+</style>
+</head>
+<body>
+<div class="page-wrapper">
+
+  <!-- Footer text source (hidden, used by @page bottom) -->
+  <span class="footer-text-src">{{ footer_text }}</span>
+
+  <!-- Header -->
+  <header class="flyer-header">
+    <div class="logo-placeholder">LOGO</div>
+    <div class="header-meta">
+      <strong>{{ organizer }}</strong><br>
+      {{ date }}<br>
+      {{ location }}
+    </div>
+  </header>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="hero-image-placeholder">[Kép helye -- {{ image_hint }}]</div>
+    <h1>{{ title }}</h1>
+    <p class="subtitle">{{ subtitle }}</p>
+    <p class="lead">{{ lead }}</p>
+  </section>
+
+  <hr class="divider">
+
+  <!-- Body -->
+  <div class="body-content">
+    {{ body_html }}
+  </div>
+
+  <!-- Highlight box (opcionális) -->
+  <div class="highlight-box">
+    <p><strong>{{ highlight_title }}</strong></p>
+    <p>{{ highlight_body }}</p>
+  </div>
+
+  <!-- CTA -->
+  <div class="cta-section">
+    <div>
+      <div class="cta-text">{{ cta_text }}</div>
+      <div class="cta-detail">{{ cta_detail }}</div>
+    </div>
+    <a class="cta-link" href="{{ cta_url }}">{{ cta_label }}</a>
+  </div>
+
+  <!-- Contacts -->
+  <div class="contact-row">
+    <div class="contact-item"><span class="contact-label">Web:</span> {{ contact_web }}</div>
+    <div class="contact-item"><span class="contact-label">Email:</span> {{ contact_email }}</div>
+    <div class="contact-item"><span class="contact-label">Tel:</span> {{ contact_phone }}</div>
+  </div>
+
+</div>
+</body>
+</html>
