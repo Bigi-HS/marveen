@@ -74,7 +74,7 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
   }
 
   if (path === '/api/marveen/restart' && method === 'POST') {
-    const result = hardRestartMarveenChannels()
+    const result = hardRestartMarveenChannels({ bypassBootGrace: true })
     if (!result.ok) { json(res, { error: result.error || 'Restart failed' }, 500); return true }
     json(res, { ok: true })
     return true

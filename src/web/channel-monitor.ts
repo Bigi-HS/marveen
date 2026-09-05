@@ -313,6 +313,39 @@ let marveenLastHardRestart = 0
 // shares the same post-respawn grace (single source of truth).
 export const MARVEEN_POST_RESPAWN_GRACE_MS = 360_000
 
+// --- Server-boot grace (card 3d70de24) ------------------------------------
+// The dashboard server process that OWNS this in-process monitor was itself
+// observed CRASH-LOOPING on 2026-09-04 16:27 -- a full reboot every 1-2 min
+// (pid 90 -> 94 -> ...). On every fresh boot the main channels session's plugin
+// read is transiently unreliable (the plugin is mid-handshake), and an automatic
+// fresh respawn here KILLS a healthy Telegram pipe. That is exactly what fired the
+// "Hard restart: marveen session respawned fresh" log on every boot and muted
+// Genesis through the loop (Boss 16:56). So defer any AUTOMATIC fresh respawn until
+// THIS server process has been up past the grace window: process.uptime() resets on
+// each crash-loop boot, so a short-lived boot can never churn the pipe. The on-boot
+// one-shot recoverOrchestratorPipeOnce() (card b322514d) still SOFT-recovers a
+// genuinely dead pipe during the window, so recovery is not lost -- only the
+// destructive respawn is held back. Manual operator restarts (dashboard/API) pass
+// bypassBootGrace and are never deferred. Sits within the 90-120s Forge spec.
+export const SERVER_BOOT_GRACE_MS = 120_000
+
+export interface RespawnOpts {
+  // Skip the server-boot grace. Set ONLY for an explicit operator-triggered
+  // restart (dashboard button / API), NEVER for an automatic watchdog path.
+  bypassBootGrace?: boolean
+}
+
+// Pure: is THIS server process still inside its post-boot grace window? Takes the
+// uptime in ms so it stays unit-testable; the call sites pass process.uptime()*1000.
+// Fails toward FALSE (normal recovery) on a garbage/negative uptime -- the grace
+// must never permanently lock recovery off.
+export function isWithinServerBootGrace(
+  serverUptimeMs: number,
+  graceMs: number = SERVER_BOOT_GRACE_MS,
+): boolean {
+  return serverUptimeMs >= 0 && serverUptimeMs < graceMs
+}
+
 // Pure: the most recent main-session respawn time across all three writers --
 // the keepalive path (marveenLastKeepaliveRespawn), the hard-restart/inbound path
 // (marveenLastHardRestart) and the external file-stamp watchdog. This fold is what
@@ -369,7 +402,21 @@ function writeRespawnStamp(): void {
 // but starts a clean session -- exactly what scripts/channels.sh does -- so a
 // wedged plugin gets a brand-new process even on pure-tmux installs. Distinct
 // from the stage-3 resume (which keeps --continue) by clearing session state.
-function respawnMarveenSessionFresh(): boolean {
+function respawnMarveenSessionFresh(opts: RespawnOpts = {}): boolean {
+  // Server-boot grace (card 3d70de24): the choke point ALL fresh-respawn paths
+  // funnel through (stage-4 hard restart AND the keepalive-staleness path), so a
+  // single guard here provably covers every automatic respawn regardless of
+  // caller. See SERVER_BOOT_GRACE_MS.
+  if (!opts.bypassBootGrace) {
+    const uptimeMs = process.uptime() * 1000
+    if (isWithinServerBootGrace(uptimeMs)) {
+      logger.warn(
+        { uptimeMs: Math.round(uptimeMs), graceMs: SERVER_BOOT_GRACE_MS },
+        'Server-boot grace: skipping automatic marveen fresh-respawn (transient post-boot plugin read); on-boot soft recovery still runs',
+      )
+      return false
+    }
+  }
   const provider = getProvider(getMainAgentProvider())
   try {
     const claudeCmd = buildMainSessionRespawnCmd({
@@ -396,7 +443,18 @@ function respawnMarveenSessionFresh(): boolean {
   }
 }
 
-export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
+export function hardRestartMarveenChannels(opts: RespawnOpts = {}): { ok: boolean; error?: string } {
+  // Server-boot grace (card 3d70de24): defer an AUTOMATIC hard restart while this
+  // server process is still in its post-boot window -- a transient false "down"
+  // right after boot must not respawn (and kill) a healthy pipe. Covers BOTH the
+  // launchctl (macOS) and respawn-pane (Linux) paths. Operator restarts bypass.
+  if (!opts.bypassBootGrace && isWithinServerBootGrace(process.uptime() * 1000)) {
+    logger.warn(
+      { uptimeMs: Math.round(process.uptime() * 1000), graceMs: SERVER_BOOT_GRACE_MS },
+      'Server-boot grace: skipping automatic marveen hard restart (transient post-boot plugin read)',
+    )
+    return { ok: false, error: 'deferred: within server-boot grace' }
+  }
   // macOS: bounce the launchd job (its own process group -- safe).
   if (process.platform !== 'linux') {
     try {
@@ -419,7 +477,7 @@ export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
   // tmux server and with it EVERY agent session, not just the main one.
   // respawn-pane replaces only the claude process in the main channels pane,
   // leaving the server and all other sessions intact.
-  if (respawnMarveenSessionFresh()) {
+  if (respawnMarveenSessionFresh(opts)) {
     marveenLastHardRestart = Date.now()
     return { ok: true }
   }

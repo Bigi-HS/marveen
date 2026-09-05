@@ -790,7 +790,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     let restarted = false
     let wasRunning = false
     if (isMain) {
-      const r = hardRestartMarveenChannels()
+      const r = hardRestartMarveenChannels({ bypassBootGrace: true })
       restarted = r.ok
       wasRunning = true
     } else {
@@ -1308,7 +1308,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // `/remote-control` (needs a full-scope login token the agent lacks). Mirror
     // the precedent in the channels-config handler above. Sub-agents unchanged.
     if (isMainChannelsAgent(name)) {
-      const r = hardRestartMarveenChannels()
+      const r = hardRestartMarveenChannels({ bypassBootGrace: true })
       if (r.ok) { json(res, { ok: true }); return true }
       json(res, { error: r.error || 'Restart failed' }, 500)
       return true
