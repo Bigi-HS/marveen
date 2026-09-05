@@ -729,9 +729,14 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb(), nowMsOverride?:
     if (result === 'fired') {
       rollForwardFired(taskDef, nowMs, nowS, db)
       deletePendingRetry(row.task_name, row.agent_name, db)
-    } else if (result === 'missing') {
-      deletePendingRetry(row.task_name, row.agent_name, db)
     } else {
+      // 'missing' falls through here too (card 8af09fa0). It used to DELETE the
+      // row -- which is exactly how a task for a wedged/absent agent went silent:
+      // the retry was abandoned and only the 3h stuck-sentinel remained. Keeping
+      // the row means the task stays tracked, keeps retrying (so it recovers the
+      // instant the session returns), and escalates on the 1h/6h/24h schedule.
+      // A genuinely gone task is not stranded: the top-of-loop guard drops the
+      // row as soon as the task is paused or deleted.
       updatePendingRetry(row.task_name, row.agent_name, nowS, result, db)
       // Escalate a row that has been stuck past the threshold. Restored here
       // because the A4 migration dropped it (see pending-retry-alert.ts): a
@@ -782,7 +787,14 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb(), nowMsOverride?:
         'scheduler: send unconfirmed (pane unreadable after re-probe) -- operator escalation, next_run rolled forward',
       )
     } else if (result === 'missing') {
-      logger.warn({ task: task.id, agent: agentName }, 'scheduler: session missing, skipping (no retry)')
+      // Card 8af09fa0: a missing session (wedged / stopped agent) used to leave
+      // NO durable trace -- next_run frozen, no retry row -- so the fire was
+      // silently lost until the 3h stuck-sentinel. Enqueue a retry row (reason
+      // 'missing') so the miss is visible in the pending queue, recovers
+      // automatically when the session returns (Step 1 re-fires it), and
+      // escalates via the 1h pending-retry alert instead of staying silent.
+      insertPendingRetryIfNew(task.id, agentName, nowS, 'missing', db)
+      logger.warn({ task: task.id, agent: agentName }, 'scheduler: session missing, enqueued missing-retry (card 8af09fa0)')
     } else if (result === 'error') {
       logger.warn({ task: task.id, agent: agentName }, 'scheduler: fire error, will retry on next cron match')
     }

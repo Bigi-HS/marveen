@@ -502,6 +502,135 @@ describe('runSweepTick', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Card 8af09fa0: a missing session (wedged / absent agent) must not silently
+// lose its scheduled fires. Before this fix a 'missing' verdict left ZERO
+// durable trace -- next_run frozen, no retry row -- so the only backstop was
+// the 3h stuck-sentinel (stuck-task-sentinel.ts header: "it does NOT cover
+// 'missing'"). The fix wires 'missing' into the existing pending-retry queue,
+// which gives it three properties for free: a durable row (dashboard-visible),
+// automatic recovery when the session returns, and 1h operator escalation.
+// ---------------------------------------------------------------------------
+
+describe('runSweepTick: missing session durable trace + recovery (card 8af09fa0)', () => {
+  // A task whose agent session is NOT in the mocked tmux list ('marveen-channels'
+  // only) resolves to 'agent-ghost' -> not present -> attemptFireTask == 'missing'.
+  const GHOST = "('ghost-task', 'ghost', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?)"
+
+  beforeEach(() => {
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+    vi.mocked(sendPromptToSession).mockReset()
+    vi.mocked(sendPendingRetryAlert).mockReset()
+  })
+
+  it('missing session enqueues a pending-retry row (reason=missing); no send; next_run frozen', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    db.prepare(`INSERT INTO scheduled_tasks
+      (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES ${GHOST}`).run(nowS - 10, nowS - 100)
+
+    runSweepTick(60000, db)
+
+    // Session absent -> never attempted to send.
+    expect(vi.mocked(sendPromptToSession)).not.toHaveBeenCalled()
+
+    // Durable trace: exactly one retry row, reason 'missing'.
+    const rows = db.prepare(
+      `SELECT * FROM pending_task_retries WHERE task_name='ghost-task'`
+    ).all() as Array<{ last_reason: string; attempt_count: number }>
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.last_reason).toBe('missing')
+    expect(rows[0]!.attempt_count).toBe(1)
+
+    // next_run NOT advanced (task still due) and NOT falsely marked fired.
+    const t = getTask('ghost-task', db)!
+    expect(t.next_run).toBe(nowS - 10)
+    expect(t.last_result).not.toBe('fired')
+  })
+
+  it('missing row survives a second still-missing tick (pre-fix it was deleted in Step 1)', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    db.prepare(`INSERT INTO scheduled_tasks
+      (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES ${GHOST}`).run(nowS - 10, nowS - 100)
+
+    runSweepTick(60000, db)                                   // tick 1: row created
+    runSweepTick(60000, db, Date.now() + 11 * 60 * 1000)     // tick 2: still missing, backoff elapsed
+
+    const rows = db.prepare(
+      `SELECT * FROM pending_task_retries WHERE task_name='ghost-task'`
+    ).all() as Array<{ last_reason: string; attempt_count: number }>
+    expect(rows).toHaveLength(1)                              // NOT deleted
+    expect(rows[0]!.attempt_count).toBeGreaterThanOrEqual(2)  // retried again, still tracked
+    expect(rows[0]!.last_reason).toBe('missing')
+  })
+
+  it('recovers automatically: when the session returns the task fires and the row clears', async () => {
+    const db = getNoaDb()
+    const { execFileSync } = await import('node:child_process')
+    const nowS = Math.floor(Date.now() / 1000)
+    db.prepare(`INSERT INTO scheduled_tasks
+      (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES ${GHOST}`).run(nowS - 10, nowS - 100)
+
+    runSweepTick(60000, db)                                   // tick 1: missing -> row
+    expect(db.prepare(
+      `SELECT * FROM pending_task_retries WHERE task_name='ghost-task'`
+    ).all()).toHaveLength(1)
+
+    // Session returns: the ghost agent's tmux session now shows up in list-sessions.
+    vi.mocked(execFileSync).mockReturnValue('marveen-channels\nagent-ghost\n')
+    vi.mocked(sendPromptToSession).mockReset()
+
+    runSweepTick(60000, db, Date.now() + 11 * 60 * 1000)     // tick 2: present + backoff elapsed
+
+    expect(vi.mocked(sendPromptToSession)).toHaveBeenCalledOnce()  // fired
+    expect(db.prepare(
+      `SELECT * FROM pending_task_retries WHERE task_name='ghost-task'`
+    ).all()).toHaveLength(0)                                  // row cleared on success
+    const t = getTask('ghost-task', db)!
+    expect(t.next_run).toBeGreaterThan(nowS)                  // rolled forward
+    expect(t.last_result).toBe('fired')
+
+    vi.mocked(execFileSync).mockReturnValue('marveen-channels\n')  // restore default
+  })
+
+  it('escalates a chronically-missing task via the pending-retry alert once past the 1h threshold', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    db.prepare(`INSERT INTO scheduled_tasks
+      (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES ${GHOST}`).run(nowS - 10, nowS - 5000)
+    // Pre-seed a missing retry row older than ALERT_THRESHOLD_S (1h = 3600s).
+    db.prepare(`INSERT INTO pending_task_retries
+      (task_name, agent_name, first_attempt, last_attempt, attempt_count, last_reason)
+      VALUES ('ghost-task', 'ghost', ?, ?, 5, 'missing')`).run(nowS - 4000, nowS - 4000)
+
+    // Tick with the backoff window elapsed; age (4000s+) exceeds the 1h threshold.
+    runSweepTick(60000, db, (nowS + 700) * 1000)
+
+    expect(vi.mocked(sendPendingRetryAlert)).toHaveBeenCalled()
+  })
+
+  it('does not regress the happy path: a present-session task fires and enqueues nothing', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    db.prepare(`INSERT INTO scheduled_tasks
+      (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES ('ok-task', 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?)`
+    ).run(nowS - 10, nowS - 100)
+
+    runSweepTick(60000, db)
+
+    expect(vi.mocked(sendPromptToSession)).toHaveBeenCalledOnce()
+    expect(db.prepare(
+      `SELECT * FROM pending_task_retries WHERE task_name='ok-task'`
+    ).all()).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // AC-7: File migration
 // ---------------------------------------------------------------------------
 
