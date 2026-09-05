@@ -38,14 +38,14 @@ describe('metrics routes', () => {
     const ctx: RouteContext = {
       path: '/api/metrics/listener-status',
       method: 'GET',
-      url: 'http://dummy/api/metrics/listener-status',
+      url: new URL('http://dummy/api/metrics/listener-status'),
       res: {
         writeHead: () => {},
         end: (data: string) => {
           Object.assign(responseData, JSON.parse(data))
         },
       } as any,
-    }
+    } as any
 
     const handled = await tryHandleMetrics(ctx)
     expect(handled).toBe(true)
@@ -59,7 +59,7 @@ describe('metrics routes', () => {
     const ctx: RouteContext = {
       path: '/api/metrics/listener-status',
       method: 'GET',
-      url: 'http://dummy/api/metrics/listener-status',
+      url: new URL('http://dummy/api/metrics/listener-status'),
       res: {
         statusCode: 200,
         writeHead: (code: number) => {
@@ -69,7 +69,7 @@ describe('metrics routes', () => {
           Object.assign(statusData, JSON.parse(data))
         },
       } as any,
-    }
+    } as any
 
     const handled = await tryHandleMetrics(ctx)
     expect(handled).toBe(true)
