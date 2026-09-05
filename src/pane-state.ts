@@ -151,6 +151,28 @@ const LIMIT_MENU_OPTION_RX = /stop and wait for limit to reset/i
 const LIMIT_RESET_TIME_RX = /resets?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)/i
 const LIMIT_MENU_TAIL_LINES = 18
 
+// Active OAuth login-box detection (ba53fdee, G3).
+// Two-tier marker (marveen coord 2026-09-05):
+//
+//   PRIMARY: "Esc to cancel" AND "Paste code here" both present in the last N lines.
+//   Both are short single-line tokens -- no URL wrap risk. The AND eliminates the
+//   scrollback-FP risk of "Paste code here" alone (which persists after the box closes);
+//   "Esc to cancel" only renders while the dialog is ACTIVE.
+//
+//   FALLBACK: "Esc to cancel" AND "authorize" in the whitespace-normalised tail. Catches
+//   the edge case where "Paste code here" has scrolled past the tail window but the PKCE
+//   URL is still visible. "authorize" is OAuth-URL-specific and safe from prose collision
+//   when gated on "Esc to cancel".
+//
+//   Hard FP traps per design doc (wedge-detector-consolidation-0831.md G3):
+//   - "Paste code here" alone -- persists in scrollback after the box closes (proven FP).
+//   - "Re-authenticate" -- "--continue" replays it in a HEALTHY resumed session (proven FP).
+//   - Scope to last 10 lines so an old login banner higher in the buffer does not trigger.
+const LOGIN_BOX_TAIL_LINES = 10
+const LOGIN_BOX_ESC_RX = /\besc to cancel\b/i
+const LOGIN_BOX_PASTE_RX = /paste code here\b/i
+const LOGIN_BOX_AUTHORIZE_RX = /\bauthorize\b/
+
 // Input-box separator lines are made of U+2500 BOX DRAWINGS LIGHT
 // HORIZONTAL. At least 10 in a run to ignore stray `-` glyphs.
 const BOX_SEP_RX = /^─{10,}/
@@ -401,6 +423,21 @@ export function detectsUsageLimitMenu(pane: string, nowMs: number = Date.now()):
   // banner stays in tail -> busy). card c7987f52.
   if (!(LIMIT_PHRASE_RX.test(tail) && LIMIT_RESET_TIME_RX.test(tail))) return false
   return !limitResetTimeIsStale(tail, nowMs)
+}
+
+// Detect an active Claude Code OAuth re-authentication login-box (ba53fdee G3).
+// Returns true when the pane is currently showing the OAuth URL + paste prompt,
+// indicating the agent is wedged waiting for a code paste.
+// Scope: DETECT-ONLY (log-level flag). No recovery wiring in this function.
+export function detectsActiveLoginBox(pane: string): boolean {
+  if (!pane) return false
+  const tail = pane.split('\n').slice(-LOGIN_BOX_TAIL_LINES).join('\n')
+  // Primary: both short single-line strings present (AND) -- wrap-safe.
+  if (LOGIN_BOX_ESC_RX.test(tail) && LOGIN_BOX_PASTE_RX.test(tail)) return true
+  // Fallback: "Paste code here" scrolled out, PKCE URL still visible.
+  // Normalise whitespace so a wrap-split URL token remains matchable.
+  const normalisedTail = tail.replace(/\s+/g, ' ')
+  return LOGIN_BOX_ESC_RX.test(normalisedTail) && LOGIN_BOX_AUTHORIZE_RX.test(normalisedTail)
 }
 
 export interface DetectPaneStateOptions {

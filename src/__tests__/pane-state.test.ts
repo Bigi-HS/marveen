@@ -3,6 +3,7 @@ import {
   detectPaneState,
   detectsThinkingBlockError,
   detectsUsageLimitMenu,
+  detectsActiveLoginBox,
   detectsStalledIdle,
   isReadyForPrompt,
   isActivelyWorking,
@@ -2338,5 +2339,114 @@ describe('isQuiescentlyIdle (L2 delivery backstop, card d4aa1d14)', () => {
 
   it('empty sample list -> false', () => {
     expect(isQuiescentlyIdle([])).toBe(false)
+  })
+})
+
+// ── ba53fdee G3: active OAuth login-box fixtures ──────────────────────────────
+//
+// Synthetic fixtures constructed from CLI source (bin/claude.exe strings),
+// /login flow stdout pattern: "Opening browser…" / "If the browser didn't
+// open, visit: {PKCE-URL}" / "Paste code here if prompted > " / "Esc to cancel".
+// PKCE URL format: ~270-290 chars, client_id 22422756-60c9-4084-8eb7-27705fd5cf9a,
+// local redirect port 8205. Real byte-shape capture to follow on first live wedge
+// (store/incident-evidence/).
+// marveen coord 2026-09-05: primary=short-AND, fallback=authorize-on-normalised-tail.
+
+// FN-guard 1: normal active login box — URL fits on one line.
+const LOGIN_BOX_ACTIVE = [
+  '  (prior turn output above)',
+  '  Opening browser to sign in…',
+  '  If the browser didn’t open, visit: https://claude.ai/oauth/authorize?code_challenge=AbCdEf1234567890XyZ&code_challenge_method=S256&response_type=code&client_id=22422756-60c9-4084-8eb7-27705fd5cf9a&redirect_uri=http%3A%2F%2Flocalhost%3A8205%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference+user%3Aprofile&state=s1t2a3t4e',
+  '  Paste code here if prompted > ',
+  '  Esc to cancel',
+].join('\n')
+
+// FN-guard 2: URL wrapped across two lines (120-col pane) — primary path must
+// still match because both short AND-strings are present regardless of wrap.
+const LOGIN_BOX_URL_WRAPPED = [
+  '  (prior turn output above)',
+  '  Opening browser to sign in…',
+  '  If the browser didn’t open, visit: https://claude.ai/oauth/authorize?',
+  '  code_challenge=AbCdEf1234567890XyZ&code_challenge_method=S256&response_type=code',
+  '  &client_id=22422756-60c9-4084-8eb7-27705fd5cf9a&redirect_uri=http%3A%2F%2F',
+  '  localhost%3A8205%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference+user%3Aprofile',
+  '  Paste code here if prompted > ',
+  '  Esc to cancel',
+].join('\n')
+
+// FN-guard 3: "Paste code here" scrolled above the 10-line window; only the URL
+// tail and "Esc to cancel" remain visible — fallback (authorize + Esc) must fire.
+const LOGIN_BOX_PASTE_SCROLLED_OUT = [
+  '  Paste code here if prompted > ',  // pushed out of 10-line tail window by lines below
+  '  (output line 2)',
+  '  (output line 3)',
+  '  (output line 4)',
+  '  (output line 5)',
+  '  https://claude.ai/oauth/authorize?code_challenge=AbCdEf1234567890XyZ&code_challenge_method=S256&response_type=code&client_id=22422756-60c9-4084-8eb7-27705fd5cf9a&redirect_uri=http%3A%2F%2Flocalhost%3A8205%2Foauth%2Fcode%2Fcallback',
+  '  ',
+  '  Still waiting for authorization…',
+  '  ',
+  '  Esc to cancel',
+  '  ',
+  '  ',
+].join('\n')
+
+// FP-guard 1: active tool-execution footer has "Esc to cancel" but NO login
+// string — must NOT fire (the permission-menu / tool-running footer shape).
+const FP_ACTIVE_TOOL_ESC_FOOTER = [
+  '  Contains brace with quote character (expansion obfuscation)',
+  '',
+  '  Do you want to proceed?',
+  '  ❯ 1. Yes',
+  '    2. No',
+  '',
+  '  Esc to cancel · Tab to amend · ctrl+e to explain',
+].join('\n')
+
+// FP-guard 2: old login box content scrolled well above the 10-line tail window;
+// the tail shows only a live idle prompt — must NOT fire.
+const FP_LOGIN_BOX_CLOSED_SCROLLED = [
+  '  Opening browser to sign in…',         // login box at top (>10 lines ago)
+  '  Paste code here if prompted > ',
+  '  Esc to cancel',
+  '  (login cancelled; resuming prior work)',
+  '  Reading file…',
+  '  Found 3 issues in the analysis.',
+  '  Thinking about the next step…',
+  '  OK, let me now check the database schema.',
+  '  Running SQL query…',
+  '  Got 42 rows back.',
+  '  All looks good. Let me summarize the findings.',
+  '  Summary: no blocking issues found.',
+  '  ',
+  SEP,
+  '❯ ',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n')
+
+describe('active OAuth login-box detector (ba53fdee G3)', () => {
+  it('FN-guard: normal login box (URL one line, both AND-strings in tail)', () => {
+    expect(detectsActiveLoginBox(LOGIN_BOX_ACTIVE)).toBe(true)
+  })
+
+  it('FN-guard wrap: URL wrapped across lines, primary AND-path still matches', () => {
+    expect(detectsActiveLoginBox(LOGIN_BOX_URL_WRAPPED)).toBe(true)
+  })
+
+  it('FN-guard fallback: Paste-code scrolled out, authorize+Esc in tail', () => {
+    expect(detectsActiveLoginBox(LOGIN_BOX_PASTE_SCROLLED_OUT)).toBe(true)
+  })
+
+  it('FP-guard tool-footer: Esc-to-cancel in active-tool footer, no Paste-code -> no fire', () => {
+    expect(detectsActiveLoginBox(FP_ACTIVE_TOOL_ESC_FOOTER)).toBe(false)
+  })
+
+  it('FP-guard box-closed: login content scrolled above 10-line window, live idle tail -> no fire', () => {
+    expect(detectsActiveLoginBox(FP_LOGIN_BOX_CLOSED_SCROLLED)).toBe(false)
+  })
+
+  it('returns false on empty pane', () => {
+    expect(detectsActiveLoginBox('')).toBe(false)
   })
 })
