@@ -284,9 +284,23 @@ describe('evaluateApprovals (MG-AC3, MG-SEC3, MG-SEC6)', () => {
     expect(r.missing).toEqual(['dave'])
   })
 
-  it('blocked is sticky: a later approved on the same reviewer does NOT clear it', () => {
+  // Latest-wins per reviewer (card e48ad18c, Thor PR#467 finding): the row with
+  // the highest id (last in the array, since readApprovals orders by recorded_at
+  // ASC, id ASC) determines the effective verdict. Two directions required by the
+  // card -- both must be covered.
+  it('latest-wins: approve -> block -> approve = approved (card e48ad18c)', () => {
     const r = evaluateApprovals(
       [approval('dave', 'approved', 1), approval('dave', 'blocked', 2), approval('dave', 'approved', 3)],
+      ['thor', 'dave'],
+    )
+    expect(r.blocked).toEqual([])
+    expect(r.approved).toContain('dave')
+    expect(r.pass).toBe(false) // thor still missing
+  })
+
+  it('latest-wins: approve -> block = blocked (card e48ad18c)', () => {
+    const r = evaluateApprovals(
+      [approval('dave', 'approved', 1), approval('dave', 'blocked', 2)],
       ['thor', 'dave'],
     )
     expect(r.blocked).toEqual(['dave'])
@@ -294,19 +308,14 @@ describe('evaluateApprovals (MG-AC3, MG-SEC3, MG-SEC6)', () => {
     expect(r.pass).toBe(false)
   })
 
-  it('blocked always wins regardless of INSERT order (simultaneous approve+block)', () => {
-    const blockFirst = evaluateApprovals(
+  it('latest-wins: block -> approve = approved (rescind; card e48ad18c)', () => {
+    const r = evaluateApprovals(
       [approval('thor', 'blocked', 1), approval('thor', 'approved', 2)],
       ['thor', 'dave'],
     )
-    const approveFirst = evaluateApprovals(
-      [approval('thor', 'approved', 1), approval('thor', 'blocked', 2)],
-      ['thor', 'dave'],
-    )
-    expect(blockFirst.blocked).toEqual(['thor'])
-    expect(approveFirst.blocked).toEqual(['thor'])
-    expect(blockFirst.pass).toBe(false)
-    expect(approveFirst.pass).toBe(false)
+    expect(r.blocked).toEqual([])
+    expect(r.approved).toContain('thor')
+    expect(r.pass).toBe(false) // dave still missing
   })
 
   it('distinct reviewers: three thor approvals do not satisfy a three-sided gate (MG-SEC6)', () => {

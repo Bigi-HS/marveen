@@ -255,27 +255,23 @@ export interface GateEvaluation {
 
 // Core gate evaluation over the approval rows for ONE (pr, head_sha) pair.
 //
-// Blocked-stickiness (spec "one definition, used everywhere", MG-SEC3): a
-// `blocked` verdict for any reviewer is permanent for that sha -- a later
-// `approved` row on the same (pr, sha, reviewer) does NOT clear it, so a blocked
-// reviewer never appears in `approved`. Any blocked record at all fails the gate
-// (fail-safe). The only way to clear a block is a new commit (new sha), which
-// this function never sees because the caller queries by the current sha.
+// Latest-wins per reviewer (card e48ad18c): readApprovals returns rows ordered
+// recorded_at ASC, id ASC, so iterating and overwriting a Map gives each
+// reviewer's LAST verdict as the effective one. A rescinded block (block->approve)
+// clears to approved; a rescinded approval (approve->block) hardens to blocked.
 //
-// Distinct-reviewer (MG-SEC6): reviewers are de-duplicated via sets, so three
-// rows all claiming `reviewer=thor` satisfy only the thor role.
-//
-// Simultaneous approve+block for the same reviewer (edge-case table): blocked
-// always wins regardless of INSERT order, because the block set is computed
-// first and excludes that reviewer from `approved`.
+// Distinct-reviewer (MG-SEC6): the Map keyed by reviewer naturally de-duplicates,
+// so multiple rows claiming `reviewer=thor` produce exactly one effective verdict.
 export function evaluateApprovals(approvals: ApprovalRow[], required: Reviewer[]): GateEvaluation {
-  const blockedSet = new Set<string>()
+  const latestVerdict = new Map<string, string>()
   for (const a of approvals) {
-    if (a.verdict === 'blocked') blockedSet.add(a.reviewer)
+    latestVerdict.set(a.reviewer, a.verdict)
   }
+  const blockedSet = new Set<string>()
   const approvedSet = new Set<string>()
-  for (const a of approvals) {
-    if (a.verdict === 'approved' && !blockedSet.has(a.reviewer)) approvedSet.add(a.reviewer)
+  for (const [reviewer, verdict] of latestVerdict) {
+    if (verdict === 'blocked') blockedSet.add(reviewer)
+    else if (verdict === 'approved') approvedSet.add(reviewer)
   }
   const blocked = [...blockedSet].sort()
   const approved = [...approvedSet].sort()
