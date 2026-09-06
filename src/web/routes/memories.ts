@@ -6,6 +6,7 @@ import {
   deleteMemory, getNoaDb, type NoaMemory,
 } from '../../noa-memory.js'
 import { MAIN_AGENT_ID, OLLAMA_URL } from '../../config.js'
+import { listAgentNames } from '../agent-config.js'
 import { logger } from '../../logger.js'
 import { decideMemoryMutation, enforceFromBindingEnabled } from '../agent-identity-binding.js'
 import { recordGuardEvent } from '../guard-event-recorder.js'
@@ -126,6 +127,18 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     }
     // Distinguish absent (auto-scope) from explicit null (opt-out) from a value.
     const accessScope = 'access_scope' in data ? data.access_scope : undefined
+    // Validate access_scope (card 97ed2d2c): must be null or a known agent_id.
+    // Category names used here (e.g. 'shared') silently make the row invisible to
+    // its owner -- applyScopeFilter matches by agent_id, not by category tier.
+    if (typeof accessScope === 'string') {
+      const knownAgents = new Set([MAIN_AGENT_ID, ...listAgentNames()])
+      if (!knownAgents.has(accessScope)) {
+        json(res, {
+          error: `"access_scope" must be null or an existing agent_id (got "${accessScope}"). Use the "category" field to set a visibility tier (hot/warm/cold/shared).`
+        }, 400)
+        return true
+      }
+    }
     try {
       const result = saveAgentMemory(
         data.agent_id || MAIN_AGENT_ID,
