@@ -41,7 +41,7 @@ import {
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { probeTelegramConflict } from './channel-conflict-probe.js'
 import { schedulePluginUnlockAfterRespawn } from './channel-plugin-unlock.js'
-import { detectPaneState, decidePaneErrorAlert, detectsUsageLimitMenu, type PaneErrorAlertState, type PaneState } from '../pane-state.js'
+import { detectPaneState, decidePaneErrorAlert, detectsUsageLimitMenu, detectsActiveLoginBox, decideSustainedPaneAlert, type PaneErrorAlertState, type PaneState, type SustainedPaneAlertState } from '../pane-state.js'
 import {
   decideUsageLimitRecovery,
   DEFAULT_USAGE_LIMIT_WEDGE_THRESHOLDS,
@@ -119,6 +119,17 @@ const paneErrorState: Map<string, PaneErrorAlertState> = new Map()
 const PANE_ERROR_CONFIRM_MS = 120_000
 const PANE_ERROR_DEDUP_MS = 30 * 60 * 1000
 const PANE_ERROR_CLEAR_MS = 5 * 60 * 1000
+
+// Active OAuth login-box wedge alerting (ba53fdee SLICE 1, LOG-ONLY). Same
+// confirm/dedup/clear gate and calibration as the pane-error alert (60s tick):
+// a box must persist ~2 ticks before the first alert (a legit one-tick reauth
+// clears itself), re-alert every 30 min while it stays, clear after 5 min
+// login-free. Alert-only -- no recovery/relaunch here (that is SLICE 2, gated).
+const agentLoginWedgeAlert: Map<string, SustainedPaneAlertState> = new Map()
+const CLEAN_SUSTAINED_ALERT_STATE: SustainedPaneAlertState = { firstSeenAt: null, lastAlertAt: null, lastErrorAt: null }
+const LOGIN_WEDGE_CONFIRM_MS = 120_000
+const LOGIN_WEDGE_DEDUP_MS = 30 * 60 * 1000
+const LOGIN_WEDGE_CLEAR_MS = 5 * 60 * 1000
 
 type MarveenRecoveryStage = 'soft' | 'save' | 'resume' | 'hard' | 'gave_up'
 interface MarveenDownState {
@@ -1105,6 +1116,36 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         } else if (wedgeDecision.action === 'escalate') {
           logger.error({ agent: t.agentName, session: t.session, reason: wedgeDecision.reason }, 'Agent still wedged on usage-limit modal after restart cap -- operator needed')
           sendAlert(`🚨 ${t.agentName}: usage-limit modál ${DEFAULT_USAGE_LIMIT_WEDGE_THRESHOLDS.maxRestarts} friss újraindítás után is fennáll -- valószínűleg tényleg aktív account-limit, nem elakadt modál. Kézi beavatkozás kellhet: tmux attach -t ${t.session}`)
+        }
+      }
+
+      // Active OAuth login-box wedge (ba53fdee SLICE 1, LOG-ONLY). The session is
+      // ALIVE and the process RUNS, but the pane sits on a /login prompt the agent
+      // cannot self-exit, so it processes nothing and every delivery stalls -- all
+      // the liveness checks above are blind to it (liveness != progress; the 08-04
+      // incident dark-ed 19 then 6 agents unseen). Detect it on the pane and ALERT
+      // the operator. Recovery (a fresh, --continue-dropping relaunch) is SLICE 2
+      // and stays gated behind the c12 sandbox-proof -- nothing here mutates agent
+      // lifecycle. Scope mirrors the usage-limit block: sub-agents only, since the
+      // main session's login/reauth is owned by reauth-healer + the keepalive path
+      // and must not be double-probed. The shared confirm/dedup/clear gate means a
+      // one-tick legitimate reauth that clears on its own is never reported.
+      if (!t.isMarveen && t.agentName) {
+        const onLoginBox = pane != null && detectsActiveLoginBox(pane)
+        const prevLogin = agentLoginWedgeAlert.get(t.agentName) ?? CLEAN_SUSTAINED_ALERT_STATE
+        const loginDecision = decideSustainedPaneAlert(onLoginBox, prevLogin, Date.now(), {
+          confirmMs: LOGIN_WEDGE_CONFIRM_MS,
+          dedupMs: LOGIN_WEDGE_DEDUP_MS,
+          clearMs: LOGIN_WEDGE_CLEAR_MS,
+        })
+        if (loginDecision.next.firstSeenAt === null) {
+          agentLoginWedgeAlert.delete(t.agentName)
+        } else {
+          agentLoginWedgeAlert.set(t.agentName, loginDecision.next)
+        }
+        if (loginDecision.alert) {
+          logger.warn({ agent: t.agentName, session: t.session }, 'Agent wedged on an active OAuth login-box -- delivery stalled, manual /login or fresh relaunch needed')
+          sendAlert(`🔐 ${t.agentName}: aktív OAuth login-képernyőn ül (élő session, de semmit nem dolgoz fel -- minden kézbesítés elakad). Kézi beavatkozás kell: \`unset TMUX && tmux attach -t ${t.session}\`, majd jelentkezz be vagy indítsd újra friss sessionnel.`)
         }
       }
     }
