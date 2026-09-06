@@ -1035,6 +1035,20 @@ export function decidePaneErrorAlert(
   return { alert: false, next: { firstSeenAt: prev.firstSeenAt, lastAlertAt: prev.lastAlertAt, lastErrorAt: now } }
 }
 
+// ── Generic sustained-pane-condition alert gate ──────────────────────────────
+// decidePaneErrorAlert is condition-agnostic: its first argument is a plain
+// boolean observation, and the confirm/dedup/clear + clock-skew + flapping-
+// capture state machine applies to ANY persistent pane condition, not just the
+// thinking-block error. These aliases let a call-site read in its own domain
+// terms (login-wedge, feedback-modal, …) while reusing the exact tested machine
+// rather than forking it. The thinking-block-error path keeps its original name;
+// new sustained-condition consumers import the neutral names below.
+// First consumer: ba53fdee login-wedge SLICE 1 (channel-monitor, log-only).
+export type SustainedPaneAlertState = PaneErrorAlertState
+export type SustainedPaneAlertThresholds = PaneErrorAlertThresholds
+export type SustainedPaneAlertDecision = PaneErrorAlertDecision
+export const decideSustainedPaneAlert = decidePaneErrorAlert
+
 // A stable signature of the text parked in the live input box, or null
 // when the pane is not in the 'typing' (parked-input) state.
 //
