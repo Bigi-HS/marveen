@@ -38,6 +38,24 @@ export function __resetGithubMergeDeps(): void {
   mergeRunner = mergePullRequest
 }
 
+// PR-open seam (card ef840006): injectable for tests to avoid real network
+// and DB calls.  Production defaults are the real implementations.
+let prOpener: typeof openPullRequest = openPullRequest
+let prAuthorRecorder: (prNumber: number, agentId: string, now: number) => void = (n, a, t) =>
+  insertPrAuthor(getDb(), n, a, t)
+
+export function __setGithubPrDeps(deps: {
+  openPr?: typeof openPullRequest
+  recordAuthor?: (prNumber: number, agentId: string, now: number) => void
+}): void {
+  if (deps.openPr !== undefined) prOpener = deps.openPr
+  if (deps.recordAuthor !== undefined) prAuthorRecorder = deps.recordAuthor
+}
+export function __resetGithubPrDeps(): void {
+  prOpener = openPullRequest
+  prAuthorRecorder = (n, a, t) => insertPrAuthor(getDb(), n, a, t)
+}
+
 export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method, identity } = ctx
   if (!path.startsWith('/api/github/')) return false
@@ -144,17 +162,30 @@ export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
   }
 
   try {
-    const pr = await openPullRequest({ head: parsed.head ?? '', base: parsed.base, title: parsed.title ?? '', body: parsed.body })
+    const pr = await prOpener({ head: parsed.head ?? '', base: parsed.base, title: parsed.title ?? '', body: parsed.body })
     // Attribute the action to the authenticated caller (card b1ce5118 identity).
     logger.info({ caller: identity.agentId, head: pr.head, base: pr.base, number: pr.number }, 'opened GitHub PR server-side')
     // Record author for MG-SEC5 self-approval block (card ec818352). INSERT OR IGNORE
     // so a re-open by a different agent does not override the original author record.
     try {
-      insertPrAuthor(getDb(), pr.number, identity.agentId, Math.floor(Date.now() / 1000))
+      prAuthorRecorder(pr.number, identity.agentId, Math.floor(Date.now() / 1000))
     } catch (err) {
       logger.warn({ err, pr: pr.number }, 'Failed to record PR author (non-fatal, MG-SEC5 fail-open)')
     }
-    json(res, { number: pr.number, html_url: pr.htmlUrl, head: pr.head, base: pr.base }, 201)
+    // Card ef840006: include the recorded author in the response so callers can
+    // detect identity fallback (operator token used instead of per-agent token).
+    const body: Record<string, unknown> = {
+      number: pr.number,
+      html_url: pr.htmlUrl,
+      head: pr.head,
+      base: pr.base,
+      recorded_author: identity.agentId,
+    }
+    if (identity.source === 'operator') {
+      body.author_warning =
+        'operator token used -- recorded author may not reflect the actual caller; use a per-agent token for correct recusal'
+    }
+    json(res, body, 201)
   } catch (err) {
     const status = err instanceof PrRequestError ? err.status : 500
     const message = err instanceof PrRequestError ? err.message : 'PR open failed'
