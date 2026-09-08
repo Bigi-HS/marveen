@@ -174,6 +174,14 @@ def cmd_chart(args):
     deltas.sort()
     top_losers = deltas[:5]
 
+    # New files with low coverage (present in last snapshot only, below threshold)
+    NEW_FILE_WARN_THRESHOLD = 80.0
+    new_low = sorted(
+        [(pct, fp) for fp, pct in last_files.items()
+         if fp not in first_files and pct < NEW_FILE_WARN_THRESHOLD],
+        key=lambda x: x[0]
+    )[:3]
+
     # SVG
     W, H = 800, 360
     PAD_L, PAD_R, PAD_T, PAD_B = 60, 30, 30, 80
@@ -259,9 +267,26 @@ def cmd_chart(args):
             f'{short}  ({delta:+.1f}pp)</text>'
         )
 
+    # New low-coverage files legend
+    losers_block_h = len(top_losers) * 13
+    if new_low:
+        new_section_y = legend_y + losers_block_h + (18 if top_losers else 0)
+        lines_svg.append(
+            f'<text x="{PAD_L}" y="{new_section_y}" font-size="11" fill="#374151" font-weight="bold">'
+            f'New files (low coverage):</text>'
+        )
+        for idx, (pct, fp) in enumerate(new_low):
+            short = fp if len(fp) <= 55 else "..." + fp[-52:]
+            lines_svg.append(
+                f'<text x="{PAD_L}" y="{new_section_y + 14 + idx * 13}" font-size="10" fill="#f97316">'
+                f'{short}  ({pct:.1f}%)</text>'
+            )
+    new_low_block_h = (18 + 14 + len(new_low) * 13) if new_low else 0
+
+    total_extra_h = losers_block_h + new_low_block_h
     svg = f"""<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H + len(top_losers) * 13}">
-  <rect width="{W}" height="{H + len(top_losers) * 13}" fill="white"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H + total_extra_h}">
+  <rect width="{W}" height="{H + total_extra_h}" fill="white"/>
   <text x="{W // 2}" y="20" text-anchor="middle" font-size="14" fill="#111827" font-weight="bold">
     Coverage Trend (last {len(rows)} snapshots)
   </text>
@@ -270,7 +295,8 @@ def cmd_chart(args):
 
     out = Path(args.out)
     out.write_text(svg, encoding="utf-8")
-    print(f"Chart written to {out} ({len(rows)} snapshots, {values[0]:.1f}% → {values[-1]:.1f}%)")
+    new_low_note = f", {len(new_low)} new low-cov file(s)" if new_low else ""
+    print(f"Chart written to {out} ({len(rows)} snapshots, {values[0]:.1f}% → {values[-1]:.1f}%{new_low_note})")
 
 
 # ---------------------------------------------------------------------------
