@@ -158,6 +158,22 @@ class TestFindRoutingIds(unittest.TestCase):
         found = _hook.find_routing_ids("everything looks fine", FAKE_ID_MAP)
         self.assertEqual(len(found), 0)
 
+    # OPP fixture: displayName == capitalize(id) case -- must NOT block.
+    # Before the fix, build_id_map added {'dave': 'Dave'} (display != agent_id
+    # case-sensitively), and find_routing_ids then blocked the correct use of 'Dave'.
+    def test_capitalized_id_as_displayname_not_in_map(self):
+        # The live map must NOT contain agents whose displayName is just the
+        # capitalized routing-id (dave->Dave, thor->Thor, bond->Bond, etc.).
+        live_map = _hook.build_id_map()
+        self.assertNotIn("dave", live_map,
+                         "dave->Dave should be excluded (capitalised id, not a distinct Boss name)")
+        self.assertNotIn("thor", live_map,
+                         "thor->Thor should be excluded")
+        # End-to-end: writing the correct display name must not trigger a block
+        live_found = _hook.find_routing_ids("Dave is done, Thor approved.", live_map)
+        self.assertEqual(len(live_found), 0,
+                         "Correct display names must not trigger a soft-block")
+
 
 # ---------------------------------------------------------------------------
 # build_id_map (integration: hits real filesystem)

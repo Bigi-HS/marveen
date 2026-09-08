@@ -59,7 +59,7 @@ def build_id_map(agents_dir=None):
                     d = json.load(f)
                 agent_id = os.path.basename(os.path.dirname(p))
                 display = d.get("displayName", "")
-                if display and display != agent_id:
+                if display and display.lower() != agent_id.lower():
                     result[agent_id] = display
             except Exception:
                 pass
