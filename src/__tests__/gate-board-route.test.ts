@@ -96,15 +96,15 @@ describe('computeGateBoard -- aggregation', () => {
     expect(pr.merge_ready).toBe(false)
   })
 
-  it('a blocked seat is sticky and blocks merge-ready even after a later approval', () => {
+  it('latest-wins: block -> approve clears the block (card e48ad18c)', () => {
     const db = getDb()
     const t = nowS()
     insertApproval(db, { pr_number: 11, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, t)
     insertApproval(db, { pr_number: 11, head_sha: SHA_A, reviewer: 'dave', verdict: 'blocked', recorded_by: 'dave' }, t + 1)
     insertApproval(db, { pr_number: 11, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved', recorded_by: 'dave' }, t + 2)
     const pr = computeGateBoard(db, nowS()).prs[0]
-    expect(pr.seats.dave).toBe('blocked')
-    expect(pr.merge_ready).toBe(false)
+    expect(pr.seats.dave).toBe('approved')
+    expect(pr.merge_ready).toBe(true)
   })
 
   it('once chad has reviewed, chad becomes required for merge-ready', () => {
@@ -119,12 +119,11 @@ describe('computeGateBoard -- aggregation', () => {
     expect(pr.chad_reviewed).toBe(true)
     expect(pr.merge_ready).toBe(false)
 
-    // chad approves -> now all three required seats approved -> ready
+    // chad approves -> latest-wins: chad's last row is approved -> now all three seats approved -> ready
     insertApproval(db, { pr_number: 12, head_sha: SHA_A, reviewer: 'chad', verdict: 'approved', recorded_by: 'chad' }, t + 3)
     const pr2 = computeGateBoard(db, nowS()).prs[0]
-    // blocked is sticky per evaluateApprovals, so chad stays blocked -> still not ready
-    expect(pr2.seats.chad).toBe('blocked')
-    expect(pr2.merge_ready).toBe(false)
+    expect(pr2.seats.chad).toBe('approved')
+    expect(pr2.merge_ready).toBe(true)
   })
 
   it('computes seats only at the latest head_sha (a stale-sha approval does not count)', () => {

@@ -145,14 +145,15 @@ describe('GET /api/gate/check (MG-AC3, MG-AC4, MG-AC6)', () => {
     expect(r.body.pass).toBe(false)
   })
 
-  it('a blocked verdict is sticky and keeps the gate closed (MG-SEC3)', async () => {
+  it('latest-wins: approve -> block -> approve clears the block (card e48ad18c)', async () => {
     await approve('thor')
     await approve('dave')
     await approve('dave', 'blocked')
-    await approve('dave', 'approved') // later approve must NOT clear the block
+    await approve('dave', 'approved') // latest approve clears the block
     const r = await call('GET', '/api/gate/check?pr=207')
-    expect(r.body.blocked).toContain('dave')
-    expect(r.body.pass).toBe(false)
+    expect(r.body.blocked).not.toContain('dave')
+    expect(r.body.approved).toContain('dave')
+    expect(r.body.pass).toBe(true) // both required seats cleared by latest-wins
   })
 
   it('approvals on an old sha do not count after a new commit (MG-AC6)', async () => {

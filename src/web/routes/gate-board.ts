@@ -81,16 +81,16 @@ interface ActivityRow {
   recorded_at: number
 }
 
-// Blocked is sticky (mirrors evaluateApprovals): a block on a reviewer wins over
-// any later approve on the same sha.
+// Latest-wins per reviewer (mirrors evaluateApprovals, card e48ad18c): readApprovals
+// returns rows ordered recorded_at ASC, id ASC, so the last matching row is effective.
 function seatFor(approvals: Array<{ reviewer: string; verdict: string }>, reviewer: Reviewer): Seat {
-  let approved = false
+  let last: Seat = 'none'
   for (const a of approvals) {
     if (a.reviewer !== reviewer) continue
-    if (a.verdict === 'blocked') return 'blocked'
-    if (a.verdict === 'approved') approved = true
+    if (a.verdict === 'blocked') last = 'blocked'
+    else if (a.verdict === 'approved') last = 'approved'
   }
-  return approved ? 'approved' : 'none'
+  return last
 }
 
 /**
