@@ -88,6 +88,7 @@ import { tryHandleGithubSearch } from './web/routes/github-search.js'
 import { tryHandleBondSrs } from './web/routes/bond-srs.js'
 import { tryHandleHibikiNutrition } from './web/routes/hibiki-nutrition.js'
 import { tryHandleGuardEvents } from './web/routes/guard-events.js'
+import { tryHandleCurator } from './web/routes/curator.js'
 import { tryHandleMetrics } from './web/routes/metrics.js'
 import { tryHandleHealthIngest } from './web/routes/health-ingest.js'
 import { tryHandleHealthIngestRaw } from './web/routes/health-ingest-raw.js'
@@ -363,6 +364,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleBondSrs(routeCtx)) return
       if (await tryHandleHibikiNutrition(routeCtx)) return
       if (await tryHandleGuardEvents(routeCtx)) return
+      if (await tryHandleCurator(routeCtx)) return
       if (await tryHandleMetrics(routeCtx)) return
       if (await tryHandleHealthIngest(routeCtx)) return
       if (await tryHandleHealthIngestRaw(routeCtx)) return
