@@ -6,15 +6,16 @@
 // status. A broken pull MUST NOT be invisible -- the written snapshot surfaces
 // the failure to Hibiki's consumer and to the health-guard alert path.
 
-import type { ZeppCreds, ZeppTokens } from './auth.js'
+import type { ZeppTokens } from './auth.js'
+import type { ZeppCredsOrToken } from './creds-reader.js'
 import type { ZeppSleep, ZeppVitals, ZeppWorkout, ZeppDailySnapshot, ZeppPullStatus } from './contract.js'
 import { checkSnapshot, type HealthGuardAlert } from './health-guard.js'
 import { writeValidatedSnapshot } from './validated-ingest.js'
 import type { PlausibilityViolation } from './health-plausibility.js'
 
 export interface PullRunnerDeps {
-  readCreds: () => Promise<ZeppCreds>
-  login: (creds: ZeppCreds) => Promise<ZeppTokens>
+  readCreds: () => Promise<ZeppCredsOrToken>
+  login: (creds: ZeppCredsOrToken) => Promise<ZeppTokens>
   pullSleep: (date: string, token: string) => Promise<ZeppSleep | null>
   pullVitals: (date: string, token: string) => Promise<ZeppVitals | null>
   pullWorkouts: (date: string, token: string) => Promise<ZeppWorkout[]>
@@ -110,20 +111,39 @@ export async function runZeppPull(date: string, deps: PullRunnerDeps): Promise<Z
 }
 
 // Default deps wiring for production use.
-import { readZeppCreds, DEFAULT_CREDS_PATH } from './creds-reader.js'
-import { zeppLogin, DEFAULT_AUTH_CONFIG } from './auth.js'
-import { pullSleep, pullVitals, pullWorkouts, DEFAULT_API_BASE_URL } from './puller.js'
+import { readZeppCredsOrToken, resolveDefaultCredsPath } from './creds-reader.js'
+import { zeppLoginOrToken, DEFAULT_AUTH_CONFIG } from './auth.js'
+import { pullSleep, pullVitals, pullWorkouts, DEFAULT_API_BASE_URL, regionToApiBase, type ZeppAuthStyle } from './puller.js'
 import { defaultZeppStore } from './ingest-store.js'
 import { defaultZeppAnomalyStore } from './anomaly-store.js'
 import { logger } from '../../logger.js'
 
 export function makeDefaultPullRunnerDeps(): PullRunnerDeps {
+  // Config derived from the creds each run: token-mode => apptoken header on the
+  // region host with userid; password-mode => Bearer on the default host. Set by
+  // readCreds (always called before the pulls in runZeppPull) and read by the
+  // pull closures below.
+  let cfg: { apiBaseUrl: string; userid?: string; authStyle: ZeppAuthStyle } = {
+    apiBaseUrl: DEFAULT_API_BASE_URL,
+    authStyle: 'bearer',
+  }
+  const fetch = globalThis.fetch
   return {
-    readCreds: async () => readZeppCreds(DEFAULT_CREDS_PATH),
-    login: (creds) => zeppLogin(creds, { ...DEFAULT_AUTH_CONFIG, fetch: globalThis.fetch }),
-    pullSleep: (date, token) => pullSleep(date, { apiBaseUrl: DEFAULT_API_BASE_URL, accessToken: token, fetch: globalThis.fetch }),
-    pullVitals: (date, token) => pullVitals(date, { apiBaseUrl: DEFAULT_API_BASE_URL, accessToken: token, fetch: globalThis.fetch }),
-    pullWorkouts: (date, token) => pullWorkouts(date, { apiBaseUrl: DEFAULT_API_BASE_URL, accessToken: token, fetch: globalThis.fetch }),
+    readCreds: async () => {
+      const creds = readZeppCredsOrToken(resolveDefaultCredsPath())
+      cfg = creds.mode === 'token'
+        ? {
+            apiBaseUrl: creds.region ? regionToApiBase(creds.region) : DEFAULT_API_BASE_URL,
+            userid: creds.userid,
+            authStyle: 'apptoken',
+          }
+        : { apiBaseUrl: DEFAULT_API_BASE_URL, authStyle: 'bearer' }
+      return creds
+    },
+    login: (creds) => zeppLoginOrToken(creds, { ...DEFAULT_AUTH_CONFIG, fetch }),
+    pullSleep: (date, token) => pullSleep(date, { apiBaseUrl: cfg.apiBaseUrl, accessToken: token, fetch, userid: cfg.userid, authStyle: cfg.authStyle }),
+    pullVitals: (date, token) => pullVitals(date, { apiBaseUrl: cfg.apiBaseUrl, accessToken: token, fetch, userid: cfg.userid, authStyle: cfg.authStyle }),
+    pullWorkouts: (date, token) => pullWorkouts(date, { apiBaseUrl: cfg.apiBaseUrl, accessToken: token, fetch, userid: cfg.userid, authStyle: cfg.authStyle }),
     writeSnapshot: (snap) => defaultZeppStore.write(snap),
     recordAnomaly: (date, suspect) => {
       defaultZeppAnomalyStore.record(date, suspect, new Date().toISOString())
