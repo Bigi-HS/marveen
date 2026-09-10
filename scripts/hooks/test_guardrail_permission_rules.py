@@ -1367,32 +1367,39 @@ class CxEscapeCorpusTests(unittest.TestCase):
 
 # ── R5: adb-token-path (card 8001dd41) ──────────────────────────────────────
 class AdbTokenPathTests(unittest.TestCase):
-    """R5: adb shell + credential/token path -> BLOCK.
+    """R5: adb shell/exec-out/pull + credential/token path -> BLOCK.
 
     Adversarial fixtures:
-      FN  -- multiple auth-path variants must all be caught.
-      FP  -- health-data-only adb shell must NOT block (Zepp emulator use case).
+      FN  -- multiple auth-path variants and read idioms must all be caught.
+      FP  -- health-data-only adb reads must NOT block (Zepp emulator use case).
       OPP -- non-adb commands containing token-like substrings must NOT block.
     """
 
     BLOCKED = [
         # SharedPreferences (most common auth storage)
-        ('sp-direct',       'adb shell cat /data/data/com.zepp.health/shared_prefs/SharedPreferences.xml'),
-        ('sp-ls',           'adb shell ls /data/data/com.huami.watch.hmwatchmanager/shared_prefs/SharedPreferences/'),
+        ('sp-direct',               'adb shell cat /data/data/com.zepp.health/shared_prefs/SharedPreferences.xml'),
+        ('sp-ls',                   'adb shell ls /data/data/com.huami.watch.hmwatchmanager/shared_prefs/SharedPreferences/'),
         # keystore
-        ('keystore-cat',    'adb shell cat /data/data/com.zepp.health/files/keystore'),
+        ('keystore-cat',            'adb shell cat /data/data/com.zepp.health/files/keystore'),
         # account storage
-        ('account-ls',      'adb shell ls /data/data/com.zepp.health/files/accounts'),
+        ('account-ls',              'adb shell ls /data/data/com.zepp.health/files/accounts'),
         # token variants
-        ('apptoken',        'adb shell cat /data/data/com.zepp.health/files/apptoken'),
-        ('access-token',    'adb shell grep access_token /data/data/com.zepp.health/files/auth_token'),
-        ('refresh-token',   'adb shell cat /data/data/com.zepp.health/databases/refresh_token'),
+        ('apptoken',                'adb shell cat /data/data/com.zepp.health/files/apptoken'),
+        ('access-token',            'adb shell grep access_token /data/data/com.zepp.health/files/auth_token'),
+        ('refresh-token',           'adb shell cat /data/data/com.zepp.health/databases/refresh_token'),
         # creds
-        ('creds-json',      'adb shell cat /data/data/com.zepp.health/files/.creds.json'),
+        ('creds-json',              'adb shell cat /data/data/com.zepp.health/files/.creds.json'),
         # encrypted prefs
-        ('enc-prefs',       'adb shell ls /data/data/com.zepp.health/shared_prefs/encrypted_prefs.xml'),
+        ('enc-prefs',               'adb shell ls /data/data/com.zepp.health/shared_prefs/encrypted_prefs.xml'),
         # adb -s (device selector before shell)
-        ('device-sel',      'adb -s emulator-5554 shell cat /data/data/com.zepp.health/shared_prefs/SharedPreferences.xml'),
+        ('device-sel',              'adb -s emulator-5554 shell cat /data/data/com.zepp.health/shared_prefs/SharedPreferences.xml'),
+        # exec-out: streams stdout directly (bypasses shell quoting), same exfil risk
+        ('exec-out-apptoken',       'adb exec-out cat /data/data/com.zepp.health/files/apptoken'),
+        # pull: copies auth file to local disk
+        ('pull-sharedprefs-xml',    'adb pull /data/data/com.zepp.health/shared_prefs/SharedPreferences.xml /tmp/x'),
+        # shared_prefs/ directory contains auth files without 'token' in name
+        ('pull-hm-id-prefs',        'adb shell cat /data/data/com.huami.watch.hmwatchmanager/shared_prefs/hm_id.xml'),
+        ('pull-userinfo-prefs',     'adb pull /data/data/com.zepp.health/shared_prefs/UserInfo.xml /tmp/u.xml'),
     ]
 
     ALLOWED = [
@@ -1403,11 +1410,11 @@ class AdbTokenPathTests(unittest.TestCase):
         # FP: non-adb commands with token-like words
         ('grep-token-src',  'grep -r access_token src/'),
         ('cat-token-ts',    'cat src/web/zepp/auth.ts'),
-        # FP: adb without shell (install, devices, logcat)
+        # FP: adb without shell/exec-out/pull (install, devices, logcat)
         ('adb-devices',     'adb devices'),
         ('adb-install',     'adb install app.apk'),
         ('adb-logcat',      'adb logcat -d'),
-        # FP: adb pull of health DB (no shell, no auth path)
+        # regression guard: adb pull of health DB must stay ALLOWED
         ('adb-pull-db',     'adb pull /data/data/com.zepp.health/databases/health_data.db /tmp/hd.db'),
     ]
 

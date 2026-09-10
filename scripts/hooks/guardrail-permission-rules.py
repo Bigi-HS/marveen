@@ -880,20 +880,26 @@ def match_config_write(command: str) -> bool:
     return False
 
 
-# ── R5: adb shell to auth/token/credential paths (card 8001dd41) ─────────────
-# adb shell is permitted for health-data reads (the Zepp emulator extraction
-# path uses it to pull health_data.db / sport/sleep/vitals directories).
-# BLOCK when the shell command touches credential storage:
-#   SharedPreferences, keystore, account, token, creds -- these hold auth state
-#   that must never enter an agent's output context (bash stdout -> Claude context).
+# ── R5: adb read to auth/token/credential paths (card 8001dd41) ──────────────
+# adb shell/exec-out/pull is permitted for health-data reads (the Zepp emulator
+# extraction path uses it to pull health_data.db / sport/sleep/vitals directories).
+# BLOCK when the read command touches credential storage:
+#   SharedPreferences (incl. shared_prefs/), keystore, account, token, creds -- these
+#   hold auth state that must never enter an agent's output context (bash stdout ->
+#   Claude context).
 # Intentionally broad: a false-positive asks the operator; a missed token
 # silently flows into agent context and violates the Tier-C Anthropic-exposure constraint.
+#
+# Covers all three primary adb read idioms:
+#   shell   -- adb shell cat/grep/ls (original)
+#   exec-out -- adb exec-out cat ... (streams stdout directly, bypasses shell quoting)
+#   pull    -- adb pull <remote> <local> (copies file to disk)
 
-_ADB_SHELL_RE = re.compile(r'\badb\b(?:.*?\s)?\bshell\b')
+_ADB_READ_RE = re.compile(r'\badb\b(?:.*?\s)?\b(?:shell|exec-out|pull)\b')
 
 _ADB_AUTH_PATH_RE = re.compile(
     r'(?:'
-    r'SharedPreferences|'
+    r'SharedPreferences|shared_prefs|'
     r'keystore|\.jks|KeyStore|'
     r'account(?:s|_info|_manager)?|'
     r'access[._\-]?token|refresh[._\-]?token|apptoken|auth[._\-]?token|'
@@ -905,7 +911,7 @@ _ADB_AUTH_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Health-data paths that adb shell IS explicitly allowed to read.
+# Health-data paths that adb reads ARE explicitly allowed.
 _ADB_HEALTH_PATH_RE = re.compile(
     r'(?:health[_\-]?data\.db|/sport/|/sleep/|/vitals?/|/steps?/|/activity/|/workout/)',
     re.IGNORECASE,
@@ -913,13 +919,13 @@ _ADB_HEALTH_PATH_RE = re.compile(
 
 
 def match_adb_token_path(command: str) -> bool:
-    """R5: adb shell command that touches auth/credential/token paths.
+    """R5: adb shell/exec-out/pull command that touches auth/credential/token paths.
 
     Allowed: health-data DB and sport/sleep/vitals reads (Zepp emulator use case).
-    Blocked: SharedPreferences, keystore, account, token, creds -- credential storage
-    that must not enter agent stdout context.
+    Blocked: SharedPreferences, shared_prefs/, keystore, account, token, creds --
+    credential storage that must not enter agent stdout or disk context.
     """
-    if not _ADB_SHELL_RE.search(command):
+    if not _ADB_READ_RE.search(command):
         return False
     # Explicit health-data-only commands are safe even if they happen to match
     # a short token like "steps" -- skip the auth check when only health paths present.
