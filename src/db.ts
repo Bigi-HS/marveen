@@ -9,6 +9,7 @@ import { resolveNoaDbPath } from './db-path.js'
 import { migrateGateTables } from './web/gate-db.js'
 import { migrateAgentTokenTable } from './web/agent-token-registry.js'
 import { migrateAckRegistry } from './web/ack-registry.js'
+import { migrateCuratorVerdicts } from './curator-verdicts.js'
 
 let db: Database.Database
 
@@ -457,6 +458,15 @@ export function initDatabase(dbPathOverride?: string): void {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error('[db] ack registry migration failed:', msg)
+  }
+
+  // Curator-verdikt persistence (card 81a912dc). Additive, no FK, no-op on
+  // existing DB, never bricks boot.
+  try {
+    migrateCuratorVerdicts(db)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[db] curator_verdicts migration failed:', msg)
   }
 
   // One-shot migration from the old JSON file (which had a read-modify-write
