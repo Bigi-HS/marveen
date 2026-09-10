@@ -880,6 +880,94 @@ def match_config_write(command: str) -> bool:
     return False
 
 
+# ── R5: adb read to auth/token/credential paths (card 8001dd41) ──────────────
+# adb shell/exec-out/pull is permitted for health-data reads (the Zepp emulator
+# extraction path uses it to pull health_data.db / sport/sleep/vitals directories).
+# BLOCK when the read command touches credential storage:
+#   SharedPreferences (incl. shared_prefs/), keystore, account, token, creds -- these
+#   hold auth state that must never enter an agent's output context (bash stdout ->
+#   Claude context).
+# Intentionally broad: a false-positive asks the operator; a missed token
+# silently flows into agent context and violates the Tier-C Anthropic-exposure constraint.
+#
+# Covers all three primary adb read idioms:
+#   shell   -- adb shell cat/grep/ls (original)
+#   exec-out -- adb exec-out cat ... (streams stdout directly, bypasses shell quoting)
+#   pull    -- adb pull <remote> <local> (copies file to disk)
+
+_ADB_READ_RE = re.compile(r'\badb\b(?:.*?\s)?\b(?:shell|exec-out|pull)\b')
+
+_ADB_AUTH_PATH_RE = re.compile(
+    r'(?:'
+    r'SharedPreferences|shared_prefs|'
+    r'keystore|\.jks|KeyStore|'
+    r'account(?:s|_info|_manager)?|'
+    r'access[._\-]?token|refresh[._\-]?token|apptoken|auth[._\-]?token|'
+    r'session[._\-]?token|token[._\-]?info|id[._\-]?token|'
+    r'cred(?:ential)?s?(?:\.json)?|'
+    r'password[._\-]?store|secure[._\-]?storage|encrypted[._\-]?prefs|'
+    r'/data/data/[^"\'\s]*/(?:files|cache)/(?:auth|token|account|session|cred)'
+    r')',
+    re.IGNORECASE,
+)
+
+# Health-data paths that adb reads ARE explicitly allowed.
+_ADB_HEALTH_PATH_RE = re.compile(
+    r'(?:health[_\-]?data\.db|/sport/|/sleep/|/vitals?/|/steps?/|/activity/|/workout/)',
+    re.IGNORECASE,
+)
+
+
+def match_adb_token_path(command: str) -> bool:
+    """R5: adb shell/exec-out/pull command that touches auth/credential/token paths.
+
+    Allowed: health-data DB and sport/sleep/vitals reads (Zepp emulator use case).
+    Blocked: SharedPreferences, shared_prefs/, keystore, account, token, creds --
+    credential storage that must not enter agent stdout or disk context.
+    """
+    if not _ADB_READ_RE.search(command):
+        return False
+    # Explicit health-data-only commands are safe even if they happen to match
+    # a short token like "steps" -- skip the auth check when only health paths present.
+    if _ADB_HEALTH_PATH_RE.search(command) and not _ADB_AUTH_PATH_RE.search(command):
+        return False
+    return bool(_ADB_AUTH_PATH_RE.search(command))
+
+
+# ── R6: frida process-injection invocation (card 8001dd41) ───────────────────
+# Frida injects JavaScript into app processes and can capture live auth tokens
+# from memory or outbound network calls.  Token capture must be Boss-manual
+# (terminal), never executed in agent context where stdout flows into the
+# Claude session (Tier-C Anthropic-exposure constraint, card 8001dd41).
+# BLOCK all frida CLI invocations regardless of arguments.
+#
+# Uses _command_word() so that "grep frida requirements.txt" (frida as an
+# argument) and "pip install frida-tools" (frida as a package name) are NOT
+# blocked -- only when frida is the actual command being executed.
+
+_FRIDA_COMMAND_WORDS = frozenset({
+    'frida', 'frida-trace', 'frida-ps', 'frida-discover',
+    'frida-compile', 'frida-create', 'frida-ls-devices',
+})
+
+
+def match_frida_invocation(command: str) -> bool:
+    """R6: any frida / frida-trace / frida-ps invocation from agent context.
+
+    Frida stdout can contain live auth tokens from app memory / network intercept.
+    Boss runs frida manually in a terminal where output does not enter Claude context.
+    Uses _command_word() to match only the command position, not arguments.
+    """
+    for piece in _split_subcommands(command):
+        tokens = _tokenize(piece)
+        if tokens is _PARSE_FAIL:
+            continue
+        verb = _command_word(tokens)
+        if verb and verb.lower() in _FRIDA_COMMAND_WORDS:
+            return True
+    return False
+
+
 # ── rule table & classifier ───────────────────────────────────────────────────
 
 class Rule:
@@ -923,6 +1011,23 @@ RULES = [
         '(MCP server config + agent permission floor; use the Write tool which the '
         'per-agent profile already blocks, or ask the operator to apply the change)',
         lambda tool, inp: match_config_write(inp) if tool == 'Bash' else False,
+    ),
+    Rule(
+        'adb-token-path',
+        'Bash adb shell command touching auth/credential/token storage '
+        '(SharedPreferences, keystore, account, token, creds -- bash stdout would '
+        'carry live credentials into the agent context, violating Tier-C '
+        'Anthropic-exposure constraint; card 8001dd41). '
+        'Health-data paths (health_data.db, sport/sleep/vitals) remain allowed.',
+        lambda tool, inp: match_adb_token_path(inp) if tool == 'Bash' else False,
+    ),
+    Rule(
+        'frida-invocation',
+        'Bash frida/frida-trace/frida-ps invocation from agent context '
+        '(Frida stdout can contain live auth tokens from app memory/network intercept; '
+        'token capture must be Boss-manual in a terminal, never in agent context; '
+        'card 8001dd41)',
+        lambda tool, inp: match_frida_invocation(inp) if tool == 'Bash' else False,
     ),
 ]
 

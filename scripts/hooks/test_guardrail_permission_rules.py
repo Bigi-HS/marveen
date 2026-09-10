@@ -1285,10 +1285,6 @@ class ConfigWriteBypassTests(unittest.TestCase):
         self.assertFalse(denied)
 
 
-if __name__ == '__main__':
-    unittest.main(verbosity=2)
-
-
 class CxEscapeCorpusTests(unittest.TestCase):
     r"""Corpus fixture for SEC card 61afbcea (Dave request 2026-08-22).
 
@@ -1363,3 +1359,177 @@ class CxEscapeCorpusTests(unittest.TestCase):
         # chr(0x41 ^ 0x40) = chr(1) = control-A; shlex.quote wraps it
         import shlex
         self.assertEqual(expanded, shlex.quote('\x01'))
+
+
+# ── R5: adb-token-path (card 8001dd41) ──────────────────────────────────────
+class AdbTokenPathTests(unittest.TestCase):
+    """R5: adb shell/exec-out/pull + credential/token path -> BLOCK.
+
+    Adversarial fixtures:
+      FN  -- multiple auth-path variants and read idioms must all be caught.
+      FP  -- health-data-only adb reads must NOT block (Zepp emulator use case).
+      OPP -- non-adb commands containing token-like substrings must NOT block.
+    """
+
+    BLOCKED = [
+        # SharedPreferences (most common auth storage)
+        ('sp-direct',               'adb shell cat /data/data/com.zepp.health/shared_prefs/SharedPreferences.xml'),
+        ('sp-ls',                   'adb shell ls /data/data/com.huami.watch.hmwatchmanager/shared_prefs/SharedPreferences/'),
+        # keystore
+        ('keystore-cat',            'adb shell cat /data/data/com.zepp.health/files/keystore'),
+        # account storage
+        ('account-ls',              'adb shell ls /data/data/com.zepp.health/files/accounts'),
+        # token variants
+        ('apptoken',                'adb shell cat /data/data/com.zepp.health/files/apptoken'),
+        ('access-token',            'adb shell grep access_token /data/data/com.zepp.health/files/auth_token'),
+        ('refresh-token',           'adb shell cat /data/data/com.zepp.health/databases/refresh_token'),
+        # creds
+        ('creds-json',              'adb shell cat /data/data/com.zepp.health/files/.creds.json'),
+        # encrypted prefs
+        ('enc-prefs',               'adb shell ls /data/data/com.zepp.health/shared_prefs/encrypted_prefs.xml'),
+        # adb -s (device selector before shell)
+        ('device-sel',              'adb -s emulator-5554 shell cat /data/data/com.zepp.health/shared_prefs/SharedPreferences.xml'),
+        # exec-out: streams stdout directly (bypasses shell quoting), same exfil risk
+        ('exec-out-apptoken',       'adb exec-out cat /data/data/com.zepp.health/files/apptoken'),
+        # pull: copies auth file to local disk
+        ('pull-sharedprefs-xml',    'adb pull /data/data/com.zepp.health/shared_prefs/SharedPreferences.xml /tmp/x'),
+        # shared_prefs/ directory contains auth files without 'token' in name
+        ('pull-hm-id-prefs',        'adb shell cat /data/data/com.huami.watch.hmwatchmanager/shared_prefs/hm_id.xml'),
+        ('pull-userinfo-prefs',     'adb pull /data/data/com.zepp.health/shared_prefs/UserInfo.xml /tmp/u.xml'),
+    ]
+
+    ALLOWED = [
+        # OPP: health-data DB reads (the intended Zepp emulator use case)
+        ('health-db',       'adb shell sqlite3 /data/data/com.zepp.health/databases/health_data.db "SELECT * FROM sleep_detail"'),
+        ('sport-pull',      'adb pull /data/data/com.zepp.health/files/sport/ /tmp/sport'),
+        ('sleep-ls',        'adb shell ls /data/data/com.zepp.health/databases/'),
+        # FP: non-adb commands with token-like words
+        ('grep-token-src',  'grep -r access_token src/'),
+        ('cat-token-ts',    'cat src/web/zepp/auth.ts'),
+        # FP: adb without shell/exec-out/pull (install, devices, logcat)
+        ('adb-devices',     'adb devices'),
+        ('adb-install',     'adb install app.apk'),
+        ('adb-logcat',      'adb logcat -d'),
+        # regression guard: adb pull of health DB must stay ALLOWED
+        ('adb-pull-db',     'adb pull /data/data/com.zepp.health/databases/health_data.db /tmp/hd.db'),
+    ]
+
+    def test_blocked(self):
+        for label, cmd in self.BLOCKED:
+            with self.subTest(label):
+                self.assertTrue(
+                    guard.match_adb_token_path(cmd),
+                    f'Expected BLOCK for [{label}]: {cmd!r}',
+                )
+
+    def test_allowed(self):
+        for label, cmd in self.ALLOWED:
+            with self.subTest(label):
+                self.assertFalse(
+                    guard.match_adb_token_path(cmd),
+                    f'Expected ALLOW for [{label}]: {cmd!r}',
+                )
+
+    def test_classify_blocks_adb_token_path(self):
+        """classify() routes through RULES and names the right rule."""
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'adb shell cat /data/data/com.zepp.health/shared_prefs/SharedPreferences.xml'},
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'adb-token-path')
+
+    def test_classify_allows_health_db(self):
+        """Health-data reads must not be blocked."""
+        denied, _, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'adb shell sqlite3 /data/data/com.zepp.health/databases/health_data.db "SELECT * FROM sleep_detail"'},
+        })
+        self.assertFalse(denied)
+
+    def test_non_bash_tool_not_blocked(self):
+        """R5 is Bash-only; Read/Write with adb path not affected."""
+        denied, _, _ = guard.classify({
+            'tool_name': 'Read',
+            'tool_input': {'file_path': '/tmp/SharedPreferences.xml'},
+        })
+        self.assertFalse(denied)
+
+
+# ── R6: frida-invocation (card 8001dd41) ────────────────────────────────────
+class FridaInvocationTests(unittest.TestCase):
+    """R6: any frida/frida-trace/frida-ps invocation from agent context -> BLOCK.
+
+    Adversarial fixtures:
+      FN  -- all frida sub-commands and invocation forms must be caught.
+      FP  -- commands containing 'frida' as a substring (not a command) must NOT block.
+      OPP -- already-documented frida paths in comments/strings must NOT block.
+    """
+
+    BLOCKED = [
+        ('frida-plain',         'frida -U com.zepp.health'),
+        ('frida-trace',         'frida-trace -U -i "SSL_write" com.zepp.health'),
+        ('frida-ps',            'frida-ps -U'),
+        ('frida-discover',      'frida-discover -U'),
+        ('frida-ls-devices',    'frida-ls-devices'),
+        ('frida-compile',       'frida-compile hook.ts -o hook.js'),
+        ('frida-pipe',          'python3 inject.py | frida -U com.zepp.health'),
+        ('frida-semicolon',     'adb devices; frida -U com.zepp.health'),
+        ('frida-subshell',      '(frida-ps -U)'),
+        ('frida-uppercase',     'FRIDA -U com.zepp.health'),
+        ('frida-backtick',      '`frida-ps -U`'),
+    ]
+
+    ALLOWED = [
+        # FP: 'frida' as a directory component, not a command
+        ('path-frida-dir',      'ls /opt/frida-tools/scripts/'),
+        ('cat-frida-hook',      'cat scripts/frida-hook.js'),
+        ('grep-frida',          'grep frida requirements.txt'),
+        # OPP: frida mentioned in echo/print (documentation, not invocation)
+        ('echo-frida',          "echo 'use frida manually: frida -U com.zepp.health'"),
+        # FP: npm/pip package management (not execution)
+        ('pip-install-frida',   'pip install frida-tools'),
+        ('npm-frida',           'npm install frida'),
+    ]
+
+    def test_blocked(self):
+        for label, cmd in self.BLOCKED:
+            with self.subTest(label):
+                self.assertTrue(
+                    guard.match_frida_invocation(cmd),
+                    f'Expected BLOCK for [{label}]: {cmd!r}',
+                )
+
+    def test_allowed(self):
+        for label, cmd in self.ALLOWED:
+            with self.subTest(label):
+                self.assertFalse(
+                    guard.match_frida_invocation(cmd),
+                    f'Expected ALLOW for [{label}]: {cmd!r}',
+                )
+
+    def test_classify_blocks_frida(self):
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'frida-trace -U -i "SSL_write" com.zepp.health'},
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'frida-invocation')
+
+    def test_classify_allows_cat_frida_hook(self):
+        denied, _, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'cat scripts/frida-hook.js'},
+        })
+        self.assertFalse(denied)
+
+    def test_non_bash_tool_not_blocked(self):
+        denied, _, _ = guard.classify({
+            'tool_name': 'Read',
+            'tool_input': {'file_path': '/tmp/frida-output.txt'},
+        })
+        self.assertFalse(denied)
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
