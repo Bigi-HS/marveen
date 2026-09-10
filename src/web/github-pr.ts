@@ -162,6 +162,74 @@ export async function openPullRequest(params: OpenPrParams, deps: GithubDeps = {
   throw new PrRequestError(res.status, await safeGithubMessage(res, res.status))
 }
 
+// --- Server-side PR-close (card 58f79330) --------------------------------
+//
+// The token-bound re-open recovery (author re-opens a mis-attributed PR with
+// their own .genesis-token so recusal fires) needs the stale PR CLOSED first,
+// but agents cannot PATCH api.github.com directly (external-curl guard). This
+// closes a PR SERVER-SIDE with the fleet PAT: close-only, GATE_REPO-pinned, no
+// other state mutation -- the minimal operation that unblocks the whole
+// mis-authored-PR class without reopening an exfiltration channel.
+
+export interface ClosePrResult {
+  number: number
+  state: string
+}
+
+export type ClosePrValidation =
+  | { ok: true; pr: number }
+  | { ok: false; error: string }
+
+// Pure input validation -- no network. Mirrors validateMergeParams' pr rule so
+// a bad request fails BEFORE any egress.
+export function validateClosePrParams(p: { pr?: unknown }): ClosePrValidation {
+  const pr = p.pr
+  if (typeof pr !== 'number' || !Number.isInteger(pr) || pr <= 0) {
+    return { ok: false, error: 'pr_number must be a positive integer' }
+  }
+  return { ok: true, pr }
+}
+
+// Close a pull request on GATE_REPO. Validates first, then makes exactly ONE
+// external call (PATCH /repos/<GATE_REPO>/pulls/<pr> {state:"closed"}). The PAT
+// is read in-process and placed only in the Authorization header -- never
+// returned, never logged. Dependency-injected (fetch + token) for unit tests.
+export async function closePullRequest(pr: number, deps: GithubDeps = {}): Promise<ClosePrResult> {
+  const v = validateClosePrParams({ pr })
+  if (!v.ok) throw new PrRequestError(400, v.error)
+
+  const doFetch = deps.fetchImpl ?? fetch
+  const token = (deps.readToken ?? readGithubToken)()
+
+  let res: { ok: boolean; status: number; json: () => Promise<any> }
+  try {
+    res = await doFetch(`https://api.github.com/repos/${GATE_REPO}/pulls/${v.pr}`, {
+      method: 'PATCH',
+      headers: { ...ghHeaders(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: 'closed' }),
+    })
+  } catch {
+    throw new PrRequestError(502, 'GitHub request failed')
+  }
+
+  if (res.ok) {
+    const j = await res.json().catch(() => null)
+    const number = j?.number
+    const state = j?.state
+    if (typeof number !== 'number' || typeof state !== 'string') {
+      throw new PrRequestError(502, 'GitHub PR close response malformed')
+    }
+    return { number, state }
+  }
+
+  // Mask auth/permission failures (server-side credential problem, not the
+  // caller's API authorization) -- same policy as openPullRequest.
+  if (res.status === 401 || res.status === 403) {
+    throw new PrRequestError(502, 'GitHub authentication/permission error')
+  }
+  throw new PrRequestError(res.status, await safeGithubMessage(res, res.status))
+}
+
 // Fetches the current head.sha and the full changed-file path list for a PR.
 export async function fetchPrInfo(pr: number): Promise<GithubPrInfo> {
   const token = readGithubToken()
