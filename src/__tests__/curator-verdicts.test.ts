@@ -22,6 +22,10 @@ import {
 function freshDb(): Database.Database {
   const db = new Database(':memory:')
   db.pragma('foreign_keys = ON')
+  // Only the memories table is a pre-condition (the applyer reads/writes it).
+  // migration_log is NOT created here -- migrateCuratorVerdicts must create it
+  // (production migration, not fixture). This is the Dave M1 fix: the old
+  // fixture DDL masked the missing production migration (false green).
   db.exec(`
     CREATE TABLE IF NOT EXISTS memories (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -31,18 +35,6 @@ function freshDb(): Database.Database {
       keywords    TEXT,
       created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
       accessed_at INTEGER
-    )
-  `)
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS migration_log (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      rule       TEXT    NOT NULL,
-      entry_id   INTEGER NOT NULL,
-      from_cat   TEXT    NOT NULL,
-      to_cat     TEXT    NOT NULL,
-      reason     TEXT    NOT NULL,
-      applier    TEXT    NOT NULL DEFAULT 'curator-applyer',
-      applied_at INTEGER NOT NULL
     )
   `)
   migrateCuratorVerdicts(db)
@@ -274,6 +266,52 @@ describe('applyPendingCuratorVerdicts', () => {
     expect(second.approved).toBe(0)
     expect(second.rejected).toBe(0)
     // migration_log should still have exactly one entry (not two)
+    const logCount = (db.prepare('SELECT COUNT(*) AS c FROM migration_log').get() as { c: number }).c
+    expect(logCount).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Production migration completeness (Dave M1 blocker fix)
+// ---------------------------------------------------------------------------
+// The applyer writes to migration_log. Previously the test fixture created this
+// table manually, masking the fact that migrateCuratorVerdicts() did NOT create
+// it -- causing a 'no such table: migration_log' crash on the live noa.db.
+// This test proves the production migration alone is sufficient: no extra DDL.
+
+describe('production migration completeness -- migration_log created by migrateCuratorVerdicts', () => {
+  it('migration_log table exists after migrateCuratorVerdicts (no extra DDL)', () => {
+    const db = new Database(':memory:')
+    // ONLY the production migration -- no fixture DDL for migration_log
+    migrateCuratorVerdicts(db)
+    const row = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='migration_log'`)
+      .get() as { name: string } | undefined
+    expect(row?.name).toBe('migration_log')
+  })
+
+  it('applyer can write to migration_log using only production migration (no crash)', () => {
+    const db = new Database(':memory:')
+    db.exec(`
+      CREATE TABLE memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        category TEXT NOT NULL,
+        accessed_at INTEGER
+      )
+    `)
+    migrateCuratorVerdicts(db)
+    const memId = Number(
+      (db.prepare(`INSERT INTO memories (agent_id, content, category) VALUES ('a', 'c', 'warm')`).run() as { lastInsertRowid: number | bigint }).lastInsertRowid
+    )
+    const vId = saveCuratorVerdict(db, {
+      agent_id: 'applegate', entry_a_id: memId, entry_b_id: memId + 1,
+      jaccard: 0.9, verdict: 'APPROVE',
+    })
+    expect(vId).toBeGreaterThan(0)
+    // This must NOT throw 'no such table: migration_log'
+    expect(() => applyPendingCuratorVerdicts(db)).not.toThrow()
     const logCount = (db.prepare('SELECT COUNT(*) AS c FROM migration_log').get() as { c: number }).c
     expect(logCount).toBe(1)
   })

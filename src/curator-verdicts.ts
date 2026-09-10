@@ -74,6 +74,24 @@ export function migrateCuratorVerdicts(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_curator_verdicts_verdict ON curator_verdicts(verdict, applied_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_curator_verdicts_agent ON curator_verdicts(agent_id, created_at)`)
+
+  // migration_log: append-only audit trail for APPROVE/REJECT applications.
+  // Lives here because applyPendingCuratorVerdicts is its sole writer; no other
+  // subsystem references this table, so it is natural to co-locate with the
+  // curator_verdicts migration.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS migration_log (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule       TEXT    NOT NULL,
+      entry_id   INTEGER NOT NULL,
+      from_cat   TEXT    NOT NULL,
+      to_cat     TEXT    NOT NULL,
+      reason     TEXT    NOT NULL,
+      applier    TEXT    NOT NULL DEFAULT 'curator-applyer',
+      applied_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_migration_log_entry ON migration_log(entry_id, applied_at)`)
 }
 
 export function saveCuratorVerdict(db: Database.Database, input: InsertCuratorVerdict): number {

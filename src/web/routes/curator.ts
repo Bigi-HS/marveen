@@ -62,12 +62,17 @@ export async function tryHandleCurator(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'agent_id required' }, 400)
       return true
     }
-    if (typeof entry_a_id !== 'number' || typeof entry_b_id !== 'number') {
-      json(res, { error: 'entry_a_id and entry_b_id must be numbers' }, 400)
+    if (!Number.isInteger(entry_a_id) || (entry_a_id as number) <= 0 ||
+        !Number.isInteger(entry_b_id) || (entry_b_id as number) <= 0) {
+      json(res, { error: 'entry_a_id and entry_b_id must be positive integers' }, 400)
       return true
     }
-    if (typeof jaccard !== 'number' || jaccard < 0 || jaccard > 1) {
-      json(res, { error: 'jaccard must be a number in [0, 1]' }, 400)
+    if (entry_a_id === entry_b_id) {
+      json(res, { error: 'entry_a_id and entry_b_id must be different' }, 400)
+      return true
+    }
+    if (!Number.isFinite(jaccard as number) || (jaccard as number) < 0 || (jaccard as number) > 1) {
+      json(res, { error: 'jaccard must be a finite number in [0, 1]' }, 400)
       return true
     }
     if (typeof verdict !== 'string' || !VALID_VERDICTS.has(verdict)) {
@@ -78,9 +83,9 @@ export async function tryHandleCurator(ctx: RouteContext): Promise<boolean> {
     const input: InsertCuratorVerdict = {
       proposal_id: typeof proposal_id === 'string' ? proposal_id : null,
       agent_id,
-      entry_a_id,
-      entry_b_id,
-      jaccard,
+      entry_a_id: entry_a_id as number,
+      entry_b_id: entry_b_id as number,
+      jaccard: jaccard as number,
       verdict,
       curator_notes: typeof curator_notes === 'string' ? curator_notes : null,
       approved_at: typeof approved_at === 'number' ? approved_at : null,
