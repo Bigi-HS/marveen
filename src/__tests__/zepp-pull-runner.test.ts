@@ -8,7 +8,7 @@ const WORKOUTS: ZeppWorkout[] = [{ type: 'outdoor_running', startAt: '2026-08-22
 
 function makeDeps(over: Partial<PullRunnerDeps> = {}): PullRunnerDeps {
   return {
-    readCreds: vi.fn(async () => ({ email: 'user@test.com', password: 'pass' })),
+    readCreds: vi.fn(async () => ({ mode: 'password' as const, email: 'user@test.com', password: 'pass' })),
     login: vi.fn(async () => ({ accessToken: 'acc', refreshToken: 'ref', expiresAt: Date.now() + 3600_000 })),
     pullSleep: vi.fn(async () => SLEEP),
     pullVitals: vi.fn(async () => VITALS),

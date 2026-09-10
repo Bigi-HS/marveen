@@ -24,17 +24,49 @@ export class ZeppAuthError extends Error {
   }
 }
 
+export type ZeppAuthStyle = 'bearer' | 'apptoken'
+
 export interface ZeppPullDeps {
   apiBaseUrl: string
   accessToken: string
   fetch: typeof globalThis.fetch
+  /** de2/apptoken flow: the numeric account id, sent as a request param. */
+  userid?: string
+  /** How the token is presented. Default 'bearer' preserves the login flow. */
+  authStyle?: ZeppAuthStyle
 }
 
-// Default Zepp/Huami cloud API base (Zepp app flow, not Zepp Life).
+// Default Zepp/Huami cloud API base (Zepp app / login flow, not de2 app-token).
 export const DEFAULT_API_BASE_URL = 'https://api-mifit.huami.com'
 
-function authHeaders(token: string): Record<string, string> {
-  return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+// region -> app-token cloud host. 'de2' => https://api-mifit-de2.zepp.com
+// (MITM-confirmed 09-08, doc zepp-accurate-data-auth-architecture-0908).
+export function regionToApiBase(region: string): string {
+  return `https://api-mifit-${region}.zepp.com`
+}
+
+// Trimmed net sleep (minutes) = asleep stages only (deep+light+rem), excluding
+// awake. This is the app-displayed "net" figure; the in-bed span/headline is
+// larger and is what Health Connect over-counts. Verified vs the local DB gold
+// (09-09 net = 464 min).
+export function netSleepMin(stages?: { deep?: number; light?: number; rem?: number; awake?: number }): number | undefined {
+  if (!stages) return undefined
+  return (stages.deep ?? 0) + (stages.light ?? 0) + (stages.rem ?? 0)
+}
+
+function authHeaders(deps: ZeppPullDeps): Record<string, string> {
+  const base: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (deps.authStyle === 'apptoken') return { ...base, apptoken: deps.accessToken }
+  return { ...base, Authorization: `Bearer ${deps.accessToken}` }
+}
+
+// Append userid as a query param when present (de2 flow). Query-param placement
+// is the best-known default; the path form (/users/<userid>/...) is the
+// alternative to confirm at verify (card 8001dd41).
+function withUserid(url: string, deps: ZeppPullDeps): string {
+  if (!deps.userid) return url
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}userid=${encodeURIComponent(deps.userid)}`
 }
 
 async function safeFetch(
@@ -50,8 +82,8 @@ async function safeFetch(
 }
 
 export async function pullSleep(date: string, deps: ZeppPullDeps): Promise<ZeppSleep | null> {
-  const url = `${deps.apiBaseUrl}/v1/sport/sleep/detail?date=${date}`
-  const { ok, body } = await safeFetch(url, { headers: authHeaders(deps.accessToken) }, deps)
+  const url = withUserid(`${deps.apiBaseUrl}/v1/sport/sleep/detail?date=${date}`, deps)
+  const { ok, body } = await safeFetch(url, { headers: authHeaders(deps) }, deps)
   if (!ok || !body) return null
   const d = (body as any).data
   if (!d) return null
@@ -73,8 +105,8 @@ export async function pullSleep(date: string, deps: ZeppPullDeps): Promise<ZeppS
 }
 
 export async function pullVitals(date: string, deps: ZeppPullDeps): Promise<ZeppVitals | null> {
-  const url = `${deps.apiBaseUrl}/v1/health/vitals?date=${date}`
-  const { ok, body } = await safeFetch(url, { headers: authHeaders(deps.accessToken) }, deps)
+  const url = withUserid(`${deps.apiBaseUrl}/v1/health/vitals?date=${date}`, deps)
+  const { ok, body } = await safeFetch(url, { headers: authHeaders(deps) }, deps)
   if (!ok || !body) return null
   const d = (body as any).data
   if (!d) return null
@@ -89,8 +121,8 @@ export async function pullVitals(date: string, deps: ZeppPullDeps): Promise<Zepp
 }
 
 export async function pullWorkouts(date: string, deps: ZeppPullDeps): Promise<ZeppWorkout[]> {
-  const url = `${deps.apiBaseUrl}/v1/sport/history?date=${date}`
-  const { ok, body } = await safeFetch(url, { headers: authHeaders(deps.accessToken) }, deps)
+  const url = withUserid(`${deps.apiBaseUrl}/v1/sport/history?date=${date}`, deps)
+  const { ok, body } = await safeFetch(url, { headers: authHeaders(deps) }, deps)
   if (!ok || !body) return []
   const items: any[] = (body as any).data ?? []
   return items.map((w: any) => ({
