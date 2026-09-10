@@ -1285,10 +1285,6 @@ class ConfigWriteBypassTests(unittest.TestCase):
         self.assertFalse(denied)
 
 
-if __name__ == '__main__':
-    unittest.main(verbosity=2)
-
-
 class CxEscapeCorpusTests(unittest.TestCase):
     r"""Corpus fixture for SEC card 61afbcea (Dave request 2026-08-22).
 
@@ -1533,3 +1529,7 @@ class FridaInvocationTests(unittest.TestCase):
             'tool_input': {'file_path': '/tmp/frida-output.txt'},
         })
         self.assertFalse(denied)
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
