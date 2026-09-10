@@ -12,7 +12,7 @@
 
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
-import { openPullRequest, PrRequestError, fetchPrInfo } from '../github-pr.js'
+import { openPullRequest, closePullRequest, PrRequestError, fetchPrInfo, type ClosePrResult } from '../github-pr.js'
 import { mergePullRequest, MergeRequestError, validateMergeParams } from '../github-merge.js'
 import { runGateCheck, resolveCiStatus, isGateCiRequired, type GithubPrInfo } from '../gate-check.js'
 import { readApprovals, hasActiveOverride, insertPrAuthor, readPrAuthor, readLatestCiRun } from '../gate-db.js'
@@ -26,16 +26,20 @@ import type { RouteContext } from './types.js'
 // are the real functions; production behaviour is unchanged.
 let mergePrFetcher: (pr: number) => Promise<GithubPrInfo> = fetchPrInfo
 let mergeRunner: typeof mergePullRequest = mergePullRequest
+let closeRunner: (pr: number) => Promise<ClosePrResult> = closePullRequest
 export function __setGithubMergeDeps(deps: {
   fetchPr?: (pr: number) => Promise<GithubPrInfo>
   merge?: typeof mergePullRequest
+  close?: (pr: number) => Promise<ClosePrResult>
 }): void {
   if (deps.fetchPr) mergePrFetcher = deps.fetchPr
   if (deps.merge) mergeRunner = deps.merge
+  if (deps.close) closeRunner = deps.close
 }
 export function __resetGithubMergeDeps(): void {
   mergePrFetcher = fetchPrInfo
   mergeRunner = mergePullRequest
+  closeRunner = closePullRequest
 }
 
 export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
@@ -124,6 +128,41 @@ export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
       const status = err instanceof MergeRequestError ? err.status : 500
       const message = err instanceof MergeRequestError ? err.message : 'merge failed'
       logger.warn({ caller: identity.agentId, pr: v.pr, status }, 'GitHub merge failed')
+      json(res, { error: message }, status)
+    }
+    return true
+  }
+
+  // -------------------------------------------------------------------------
+  // POST /api/github/pr/close -- server-side PR close (card 58f79330)
+  // Enables token-bound re-open recovery: close a mis-authored PR so the real
+  // author can re-open the same head with their own token. Close-only,
+  // GATE_REPO-pinned, identity-logged -- minimal blast radius.
+  // -------------------------------------------------------------------------
+  if (path === '/api/github/pr/close' && method === 'POST') {
+    let parsed: Record<string, unknown>
+    try {
+      const raw = (await readBody(req, { maxBytes: 4 * 1024 })).toString('utf-8')
+      parsed = raw ? JSON.parse(raw) : {}
+    } catch {
+      json(res, { error: 'invalid request body' }, 400)
+      return true
+    }
+
+    const prNum = typeof parsed['pr_number'] === 'number' ? parsed['pr_number'] : 0
+    if (!Number.isInteger(prNum) || prNum <= 0) {
+      json(res, { error: 'pr_number must be a positive integer' }, 400)
+      return true
+    }
+
+    try {
+      const result = await closeRunner(prNum)
+      logger.info({ caller: identity.agentId, pr: prNum, state: result.state }, 'closed GitHub PR server-side')
+      json(res, { closed: true, number: result.number, state: result.state }, 200)
+    } catch (err) {
+      const status = err instanceof PrRequestError ? err.status : 500
+      const message = err instanceof PrRequestError ? err.message : 'PR close failed'
+      logger.warn({ caller: identity.agentId, pr: prNum, status }, 'GitHub PR close failed')
       json(res, { error: message }, status)
     }
     return true
