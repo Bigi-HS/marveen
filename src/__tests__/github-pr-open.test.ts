@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { Readable } from 'node:stream'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -8,7 +8,7 @@ import {
   PrRequestError,
   PR_BASE_ALLOWLIST,
 } from '../web/github-pr.js'
-import { tryHandleGithub } from '../web/routes/github.js'
+import { tryHandleGithub, __setGithubPrDeps, __resetGithubPrDeps } from '../web/routes/github.js'
 
 const SECRET = 'SUPERSECRET_TOKEN_deadbeefdeadbeefdeadbeefdeadbeef'
 
@@ -149,6 +149,56 @@ describe('tryHandleGithub route (POST /api/github/pr)', () => {
     const handled = await tryHandleGithub({ req: rr.req, res: rr.res, path: '/api/github/pr', method: 'POST', url: new URL('http://x/api/github/pr'), identity } as any)
     expect(handled).toBe(true)
     expect(rr.status).toBe(400)
+  })
+})
+
+describe('tryHandleGithub POST /api/github/pr -- recorded_author in response (card ef840006)', () => {
+  function makeReqRes(payload: string) {
+    const req = Readable.from([Buffer.from(payload)]) as any
+    let status = 0
+    let body = ''
+    const res = {
+      writeHead(s: number) { status = s },
+      end(b?: string) { body = b ?? '' },
+      setHeader() {},
+    } as any
+    return { req, res, get status() { return status }, get body() { return body ? JSON.parse(body) : null } }
+  }
+
+  const fakePr = { number: 99, htmlUrl: 'https://github.com/Bigi-HS/marveen/pull/99', head: 'eng/x', base: 'develop' }
+  const noopRecord = () => {}
+
+  beforeEach(() => { __setGithubPrDeps({ openPr: async () => fakePr, recordAuthor: noopRecord }) })
+  afterEach(() => { __resetGithubPrDeps() })
+
+  it('includes recorded_author in the 201 response when per-agent token is used', async () => {
+    const rr = makeReqRes(JSON.stringify({ head: 'eng/x', title: 'My PR' }))
+    const identity = { agentId: 'dave', scopes: [], source: 'agent' as const }
+    await tryHandleGithub({ req: rr.req, res: rr.res, path: '/api/github/pr', method: 'POST', url: new URL('http://x/api/github/pr'), identity } as any)
+    expect(rr.status).toBe(201)
+    expect(rr.body.recorded_author).toBe('dave')
+    expect(rr.body.author_warning).toBeUndefined()
+  })
+
+  it('includes author_warning when operator (fallback) token is used', async () => {
+    const rr = makeReqRes(JSON.stringify({ head: 'eng/x', title: 'My PR' }))
+    const identity = { agentId: 'marveen', scopes: [], source: 'operator' as const }
+    await tryHandleGithub({ req: rr.req, res: rr.res, path: '/api/github/pr', method: 'POST', url: new URL('http://x/api/github/pr'), identity } as any)
+    expect(rr.status).toBe(201)
+    expect(rr.body.recorded_author).toBe('marveen')
+    expect(typeof rr.body.author_warning).toBe('string')
+    expect(rr.body.author_warning).toContain('operator token')
+  })
+
+  it('calls recordAuthor with the identity agentId', async () => {
+    const recorded: Array<{ prNumber: number; agentId: string }> = []
+    __setGithubPrDeps({ openPr: async () => fakePr, recordAuthor: (n, a) => { recorded.push({ prNumber: n, agentId: a }) } })
+    const rr = makeReqRes(JSON.stringify({ head: 'eng/x', title: 'My PR' }))
+    const identity = { agentId: 'rackham', scopes: [], source: 'agent' as const }
+    await tryHandleGithub({ req: rr.req, res: rr.res, path: '/api/github/pr', method: 'POST', url: new URL('http://x/api/github/pr'), identity } as any)
+    expect(recorded).toHaveLength(1)
+    expect(recorded[0].prNumber).toBe(99)
+    expect(recorded[0].agentId).toBe('rackham')
   })
 })
 
