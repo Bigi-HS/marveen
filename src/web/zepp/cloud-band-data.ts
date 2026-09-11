@@ -78,7 +78,10 @@ export function parseBandDataDay(day: BandDataDay, date: string): ZeppSleep | nu
 export async function pullCloudSleep(date: string, deps: CloudPullDeps): Promise<ZeppSleep | null> {
   const url = buildBandDataUrl(deps.host, deps.userId, date, date)
   const res = await deps.fetch(url, {
-    headers: { apptoken: deps.appToken, 'Content-Type': 'application/json' },
+    // The proven 200-returning shape (verified at 00:54 capture on de2) sends the token as the
+    // `apptoken` header alongside `appPlatform: android_phone` -- the latter is required or the
+    // server 401s. No Bearer/Authorization header.
+    headers: { apptoken: deps.appToken, appPlatform: 'android_phone', 'Content-Type': 'application/json' },
   })
   if (res.status === 401) throw new ZeppAuthError(`Zepp band_data 401 (apptoken expired?) at ${deps.host}`)
   if (!res.ok && res.status !== 404) throw new ZeppEndpointError(`Zepp band_data ${res.status} at ${deps.host}`)

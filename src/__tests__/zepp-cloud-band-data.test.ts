@@ -91,6 +91,7 @@ describe('pullCloudSleep', () => {
     const opts: RequestInit = call[1]
     expect(url).toContain('/v1/data/band_data.json')
     expect((opts.headers as Record<string, string>)['apptoken']).toBe('test-apptoken')
+    expect((opts.headers as Record<string, string>)['appPlatform']).toBe('android_phone')
     expect((opts.headers as Record<string, string>)['Authorization']).toBeUndefined()
   })
 
