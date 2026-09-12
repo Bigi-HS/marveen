@@ -47,6 +47,11 @@ const REGION_HOSTS: Record<string, string> = {
   cn2: 'api-mifit-cn2.zepp.com',
 }
 
+// Boss's account data region -- fallback DATA host when the creds file names neither an explicit
+// host nor a region. The email+password login path mints a token but carries no host, so the
+// pull defaults to de2 here.
+const DEFAULT_REGION = 'de2'
+
 export interface ZeppCloudCreds {
   appToken: string
   userId: string
@@ -82,6 +87,48 @@ export function readZeppCloudCreds(path: string = CLOUD_CREDS_PATH): ZeppCloudCr
     throw new Error('Zepp cloud creds file must contain a host or a known region (de2/us2/cn2)')
   }
   return { appToken, userId: String(userId), host }
+}
+
+/**
+ * Cloud auth for the accurate-sleep pull, in the two shapes the ~/.zepp-creds.json file can
+ * take. `password` mode is the hands-off path (email+password -> server-side login mints a
+ * fresh app_token each run); `token` mode is the legacy captured-apptoken path. `host` is the
+ * DATA region host for the band_data pull (de2 by default), resolved independently of the auth
+ * handshake.
+ */
+export type ZeppCloudAuth =
+  | { mode: 'password'; email: string; password: string; host: string }
+  | { mode: 'token'; appToken: string; userId: string; host: string }
+
+/**
+ * Read the cloud creds and decide the auth mode. If the file carries email+password we take the
+ * hands-off login path (no user_id/app_token needed in the file -- login mints them); otherwise
+ * we fall back to the captured-apptoken shape. The data host resolves from an explicit `host`,
+ * a region code, or the de2 default. No credential value is logged.
+ */
+export function readZeppCloudAuth(path: string = CLOUD_CREDS_PATH): ZeppCloudAuth {
+  let raw: string
+  try {
+    raw = readFileSync(path, 'utf8')
+  } catch {
+    throw new Error(`Zepp cloud creds not found at ${path} -- write {"email","password"} (or the captured apptoken shape)`)
+  }
+  const p = JSON.parse(raw) as Record<string, unknown>
+  const region = (p['region_host'] ?? p['region']) as unknown
+  const host =
+    ((p['host'] as unknown) ??
+      (typeof region === 'string' ? REGION_HOSTS[region] : undefined) ??
+      REGION_HOSTS[DEFAULT_REGION]) as string
+
+  const email = p['email']
+  const password = p['password']
+  if (typeof email === 'string' && email && typeof password === 'string' && password) {
+    return { mode: 'password', email, password, host }
+  }
+
+  // Fall back to the captured-apptoken shape.
+  const creds = readZeppCloudCreds(path)
+  return { mode: 'token', appToken: creds.appToken, userId: creds.userId, host: creds.host }
 }
 
 // Backward-compat alias for existing callers that expect ZeppCreds

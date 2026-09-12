@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { writeFileSync, rmSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readZeppCloudCreds } from '../web/zepp/creds-reader.js'
+import { readZeppCloudCreds, readZeppCloudAuth } from '../web/zepp/creds-reader.js'
 
 const dir = mkdtempSync(join(tmpdir(), 'zepp-creds-'))
 const paths: string[] = []
@@ -48,5 +48,37 @@ describe('readZeppCloudCreds', () => {
 
   it('throws a not-found error for a missing file', () => {
     expect(() => readZeppCloudCreds(join(dir, 'nope.json'))).toThrow(/not found/i)
+  })
+})
+
+describe('readZeppCloudAuth', () => {
+  it('detects password mode from {email,password} and defaults the data host to de2', () => {
+    const p = credsFile({ email: 'boss@example.com', password: 'sekret' })
+    expect(readZeppCloudAuth(p)).toEqual({
+      mode: 'password',
+      email: 'boss@example.com',
+      password: 'sekret',
+      host: 'api-mifit-de2.zepp.com',
+    })
+  })
+
+  it('honours an explicit host/region in password mode', () => {
+    const p = credsFile({ email: 'boss@example.com', password: 'sekret', region: 'us2' })
+    expect(readZeppCloudAuth(p)).toMatchObject({ mode: 'password', host: 'api-mifit-us2.zepp.com' })
+  })
+
+  it('falls back to token mode from the captured apptoken shape', () => {
+    const p = credsFile({ app_token: 'TOK', user_id: '7054735479', host: 'api-mifit-de2.zepp.com' })
+    expect(readZeppCloudAuth(p)).toEqual({
+      mode: 'token',
+      appToken: 'TOK',
+      userId: '7054735479',
+      host: 'api-mifit-de2.zepp.com',
+    })
+  })
+
+  it('prefers password mode when both credential shapes are present', () => {
+    const p = credsFile({ email: 'boss@example.com', password: 'sekret', app_token: 'TOK', user_id: '1' })
+    expect(readZeppCloudAuth(p)).toMatchObject({ mode: 'password' })
   })
 })
