@@ -44,6 +44,10 @@ const SESSION_ENFORCE_HOOK_MARKER = 'session-start-enforce.py'
 // And the UserPromptSubmit long-session anti-bloat freshness nudge (card 705381e3):
 // threshold-gated + rate-limited, fleet-wide, no-ops on normal turns.
 const FRESHNESS_NUDGE_HOOK_MARKER = 'prompt-freshness-nudge.py'
+// And the SessionEnd per-agent clean-shutdown marker (memory-continuity Phase 1 S1):
+// stamps a clean-shutdown marker on any orderly session end; absence at the next
+// startup = crash (read by S2). Fleet-wide, fail-open, no read-side behavior yet.
+const SESSION_END_MARKER_HOOK_MARKER = 'session-end-marker.py'
 
 type HookCommand = { type?: string; command?: string; prompt?: string }
 type HookEntry = { matcher?: string; hooks?: HookCommand[] }
@@ -145,6 +149,20 @@ export function ensureFreshnessNudgeHook(target: HooksBlock, template: HooksBloc
   return true
 }
 
+// Targeted idempotent merge of the SessionEnd per-agent clean-shutdown marker
+// (memory-continuity Phase 1 S1). ADD-only; creates the SessionEnd block if the
+// agent has none (no agent ships one today), never rewrites existing entries.
+// The hook only WRITES a marker on orderly session end -- zero read-side behavior
+// until S2 wires the startup replay gate.
+export function ensureSessionEndMarkerHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.SessionEnd ?? []).filter(e => entryReferences(e, SESSION_END_MARKER_HOOK_MARKER))
+  if (entries.length === 0) return false
+  const existing = target.SessionEnd ?? []
+  if (existing.some(e => entryReferences(e, SESSION_END_MARKER_HOOK_MARKER))) return false
+  target.SessionEnd = [...existing, ...entries]
+  return true
+}
+
 // Idempotent migration: every agent's settings.json should carry the shared
 // hooks (PreCompact memory-save/skill-reflection + the SessionStart taskstate
 // and memory auto-inject replays). Two cases:
@@ -184,8 +202,9 @@ export function ensureAgentHooks(name: string): boolean {
     const permRulesChanged = ensurePermissionRulesHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const sessionEnforceChanged = ensureSessionEnforceHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const freshnessNudgeChanged = ensureFreshnessNudgeHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    const sessionEndMarkerChanged = ensureSessionEndMarkerHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     changed = memChanged || guardChanged || askFirstChanged || destructiveBashChanged || permRulesChanged
-      || sessionEnforceChanged || freshnessNudgeChanged
+      || sessionEnforceChanged || freshnessNudgeChanged || sessionEndMarkerChanged
   }
   if (!changed) return false
   mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
