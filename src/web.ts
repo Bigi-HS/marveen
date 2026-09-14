@@ -44,6 +44,7 @@ import { tryHandleEvents } from './web/routes/events.js'
 import { isSseStreamPath } from './web/sse-paths.js'
 import { tryHandleAgentActions } from './web/routes/agent-actions.js'
 import { tryHandleAgentTaskState } from './web/routes/agent-taskstate.js'
+import { tryHandleShutdownMarker } from './web/routes/shutdown-marker.js'
 import { sweepOrphanTaskStates } from './web/agent-taskstate.js'
 import { tryHandleDailyLog } from './web/routes/daily-log.js'
 import { tryHandleMemories } from './web/routes/memories.js'
@@ -335,6 +336,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleEvents(routeCtx)) return
       if (await tryHandleAgentActions(routeCtx)) return
       if (await tryHandleAgentTaskState(routeCtx)) return
+      if (await tryHandleShutdownMarker(routeCtx)) return
       if (await tryHandleAgentCategories(routeCtx)) return
       if (await tryHandleAdmin(routeCtx)) return
       if (await tryHandleAck(routeCtx)) return
