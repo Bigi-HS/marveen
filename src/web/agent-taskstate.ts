@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { PROJECT_ROOT } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { logger } from '../logger.js'
+import type { BootClass } from './shutdown-marker.js'
 
 // Compact task-state re-injection (Adam stability-fix #4, scoped 2026-06-03).
 //
@@ -23,8 +24,10 @@ const STORE_DIR = join(PROJECT_ROOT, 'store', 'agent-taskstate')
 // truly abandoned record without risking dropping a real long-running task.
 export const TASKSTATE_TTL_MS = 12 * 60 * 60 * 1000
 
-// SessionStart sources we replay on. NOT 'startup' (a cold start has no
-// in-flight task to resume) -- only an in-place compact or a resume/respawn.
+// SessionStart sources we replay on UNCONDITIONALLY: an in-place compact or a
+// resume/respawn is never a fresh boot, so there is always an in-flight task to
+// carry over. A plain 'startup' is gated separately on the S1 crash marker (see
+// shouldReplayTaskState): it resumes ONLY when the previous session crashed.
 const REPLAY_SOURCES = new Set(['compact', 'resume'])
 
 export interface AgentTaskState {
@@ -64,18 +67,29 @@ export function isEmptyTaskState(r: Pick<AgentTaskState, 'doneSteps' | 'alreadyD
 
 /**
  * Pure decision: should this record be re-injected at SessionStart?
- * Replays ONLY when: record exists, not yet consumed, source is compact|resume
- * (never cold startup), within TTL, and the record actually holds a task.
+ * Replays ONLY when: record exists, not yet consumed, the source is eligible,
+ * within TTL, and the record actually holds a task.
+ *
+ * Source eligibility (memory-continuity Phase 1, S2):
+ *   - compact | resume       -> always eligible (an in-place compact / resume is
+ *                               never a fresh boot; there is a task to carry over).
+ *   - startup + lastBoot=crash -> eligible: the previous session died with work
+ *                               in flight, so resume it.
+ *   - startup + clean|unknown  -> NOT eligible: a normal (or ambiguous) boot must
+ *                               not resume -- the safe default (today's behavior).
+ * lastBoot has no default: the caller MUST supply the S1 crash verdict.
  */
 export function shouldReplayTaskState(
   record: AgentTaskState | null,
   source: string,
+  lastBoot: BootClass,
   nowMs: number,
   ttlMs: number = TASKSTATE_TTL_MS,
 ): boolean {
   if (!record) return false
   if (record.consumed) return false
-  if (!REPLAY_SOURCES.has(source)) return false
+  const sourceEligible = REPLAY_SOURCES.has(source) || (source === 'startup' && lastBoot === 'crash')
+  if (!sourceEligible) return false
   if (nowMs - record.ts > ttlMs) return false
   if (isEmptyTaskState(record)) return false
   return true
