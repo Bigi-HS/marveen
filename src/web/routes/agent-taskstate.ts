@@ -28,13 +28,15 @@ export async function tryHandleAgentTaskState(ctx: RouteContext): Promise<boolea
     const agent = decodeURIComponent(replayMatch[1])
     const source = url.searchParams.get('source') || ''
     const record = readTaskState(agent)
-    // S2 crash-gate: this /replay endpoint is the SINGLE SessionStart reader of
-    // the S1 shutdown marker. classifyAndConsume() reads + classifies + DELETES
-    // the marker in one call (consume-once invariant): after this call the marker
-    // is gone, so the NEXT boot's absence correctly reads as a crash. A plain
-    // 'startup' therefore resumes only when lastBoot==='crash'; compact|resume
-    // replay unconditionally.
-    const lastBoot = classifyAndConsume(agent, Date.now())
+    // S2 crash-gate: only a cold 'startup' consults (and consumes) the S1 shutdown
+    // marker. classifyAndConsume() reads + classifies + DELETES the marker in one
+    // call (consume-once invariant): after a startup read the marker is gone, so the
+    // NEXT boot's absence correctly reads as a crash. compact|resume are eligible via
+    // REPLAY_SOURCES regardless of lastBoot, so they must NOT touch the marker --
+    // consuming it on a mid-session compact would let a later cold boot see absence
+    // (=crash) and double-replay (Chad PR#654 low-finding). Non-startup => 'unknown'
+    // (a no-op for the gate) and the marker is preserved for the eventual startup.
+    const lastBoot = source === 'startup' ? classifyAndConsume(agent, Date.now()) : 'unknown'
     const inject = shouldReplayTaskState(record, source, lastBoot, Date.now())
       ? buildTaskStateInjection(record!)
       : null

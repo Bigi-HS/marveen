@@ -87,4 +87,15 @@ describe('GET /replay -- S2 crash-gated startup replay', () => {
     await tryHandleAgentTaskState(ctx)
     expect(JSON.parse(captured.body).additionalContext).not.toBeNull()
   })
+
+  it('compact does NOT consume the marker -- only startup consumes (Chad PR#654 low-finding fix)', async () => {
+    armRecord()
+    stampCleanShutdown(AGENT, Date.now())
+    expect(existsSync(MARKER_PATH)).toBe(true)
+    const { ctx } = makeReplayCtx(AGENT, 'compact')
+    await tryHandleAgentTaskState(ctx)
+    // A mid-session compact must leave the marker intact so a later cold startup
+    // still sees the true clean/crash signal (no consume -> no double-replay edge).
+    expect(existsSync(MARKER_PATH)).toBe(true)
+  })
 })
