@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER } from '../config.js'
+import { PROJECT_ROOT, STORE_DIR, OWNER_NAME, MAIN_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER } from '../config.js'
 import { channelStateDir } from '../channel-provider.js'
 import { runAgent } from '../agent.js'
 import { atomicWriteFileSync } from './atomic-write.js'
@@ -48,6 +48,22 @@ const FRESHNESS_NUDGE_HOOK_MARKER = 'prompt-freshness-nudge.py'
 // stamps a clean-shutdown marker on any orderly session end; absence at the next
 // startup = crash (read by S2). Fleet-wide, fail-open, no read-side behavior yet.
 const SESSION_END_MARKER_HOOK_MARKER = 'session-end-marker.py'
+
+// Operator c12-signoff FLAG-GATE for the SessionEnd clean-shutdown marker
+// injection (memory-continuity Phase 1 S1). The marker hook is fleet-wide, so
+// per the change-impact top-risk mitigation ("fleet-wide hooks -> c12 before any
+// live agent") its INJECTION must not go live merely because the build shipped.
+// The gate mirrors the fleet-supervisor.sh INERT-wiring pattern, now on the TS
+// side: absent flag = fully inert (fail-closed) -> no agent gets the SessionEnd
+// hook backfilled or seeded. Merging + deploying this build is therefore safe;
+// activation is a separate, deliberate operator step (touch the flag after a c12
+// sandbox sign-off). Remove nothing that was already injected -- this only gates
+// NEW injection.
+export const SESSION_END_MARKER_FLAG = 'session-end-marker.enabled'
+
+export function sessionEndMarkerHookEnabled(storeDir: string = STORE_DIR): boolean {
+  return existsSync(join(storeDir, SESSION_END_MARKER_FLAG))
+}
 
 type HookCommand = { type?: string; command?: string; prompt?: string }
 type HookEntry = { matcher?: string; hooks?: HookCommand[] }
@@ -163,6 +179,19 @@ export function ensureSessionEndMarkerHook(target: HooksBlock, template: HooksBl
   return true
 }
 
+// Remove the SessionEnd clean-shutdown marker from a template hooks block in
+// place. Applied at template-load time when the operator flag is absent, so ONE
+// gate covers BOTH injection paths in ensureAgentHooks: the full-template seed
+// for a permissions-only agent, and the targeted backfill merge for an agent
+// that already has a hooks block. Only the marker entry is dropped; any other
+// SessionEnd hook is preserved, and an emptied array is deleted to avoid a
+// dangling empty key.
+export function stripSessionEndMarker(hooks: HooksBlock): void {
+  if (!Array.isArray(hooks.SessionEnd)) return
+  hooks.SessionEnd = hooks.SessionEnd.filter(e => !entryReferences(e, SESSION_END_MARKER_HOOK_MARKER))
+  if (hooks.SessionEnd.length === 0) delete hooks.SessionEnd
+}
+
 // Idempotent migration: every agent's settings.json should carry the shared
 // hooks (PreCompact memory-save/skill-reflection + the SessionStart taskstate
 // and memory auto-inject replays). Two cases:
@@ -183,6 +212,10 @@ export function ensureAgentHooks(name: string): boolean {
     return false
   }
   if (!tpl.hooks) return false
+  // Operator c12-signoff flag-gate: until store/session-end-marker.enabled exists,
+  // strip the fleet-wide SessionEnd marker from the template so NEITHER the full
+  // seed nor the targeted backfill can inject it. Fail-closed; see the flag helper.
+  if (!sessionEndMarkerHookEnabled()) stripSessionEndMarker(tpl.hooks as HooksBlock)
   let existing: Record<string, unknown> = {}
   if (existsSync(settingsPath)) {
     try { existing = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { /* overwrite */ }
