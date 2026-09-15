@@ -112,6 +112,18 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     const id = decodeURIComponent(kanbanCardMatch[1])
     const body = await readBody(req)
     const data = JSON.parse(body.toString())
+    // Fail-closed on unknown fields (card f87f3448): an unrecognized key is
+    // silently dropped by updateCard, giving the caller a false ok:true. Reject
+    // instead so typos and stale field names surface immediately.
+    const KNOWN_PUT_FIELDS = new Set([
+      'title', 'description', 'status', 'assignee', 'priority', 'priority_score',
+      'project', 'parent_id', 'depends_on', 'due_date', 'sort_order', 'suppressIntake',
+    ])
+    const unknown = Object.keys(data).filter(k => !KNOWN_PUT_FIELDS.has(k))
+    if (unknown.length > 0) {
+      json(res, { error: `Unknown fields: ${unknown.join(', ')}`, unknown }, 400)
+      return true
+    }
     try {
       if (updateCard(id, data)) { json(res, { ok: true }); return true }
     } catch (err) {
