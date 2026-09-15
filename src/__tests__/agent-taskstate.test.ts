@@ -26,31 +26,66 @@ const rec = (over: Partial<AgentTaskState> = {}): AgentTaskState => ({
 })
 
 // Compact task-state re-injection (#4). Pure-fn coverage is the safety core.
+// S2 (memory-continuity Phase 1) adds the lastBoot crash-gate for source=startup.
 describe('shouldReplayTaskState', () => {
   it('replays a fresh unconsumed record on compact', () => {
-    expect(shouldReplayTaskState(rec(), 'compact', NOW + 1000)).toBe(true)
+    expect(shouldReplayTaskState(rec(), 'compact', 'clean', NOW + 1000)).toBe(true)
   })
   it('replays on resume too', () => {
-    expect(shouldReplayTaskState(rec(), 'resume', NOW + 1000)).toBe(true)
-  })
-  it('does NOT replay on cold startup', () => {
-    expect(shouldReplayTaskState(rec(), 'startup', NOW + 1000)).toBe(false)
+    expect(shouldReplayTaskState(rec(), 'resume', 'clean', NOW + 1000)).toBe(true)
   })
   it('does NOT replay a consumed record', () => {
-    expect(shouldReplayTaskState(rec({ consumed: true }), 'compact', NOW + 1000)).toBe(false)
+    expect(shouldReplayTaskState(rec({ consumed: true }), 'compact', 'clean', NOW + 1000)).toBe(false)
   })
   it('does NOT replay a null record', () => {
-    expect(shouldReplayTaskState(null, 'compact', NOW)).toBe(false)
+    expect(shouldReplayTaskState(null, 'compact', 'crash', NOW)).toBe(false)
   })
   it('does NOT replay past the TTL (orphan)', () => {
-    expect(shouldReplayTaskState(rec(), 'compact', NOW + TASKSTATE_TTL_MS + 1)).toBe(false)
+    expect(shouldReplayTaskState(rec(), 'compact', 'clean', NOW + TASKSTATE_TTL_MS + 1)).toBe(false)
   })
   it('replays right up to the TTL boundary', () => {
-    expect(shouldReplayTaskState(rec(), 'compact', NOW + TASKSTATE_TTL_MS)).toBe(true)
+    expect(shouldReplayTaskState(rec(), 'compact', 'clean', NOW + TASKSTATE_TTL_MS)).toBe(true)
   })
   it('does NOT replay an empty (no-task) record', () => {
     const empty = rec({ doneSteps: [], alreadyDelegated: [], nextAction: '', pendingDecision: '', summary: 'idle' })
-    expect(shouldReplayTaskState(empty, 'compact', NOW + 1)).toBe(false)
+    expect(shouldReplayTaskState(empty, 'compact', 'crash', NOW + 1)).toBe(false)
+  })
+})
+
+// S2 lastBoot x source matrix. compact|resume replay regardless of lastBoot
+// (an in-place compact / resume is never a fresh boot); startup replays ONLY
+// on a 'crash' last-boot, and NEVER on 'clean'/'unknown' (the safe default).
+describe('shouldReplayTaskState -- S2 crash-gate matrix', () => {
+  const NOWMS = NOW + 1000
+  for (const lastBoot of ['clean', 'crash', 'unknown'] as const) {
+    it(`(compact, ${lastBoot}) => true`, () => {
+      expect(shouldReplayTaskState(rec(), 'compact', lastBoot, NOWMS)).toBe(true)
+    })
+    it(`(resume, ${lastBoot}) => true`, () => {
+      expect(shouldReplayTaskState(rec(), 'resume', lastBoot, NOWMS)).toBe(true)
+    })
+  }
+  it('(startup, crash) => true (crash-restart resumes the in-flight task)', () => {
+    expect(shouldReplayTaskState(rec(), 'startup', 'crash', NOWMS)).toBe(true)
+  })
+  it('(startup, clean) => false (a normal boot must NOT resume)', () => {
+    expect(shouldReplayTaskState(rec(), 'startup', 'clean', NOWMS)).toBe(false)
+  })
+  it('(startup, unknown) => false (safe default -- do not resume on ambiguity)', () => {
+    expect(shouldReplayTaskState(rec(), 'startup', 'unknown', NOWMS)).toBe(false)
+  })
+  it('startup+crash still respects the other guards (consumed => false)', () => {
+    expect(shouldReplayTaskState(rec({ consumed: true }), 'startup', 'crash', NOWMS)).toBe(false)
+  })
+  it('startup+crash still respects the other guards (empty => false)', () => {
+    const empty = rec({ doneSteps: [], alreadyDelegated: [], nextAction: '', pendingDecision: '', summary: 'idle' })
+    expect(shouldReplayTaskState(empty, 'startup', 'crash', NOWMS)).toBe(false)
+  })
+  it('startup+crash still respects the other guards (TTL => false)', () => {
+    expect(shouldReplayTaskState(rec(), 'startup', 'crash', NOW + TASKSTATE_TTL_MS + 1)).toBe(false)
+  })
+  it('an unrecognised source never replays regardless of lastBoot', () => {
+    expect(shouldReplayTaskState(rec(), 'clear', 'crash', NOWMS)).toBe(false)
   })
 })
 
@@ -102,7 +137,7 @@ describe('task-state store I/O', () => {
     markConsumed(A)
     const r = readTaskState(A)!
     expect(r.consumed).toBe(true)
-    expect(shouldReplayTaskState(r, 'compact', NOW + 1)).toBe(false)
+    expect(shouldReplayTaskState(r, 'compact', 'clean', NOW + 1)).toBe(false)
   })
 
   it('sweepOrphanTaskStates drops a record older than the TTL', () => {

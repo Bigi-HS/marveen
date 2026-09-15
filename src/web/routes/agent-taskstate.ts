@@ -7,6 +7,7 @@ import {
   shouldReplayTaskState,
   buildTaskStateInjection,
 } from '../agent-taskstate.js'
+import { classifyAndConsume } from '../shutdown-marker.js'
 import type { RouteContext } from './types.js'
 
 // Endpoints for the compact task-state re-injection feature (#4).
@@ -27,7 +28,14 @@ export async function tryHandleAgentTaskState(ctx: RouteContext): Promise<boolea
     const agent = decodeURIComponent(replayMatch[1])
     const source = url.searchParams.get('source') || ''
     const record = readTaskState(agent)
-    const inject = shouldReplayTaskState(record, source, Date.now())
+    // S2 crash-gate: this /replay endpoint is the SINGLE SessionStart reader of
+    // the S1 shutdown marker. classifyAndConsume() reads + classifies + DELETES
+    // the marker in one call (consume-once invariant): after this call the marker
+    // is gone, so the NEXT boot's absence correctly reads as a crash. A plain
+    // 'startup' therefore resumes only when lastBoot==='crash'; compact|resume
+    // replay unconditionally.
+    const lastBoot = classifyAndConsume(agent, Date.now())
+    const inject = shouldReplayTaskState(record, source, lastBoot, Date.now())
       ? buildTaskStateInjection(record!)
       : null
     json(res, { additionalContext: inject })
