@@ -8,6 +8,7 @@ import {
   buildTaskStateInjection,
 } from '../agent-taskstate.js'
 import { classifyAndConsume } from '../shutdown-marker.js'
+import { sessionEndMarkerHookEnabled } from '../agent-scaffold.js'
 import type { RouteContext } from './types.js'
 
 // Endpoints for the compact task-state re-injection feature (#4).
@@ -28,15 +29,21 @@ export async function tryHandleAgentTaskState(ctx: RouteContext): Promise<boolea
     const agent = decodeURIComponent(replayMatch[1])
     const source = url.searchParams.get('source') || ''
     const record = readTaskState(agent)
-    // S2 crash-gate: only a cold 'startup' consults (and consumes) the S1 shutdown
-    // marker. classifyAndConsume() reads + classifies + DELETES the marker in one
-    // call (consume-once invariant): after a startup read the marker is gone, so the
-    // NEXT boot's absence correctly reads as a crash. compact|resume are eligible via
-    // REPLAY_SOURCES regardless of lastBoot, so they must NOT touch the marker --
-    // consuming it on a mid-session compact would let a later cold boot see absence
-    // (=crash) and double-replay (Chad PR#654 low-finding). Non-startup => 'unknown'
-    // (a no-op for the gate) and the marker is preserved for the eventual startup.
-    const lastBoot = source === 'startup' ? classifyAndConsume(agent, Date.now()) : 'unknown'
+    // S2 crash-gate, FLAG-GATED ON BOTH SIDES (mirrors the S1 stamp-side gate).
+    // The read path activates ONLY when store/session-end-marker.enabled exists.
+    // WHY (NoA c12-finding, merge-gating): the flag gates the STAMP side (hook
+    // injection in agent-scaffold). If the read path were flag-independent, then a
+    // deploy while the flag is OFF (0 agents stamping) would make every normal
+    // 'startup' see an ABSENT marker => classifyLastBoot='crash' => a clean restart
+    // false-resumes. Gating BOTH sides on the SAME flag keeps "deploy is always
+    // safe, activation is one operator-touch" true: flag OFF => 'unknown' => a cold
+    // 'startup' never resumes (today's behavior) AND the marker is not consumed, so
+    // S1+S2 activate atomically on the single flag-touch. flag ON + 'startup' =>
+    // classify + consume (consume-once). compact|resume replay via REPLAY_SOURCES
+    // regardless and must never touch the marker.
+    const lastBoot = (sessionEndMarkerHookEnabled() && source === 'startup')
+      ? classifyAndConsume(agent, Date.now())
+      : 'unknown'
     const inject = shouldReplayTaskState(record, source, lastBoot, Date.now())
       ? buildTaskStateInjection(record!)
       : null
