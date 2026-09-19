@@ -18,6 +18,7 @@ import { defaultZeppStore } from '../zepp/ingest-store.js'
 import { mergeDailySnapshot } from '../zepp/snapshot-merge.js'
 import { applyDistanceEstimate, applyDistanceForDisplay } from '../zepp/distance-estimate.js'
 import { applyKcalSuspectLabel } from '../zepp/kcal-suspect.js'
+import { applyReliabilityTiers } from '../zepp/reliability-tier.js'
 import { defaultZeppAnomalyStore } from '../zepp/anomaly-store.js'
 import { readIngestToken } from '../zepp/ingest-secret.js'
 import { writeValidatedSnapshot } from '../zepp/validated-ingest.js'
@@ -480,7 +481,14 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
     // Then compute the canonical Boss-facing distance render (WELL-031, Option A) onto the
     // finalized snapshot -- runs AFTER applyDistanceEstimate so it reads the resolved
     // distanceSource/estimatedDistanceM. No consumer re-derives which value to show.
-    const finalized = applyKcalSuspectLabel(applyDistanceForDisplay(applyDistanceEstimate(merged)))
+    // Finally attach the per-field reliability tier map (WELL-027 AC-5/AC-6). Runs LAST so it
+    // reads the resolved kcal-suspect / distance-estimate provenance: activeKcalSuspect ->
+    // activeKcal UNAVAILABLE, distanceSource step_estimated -> distance ESTIMATED. A derived
+    // Boss-facing number (Hibiki's dynamic calorie target) inherits min(input tiers), so an
+    // UNAVAILABLE activeKcal can never surface as a hard MEASURED target (the 1800-vs-2811 fix).
+    const finalized = applyReliabilityTiers(
+      applyKcalSuspectLabel(applyDistanceForDisplay(applyDistanceEstimate(merged))),
+    )
 
     // Numeric plausibility guard (log-only rollout, card 75337cdc). Run on the finalized day
     // so activity+steps are judged together. Detection only -- status is not downgraded.
