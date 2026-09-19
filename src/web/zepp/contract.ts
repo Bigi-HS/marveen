@@ -150,6 +150,21 @@ export interface ZeppWorkout {
   vo2max?: number
 }
 
+/**
+ * Per-field reliability tier for Boss-facing metrics (WELL-027 AC-5/AC-6). Strongest to weakest:
+ * MEASURED (trustworthy sensor value) > ADJUSTED (reconciled/inflated across sources) >
+ * ESTIMATED (derived, e.g. distance-from-steps) > UNAVAILABLE (structurally absent or
+ * implausible). The derivation + min-tier-inheritance logic lives in reliability-tier.ts.
+ */
+export type ReliabilityTier = 'MEASURED' | 'ADJUSTED' | 'ESTIMATED' | 'UNAVAILABLE'
+
+/** The Boss-facing fields that carry a reliability tier. Extensible to vitals/sleep later. */
+export interface ReliabilityTierMap {
+  steps?: ReliabilityTier
+  distance?: ReliabilityTier
+  activeKcal?: ReliabilityTier
+}
+
 export interface ZeppDailySnapshot {
   /** YYYY-MM-DD local date the snapshot covers */
   date: string
@@ -170,4 +185,11 @@ export interface ZeppDailySnapshot {
   caloriesTotal?: number
   /** ISO UTC of last device->cloud sync (from HC synced_at) */
   sourceSyncedAt?: string
+  /**
+   * Per-field reliability tier for Boss-facing metrics (WELL-027 AC-5/AC-6). Computed at write
+   * time by applyReliabilityTiers after the kcal-suspect / distance-estimate labels resolve.
+   * A render must respect it: an ESTIMATED/UNAVAILABLE field is never shown as a hard measured
+   * number, and a DERIVED metric inherits min(input tiers) (see reliability-tier.ts).
+   */
+  reliability?: ReliabilityTierMap
 }
