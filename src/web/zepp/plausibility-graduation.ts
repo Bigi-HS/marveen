@@ -241,16 +241,58 @@ export function measuredFpRate(input: FpRateInput): number | undefined {
 }
 
 /**
- * Is a rule READY to be promoted to block mode? True only when there is enough data (episodes
- * covering the policy window's expectation) AND the measured FP rate is at or below the
- * policy's threshold. With zero episodes it returns false -- the honest "not enough data yet"
- * state that keeps the rule log-only until its revisit date. This is the measurable criterion;
- * the actual flip is still an owner decision (flip the mode in PlausibilityModeConfig).
+ * Minimum suspect episodes required before a measured FP rate is trustworthy enough to promote.
+ * A single clean episode (episodes=1, FP=0) is a 0% rate but not evidence -- one clean sample
+ * is false confidence. Promotion needs a statistically meaningful sample, so any rule with fewer
+ * than this many observed episodes stays log-only regardless of its rate (WELL-027 AC-2
+ * min-episode guard, card d0694d6a). Modest by design: high enough to reject a 1-2 sample fluke,
+ * low enough that a rule which genuinely earns promotion can still reach it within the window.
+ */
+export const MIN_EPISODES_FOR_PROMOTION = 10
+
+/**
+ * Is a rule READY to be promoted to block mode? True only when there is ENOUGH data (at least
+ * MIN_EPISODES_FOR_PROMOTION observed episodes) AND the measured FP rate is at or below the
+ * policy's threshold. With too few episodes -- including zero -- it returns false: the honest
+ * "not enough data yet" state that keeps the rule log-only until its revisit date. This is the
+ * measurable criterion; the actual flip is still an owner decision (flip the mode in the
+ * graduation table row / PlausibilityModeConfig).
  */
 export function isReadyForBlockPromotion(input: FpRateInput): boolean {
   const policy = graduationPolicyFor(input.ruleId)
   if (!policy) return false
+  if (input.episodes < MIN_EPISODES_FOR_PROMOTION) return false // too few samples to trust the rate
   const rate = measuredFpRate(input)
   if (rate === undefined) return false // no episodes -> cannot judge -> stay log-only
   return rate <= policy.fpThreshold
+}
+
+/**
+ * Apply the block-mode gate decision to a snapshot (WELL-027 AC-1/AC-2 SEAM). This is the wiring
+ * that turns the pure gate decision into a mark the consumer can act on: when a suspect violation
+ * belongs to a rule currently in `block` mode, the returned snapshot carries
+ * `plausibilityBlocked=true` plus `blockedRuleIds` (the rules that forced it) so a Boss-facing
+ * consumer declines to compute a number and falls to its stale/manual branch.
+ *
+ * Pure and idempotent: the input is not mutated; the flag is a function of the snapshot's
+ * violations + the mode config, not of a prior gate pass. Self-correcting -- a clean or
+ * now-log-only snapshot has any stale block flag dropped. With the default table (all four rules
+ * log-only) or no config, nothing is ever marked: exactly today's behaviour, INERT until an owner
+ * graduates a rule. Runs in the ingest finalize chain AFTER the label/tier steps so it gates on
+ * the resolved snapshot the consumer will actually read.
+ */
+export function applyPlausibilityGate(
+  snap: ZeppDailySnapshot,
+  config?: PlausibilityModeConfig,
+): ZeppDailySnapshot {
+  const decision = gatePlausibility(snap, config)
+  const next: ZeppDailySnapshot = { ...snap }
+  if (decision.blocked) {
+    next.plausibilityBlocked = true
+    next.blockedRuleIds = Array.from(new Set(decision.blocking.map((g) => g.ruleId)))
+  } else {
+    delete next.plausibilityBlocked
+    delete next.blockedRuleIds
+  }
+  return next
 }

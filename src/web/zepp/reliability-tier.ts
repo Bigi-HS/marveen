@@ -84,8 +84,16 @@ function activeKcalTier(activity: ZeppActivity | undefined): ReliabilityTier {
  */
 function distanceTier(activity: ZeppActivity | undefined): ReliabilityTier {
   if (!activity) return 'UNAVAILABLE'
-  if (activity.distanceSource === 'step_estimated' && activity.estimatedDistanceM !== undefined) {
-    return 'ESTIMATED'
+  // distanceSource is the authoritative provenance signal. A step_estimated distance is an
+  // ESTIMATE and must never be reported MEASURED -- even on a partial snapshot where
+  // estimatedDistanceM is absent -- because falling through to the distanceM branch would
+  // over-claim MEASURED reliability on exactly the loss path this module exists to catch
+  // (Chad PR#656 LOW). ESTIMATED only when there is a usable value; otherwise UNAVAILABLE.
+  if (activity.distanceSource === 'step_estimated') {
+    const hasValue =
+      activity.estimatedDistanceM !== undefined ||
+      (activity.distanceM !== undefined && activity.distanceM !== null)
+    return hasValue ? 'ESTIMATED' : 'UNAVAILABLE'
   }
   if (activity.distanceM !== undefined && activity.distanceM !== null) return 'MEASURED'
   return 'UNAVAILABLE'

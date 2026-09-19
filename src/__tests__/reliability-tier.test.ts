@@ -72,6 +72,23 @@ describe('deriveFieldTiers (AC-5 provenance x plausibility)', () => {
     expect(t.distance).toBe('ESTIMATED')
   })
 
+  it('step_estimated is authoritative: never MEASURED even if estimatedDistanceM is absent (Chad PR#656 LOW)', () => {
+    // A partial/hand-built snapshot labelled step_estimated but missing the estimate value must
+    // NOT fall through and report the raw measured distanceM as MEASURED -- that would over-claim
+    // reliability on exactly the path this module exists to prevent. It stays ESTIMATED.
+    expect(
+      deriveFieldTiers(
+        snap({ steps: 15790, activity: { distanceM: 456, distanceSource: 'step_estimated' } }),
+      ).distance,
+    ).toBe('ESTIMATED')
+    // step_estimated with no usable value at all -> UNAVAILABLE (no ESTIMATED over-claim either).
+    expect(
+      deriveFieldTiers(
+        snap({ steps: 15790, activity: { distanceSource: 'step_estimated' } }),
+      ).distance,
+    ).toBe('UNAVAILABLE')
+  })
+
   it('measured distance -> MEASURED; absent distance -> UNAVAILABLE', () => {
     expect(
       deriveFieldTiers(snap({ steps: 15790, activity: { distanceM: 12040, distanceSource: 'measured' } }))

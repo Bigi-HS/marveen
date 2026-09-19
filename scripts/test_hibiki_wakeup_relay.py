@@ -63,6 +63,35 @@ class ComputeCalorieGoalTests(unittest.TestCase):
         self.assertEqual(goal, mod.CALORIE_BMR - mod.CALORIE_DEFICIT)
         self.assertFalse(suspect)
 
+    def test_plausibility_blocked_returns_none_goal(self):
+        """AC-2 seam: plausibilityBlocked=True -> goal=None (block-mode rule violation)."""
+        zepp = {"activity": {"activeKcal": 300}, "steps": 12000, "plausibilityBlocked": True}
+        goal, floor, suspect = mod.compute_calorie_goal(zepp)
+        self.assertIsNone(goal)
+        self.assertFalse(floor)
+        self.assertTrue(suspect)
+
+    def test_plausibility_blocked_beats_plausible_kcal(self):
+        """A block-mode violation suppresses the number even with an otherwise-plausible kcal."""
+        zepp = {"activity": {"activeKcal": 500, "activeKcalSuspect": False}, "steps": 12000, "plausibilityBlocked": True}
+        goal, _, suspect = mod.compute_calorie_goal(zepp)
+        self.assertIsNone(goal)
+        self.assertTrue(suspect)
+
+    def test_plausibility_blocked_false_is_inert(self):
+        """plausibilityBlocked=False (the log-only default) -> normal computation, no suppression."""
+        zepp = {"activity": {"activeKcal": 300, "activeKcalSuspect": False}, "steps": 12000, "plausibilityBlocked": False}
+        goal, _, suspect = mod.compute_calorie_goal(zepp)
+        self.assertEqual(goal, mod.CALORIE_BMR + 300 - mod.CALORIE_DEFICIT)
+        self.assertFalse(suspect)
+
+    def test_plausibility_blocked_absent_is_inert(self):
+        """Absent plausibilityBlocked (production today) -> treated as False, normal computation."""
+        zepp = {"activity": {"activeKcal": 300}, "steps": 12000}
+        goal, _, suspect = mod.compute_calorie_goal(zepp)
+        self.assertIsNotNone(goal)
+        self.assertFalse(suspect)
+
 
 class FormatReadinessMessageTests(unittest.TestCase):
 

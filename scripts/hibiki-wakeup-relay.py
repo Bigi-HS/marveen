@@ -171,12 +171,17 @@ def today_session(d: date) -> dict | None:
 def compute_calorie_goal(zepp: dict) -> tuple[int | None, bool, bool]:
     """Returns (calorie_goal, used_floor, upstream_suspect).
 
-    calorie_goal is None when the upstream activeKcalSuspect flag is set --
+    calorie_goal is None when the snapshot is producer-flagged as untrustworthy --
     AC-1/AC-4 (WELL-027): a suspect snapshot must NOT produce a Boss-facing number.
+    Two producer signals gate the number:
+      - activity.activeKcalSuspect: the kcal value itself is implausible (AC-1/AC-4).
+      - plausibilityBlocked: a suspect violation from a rule graduated to `block` mode
+        (AC-1/AC-2 seam, card d0694d6a). INERT today (all rules ship log-only), so this is
+        absent in production until an owner graduates a rule; the wiring is live regardless.
     The caller suppresses the calorie line and shows a warning instead.
 
-    When activeKcalSuspect is absent or False, falls back to the local sanity
-    guard (low activeKcal vs high steps) and emits a floor estimate when needed.
+    When neither flag is set, falls back to the local sanity guard (low activeKcal vs
+    high steps) and emits a floor estimate when needed.
 
     08-25 incident: activeKcal=5 with 15790 steps -> formula gave 1805 instead of
     2811 because no floor was applied for non-null low values. This guard closes that gap.
@@ -185,9 +190,11 @@ def compute_calorie_goal(zepp: dict) -> tuple[int | None, bool, bool]:
     steps = zepp.get("steps") or activity.get("steps")
     active_kcal = activity.get("activeKcal")
     upstream_suspect = bool(activity.get("activeKcalSuspect", False))
+    plausibility_blocked = bool(zepp.get("plausibilityBlocked", False))
 
-    # AC-1/AC-4: upstream producer labelled this snapshot suspect -- no Boss-facing number.
-    if upstream_suspect:
+    # AC-1/AC-4 + AC-2 seam: a producer suspect flag OR a block-mode plausibility violation
+    # means the snapshot is untrustworthy -- no Boss-facing number, fall to the warning branch.
+    if upstream_suspect or plausibility_blocked:
         return None, False, True
 
     # Local sanity: implausibly low activeKcal vs step count
@@ -330,8 +337,9 @@ def format_readiness_message(r: dict, session: dict | None, muscle_text: str, ca
             lines.append("✅ Minden érintett izomcsoport pihent")
 
     if calorie_suspect:
-        # AC-1/AC-4 (WELL-027): upstream producer flagged activeKcal suspect -> no Boss-facing number
-        lines.append("⚠️  Kalória-cél: kihagyva (Zepp activeKcal gyanús, producer jelölés)")
+        # AC-1/AC-4 + AC-2 seam (WELL-027): producer flagged the snapshot suspect
+        # (activeKcalSuspect) or blocked it (plausibilityBlocked) -> no Boss-facing number
+        lines.append("⚠️  Kalória-cél: kihagyva (Zepp adat gyanús, producer plauzibilitás-jelölés)")
     elif calorie_goal is not None:
         floor_tag = " [floor-becslés]" if calorie_floor_used else ""
         lines.append(f"🍽️  Kalória-cél: {calorie_goal} kcal{floor_tag}")

@@ -14,6 +14,7 @@ import {
   graduationPolicyFor,
   isReadyForBlockPromotion,
   measuredFpRate,
+  MIN_EPISODES_FOR_PROMOTION,
   ruleIdForViolation,
   type PlausibilityModeConfig,
   type PlausibilityRuleId,
@@ -185,6 +186,30 @@ describe('AC-2 measurable promotion criterion (FP-rate from anomaly-store histor
     // workout-distance threshold is 0.1: 2 FP in 20 = 10% is at threshold -> ready.
     expect(
       isReadyForBlockPromotion({ ruleId: 'workout-distance', episodes: 20, falsePositives: 2 }),
+    ).toBe(true)
+  })
+
+  it('NOT ready on a single clean episode: too few samples to trust a 0% rate (min-episode guard)', () => {
+    // episodes=1, FP=0 is a 0% rate but not evidence -- one clean sample is false confidence.
+    // The min-episode guard keeps such a rule log-only until a statistically meaningful sample.
+    expect(
+      isReadyForBlockPromotion({ ruleId: 'activeKcal-steps', episodes: 1, falsePositives: 0 }),
+    ).toBe(false)
+    // Just below the minimum, still a clean rate -> not ready.
+    expect(
+      isReadyForBlockPromotion({
+        ruleId: 'activeKcal-steps',
+        episodes: MIN_EPISODES_FOR_PROMOTION - 1,
+        falsePositives: 0,
+      }),
+    ).toBe(false)
+    // At the minimum with a clean rate -> ready (enough evidence + rate at/below threshold).
+    expect(
+      isReadyForBlockPromotion({
+        ruleId: 'activeKcal-steps',
+        episodes: MIN_EPISODES_FOR_PROMOTION,
+        falsePositives: 0,
+      }),
     ).toBe(true)
   })
 })
