@@ -19,6 +19,7 @@ import { mergeDailySnapshot } from '../zepp/snapshot-merge.js'
 import { applyDistanceEstimate, applyDistanceForDisplay } from '../zepp/distance-estimate.js'
 import { applyKcalSuspectLabel } from '../zepp/kcal-suspect.js'
 import { applyReliabilityTiers } from '../zepp/reliability-tier.js'
+import { applyPlausibilityGate } from '../zepp/plausibility-graduation.js'
 import { defaultZeppAnomalyStore } from '../zepp/anomaly-store.js'
 import { readIngestToken } from '../zepp/ingest-secret.js'
 import { writeValidatedSnapshot } from '../zepp/validated-ingest.js'
@@ -486,8 +487,15 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
     // activeKcal UNAVAILABLE, distanceSource step_estimated -> distance ESTIMATED. A derived
     // Boss-facing number (Hibiki's dynamic calorie target) inherits min(input tiers), so an
     // UNAVAILABLE activeKcal can never surface as a hard MEASURED target (the 1800-vs-2811 fix).
-    const finalized = applyReliabilityTiers(
-      applyKcalSuspectLabel(applyDistanceForDisplay(applyDistanceEstimate(merged))),
+    // Finally route the finalized snapshot through the block-mode gate (WELL-027 AC-1/AC-2 seam):
+    // when a suspect violation belongs to a rule graduated to `block`, the snapshot is marked
+    // plausibilityBlocked so the Boss-facing consumer (Hibiki goal-calc) declines to compute a
+    // number from it. INERT today -- all four rules ship log-only, so nothing is marked -- until
+    // an owner flips a rule's mode. Runs LAST so it gates on the fully resolved snapshot.
+    const finalized = applyPlausibilityGate(
+      applyReliabilityTiers(
+        applyKcalSuspectLabel(applyDistanceForDisplay(applyDistanceEstimate(merged))),
+      ),
     )
 
     // Numeric plausibility guard (log-only rollout, card 75337cdc). Run on the finalized day

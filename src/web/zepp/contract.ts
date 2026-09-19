@@ -3,6 +3,11 @@
 // adaptive-plan consumer reads. The pull layer (huami-token + rolandsz exporter)
 // populates these fields; the consumer never touches credentials or HTTP.
 
+// Type-only import: PlausibilityRuleId is a string-union used to tag which rules blocked a
+// snapshot (WELL-027 seam). Erased at compile time, so this does not create a runtime cycle
+// with plausibility-graduation.ts (which imports ZeppDailySnapshot as a type from here).
+import type { PlausibilityRuleId } from './plausibility-graduation.js'
+
 export type ZeppPullStatus = 'ok' | 'partial' | 'auth_fail' | 'endpoint_error' | 'stale' | 'no_new_data'
 
 export interface ZeppSleep {
@@ -192,4 +197,14 @@ export interface ZeppDailySnapshot {
    * number, and a DERIVED metric inherits min(input tiers) (see reliability-tier.ts).
    */
   reliability?: ReliabilityTierMap
+  /**
+   * WELL-027 AC-1/AC-2 seam: true when a suspect plausibility violation belongs to a rule
+   * currently graduated to `block` mode. Set at write time by applyPlausibilityGate (after the
+   * plausibility rules run). A Boss-facing consumer (Hibiki goal-calc) declines to compute a
+   * number from a blocked snapshot and falls to its stale/manual branch. INERT today: all rules
+   * ship log-only, so this is absent in production until an owner graduates a rule to block.
+   */
+  plausibilityBlocked?: boolean
+  /** The rule ids that forced the block (WELL-027). Present iff plausibilityBlocked is true. */
+  blockedRuleIds?: PlausibilityRuleId[]
 }
