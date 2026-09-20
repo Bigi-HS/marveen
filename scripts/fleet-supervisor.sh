@@ -650,6 +650,27 @@ check_hc_transform_drift() {
   ( cd "$INSTALL_DIR" && node "$verify_script" --alert ) >> "$STORE/hc-transform-verify.log" 2>&1 || true
 }
 
+# Zepp freshness surfacing poller (WELL-022, card 7e1f6628).
+# The /api/health/zepp/freshness endpoint detects staleness (alert:true) but nothing
+# surfaced it -- an 08-26 push-gap read alert:true for 5 days with no ping (detection
+# without surfacing). This tick runs the poller every 30 min, so a real gap surfaces
+# within one 30-min block; the poller relays to marveen and is its own dead-man switch
+# (a resumed run reports if the poller had fallen silent). Only when the dashboard is up.
+check_zepp_freshness() {
+  local poller="$INSTALL_DIR/scripts/zepp-freshness-check.py"
+  [ -f "$poller" ] || return 0
+  dash_alive || return 0
+  local state_file="$STATE_DIR/zepp-freshness-check.ts"
+  if [ -f "$state_file" ]; then
+    local last_run age
+    last_run=$(cat "$state_file" 2>/dev/null || echo 0)
+    age=$(( $(date +%s) - last_run ))
+    [ "$age" -lt 1800 ] && return 0   # throttle: 30 min (one freshness block)
+  fi
+  date +%s > "$state_file"
+  ( cd "$INSTALL_DIR" && python3 "$poller" ) >> "$STORE/zepp-freshness-check.log" 2>&1 || true
+}
+
 # n8n -> WSL2 dashboard bridge (card e4d64187). Windows-side n8n cannot reach
 # 127.0.0.1:3420 (WSL2 loopback, PR#325 boot-hardening). Forwarder binds 0.0.0.0:3422
 # inside WSL2. Pure Python3 stdlib, no socat needed. URL written to store/n8n-kanban-url.txt.
@@ -1105,6 +1126,8 @@ tick() {
   check_n8n_ghosts
   # 16c) HC-TRANSFORM DRIFT SENTINEL (live n8n node == repo HC_TRANSFORM_NODE_JS -- WELL-027 WS5-a, card 3464410c)
   check_hc_transform_drift
+  # 16d) ZEPP FRESHNESS SURFACING (poll /api/health/zepp/freshness, surface alert:true -- WELL-022, card 7e1f6628)
+  check_zepp_freshness
   # 17) N8N KANBAN BRIDGE (Windows-side n8n -> WSL2 dashboard API forwarder -- card e4d64187)
   ensure_n8n_kanban_bridge
 }
