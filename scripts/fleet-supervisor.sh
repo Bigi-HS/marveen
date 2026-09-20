@@ -627,6 +627,29 @@ check_n8n_ghosts() {
   python3 "$flush_script" >> "$STORE/n8n-ghost-flush.log" 2>&1 || true
 }
 
+# HC-transform drift sentinel (WELL-027 WS5-a, card 3464410c).
+# Asserts the LIVE n8n "Transform to Canonical Schema" node stays byte-identical to the
+# version-controlled HC_TRANSFORM_NODE_JS. Catches a post-deploy divergence (manual UI edit,
+# half-applied deploy, stale sync) that unit tests -- which exercise the repo string, not the
+# live node -- cannot see. --alert pings marveen on drift. Throttled to 6h; only when n8n
+# is alive, the gate is set, and the dist build exists.
+check_hc_transform_drift() {
+  [ -f "$STORE/n8n.enabled" ] || return 0
+  n8n_alive || return 0
+  local verify_script="$INSTALL_DIR/scripts/verify-hc-transform-live.mjs"
+  [ -f "$verify_script" ] || return 0
+  [ -f "$INSTALL_DIR/dist/web/zepp/hc-transform-live-verify.js" ] || return 0
+  local state_file="$STATE_DIR/hc-transform-verify.ts"
+  if [ -f "$state_file" ]; then
+    local last_run age
+    last_run=$(cat "$state_file" 2>/dev/null || echo 0)
+    age=$(( $(date +%s) - last_run ))
+    [ "$age" -lt 21600 ] && return 0   # throttle: 6h
+  fi
+  date +%s > "$state_file"
+  ( cd "$INSTALL_DIR" && node "$verify_script" --alert ) >> "$STORE/hc-transform-verify.log" 2>&1 || true
+}
+
 # n8n -> WSL2 dashboard bridge (card e4d64187). Windows-side n8n cannot reach
 # 127.0.0.1:3420 (WSL2 loopback, PR#325 boot-hardening). Forwarder binds 0.0.0.0:3422
 # inside WSL2. Pure Python3 stdlib, no socat needed. URL written to store/n8n-kanban-url.txt.
@@ -1080,6 +1103,8 @@ tick() {
   ensure_n8n
   # 16b) N8N GHOST MONITOR (auto-flush active=0 ghost triggers -- card a9e4e35e)
   check_n8n_ghosts
+  # 16c) HC-TRANSFORM DRIFT SENTINEL (live n8n node == repo HC_TRANSFORM_NODE_JS -- WELL-027 WS5-a, card 3464410c)
+  check_hc_transform_drift
   # 17) N8N KANBAN BRIDGE (Windows-side n8n -> WSL2 dashboard API forwarder -- card e4d64187)
   ensure_n8n_kanban_bridge
 }

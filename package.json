@@ -15,7 +15,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "design:lint": "node scripts/design-wcag-lint.mjs",
-    "lint:tmux": "python3 scripts/lint-tmux-session-targets.py"
+    "lint:tmux": "python3 scripts/lint-tmux-session-targets.py",
+    "verify:hc-transform": "node scripts/verify-hc-transform-live.mjs"
   },
   "engines": {
     "node": ">=20 <24"
