@@ -769,6 +769,24 @@ export function dayBucket(epochSeconds: number): number {
   return boundary
 }
 
+// Epoch-MS of "00:00 wall-clock Europe/Budapest" (calendar midnight) for the
+// Budapest day containing `nowMs`. This is the overview's "today" boundary
+// (WELL-027 C4b): pinned to Budapest EXPLICITLY so the figure is stable
+// regardless of the server's ambient TZ, unlike `new Date().setHours(0,0,0,0)`
+// which follows the process-local zone. DST-aware: the UTC instant of "00:00
+// Budapest" shifts by one hour across CET<->CEST, derived from Intl, not a
+// fixed offset. Midnight is never inside the 02:00-03:00 spring-forward gap, so
+// the offset lookup is unambiguous.
+export function startOfBudapestDayMs(nowMs: number): number {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TODO_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+  })
+  const [year, month, day] = fmt.format(new Date(nowMs)).split('-').map(Number)
+  const naiveUtcMs = Date.UTC(year, month - 1, day, 0, 0, 0)
+  const offset = tzOffsetSeconds(TODO_TZ, new Date(naiveUtcMs))
+  return naiveUtcMs - offset * 1000
+}
+
 
 // ===== To-Do widget (todo_items) =====
 
