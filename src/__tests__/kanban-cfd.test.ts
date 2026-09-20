@@ -14,6 +14,7 @@ import {
   buildCfdSnapshot,
   upsertCfdSnapshot,
   listCfdSnapshots,
+  buildCfdSeries,
   type CfdMetrics,
 } from '../web/routes/kanban-cfd.js'
 
@@ -68,7 +69,111 @@ describe('buildCfdSnapshot', () => {
     db.prepare(`DELETE FROM kanban_cards`).run()
 
     const snap = buildCfdSnapshot(db)
-    expect(snap).toEqual({ planned: 0, in_progress: 0, waiting: 0, done: 0 })
+    expect(snap).toEqual({ planned: 0, in_progress: 0, waiting: 0, done: 0, other: 0 })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// C7a (card 27c75118): the four flow buckets + `other` must sum to the count of
+// all active (non-icebox) cards. An unexpected/new status must be surfaced in
+// `other`, never silently dropped (which reads as flow shrinking).
+// ---------------------------------------------------------------------------
+describe('buildCfdSnapshot -- C7a completeness (no silent drop of unknown status)', () => {
+  it('routes an unexpected status into the `other` bucket instead of dropping it', () => {
+    const db = getNoaDb()
+    db.prepare(`DELETE FROM kanban_cards`).run()
+    db.prepare(`INSERT INTO kanban_cards (id, title, status, priority, sort_order, created_at, updated_at)
+      VALUES ('a','A','planned','normal',1,0,0),
+             ('b','B','blocked','normal',2,0,0),
+             ('c','C','review','normal',3,0,0)`).run()
+
+    const snap = buildCfdSnapshot(db)
+    expect(snap.planned).toBe(1)
+    // 'blocked' and 'review' are not flow statuses and not icebox -> surfaced.
+    expect(snap.other).toBe(2)
+  })
+
+  it('all buckets sum to the count of every active (non-icebox) card', () => {
+    const db = getNoaDb()
+    db.prepare(`DELETE FROM kanban_cards`).run()
+    db.prepare(`INSERT INTO kanban_cards (id, title, status, priority, sort_order, created_at, updated_at)
+      VALUES ('a','A','planned','normal',1,0,0),
+             ('b','B','in_progress','normal',2,0,0),
+             ('c','C','waiting','normal',3,0,0),
+             ('d','D','done','normal',4,0,0),
+             ('e','E','blocked','normal',5,0,0),
+             ('z','Z','icebox','normal',6,0,0)`).run()
+
+    const snap = buildCfdSnapshot(db)
+    const sum = snap.planned + snap.in_progress + snap.waiting + snap.done + snap.other
+    const active = db.prepare(
+      `SELECT COUNT(*) AS n FROM kanban_cards WHERE status != 'icebox'`
+    ).get() as { n: number }
+    expect(sum).toBe(active.n)
+    expect(sum).toBe(5) // icebox 'Z' excluded
+    expect(snap.other).toBe(1) // 'blocked'
+  })
+
+  it('still excludes icebox and keeps `other` at 0 for a clean board', () => {
+    const db = getNoaDb()
+    db.prepare(`DELETE FROM kanban_cards`).run()
+    db.prepare(`INSERT INTO kanban_cards (id, title, status, priority, sort_order, created_at, updated_at)
+      VALUES ('a','A','planned','normal',1,0,0),('z','Z','icebox','normal',2,0,0)`).run()
+
+    const snap = buildCfdSnapshot(db)
+    expect(snap.other).toBe(0)
+    expect(snap.planned).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// C7b (card 27c75118): a calendar date with no snapshot must be representable
+// as an explicit gap, not silently interpolated across by the chart consumer.
+// ---------------------------------------------------------------------------
+describe('buildCfdSeries -- C7b missing-day gaps', () => {
+  it('marks a missing calendar day between snapshots as an explicit gap', () => {
+    const rows = [
+      { date: '2026-08-01', planned: 1, in_progress: 0, waiting: 0, done: 0, other: 0 },
+      { date: '2026-08-03', planned: 2, in_progress: 0, waiting: 0, done: 0, other: 0 },
+    ]
+    const series = buildCfdSeries(rows)
+    expect(series.map(p => p.date)).toEqual(['2026-08-01', '2026-08-02', '2026-08-03'])
+    expect(series.map(p => p.present)).toEqual([true, false, true])
+    // The gap point carries no real numbers to interpolate from.
+    const gap = series.find(p => p.date === '2026-08-02')!
+    expect(gap.present).toBe(false)
+  })
+
+  it('leaves a contiguous run with no gaps (all present)', () => {
+    const rows = [
+      { date: '2026-08-01', planned: 1, in_progress: 0, waiting: 0, done: 0, other: 0 },
+      { date: '2026-08-02', planned: 2, in_progress: 0, waiting: 0, done: 0, other: 0 },
+    ]
+    const series = buildCfdSeries(rows)
+    expect(series).toHaveLength(2)
+    expect(series.every(p => p.present)).toBe(true)
+  })
+
+  it('handles empty input and a single row', () => {
+    expect(buildCfdSeries([])).toEqual([])
+    const one = buildCfdSeries([{ date: '2026-08-05', planned: 3, in_progress: 0, waiting: 0, done: 0, other: 0 }])
+    expect(one).toHaveLength(1)
+    expect(one[0].present).toBe(true)
+  })
+
+  it('preserves real metrics on present days and spans a multi-day gap', () => {
+    const rows = [
+      { date: '2026-08-01', planned: 5, in_progress: 1, waiting: 0, done: 2, other: 0 },
+      { date: '2026-08-05', planned: 6, in_progress: 0, waiting: 1, done: 3, other: 1 },
+    ]
+    const series = buildCfdSeries(rows)
+    expect(series.map(p => p.date)).toEqual([
+      '2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05',
+    ])
+    expect(series.map(p => p.present)).toEqual([true, false, false, false, true])
+    expect(series[0].planned).toBe(5)
+    expect(series[4].done).toBe(3)
+    expect(series[4].other).toBe(1)
   })
 })
 
@@ -78,7 +183,7 @@ describe('buildCfdSnapshot', () => {
 describe('upsertCfdSnapshot', () => {
   it('inserts a new row for a date', () => {
     const db = getNoaDb()
-    const metrics: CfdMetrics = { planned: 5, in_progress: 2, waiting: 1, done: 10 }
+    const metrics: CfdMetrics = { planned: 5, in_progress: 2, waiting: 1, done: 10, other: 0 }
     upsertCfdSnapshot('2026-08-01', metrics, db)
 
     const rows = listCfdSnapshots(30, db)
@@ -92,8 +197,8 @@ describe('upsertCfdSnapshot', () => {
 
   it('overwrites existing row on repeated call for same date (idempotent)', () => {
     const db = getNoaDb()
-    upsertCfdSnapshot('2026-08-02', { planned: 3, in_progress: 1, waiting: 0, done: 5 }, db)
-    upsertCfdSnapshot('2026-08-02', { planned: 4, in_progress: 2, waiting: 1, done: 6 }, db)
+    upsertCfdSnapshot('2026-08-02', { planned: 3, in_progress: 1, waiting: 0, done: 5, other: 0 }, db)
+    upsertCfdSnapshot('2026-08-02', { planned: 4, in_progress: 2, waiting: 1, done: 6, other: 0 }, db)
 
     const rows = listCfdSnapshots(30, db)
     expect(rows).toHaveLength(1)
@@ -105,9 +210,9 @@ describe('upsertCfdSnapshot', () => {
 describe('listCfdSnapshots', () => {
   it('returns rows ascending by date (oldest first)', () => {
     const db = getNoaDb()
-    upsertCfdSnapshot('2026-08-03', { planned: 1, in_progress: 0, waiting: 0, done: 1 }, db)
-    upsertCfdSnapshot('2026-08-01', { planned: 2, in_progress: 0, waiting: 0, done: 2 }, db)
-    upsertCfdSnapshot('2026-08-02', { planned: 3, in_progress: 0, waiting: 0, done: 3 }, db)
+    upsertCfdSnapshot('2026-08-03', { planned: 1, in_progress: 0, waiting: 0, done: 1, other: 0 }, db)
+    upsertCfdSnapshot('2026-08-01', { planned: 2, in_progress: 0, waiting: 0, done: 2, other: 0 }, db)
+    upsertCfdSnapshot('2026-08-02', { planned: 3, in_progress: 0, waiting: 0, done: 3, other: 0 }, db)
 
     const rows = listCfdSnapshots(30, db)
     expect(rows.map(r => r.date)).toEqual(['2026-08-01', '2026-08-02', '2026-08-03'])
@@ -116,7 +221,7 @@ describe('listCfdSnapshots', () => {
   it('limits to the requested number of most recent days', () => {
     const db = getNoaDb()
     for (let i = 1; i <= 5; i++) {
-      upsertCfdSnapshot(`2026-08-0${i}`, { planned: i, in_progress: 0, waiting: 0, done: 0 }, db)
+      upsertCfdSnapshot(`2026-08-0${i}`, { planned: i, in_progress: 0, waiting: 0, done: 0, other: 0 }, db)
     }
 
     const rows = listCfdSnapshots(3, db)
