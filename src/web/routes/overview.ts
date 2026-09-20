@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { PROJECT_ROOT, MAIN_AGENT_ID, BOT_NAME } from '../../config.js'
-import { getDb, countTaskRunsBetween } from '../../db.js'
+import { getDb, countTaskRunsBetween, startOfBudapestDayMs } from '../../db.js'
 import {
   agentDir, listAgentNames, readAgentDisplayName,
 } from '../agent-config.js'
@@ -58,6 +58,56 @@ function countUserTurns(fromMs: number, toMs: number = Number.POSITIVE_INFINITY)
   return total
 }
 
+// Injectable seam for the "tasks today/yesterday" figures so the day-boundary
+// and the source-combining arithmetic are unit-testable without a DB or the
+// filesystem (WELL-027 C4).
+export interface OverviewCountDeps {
+  /** Absolute wall-clock now in epoch ms. */
+  nowMs: () => number
+  /** Scheduled task_runs in [from, to). Defaults to the live noa.db counter. */
+  countTaskRuns: (from: number, to?: number) => number
+  /** Session-JSONL user-turns in [from, to). Defaults to the live scanner. */
+  countUserTurns: (from: number, to?: number) => number
+}
+
+export interface OverviewCounts {
+  tasksToday: number
+  tasksYesterday: number
+  /** Budapest-pinned start-of-today, epoch ms (the "today" window start). */
+  startOfDayMs: number
+}
+
+/**
+ * Combine the scheduled-task and user-turn counters into the overview's
+ * "tasks today/yesterday" figures.
+ *
+ * C4b: the day boundary is pinned to Europe/Budapest via startOfBudapestDayMs,
+ * not the ambient server TZ.
+ *
+ * C4a KNOWN LIMITATION: tasksToday/tasksYesterday are the ARITHMETIC SUM of two
+ * independently-counted, NOT-disjoint sources -- a scheduled task writes a
+ * task_runs row AND its dispatched prompt can also appear as a user-turn in a
+ * session JSONL, so one logical activity is counted in both. This overcount is
+ * bounded and intentional here; event-identity dedup is tracked separately in
+ * card 2fbfdb39. See overview-counts.test.ts (C4a) which pins this behavior.
+ */
+export function computeOverviewCounts(deps: OverviewCountDeps): OverviewCounts {
+  const startTs = startOfBudapestDayMs(deps.nowMs())
+  // Fixed 24h window before today's boundary. Faithful to the pre-C4 behavior;
+  // may drift by an hour on the two DST-transition nights, which is immaterial
+  // to an activity counter (the today boundary is what C4b pins).
+  const yesterday = startTs - 24 * 60 * 60 * 1000
+  const schedToday = deps.countTaskRuns(startTs)
+  const schedYesterday = deps.countTaskRuns(yesterday, startTs)
+  const userTurns = deps.countUserTurns(startTs)
+  const userTurnsPrev = deps.countUserTurns(yesterday, startTs)
+  return {
+    tasksToday: schedToday + userTurns,
+    tasksYesterday: schedYesterday + userTurnsPrev,
+    startOfDayMs: startTs,
+  }
+}
+
 export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
   const { res, path, method } = ctx
 
@@ -70,16 +120,11 @@ export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
     const memStats = db0.prepare("SELECT COUNT(*) as c FROM memories").get() as { c: number }
     const memCats = db0.prepare("SELECT COUNT(DISTINCT category) as c FROM memories").get() as { c: number }
 
-    const startOfDay = new Date()
-    startOfDay.setHours(0, 0, 0, 0)
-    const startTs = startOfDay.getTime()
-    const yesterday = startTs - 24 * 60 * 60 * 1000
-    const schedToday = countTaskRunsBetween(startTs)
-    const schedYesterday = countTaskRunsBetween(yesterday, startTs)
-    const userTurns = countUserTurns(startTs)
-    const userTurnsPrev = countUserTurns(yesterday, startTs)
-    const tasksToday = schedToday + userTurns
-    const tasksYesterday = schedYesterday + userTurnsPrev
+    const { tasksToday, tasksYesterday, startOfDayMs: startTs } = computeOverviewCounts({
+      nowMs: () => Date.now(),
+      countTaskRuns: countTaskRunsBetween,
+      countUserTurns,
+    })
 
     let skillCount = 0
     let skillsToday = 0
