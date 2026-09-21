@@ -9,6 +9,7 @@ import {
   getTokenUsageLiveness,
   getFableBudget,
   getFableBudgetStatus,
+  getUnratedModels,
 } from '../token-usage.js'
 import { json } from '../http-helpers.js'
 import { logger } from '../../logger.js'
@@ -42,6 +43,10 @@ export async function tryHandleTokenUsage(ctx: RouteContext): Promise<boolean> {
     json(res, {
       agents: getTokenSummary(fromN, toN),
       lineage: getLineageRollup(fromN, toN),
+      // Rate-coverage surface (card 3f674c34 C5a): models that priced to null
+      // (unknown/renamed, non-zero tokens, fable excluded) so an unrated model is
+      // a visible signal instead of a silent $0 folded into the cost aggregate.
+      unrated: getUnratedModels(fromN, toN),
     })
     return true
   }

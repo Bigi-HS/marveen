@@ -3,7 +3,7 @@ import { join, basename } from 'node:path'
 import { homedir } from 'node:os'
 import { createReadStream } from 'node:fs'
 import { createInterface } from 'node:readline'
-import { getDb } from '../db.js'
+import { getDb, startOfBudapestDayMs } from '../db.js'
 import { getNoaDb } from '../noa-memory.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, FABLE_DAILY_TOKEN_CEILING } from '../config.js'
@@ -164,6 +164,93 @@ async function parseJsonlFile(
   return { calls, linesRead: lineNum }
 }
 
+// Prepared statements for one collect pass. Built once and reused across files
+// (see ingestJsonlFile) so the hot loop never re-prepares. Exported alongside
+// ingestJsonlFile so the cursor idempotency path is unit-testable on one file
+// without mocking the module-level PROJECTS_DIR (card 3f674c34 C5b).
+// Statement<unknown[]> keeps run(...params) variadic; ReturnType over db.prepare
+// resolves through the generic constraint and collapses to a 1-arg tuple instead.
+type PreparedStmt = import('better-sqlite3').Statement<unknown[]>
+export interface TokenUsageStmts {
+  getCursor: PreparedStmt
+  setCursor: PreparedStmt
+  insertCall: PreparedStmt
+  backfillAttribution: PreparedStmt
+}
+
+export function prepareTokenUsageStmts(db: ReturnType<typeof getDb>): TokenUsageStmts {
+  return {
+    getCursor: db.prepare('SELECT last_line, last_size FROM token_usage_cursors WHERE file_path = ?'),
+    setCursor: db.prepare('INSERT OR REPLACE INTO token_usage_cursors (file_path, last_line, last_size) VALUES (?, ?, ?)'),
+    insertCall: db.prepare(`
+      INSERT OR IGNORE INTO token_usage (agent, session_id, timestamp, input_tokens, output_tokens,
+        cache_read_tokens, cache_creation_tokens, content_preview, tool_name, model, spawned_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `),
+    // On a re-ingest the row already exists, so INSERT OR IGNORE is a no-op; this
+    // backfills the new attribution columns onto a pre-existing row keyed by the
+    // dedup tuple. NULL-coalesced so a re-parse never clobbers a known value.
+    backfillAttribution: db.prepare(`
+      UPDATE token_usage SET model = COALESCE(model, ?), spawned_by = COALESCE(spawned_by, ?)
+      WHERE agent = ? AND session_id = ? AND timestamp = ? AND input_tokens = ? AND output_tokens = ?
+        AND (model IS NULL OR spawned_by IS NULL)
+    `),
+  }
+}
+
+// Ingest a single transcript file. Idempotent by construction: the cursor
+// (file_path -> last_line, last_size) skips an unchanged file and resumes an
+// appended one from where it stopped, while the UNIQUE dedup index +
+// INSERT OR IGNORE make any overlapping re-read count each tuple exactly once.
+// `processed` mirrors the old totalFiles++ (a parse actually ran; false on a
+// stat failure or an unchanged-file skip). Stmts are shared across files by the
+// caller; a lone call self-prepares (used by tests).
+export async function ingestJsonlFile(
+  db: ReturnType<typeof getDb>,
+  file: string,
+  agent: string,
+  stmts: TokenUsageStmts = prepareTokenUsageStmts(db),
+): Promise<{ inserted: number; processed: boolean }> {
+  let fileSize: number
+  try { fileSize = statSync(file).size } catch { return { inserted: 0, processed: false } }
+
+  const cursor = stmts.getCursor.get(file) as { last_line: number; last_size: number } | undefined
+  if (cursor && cursor.last_size === fileSize) return { inserted: 0, processed: false }
+
+  const fromLine = (cursor && cursor.last_size <= fileSize) ? cursor.last_line : 0
+
+  try {
+    const { calls, linesRead } = await parseJsonlFile(file, agent, fromLine)
+
+    if (calls.length > 0) {
+      const tx = db.transaction(() => {
+        for (const c of calls) {
+          stmts.insertCall.run(
+            c.agent, c.sessionId, c.timestamp,
+            c.inputTokens, c.outputTokens,
+            c.cacheReadTokens, c.cacheCreationTokens,
+            c.contentPreview || null, c.toolName, c.model, c.spawnedBy,
+          )
+          if (c.model !== null || c.spawnedBy !== null) {
+            stmts.backfillAttribution.run(
+              c.model, c.spawnedBy,
+              c.agent, c.sessionId, c.timestamp, c.inputTokens, c.outputTokens,
+            )
+          }
+        }
+        stmts.setCursor.run(file, linesRead, fileSize)
+      })
+      tx()
+      return { inserted: calls.length, processed: true }
+    }
+    stmts.setCursor.run(file, linesRead, fileSize)
+    return { inserted: 0, processed: true }
+  } catch (err) {
+    logger.warn({ err, file }, 'Token usage parse failed')
+    return { inserted: 0, processed: false }
+  }
+}
+
 export async function collectTokenUsage(
   opts: { reparse?: boolean } = {},
 ): Promise<{ inserted: number; files: number }> {
@@ -178,63 +265,14 @@ export async function collectTokenUsage(
   // spawned_by) on rows that already existed get filled by the UPDATE below.
   if (opts.reparse) db.exec('DELETE FROM token_usage_cursors')
 
-  const getCursor = db.prepare('SELECT last_line, last_size FROM token_usage_cursors WHERE file_path = ?')
-  const setCursor = db.prepare('INSERT OR REPLACE INTO token_usage_cursors (file_path, last_line, last_size) VALUES (?, ?, ?)')
-  const insertCall = db.prepare(`
-    INSERT OR IGNORE INTO token_usage (agent, session_id, timestamp, input_tokens, output_tokens,
-      cache_read_tokens, cache_creation_tokens, content_preview, tool_name, model, spawned_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `)
-  // On a re-ingest the row already exists, so INSERT OR IGNORE is a no-op; this
-  // backfills the new attribution columns onto a pre-existing row keyed by the
-  // dedup tuple. NULL-coalesced so a re-parse never clobbers a known value.
-  const backfillAttribution = db.prepare(`
-    UPDATE token_usage SET model = COALESCE(model, ?), spawned_by = COALESCE(spawned_by, ?)
-    WHERE agent = ? AND session_id = ? AND timestamp = ? AND input_tokens = ? AND output_tokens = ?
-      AND (model IS NULL OR spawned_by IS NULL)
-  `)
+  const stmts = prepareTokenUsageStmts(db)
 
   for (const source of sources) {
     const files = findJsonlFiles(source.projectDir)
     for (const file of files) {
-      let fileSize: number
-      try { fileSize = statSync(file).size } catch { continue }
-
-      const cursor = getCursor.get(file) as { last_line: number; last_size: number } | undefined
-      if (cursor && cursor.last_size === fileSize) continue
-
-      const fromLine = (cursor && cursor.last_size <= fileSize) ? cursor.last_line : 0
-
-      try {
-        const { calls, linesRead } = await parseJsonlFile(file, source.agent, fromLine)
-
-        if (calls.length > 0) {
-          const tx = db.transaction(() => {
-            for (const c of calls) {
-              insertCall.run(
-                c.agent, c.sessionId, c.timestamp,
-                c.inputTokens, c.outputTokens,
-                c.cacheReadTokens, c.cacheCreationTokens,
-                c.contentPreview || null, c.toolName, c.model, c.spawnedBy,
-              )
-              if (c.model !== null || c.spawnedBy !== null) {
-                backfillAttribution.run(
-                  c.model, c.spawnedBy,
-                  c.agent, c.sessionId, c.timestamp, c.inputTokens, c.outputTokens,
-                )
-              }
-            }
-            setCursor.run(file, linesRead, fileSize)
-          })
-          tx()
-          totalInserted += calls.length
-        } else {
-          setCursor.run(file, linesRead, fileSize)
-        }
-        totalFiles++
-      } catch (err) {
-        logger.warn({ err, file }, 'Token usage parse failed')
-      }
+      const { inserted, processed } = await ingestJsonlFile(db, file, source.agent, stmts)
+      totalInserted += inserted
+      if (processed) totalFiles++
     }
   }
 
@@ -364,22 +402,26 @@ export interface FableBudget {
   blind: boolean
   /** All-time fable row count (has the stream EVER carried fable telemetry?). */
   fableRowsSeenTotal: number
+  /** Untagged spend from fable-configured agents in the week window: rows whose
+   *  model is NULL, so fableWindowAgg (which matches by model tag) silently drops
+   *  them and fable spend may be under-counted (card 3f674c34 C6a). Fable-SCOPED
+   *  via agentsOnFable, the clean agent->fable config mapping (readAgentModel /
+   *  agent-config), not a guess. LIMIT: a row carrying a deliberate non-fable
+   *  model tag is NOT flagged -- it is indistinguishable from a fable-configured
+   *  agent legitimately running another model, so only the missing-tag (NULL)
+   *  case is surfaced. `blind` still covers the TOTAL-zero case. */
+  possiblyUntagged: { rows: number; tokens: number; agents: string[] }
   fiveHour: FableWindowAgg
   today: FableWindowAgg
   week: FableWindowAgg
 }
 
-// Budapest local midnight (epoch seconds) for the instant nowMs. Standard Intl
-// offset trick; on a DST-transition day the boundary can be off by the 1h shift,
-// which is acceptable for a daily budget window.
+// Budapest local midnight (epoch seconds) for the instant nowMs. Delegates to the
+// shared DST-exact `startOfBudapestDayMs` (db.ts, Intl + tzOffsetSeconds) so the
+// daily window boundary is correct across DST transitions (card 3f674c34 C6-TZ);
+// the previous local toLocaleString offset trick could be off by the 1h shift.
 function startOfBudapestDaySeconds(nowMs: number): number {
-  const tz = 'Europe/Budapest'
-  const asUTC = new Date(new Date(nowMs).toLocaleString('en-US', { timeZone: 'UTC' })).getTime()
-  const asLocal = new Date(new Date(nowMs).toLocaleString('en-US', { timeZone: tz })).getTime()
-  const offsetMs = asLocal - asUTC
-  const localWall = new Date(nowMs + offsetMs)
-  localWall.setUTCHours(0, 0, 0, 0)
-  return Math.floor((localWall.getTime() - offsetMs) / 1000)
+  return Math.floor(startOfBudapestDayMs(nowMs) / 1000)
 }
 
 function fableWindowAgg(db: ReturnType<typeof getDb>, fromSec: number, toSec: number): FableWindowAgg {
@@ -422,6 +464,36 @@ function fableWindowAgg(db: ReturnType<typeof getDb>, fromSec: number, toSec: nu
   }
 }
 
+// Rows in [fromSec, toSec] from fable-configured agents whose model is NULL
+// (untagged) -> silently excluded from fableWindowAgg's model-tag match. A
+// non-zero count means real fable spend may be under-counted (card 3f674c34 C6a).
+function possiblyUntaggedFable(
+  db: ReturnType<typeof getDb>,
+  fromSec: number,
+  toSec: number,
+  agentsOnFable: string[],
+): { rows: number; tokens: number; agents: string[] } {
+  if (agentsOnFable.length === 0) return { rows: 0, tokens: 0, agents: [] }
+  const placeholders = agentsOnFable.map(() => '?').join(',')
+  const groups = db.prepare(`
+    SELECT agent,
+      COUNT(*) as rows,
+      COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens), 0) as tokens
+    FROM token_usage
+    WHERE timestamp >= ? AND timestamp <= ? AND model IS NULL AND agent IN (${placeholders})
+    GROUP BY agent
+  `).all(fromSec, toSec, ...agentsOnFable) as Array<{ agent: string; rows: number; tokens: number }>
+
+  let rows = 0, tokens = 0
+  const agents: string[] = []
+  for (const g of groups) {
+    rows += g.rows
+    tokens += g.tokens
+    agents.push(g.agent)
+  }
+  return { rows, tokens, agents }
+}
+
 export function getFableBudget(opts: { nowMs?: number; agentsOnFable?: string[] } = {}): FableBudget {
   const now = opts.nowMs ?? Date.now()
   const nowSec = Math.floor(now / 1000)
@@ -442,8 +514,9 @@ export function getFableBudget(opts: { nowMs?: number; agentsOnFable?: string[] 
   const week = fableWindowAgg(db, nowSec - 7 * 86400, nowSec)
 
   const blind = agentsOnFable.length > 0 && week.rows === 0
+  const possiblyUntagged = possiblyUntaggedFable(db, nowSec - 7 * 86400, nowSec, agentsOnFable)
 
-  return { now, tags: [...FABLE_MODEL_TAGS], agentsOnFable, blind, fableRowsSeenTotal, fiveHour, today, week }
+  return { now, tags: [...FABLE_MODEL_TAGS], agentsOnFable, blind, fableRowsSeenTotal, possiblyUntagged, fiveHour, today, week }
 }
 
 // --- Fable safety-net F1 slice-4: configurable daily ceiling + restrict signal ---
@@ -528,6 +601,53 @@ export function getTokenSummary(from?: number, to?: number): TokenSummary[] {
   }
 
   return [...byAgent.values()].sort((a, b) => b.totalInput - a.totalInput)
+}
+
+// One (agent, effective-model) group whose spend could NOT be priced -- the model
+// is absent from the rate registry (unknown or renamed) yet carried real tokens.
+// costForGroup swallows this as $0 (`cost ?? 0`), so the spend silently disappears
+// from every USD rollup. Surfacing it turns an invisible $0 into a visible signal
+// (card 3f674c34 C5a). Fable is intentionally unpriced and is NOT "unrated".
+export interface UnratedModelUsage {
+  agent: string
+  /** Effective model that failed to price (the row's own model, else the agent's
+   *  configured fallback). */
+  model: string | null
+  calls: number
+  totalTokens: number
+}
+
+export function getUnratedModels(from?: number, to?: number): UnratedModelUsage[] {
+  const db = getDb()
+  const { clause, params } = timeFilter(from, to)
+  const groups = db.prepare(`
+    SELECT agent, model,
+      COUNT(*) as calls,
+      SUM(input_tokens) as input,
+      SUM(output_tokens) as output,
+      SUM(cache_read_tokens) as cacheRead,
+      SUM(cache_creation_tokens) as cacheCreation
+    FROM token_usage${clause}
+    GROUP BY agent, model
+  `).all(...params) as Array<{
+    agent: string; model: string | null
+    calls: number; input: number; output: number; cacheRead: number; cacheCreation: number
+  }>
+
+  const unrated: UnratedModelUsage[] = []
+  for (const g of groups) {
+    // Same fallback chain as costForGroup, so we flag exactly what pricing sees.
+    const model = g.model ?? readAgentModel(g.agent)
+    if (isFableModel(model)) continue // fable is unpriced by design, not "unrated"
+    const cost = costForUsageDetailedUsd(model, {
+      input: g.input, output: g.output, cacheRead: g.cacheRead, cacheCreation: g.cacheCreation,
+    })
+    if (cost !== null) continue // priced fine
+    const totalTokens = g.input + g.output + g.cacheRead + g.cacheCreation
+    if (totalTokens <= 0) continue // nothing to price anyway
+    unrated.push({ agent: g.agent, model, calls: g.calls, totalTokens })
+  }
+  return unrated.sort((a, b) => b.totalTokens - a.totalTokens)
 }
 
 export interface SessionCost {
