@@ -67,15 +67,23 @@ import hashlib
 #     src/__tests__/google-mcp-tool-names.test.ts; the deploy doc has a live
 #     `claude mcp`-roster verification step. The sibling `calendar_today` tool is
 #     read-only (calendar.events.readonly) and is intentionally NOT guarded.
-#   - Claudia Google MCP v2 (card 3a95349f): the same server gains 7 catastrophic
-#     / irreversible ops that are HARD ask-first (GP-AC2, non-weakeneable even on
-#     a Dominik Telegram instruction): trash a message, delete a label
-#     definition, create/delete a filter, set/clear vacation auto-reply, delete a
-#     calendar event, and update ALL instances of a recurring event. Each name is
-#     defined once in src/mcp/tool-names.ts (GUARDED_* consts) and cross-pinned by
-#     src/__tests__/google-mcp-tool-names-v2.test.ts (TS) +
+#   - Claudia Google MCP v2 (card 3a95349f): the same server gains catastrophic /
+#     irreversible GMAIL ops that are HARD ask-first (GP-AC2, non-weakeneable even
+#     on a Dominik Telegram instruction): trash a message, delete a label
+#     definition, create/delete a filter, set/clear vacation auto-reply. Each name
+#     is defined once in src/mcp/tool-names.ts (GUARDED_* consts) and cross-pinned
+#     by src/__tests__/google-mcp-tool-names-v2.test.ts (TS) +
 #     scripts/__tests__/guardrail-google-v2.test.py (python). The v2 read tools
 #     and reversible writes (archive, mark-read, label, move) are NOT guarded.
+#   - Calendar write ops (card a7b62541, Boss 09-21): calendar_delete_event and
+#     calendar_update_event_all were previously ask-first here but are now
+#     DELIBERATELY NOT guarded. Boss overrode the marveen-approver gate for
+#     calendar: Claudia asks Boss DIRECTLY (her own Telegram) before a calendar
+#     write and acts on his yes. The human-in-loop stays (Boss replaces marveen);
+#     only the technical hook-enforcement moves to Claudia's behavioral rule
+#     (agents/claudia/CLAUDE.md). calendar_delete still writes an undo-snapshot +
+#     audit on the server (that is separate from this guard). gmail catastrophe
+#     ops above STAY guarded (outbound / marveen-approver).
 #   - Claudia Google MCP Drive (ENG-048): the same server gains a Drive
 #     drive_upload_file tool. It is ask-first GUARDED because an OVERWRITE is an
 #     irreversible external write to the Boss's Drive; a pre-write local backup
@@ -96,8 +104,9 @@ GUARDED_TOOLS = frozenset(
         "mcp__claudia_google__gmail_create_filter",
         "mcp__claudia_google__gmail_delete_filter",
         "mcp__claudia_google__gmail_update_vacation",
-        "mcp__claudia_google__calendar_delete_event",
-        "mcp__claudia_google__calendar_update_event_all",
+        # calendar_delete_event / calendar_update_event_all are DELIBERATELY not
+        # here (card a7b62541): calendar write moved to Claudia's Boss-direct
+        # confirm, off the marveen ask-first gate. See the comment block above.
         # ENG-048 -- Drive overwrite is an irreversible external write (guarded);
         # list/download are read-only and intentionally NOT guarded.
         "mcp__claudia_google__drive_upload_file",

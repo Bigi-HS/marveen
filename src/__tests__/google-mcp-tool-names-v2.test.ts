@@ -19,14 +19,14 @@ import {
   TOOL_DRIVE_LIST_FILES,
   TOOL_DRIVE_DOWNLOAD_FILE,
   TOOL_DRIVE_UPLOAD_FILE,
-  // the 7 v2 GUARDED namespaced strings (must equal GUARDED_TOOLS in the hook)
+  // the v2 GUARDED gmail namespaced strings (must equal GUARDED_TOOLS in the hook).
+  // The 2 calendar GUARDED_CALENDAR_* consts were retired (card a7b62541): calendar
+  // write left the ask-first gate, so they are no longer guarded/cross-pinned here.
   GUARDED_GMAIL_TRASH,
   GUARDED_GMAIL_DELETE_LABEL,
   GUARDED_GMAIL_CREATE_FILTER,
   GUARDED_GMAIL_DELETE_FILTER,
   GUARDED_GMAIL_UPDATE_VACATION,
-  GUARDED_CALENDAR_DELETE_EVENT,
-  GUARDED_CALENDAR_UPDATE_EVENT_ALL,
   // ENG-048: the one guarded Drive write (overwrite is irreversible)
   GUARDED_DRIVE_UPLOAD,
 } from '../mcp/tool-names.js'
@@ -45,14 +45,12 @@ describe('Claudia Google MCP v2 tool names', () => {
     expect(namespacedToolName(TOOL_CALENDAR_UPDATE_EVENT)).toBe('mcp__claudia_google__calendar_update_event')
   })
 
-  it('pins the 7 v2 guarded names to their exact namespaced strings', () => {
+  it('pins the v2 guarded gmail names to their exact namespaced strings', () => {
     expect(GUARDED_GMAIL_TRASH).toBe('mcp__claudia_google__gmail_trash_message')
     expect(GUARDED_GMAIL_DELETE_LABEL).toBe('mcp__claudia_google__gmail_delete_label')
     expect(GUARDED_GMAIL_CREATE_FILTER).toBe('mcp__claudia_google__gmail_create_filter')
     expect(GUARDED_GMAIL_DELETE_FILTER).toBe('mcp__claudia_google__gmail_delete_filter')
     expect(GUARDED_GMAIL_UPDATE_VACATION).toBe('mcp__claudia_google__gmail_update_vacation')
-    expect(GUARDED_CALENDAR_DELETE_EVENT).toBe('mcp__claudia_google__calendar_delete_event')
-    expect(GUARDED_CALENDAR_UPDATE_EVENT_ALL).toBe('mcp__claudia_google__calendar_update_event_all')
   })
 
   it('derives each guarded string from namespacedToolName(tool constant) (no drift)', () => {
@@ -61,8 +59,6 @@ describe('Claudia Google MCP v2 tool names', () => {
     expect(GUARDED_GMAIL_CREATE_FILTER).toBe(namespacedToolName(TOOL_GMAIL_CREATE_FILTER))
     expect(GUARDED_GMAIL_DELETE_FILTER).toBe(namespacedToolName(TOOL_GMAIL_DELETE_FILTER))
     expect(GUARDED_GMAIL_UPDATE_VACATION).toBe(namespacedToolName(TOOL_GMAIL_UPDATE_VACATION))
-    expect(GUARDED_CALENDAR_DELETE_EVENT).toBe(namespacedToolName(TOOL_CALENDAR_DELETE_EVENT))
-    expect(GUARDED_CALENDAR_UPDATE_EVENT_ALL).toBe(namespacedToolName(TOOL_CALENDAR_UPDATE_EVENT_ALL))
   })
 })
 
