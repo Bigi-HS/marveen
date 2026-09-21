@@ -67,14 +67,16 @@ export function namespacedToolName(tool: string): string {
 // them and the deploy doc has a live `claude mcp`-roster verification step.
 // v1:
 export const GUARDED_GMAIL_SEND = namespacedToolName(TOOL_GMAIL_SEND)
-// v2 (SEC-AC5) -- the 7 catastrophic / irreversible ops (GP-AC2, non-weakeneable):
+// v2 (SEC-AC5) -- the catastrophic / irreversible GMAIL ops (GP-AC2, non-weakeneable):
 export const GUARDED_GMAIL_TRASH = namespacedToolName(TOOL_GMAIL_TRASH_MESSAGE)
 export const GUARDED_GMAIL_DELETE_LABEL = namespacedToolName(TOOL_GMAIL_DELETE_LABEL)
 export const GUARDED_GMAIL_CREATE_FILTER = namespacedToolName(TOOL_GMAIL_CREATE_FILTER)
 export const GUARDED_GMAIL_DELETE_FILTER = namespacedToolName(TOOL_GMAIL_DELETE_FILTER)
 export const GUARDED_GMAIL_UPDATE_VACATION = namespacedToolName(TOOL_GMAIL_UPDATE_VACATION)
-export const GUARDED_CALENDAR_DELETE_EVENT = namespacedToolName(TOOL_CALENDAR_DELETE_EVENT)
-export const GUARDED_CALENDAR_UPDATE_EVENT_ALL = namespacedToolName(TOOL_CALENDAR_UPDATE_EVENT_ALL)
+// GUARDED_CALENDAR_DELETE_EVENT / GUARDED_CALENDAR_UPDATE_EVENT_ALL were retired
+// (card a7b62541): calendar write ops left the ask-first gate for Claudia's
+// Boss-direct confirm, so there is no longer a guarded namespaced const for them.
+// The TOOL_CALENDAR_* name consts stay -- the tools are still served.
 // ENG-048 -- drive_upload_file is ask-first GUARDED: an overwrite is an
 // irreversible external write to the Boss's Drive (Boss decision -- backup runs
 // AFTER this guard, BEFORE the actual write). list/download are read-only, NOT guarded.

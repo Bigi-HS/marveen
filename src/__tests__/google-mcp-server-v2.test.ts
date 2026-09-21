@@ -41,6 +41,10 @@ const EXPECTED_TOOLS = [
   'drive_list_files', 'drive_download_file', 'drive_upload_file',
 ]
 
+// The 2 calendar write ops are DELIBERATELY absent (card a7b62541): calendar
+// left the ask-first gate for Claudia's Boss-direct confirm. The
+// `guarded:true set === GUARDED` assertion below then pins them NOT guarded
+// (dangerous-direction). TOOL_CALENDAR_* imports stay -- used by handler tests.
 const GUARDED = [
   TOOL_GMAIL_SEND,
   TOOL_GMAIL_TRASH_MESSAGE,
@@ -48,8 +52,6 @@ const GUARDED = [
   TOOL_GMAIL_CREATE_FILTER,
   TOOL_GMAIL_DELETE_FILTER,
   TOOL_GMAIL_UPDATE_VACATION,
-  TOOL_CALENDAR_DELETE_EVENT,
-  TOOL_CALENDAR_UPDATE_EVENT_ALL,
   'drive_upload_file',
 ]
 

@@ -618,9 +618,11 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
     },
     {
       name: TOOL_CALENDAR_UPDATE_EVENT_ALL,
-      description: 'Update ALL instances of a recurring event (patch the master). ASK-FIRST GUARDED. Defaults to the primary calendar; pass calendarId for another.',
+      // Not ask-first guarded (card a7b62541): calendar write moved off the marveen
+      // gate to Claudia's Boss-direct confirm. The audit line is still recorded.
+      description: 'Update ALL instances of a recurring event (patch the master). Defaults to the primary calendar; pass calendarId for another.',
       inputSchema: { id: z.string(), calendarId: z.string().optional(), ...eventInputShape },
-      guarded: true,
+      guarded: false,
       write: true,
       handler: async ({ id, calendarId, ...patch }) => {
         const out = await updateEventAll(await tok(), id, patch, f, calendarId)
@@ -631,9 +633,12 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
     },
     {
       name: TOOL_CALENDAR_DELETE_EVENT,
-      description: 'Permanently delete a calendar event. ASK-FIRST GUARDED. Writes an undo-snapshot before deleting. Defaults to the primary calendar; pass calendarId for another.',
+      // Not ask-first guarded (card a7b62541): calendar write moved off the marveen
+      // gate to Claudia's Boss-direct confirm. The pre-delete undo-snapshot + audit
+      // stay (data-safety, separate from the ask-first gate).
+      description: 'Permanently delete a calendar event. Writes an undo-snapshot before deleting. Defaults to the primary calendar; pass calendarId for another.',
       inputSchema: { id: z.string(), calendarId: z.string().optional() },
-      guarded: true,
+      guarded: false,
       write: true,
       handler: async ({ id, calendarId }) => {
         const dir = join(deps.channelDir, 'deleted-events')

@@ -17,20 +17,24 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _HOOK = os.path.join(_HERE, "..", "hooks", "guardrail-ask-first.py")
 _TOOL_NAMES_TS = os.path.join(_HERE, "..", "..", "src", "mcp", "tool-names.ts")
 
-# The 7 ask-first=YES tools (SEC-AC5), as (ts_const_name, expected_tool_string).
+# The gmail catastrophe ops (SEC-AC5) + the ENG-048 Drive overwrite that stay
+# ask-first=YES, as (ts_const_name, expected_tool_string). The 2 calendar write
+# ops were removed here (card a7b62541) -> see UNGUARDED_V2.
 GUARDED_V2 = [
     ("TOOL_GMAIL_TRASH_MESSAGE", "gmail_trash_message"),
     ("TOOL_GMAIL_DELETE_LABEL", "gmail_delete_label"),
     ("TOOL_GMAIL_CREATE_FILTER", "gmail_create_filter"),
     ("TOOL_GMAIL_DELETE_FILTER", "gmail_delete_filter"),
     ("TOOL_GMAIL_UPDATE_VACATION", "gmail_update_vacation"),
-    ("TOOL_CALENDAR_DELETE_EVENT", "calendar_delete_event"),
-    ("TOOL_CALENDAR_UPDATE_EVENT_ALL", "calendar_update_event_all"),
     # ENG-048: Drive overwrite is an irreversible external write -> ask-first.
     ("TOOL_DRIVE_UPLOAD_FILE", "drive_upload_file"),
 ]
 
 # New v2 tools that MUST NOT be ask-first gated (reads + reversible writes).
+# calendar_delete_event + calendar_update_event_all are here DELIBERATELY (card
+# a7b62541, Boss 09-21): calendar write left the marveen ask-first gate for
+# Claudia's Boss-direct confirm. This is the dangerous-direction pin -- it fails
+# if either calendar op is (re)added to the hook's GUARDED_TOOLS.
 UNGUARDED_V2 = [
     "gmail_list_messages",
     "gmail_get_message",
@@ -43,6 +47,8 @@ UNGUARDED_V2 = [
     "calendar_list_events",
     "calendar_create_event",
     "calendar_update_event",
+    "calendar_delete_event",
+    "calendar_update_event_all",
     # ENG-048: Drive reads are NOT guarded (only the overwrite/upload is).
     "drive_list_files",
     "drive_download_file",
@@ -107,10 +113,11 @@ class TestV2Registration(unittest.TestCase):
                 "%s must NOT be ask-first gated" % tool,
             )
 
-    def test_guarded_set_size_is_exactly_nine(self):
-        # 1 v1 (gmail_send) + 7 v2 + 1 ENG-048 (drive_upload_file) = 9.
-        # Catches an accidental extra/missing entry.
-        self.assertEqual(len(hook.GUARDED_TOOLS), 9)
+    def test_guarded_set_size_is_exactly_seven(self):
+        # 1 v1 (gmail_send) + 5 v2 gmail + 1 ENG-048 (drive_upload_file) = 7.
+        # The 2 calendar write ops were removed (card a7b62541). Catches an
+        # accidental extra/missing entry -- including a re-added calendar op.
+        self.assertEqual(len(hook.GUARDED_TOOLS), 7)
 
 
 class TestV2ClassifyBlocks(unittest.TestCase):
