@@ -59,6 +59,10 @@ export interface EventInput {
   start?: EventTime
   end?: EventTime
   attendees?: { email: string }[]
+  // Google Calendar RRULE lines, e.g. ['RRULE:FREQ=WEEKLY;BYDAY=WE'] (card
+  // ae5a6483). A plain body field: forwarded as-is on create/update; absent
+  // leaves the event one-off (back-compat).
+  recurrence?: string[]
 }
 
 async function call(

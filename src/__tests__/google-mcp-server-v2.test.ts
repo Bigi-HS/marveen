@@ -209,6 +209,13 @@ describe('calendarId routing (card 56894427)', () => {
     expect(calls[0].url).toBe('https://www.googleapis.com/calendar/v3/calendars/primary/events')
   })
 
+  it('calendar_create_event forwards an RRULE recurrence into the body (card ae5a6483)', async () => {
+    const { fn, calls } = capture(jsonRes({ id: 'ev1' }))
+    const def = buildToolDefs(makeDeps(dir, fn)).find((d) => d.name === TOOL_CALENDAR_CREATE_EVENT)!
+    await def.handler({ summary: 'Standup', recurrence: ['RRULE:FREQ=WEEKLY;BYDAY=WE'] })
+    expect(calls[0].body.recurrence).toEqual(['RRULE:FREQ=WEEKLY;BYDAY=WE'])
+  })
+
   it('calendar_list_events reads from the given calendar', async () => {
     const { fn, calls } = capture(jsonRes({ items: [] }))
     const def = buildToolDefs(makeDeps(dir, fn)).find((d) => d.name === TOOL_CALENDAR_LIST_EVENTS)!
