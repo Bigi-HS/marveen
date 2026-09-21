@@ -18,6 +18,7 @@ import {
   TOOL_CALENDAR_DELETE_EVENT,
   TOOL_CALENDAR_UPDATE_EVENT_ALL,
   TOOL_CALENDAR_LIST_EVENTS,
+  TOOL_CALENDAR_CREATE_EVENT,
 } from '../mcp/tool-names.js'
 
 const EXPECTED_TOOLS = [
@@ -165,6 +166,61 @@ describe('write handlers append to the audit log (SEC-AC4)', () => {
     expect(log).toContain('ev9')
     // audit summary must be metadata-only -- never the event title (SEC-AC2)
     expect(log).not.toContain('secret meeting')
+  })
+})
+
+// card 56894427: the calendar tool handlers thread an optional calendarId into
+// the calendar-events layer so Claudia can act on ALL of Dominik's calendars.
+// Default stays primary (back-compat). calendarId must NOT leak into the event body.
+describe('calendarId routing (card 56894427)', () => {
+  let dir: string
+  const WORK = 'work@group.calendar.google.com'
+  const enc = encodeURIComponent(WORK)
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'srv-cid-'))
+  })
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  function capture(res: any) {
+    const calls: Array<{ url: string; method: string; body: any }> = []
+    const fn = (async (url: string, init: any) => {
+      calls.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(init.body) : undefined })
+      return res
+    }) as unknown as FetchLike
+    return { fn, calls }
+  }
+
+  it('calendar_create_event POSTs to the given calendar and strips calendarId from the body', async () => {
+    const { fn, calls } = capture(jsonRes({ id: 'ev1' }))
+    const def = buildToolDefs(makeDeps(dir, fn)).find((d) => d.name === TOOL_CALENDAR_CREATE_EVENT)!
+    await def.handler({ summary: 'X', calendarId: WORK })
+    expect(calls[0].method).toBe('POST')
+    expect(calls[0].url).toBe(`https://www.googleapis.com/calendar/v3/calendars/${enc}/events`)
+    expect(calls[0].body.calendarId).toBeUndefined()
+    expect(calls[0].body.summary).toBe('X')
+  })
+
+  it('calendar_create_event defaults to the primary calendar (back-compat)', async () => {
+    const { fn, calls } = capture(jsonRes({ id: 'ev1' }))
+    const def = buildToolDefs(makeDeps(dir, fn)).find((d) => d.name === TOOL_CALENDAR_CREATE_EVENT)!
+    await def.handler({ summary: 'X' })
+    expect(calls[0].url).toBe('https://www.googleapis.com/calendar/v3/calendars/primary/events')
+  })
+
+  it('calendar_list_events reads from the given calendar', async () => {
+    const { fn, calls } = capture(jsonRes({ items: [] }))
+    const def = buildToolDefs(makeDeps(dir, fn)).find((d) => d.name === TOOL_CALENDAR_LIST_EVENTS)!
+    await def.handler({ timeMin: '2026-06-01T00:00:00Z', timeMax: '2026-06-30T00:00:00Z', calendarId: WORK })
+    expect(calls[0].url.startsWith(`https://www.googleapis.com/calendar/v3/calendars/${enc}/events`)).toBe(true)
+  })
+
+  it('calendar_delete_event GETs+DELETEs on the given calendar', async () => {
+    const { fn, calls } = capture(jsonRes({ id: 'ev9', summary: 'x' }))
+    const def = buildToolDefs(makeDeps(dir, fn)).find((d) => d.name === TOOL_CALENDAR_DELETE_EVENT)!
+    await def.handler({ id: 'ev9', calendarId: WORK })
+    expect(calls[0].url).toBe(`https://www.googleapis.com/calendar/v3/calendars/${enc}/events/ev9`)
   })
 })
 

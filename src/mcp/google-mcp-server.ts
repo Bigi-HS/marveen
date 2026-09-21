@@ -566,23 +566,23 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
     },
     {
       name: TOOL_CALENDAR_LIST_EVENTS,
-      description: 'List primary-calendar events in any [timeMin,timeMax] ISO8601 range (past/present/future).',
-      inputSchema: { timeMin: z.string(), timeMax: z.string() },
+      description: 'List events in any [timeMin,timeMax] ISO8601 range (past/present/future). Defaults to the primary calendar; pass calendarId (from calendar_list_calendars) to read another.',
+      inputSchema: { timeMin: z.string(), timeMax: z.string(), calendarId: z.string().optional() },
       guarded: false,
       write: false,
-      handler: async ({ timeMin, timeMax }) => {
-        const out = await listEvents(await tok(), { timeMin, timeMax }, f)
+      handler: async ({ timeMin, timeMax, calendarId }) => {
+        const out = await listEvents(await tok(), { timeMin, timeMax }, f, calendarId)
         return textResult(fmtEvents(out.events))
       },
     },
     {
       name: TOOL_CALENDAR_SEARCH_EVENTS,
-      description: 'Search primary-calendar events by text query (optional time range).',
-      inputSchema: { q: z.string(), timeMin: z.string().optional(), timeMax: z.string().optional() },
+      description: 'Search events by text query (optional time range). Defaults to the primary calendar; pass calendarId to search another.',
+      inputSchema: { q: z.string(), timeMin: z.string().optional(), timeMax: z.string().optional(), calendarId: z.string().optional() },
       guarded: false,
       write: false,
-      handler: async ({ q, timeMin, timeMax }) => {
-        const out = await searchEvents(await tok(), { q, timeMin, timeMax }, f)
+      handler: async ({ q, timeMin, timeMax, calendarId }) => {
+        const out = await searchEvents(await tok(), { q, timeMin, timeMax }, f, calendarId)
         return textResult(fmtEvents(out.events))
       },
     },
@@ -590,24 +590,24 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
     // --- Calendar write (calendar) ---
     {
       name: TOOL_CALENDAR_CREATE_EVENT,
-      description: 'Create an event in the primary calendar (summary/start/end, optional description/location).',
-      inputSchema: eventInputShape,
+      description: 'Create an event (summary/start/end, optional description/location). Defaults to the primary calendar; pass calendarId to create it in another.',
+      inputSchema: { ...eventInputShape, calendarId: z.string().optional() },
       guarded: false,
       write: true,
-      handler: async (args) => {
-        const out = await createEvent(await tok(), args, f)
+      handler: async ({ calendarId, ...args }) => {
+        const out = await createEvent(await tok(), args, f, calendarId)
         audit(TOOL_CALENDAR_CREATE_EVENT, `id=${out.id ?? ''}`)
         return textResult('Created:\n' + fmtEvent(wrapEvent(out)))
       },
     },
     {
       name: TOOL_CALENDAR_UPDATE_EVENT,
-      description: 'Update fields of a SINGLE event instance. Rejects scope=all (use calendar_update_event_all).',
-      inputSchema: { id: z.string(), scope: z.string().optional(), ...eventInputShape },
+      description: 'Update fields of a SINGLE event instance. Rejects scope=all (use calendar_update_event_all). Defaults to the primary calendar; pass calendarId for another.',
+      inputSchema: { id: z.string(), scope: z.string().optional(), calendarId: z.string().optional(), ...eventInputShape },
       guarded: false,
       write: true,
-      handler: async ({ id, scope, ...patch }) => {
-        const out = await updateEvent(await tok(), id, patch, { scope }, f)
+      handler: async ({ id, scope, calendarId, ...patch }) => {
+        const out = await updateEvent(await tok(), id, patch, { scope }, f, calendarId)
         if ('error' in out) return textResult(`Error: ${out.error}`)
         audit(TOOL_CALENDAR_UPDATE_EVENT, `id=${id}`)
         return textResult('Updated:\n' + fmtEvent(wrapEvent(out)))
@@ -615,12 +615,12 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
     },
     {
       name: TOOL_CALENDAR_UPDATE_EVENT_ALL,
-      description: 'Update ALL instances of a recurring event (patch the master). ASK-FIRST GUARDED.',
-      inputSchema: { id: z.string(), ...eventInputShape },
+      description: 'Update ALL instances of a recurring event (patch the master). ASK-FIRST GUARDED. Defaults to the primary calendar; pass calendarId for another.',
+      inputSchema: { id: z.string(), calendarId: z.string().optional(), ...eventInputShape },
       guarded: true,
       write: true,
-      handler: async ({ id, ...patch }) => {
-        const out = await updateEventAll(await tok(), id, patch, f)
+      handler: async ({ id, calendarId, ...patch }) => {
+        const out = await updateEventAll(await tok(), id, patch, f, calendarId)
         if ('error' in out) return textResult(`Error: ${out.error}`)
         audit(TOOL_CALENDAR_UPDATE_EVENT_ALL, `id=${id}`)
         return textResult('Updated (all instances):\n' + fmtEvent(wrapEvent(out)))
@@ -628,13 +628,13 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
     },
     {
       name: TOOL_CALENDAR_DELETE_EVENT,
-      description: 'Permanently delete a calendar event. ASK-FIRST GUARDED. Writes an undo-snapshot before deleting.',
-      inputSchema: { id: z.string() },
+      description: 'Permanently delete a calendar event. ASK-FIRST GUARDED. Writes an undo-snapshot before deleting. Defaults to the primary calendar; pass calendarId for another.',
+      inputSchema: { id: z.string(), calendarId: z.string().optional() },
       guarded: true,
       write: true,
-      handler: async ({ id }) => {
+      handler: async ({ id, calendarId }) => {
         const dir = join(deps.channelDir, 'deleted-events')
-        const out = await deleteEvent(await tok(), id, dir, f)
+        const out = await deleteEvent(await tok(), id, dir, f, calendarId)
         if (!('error' in out)) audit(TOOL_CALENDAR_DELETE_EVENT, `id=${id} snapshot=${out.snapshot}`)
         return jsonResult(out)
       },
