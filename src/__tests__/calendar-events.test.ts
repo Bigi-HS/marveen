@@ -236,3 +236,36 @@ describe('calendarId targeting (all-calendars, card 56894427)', () => {
     expect(calls[0].url.startsWith(WORK_EVENTS)).toBe(true)
   })
 })
+
+// card ae5a6483: an optional RRULE recurrence (Google Calendar API format) can be
+// set on create/update so Dominik's events repeat. recurrence is a plain body
+// field, so it just rides the request body; absent -> a one-off event (back-compat).
+describe('recurrence RRULE forwarding (card ae5a6483)', () => {
+  const RRULE = ['RRULE:FREQ=WEEKLY;BYDAY=WE']
+
+  it('createEvent forwards recurrence in the POST body', async () => {
+    const { fn, calls } = capturing(jsonRes({ id: 'ev1' }))
+    await createEvent('tok', { summary: 'Standup', recurrence: RRULE }, fn)
+    expect(calls[0].method).toBe('POST')
+    expect(calls[0].body.recurrence).toEqual(RRULE)
+  })
+
+  it('createEvent omits recurrence when none is given (back-compat one-off)', async () => {
+    const { fn, calls } = capturing(jsonRes({ id: 'ev1' }))
+    await createEvent('tok', { summary: 'Standup' }, fn)
+    expect(calls[0].body.recurrence).toBeUndefined()
+  })
+
+  it('updateEventAll forwards recurrence in the PATCH body', async () => {
+    const { fn, calls } = capturing(jsonRes({ id: 'rec1' }))
+    await updateEventAll('tok', 'rec1', { summary: 'Standup', recurrence: RRULE }, fn)
+    expect(calls[0].method).toBe('PATCH')
+    expect(calls[0].body.recurrence).toEqual(RRULE)
+  })
+
+  it('updateEvent forwards recurrence in the PATCH body', async () => {
+    const { fn, calls } = capturing(jsonRes({ id: 'ev1' }))
+    await updateEvent('tok', 'ev1', { summary: 'Standup', recurrence: RRULE }, {}, fn)
+    expect(calls[0].body.recurrence).toEqual(RRULE)
+  })
+})

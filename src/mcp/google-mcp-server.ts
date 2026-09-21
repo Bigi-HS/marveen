@@ -290,6 +290,9 @@ const eventInputShape = {
   location: z.string().optional(),
   start: eventTime.optional(),
   end: eventTime.optional(),
+  // RRULE recurrence lines, e.g. ['RRULE:FREQ=WEEKLY;BYDAY=WE'] (card ae5a6483).
+  // Shared by create/update/update-all (they spread this shape); rides the body.
+  recurrence: z.array(z.string()).optional(),
 }
 
 // Build the full tool registry. Pure given its deps -- unit-tested directly.
