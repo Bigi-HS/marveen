@@ -18,7 +18,15 @@ import type { FetchLike } from './google-oauth.js'
 
 const CALENDAR_BASE = 'https://www.googleapis.com/calendar/v3'
 export const CALENDAR_LIST_URL = `${CALENDAR_BASE}/users/me/calendarList`
-export const CALENDAR_PRIMARY_EVENTS_URL = `${CALENDAR_BASE}/calendars/primary/events`
+// Base for a specific calendar's events collection. calendarEventsUrl(id) yields
+// `${CALENDAR_BASE_EVENTS}/<url-encoded id>/events`; the default 'primary' keeps
+// every pre-existing call targeting the primary calendar (card 56894427: all of
+// Dominik's calendars become addressable via an optional calendarId param).
+export const CALENDAR_BASE_EVENTS = `${CALENDAR_BASE}/calendars`
+export function calendarEventsUrl(calendarId = 'primary'): string {
+  return `${CALENDAR_BASE_EVENTS}/${encodeURIComponent(calendarId)}/events`
+}
+export const CALENDAR_PRIMARY_EVENTS_URL = calendarEventsUrl('primary')
 
 const realFetch = fetch as unknown as FetchLike
 
@@ -84,8 +92,8 @@ export async function listCalendars(
   }
 }
 
-function eventsListUrl(params: { timeMin?: string; timeMax?: string; q?: string }): string {
-  const url = new URL(CALENDAR_PRIMARY_EVENTS_URL)
+function eventsListUrl(params: { timeMin?: string; timeMax?: string; q?: string }, calendarId = 'primary'): string {
+  const url = new URL(calendarEventsUrl(calendarId))
   if (params.timeMin) url.searchParams.set('timeMin', params.timeMin)
   if (params.timeMax) url.searchParams.set('timeMax', params.timeMax)
   if (params.q) url.searchParams.set('q', params.q)
@@ -99,37 +107,43 @@ async function fetchEvents(
   accessToken: string,
   params: { timeMin?: string; timeMax?: string; q?: string },
   fetchFn: FetchLike,
+  calendarId = 'primary',
 ): Promise<{ events: CalendarEventFull[] }> {
-  const res = await call(eventsListUrl(params), 'GET', accessToken, undefined, fetchFn)
+  const res = await call(eventsListUrl(params, calendarId), 'GET', accessToken, undefined, fetchFn)
   if (!res.ok) throwHttp('calendar events list', res.status, await res.text().catch(() => ''))
   const j = (await res.json()) as { items?: CalendarEventFull[] }
   return { events: j.items ?? [] }
 }
 
 // List events in any [timeMin, timeMax] range (past/present/future), F-AC5b.
+// calendarId defaults to primary; pass a listCalendars() id to read another one.
 export function listEvents(
   accessToken: string,
   params: { timeMin: string; timeMax: string },
   fetchFn: FetchLike = realFetch,
+  calendarId = 'primary',
 ): Promise<{ events: CalendarEventFull[] }> {
-  return fetchEvents(accessToken, params, fetchFn)
+  return fetchEvents(accessToken, params, fetchFn, calendarId)
 }
 
-// Text search across the primary calendar.
+// Text search across a calendar (default primary). A per-calendar read is what
+// supplies the event id that update/delete then act on for non-primary calendars.
 export function searchEvents(
   accessToken: string,
   params: { q: string; timeMin?: string; timeMax?: string },
   fetchFn: FetchLike = realFetch,
+  calendarId = 'primary',
 ): Promise<{ events: CalendarEventFull[] }> {
-  return fetchEvents(accessToken, params, fetchFn)
+  return fetchEvents(accessToken, params, fetchFn, calendarId)
 }
 
 export async function createEvent(
   accessToken: string,
   event: EventInput,
   fetchFn: FetchLike = realFetch,
+  calendarId = 'primary',
 ): Promise<CalendarEventFull> {
-  const res = await call(CALENDAR_PRIMARY_EVENTS_URL, 'POST', accessToken, event, fetchFn)
+  const res = await call(calendarEventsUrl(calendarId), 'POST', accessToken, event, fetchFn)
   if (!res.ok) throwHttp('calendar create', res.status, await res.text().catch(() => ''))
   return (await res.json()) as CalendarEventFull
 }
@@ -141,11 +155,12 @@ export async function updateEvent(
   patch: EventInput,
   opts: { scope?: string } = {},
   fetchFn: FetchLike = realFetch,
+  calendarId = 'primary',
 ): Promise<CalendarEventFull | { error: string }> {
   if (opts.scope === 'all') {
     return { error: 'use calendar_update_event_all for all-instances edit' }
   }
-  const url = `${CALENDAR_PRIMARY_EVENTS_URL}/${encodeURIComponent(id)}`
+  const url = `${calendarEventsUrl(calendarId)}/${encodeURIComponent(id)}`
   const res = await call(url, 'PATCH', accessToken, patch, fetchFn)
   if (!res.ok) {
     if (res.status === 404) return { error: 'event not found' }
@@ -161,8 +176,9 @@ export async function updateEventAll(
   recurringEventId: string,
   patch: EventInput,
   fetchFn: FetchLike = realFetch,
+  calendarId = 'primary',
 ): Promise<CalendarEventFull | { error: string }> {
-  const url = `${CALENDAR_PRIMARY_EVENTS_URL}/${encodeURIComponent(recurringEventId)}`
+  const url = `${calendarEventsUrl(calendarId)}/${encodeURIComponent(recurringEventId)}`
   const res = await call(url, 'PATCH', accessToken, patch, fetchFn)
   if (!res.ok) {
     if (res.status === 404) return { error: 'event not found' }
@@ -178,9 +194,10 @@ export async function deleteEvent(
   id: string,
   deletedEventsDir: string,
   fetchFn: FetchLike = realFetch,
+  calendarId = 'primary',
 ): Promise<{ id: string; snapshot: string } | { error: string }> {
   // 1. Fetch the full event for the snapshot. Missing -> abort cleanly.
-  const getUrl = `${CALENDAR_PRIMARY_EVENTS_URL}/${encodeURIComponent(id)}`
+  const getUrl = `${calendarEventsUrl(calendarId)}/${encodeURIComponent(id)}`
   const getRes = await call(getUrl, 'GET', accessToken, undefined, fetchFn)
   if (!getRes.ok) {
     if (getRes.status === 404) return { error: 'event not found' }

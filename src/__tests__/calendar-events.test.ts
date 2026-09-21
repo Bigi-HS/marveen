@@ -13,6 +13,7 @@ import {
   deleteEvent,
   CALENDAR_LIST_URL,
   CALENDAR_PRIMARY_EVENTS_URL,
+  CALENDAR_BASE_EVENTS,
 } from '../mcp/calendar-events.js'
 
 function jsonRes(obj: unknown, ok = true, status = 200): any {
@@ -167,5 +168,71 @@ describe('deleteEvent (F-AC7 undo-snapshot, guarded)', () => {
     writeFileSync(join(dir, 'afile'), 'x')
     await expect(deleteEvent('tok', 'ev6', badDir, fn)).rejects.toThrow()
     expect(calls.every((c) => c.method !== 'DELETE')).toBe(true)
+  })
+})
+
+// card 56894427: every calendar write op takes an optional calendarId (default
+// 'primary', backward-compatible) so Claudia can act on ALL of Dominik's
+// calendars, not only primary. The reads (list/search) are scoped too, because
+// update/delete need an event id that only a per-calendar listing can supply.
+// A non-primary id is URL-encoded into /calendars/<id>/events.
+describe('calendarId targeting (all-calendars, card 56894427)', () => {
+  const WORK = 'work@group.calendar.google.com'
+  const WORK_EVENTS = `${CALENDAR_BASE_EVENTS}/${encodeURIComponent(WORK)}/events`
+
+  it('createEvent defaults to the primary calendar (back-compat)', async () => {
+    const { fn, calls } = capturing(jsonRes({ id: 'ev1' }))
+    await createEvent('tok', { summary: 'X' }, fn)
+    expect(calls[0].url).toBe(CALENDAR_PRIMARY_EVENTS_URL)
+  })
+
+  it('createEvent POSTs to /calendars/<id>/events when a calendarId is given', async () => {
+    const { fn, calls } = capturing(jsonRes({ id: 'ev1' }))
+    await createEvent('tok', { summary: 'X' }, fn, WORK)
+    expect(calls[0].method).toBe('POST')
+    expect(calls[0].url).toBe(WORK_EVENTS)
+  })
+
+  it('updateEvent PATCHes the given calendar, url-encoding the id', async () => {
+    const { fn, calls } = capturing(jsonRes({ id: 'ev1' }))
+    await updateEvent('tok', 'ev1', { summary: 'X' }, {}, fn, WORK)
+    expect(calls[0].method).toBe('PATCH')
+    expect(calls[0].url).toBe(`${WORK_EVENTS}/ev1`)
+  })
+
+  it('updateEvent defaults to primary when no calendarId (back-compat)', async () => {
+    const { fn, calls } = capturing(jsonRes({ id: 'ev1' }))
+    await updateEvent('tok', 'ev1', { summary: 'X' }, {}, fn)
+    expect(calls[0].url).toBe(`${CALENDAR_PRIMARY_EVENTS_URL}/ev1`)
+  })
+
+  it('updateEventAll PATCHes the given calendar', async () => {
+    const { fn, calls } = capturing(jsonRes({ id: 'rec1' }))
+    await updateEventAll('tok', 'rec1', { summary: 'X' }, fn, WORK)
+    expect(calls[0].url).toBe(`${WORK_EVENTS}/rec1`)
+  })
+
+  it('deleteEvent GETs+DELETEs on the given calendar', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'cal-del-cid-'))
+    const { fn, calls } = router([
+      { match: (u, m) => m === 'GET' && u.startsWith(`${WORK_EVENTS}/ev5`), res: jsonRes({ id: 'ev5', summary: 'D' }) },
+      { match: (u, m) => m === 'DELETE' && u.startsWith(`${WORK_EVENTS}/ev5`), res: jsonRes({}, true, 204) },
+    ])
+    const out = (await deleteEvent('tok', 'ev5', d, fn, WORK)) as any
+    expect(calls[0].url).toBe(`${WORK_EVENTS}/ev5`)
+    expect(out.id).toBe('ev5')
+    rmSync(d, { recursive: true, force: true })
+  })
+
+  it('listEvents reads from the given calendar', async () => {
+    const { fn, calls } = capturing(jsonRes({ items: [] }))
+    await listEvents('tok', { timeMin: '2026-01-01T00:00:00Z', timeMax: '2026-02-01T00:00:00Z' }, fn, WORK)
+    expect(calls[0].url.startsWith(WORK_EVENTS)).toBe(true)
+  })
+
+  it('searchEvents reads from the given calendar', async () => {
+    const { fn, calls } = capturing(jsonRes({ items: [] }))
+    await searchEvents('tok', { q: 'x' }, fn, WORK)
+    expect(calls[0].url.startsWith(WORK_EVENTS)).toBe(true)
   })
 })
