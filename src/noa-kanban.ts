@@ -357,14 +357,28 @@ export function staleThresholdSeconds(score: number | null): number | null {
  *   1. last_moved NOT NULL  -> use last_moved for age comparison
  *   2. last_moved NULL, updated_at NOT in bulk-stamp burst window -> updated_at as proxy
  *   3. last_moved NULL, updated_at IN burst window -> 'unknown' (unmeasured; NEVER false)
+ *
+ * depends_on (card 19bb3852): if the card points to a non-done, non-archived blocker
+ * the card is legitimately blocked and is NOT considered stale. Pass `lookupBlocker`
+ * to enable this check; without it the depends_on field is ignored (backward compat).
  */
 export function isCardStale(
-  card: Pick<KanbanCard, 'priority_score' | 'updated_at' | 'last_moved' | 'status'>,
+  card: Pick<KanbanCard, 'priority_score' | 'updated_at' | 'last_moved' | 'status'> & {
+    depends_on?: string | null
+  },
   nowSec: number = Math.floor(Date.now() / 1000),
+  lookupBlocker?: (id: string) => { status: string; archived_at?: number | null } | null | undefined,
 ): boolean | 'unknown' {
   if (card.status === PARKED_STATUS || card.status === 'done') return false
   const threshold = staleThresholdSeconds(card.priority_score)
   if (threshold === null) return false
+
+  if (card.depends_on && lookupBlocker) {
+    const blocker = lookupBlocker(card.depends_on)
+    if (blocker && blocker.status !== 'done' && !blocker.archived_at) {
+      return false
+    }
+  }
 
   if (card.last_moved !== null && card.last_moved !== undefined) {
     return nowSec - card.last_moved >= threshold
