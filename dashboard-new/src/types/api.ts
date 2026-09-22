@@ -56,6 +56,10 @@ export interface KanbanCard {
   last_moved: number | null
   /** Fine-grained attention rank 1-10 (card 65afc67e). NULL for icebox cards. */
   priority_score: number | null
+  /** Epoch-seconds until which this card is intentionally parked (fc574fb3). NULL = not set. */
+  parked_until?: number | null
+  /** Non-zero when awaiting a Boss decision (fc574fb3). */
+  boss_waiting?: number
 }
 
 /** GET /api/messages?limit=N -- inter-agent activity (epoch SECONDS). */

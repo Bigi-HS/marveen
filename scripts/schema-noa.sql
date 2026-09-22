@@ -126,7 +126,13 @@ CREATE TABLE kanban_cards (
   -- Epoch-seconds of last meaningful movement (status/assignee change, archive,
   -- dispatch). NULL = unmeasured (card predates this column or no movement yet).
   -- NEVER written by bulk migrations or sort_order updates (card 4326682b).
-  last_moved INTEGER
+  last_moved INTEGER,
+  -- Epoch-seconds until which this card is intentionally parked (fc574fb3).
+  -- While parked_until > now the card is NOT stale -- the owner cannot act yet.
+  parked_until INTEGER,
+  -- Non-zero when the card awaits a Boss decision (fc574fb3).
+  -- While set the card is NOT stale -- it is legitimately Boss-gated.
+  boss_waiting INTEGER NOT NULL DEFAULT 0
 );
 
 -- Per-prefix monotonic counter backing the card `code` auto-sequence (card

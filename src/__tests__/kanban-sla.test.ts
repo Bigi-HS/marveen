@@ -26,11 +26,12 @@ beforeEach(() => {
 function insertCard(over: {
   id?: string; title?: string; status?: string; priority?: string;
   priority_score?: number | null; last_moved?: number | null; updated_at?: number;
+  parked_until?: number | null; boss_waiting?: number;
 } = {}): string {
   const id = over.id ?? 'test-card'
   getNoaDb().prepare(
-    `INSERT INTO kanban_cards (id, title, status, priority, priority_score, last_moved, updated_at, sort_order, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`
+    `INSERT INTO kanban_cards (id, title, status, priority, priority_score, last_moved, updated_at, sort_order, created_at, parked_until, boss_waiting)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`
   ).run(
     id,
     over.title ?? 'Test card',
@@ -40,6 +41,8 @@ function insertCard(over: {
     over.last_moved ?? null,
     over.updated_at ?? NOW - 86400,
     NOW - 86400,
+    over.parked_until ?? null,
+    over.boss_waiting ?? 0,
   )
   return id
 }
@@ -109,5 +112,30 @@ describe('computeSlaCards', () => {
     expect(statusMap['ok-card']).toBe('ok')
     expect(statusMap['breach-card']).toBe('breach')
     expect(statusMap['unknown-card']).toBe('unknown')
+  })
+
+  // --- parked_until + boss_waiting SLA exemption (fc574fb3) ---
+  it('a card with parked_until in the future shows sla_status=ok regardless of age', () => {
+    insertCard({ id: 'parked', priority_score: 5, updated_at: NOW - 5 * 86400,
+      parked_until: NOW + 86400 })
+    const cards = computeSlaCards(NOW, getNoaDb())
+    const c = cards.find(x => x.id === 'parked')!
+    expect(c.sla_status).toBe('ok')
+  })
+
+  it('a card with parked_until in the past is evaluated normally', () => {
+    insertCard({ id: 'expired-park', priority_score: 5, updated_at: NOW - 5 * 86400,
+      parked_until: NOW - 1 })
+    const cards = computeSlaCards(NOW, getNoaDb())
+    const c = cards.find(x => x.id === 'expired-park')!
+    expect(c.sla_status).toBe('breach')
+  })
+
+  it('a card with boss_waiting=1 shows sla_status=ok regardless of age', () => {
+    insertCard({ id: 'boss-gate', priority_score: 5, updated_at: NOW - 5 * 86400,
+      boss_waiting: 1 })
+    const cards = computeSlaCards(NOW, getNoaDb())
+    const c = cards.find(x => x.id === 'boss-gate')!
+    expect(c.sla_status).toBe('ok')
   })
 })

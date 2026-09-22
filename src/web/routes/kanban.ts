@@ -118,6 +118,7 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     const KNOWN_PUT_FIELDS = new Set([
       'title', 'description', 'status', 'assignee', 'priority', 'priority_score',
       'project', 'parent_id', 'depends_on', 'due_date', 'sort_order', 'suppressIntake',
+      'parked_until', 'boss_waiting',
     ])
     const unknown = Object.keys(data).filter(k => !KNOWN_PUT_FIELDS.has(k))
     if (unknown.length > 0) {

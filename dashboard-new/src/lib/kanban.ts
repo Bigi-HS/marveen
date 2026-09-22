@@ -44,9 +44,15 @@ export function cardAgeSeconds(
  * Returns true/false/'unknown'. Mirrors backend isCardStale().
  * 'unknown' means the card may be stale but its age cannot be measured
  * (last_moved null + updated_at inside bulk-stamp burst window).
+ *
+ * parked_until / boss_waiting (fc574fb3): cards intentionally parked or
+ * blocked on a Boss decision are never stale -- mirrors backend logic.
  */
 export function isCardStale(
-  card: Pick<KanbanCard, 'status' | 'priority_score' | 'updated_at' | 'last_moved'>,
+  card: Pick<KanbanCard, 'status' | 'priority_score' | 'updated_at' | 'last_moved'> & {
+    parked_until?: number | null
+    boss_waiting?: number
+  },
   nowSec: number,
 ): boolean | 'unknown' {
   if (!ACTIVE_STATUSES.has(card.status)) return false
@@ -54,6 +60,9 @@ export function isCardStale(
   if (score === null || score === undefined) return false
   const threshold = STALE_THRESHOLD_SECONDS[score]
   if (threshold === undefined) return false
+
+  if (card.parked_until != null && card.parked_until > nowSec) return false
+  if (card.boss_waiting) return false
 
   if (card.last_moved !== null && card.last_moved !== undefined) {
     return nowSec - card.last_moved >= threshold

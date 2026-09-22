@@ -11,6 +11,9 @@ export function KanbanCardChip({ card, onClick, nowSec }: { card: KanbanCard; on
   const ageSec = cardAgeSeconds(card, now)
   const stale = isCardStale(card, now)
   const ageLabel = formatAge(ageSec)
+  // fc574fb3: intentionally-parked and boss-gated cards get amber border, not red.
+  const isParked = card.parked_until != null && card.parked_until > now
+  const isBossWaiting = Boolean(card.boss_waiting)
 
   return (
     <button
@@ -20,7 +23,9 @@ export function KanbanCardChip({ card, onClick, nowSec }: { card: KanbanCard; on
         'w-full rounded-lg border p-2.5 text-left transition-colors focus:outline-none focus:ring-1 focus:ring-accent',
         stale === true
           ? 'border-red-500/40 bg-red-950/20 hover:border-red-500/60'
-          : 'border-border bg-bg-elevated hover:border-accent/50',
+          : isParked || isBossWaiting
+            ? 'border-amber-500/30 bg-amber-950/10 hover:border-amber-500/50'
+            : 'border-border bg-bg-elevated hover:border-accent/50',
       )}
     >
       {/* The immutable taxonomy code is the Boss-facing reference id (cf0d1bfe);
@@ -32,6 +37,9 @@ export function KanbanCardChip({ card, onClick, nowSec }: { card: KanbanCard; on
       <div className="mt-1.5 flex items-center justify-between gap-2">
         <span className="truncate text-xs text-text-muted">{agentDisplayName(card.assignee) ?? 'kiosztatlan'}</span>
         <div className="flex shrink-0 items-center gap-1.5">
+          {/* Parked/boss-waiting badge: amber, not the stale-red signal. */}
+          {isParked && <span className="text-[10px] text-amber-400/80">⏸ park</span>}
+          {!isParked && isBossWaiting && <span className="text-[10px] text-amber-400/80">boss-gate</span>}
           {/* Age badge: red when stale, yellow when unmeasured, muted otherwise. */}
           <span
             className={cn(
