@@ -649,7 +649,16 @@ export function displayNameToAgentId(
   }
   for (const id of roster) {
     add(id, id)
-    add(resolveDisplay(id), id)
+    let displayName: string
+    try {
+      displayName = resolveDisplay(id)
+    } catch {
+      // Fail-open on resolver error: skip this id's display alias but keep the
+      // raw-id alias (already added above). Ambiguity still fails closed; the
+      // only change is that a throwing resolver cannot crash the caller.
+      displayName = id
+    }
+    add(displayName, id)
   }
   return index.get(key) ?? null
 }
