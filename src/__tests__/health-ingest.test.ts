@@ -961,6 +961,59 @@ describe('POST /api/health/ingest', () => {
       })
       expect(onPlausibility).toHaveBeenCalledTimes(1)
     })
+
+    // card 44783957 adversarial: boundary + partial-field + regression (Thor delegation).
+
+    it('[boundary] steps=99_999 (just below 100k cap) + active_kcal=3 fires plausibility (cap does NOT drop the steps)', async () => {
+      // steps=99_999 is below MAX_STEPS_PER_DAY=100_000 -> passes the AC#1 cap, survives into
+      // the plausibility check. 3 kcal for ~100k steps is physically impossible -> must fire.
+      const onPlausibility = vi.fn()
+      const deps = makeDeps({ onPlausibility })
+      await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-26', activity: { steps: 99_999, active_kcal: 3 } },
+      })
+      expect(onPlausibility).toHaveBeenCalledTimes(1)
+      const [, violations] = onPlausibility.mock.calls[0]
+      expect(violations.some((v: { severity: string }) => v.severity === 'suspect')).toBe(true)
+    })
+
+    it('[partial-field] push with active_kcal=null does not clobber the stored kcal (no-clobber merge)', async () => {
+      // A steps-only delta push where activeKcal is explicitly null must NOT overwrite the stored
+      // 800 kcal from the earlier push. After merge the day is coherent -> guard must NOT fire.
+      const onPlausibility = vi.fn()
+      const deps = makeStatefulDeps()
+      deps.onPlausibility = onPlausibility
+      // First push: full coherent activity day stored.
+      await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-25', activity: { steps: 12_000, active_kcal: 800, distance_m: 9_000 } },
+      })
+      // Second push: steps update, activeKcal is explicitly null -> must NOT clobber stored 800.
+      const { snap } = await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-25', activity: { steps: 13_000, active_kcal: null } },
+      })
+      expect(snap?.activity?.activeKcal).toBe(800) // null did not wipe the stored value
+      // Merged day is coherent (13k steps, 800 kcal, 9km) -> guard must not have fired.
+      expect(onPlausibility).not.toHaveBeenCalled()
+    })
+
+    it('[regression 2026-08-25] steps=15790 + active_kcal=5 WITHOUT distance_m fires the kcal/steps rule independently', async () => {
+      // The live 2026-08-25 bug payload: only steps + active_kcal, no distance_m field.
+      // Unlike the existing test (which includes distance_m:456), this pins that the
+      // kcal/steps ratio rule fires on its own -- distance coherence is a separate rule.
+      const onPlausibility = vi.fn()
+      const deps = makeDeps({ onPlausibility })
+      await handle(deps, {
+        token: VALID_TOKEN,
+        body: { date: '2026-08-25', activity: { steps: 15_790, active_kcal: 5 } },
+      })
+      expect(onPlausibility).toHaveBeenCalledTimes(1)
+      const [, violations] = onPlausibility.mock.calls[0]
+      // The kcal/steps ratio violation must be present.
+      expect(violations.some((v: { severity: string }) => v.severity === 'suspect')).toBe(true)
+    })
   })
 
   // card 44783957 P0 (G3): the cross-field anomaly signal is persisted as a health flag via
@@ -1243,6 +1296,132 @@ describe('POST /api/health/ingest', () => {
         body: { date: '2026-08-22', sleep: { total_min: 420, start: '2026-08-21T23:00:00Z', end: 'not-a-date' } },
       })
       expect(snap?.sleep).toBeDefined()
+    })
+  })
+
+  // card ec71d168 -- concurrent-push atomicity.
+  //
+  // The handler's critical section (readSnapshot -> mergeDailySnapshot -> writeSnapshot) is
+  // synchronous after `await readBody()` resolves. On Node.js's single-threaded event loop
+  // this means the second push always reads the state the first push wrote -- both fields
+  // accumulate correctly. These tests pin that invariant and document the DANGEROUS direction:
+  // if readSnapshot or writeSnapshot were ever made async (e.g., SQLite async API migration),
+  // two concurrent reads could both see null and the second write would clobber the first.
+  describe('concurrent-push atomicity (card ec71d168)', () => {
+    it('Promise.all concurrent same-date pushes: both fields survive in the final stored snapshot', async () => {
+      const store = new Map<string, ZeppDailySnapshot>()
+      const deps: HealthIngestDeps = {
+        readIngestToken: () => VALID_TOKEN,
+        readSnapshot: (d) => store.get(d) ?? null,
+        writeSnapshot: (s) => { store.set(s.date, s) },
+        nowIso: () => '2026-08-22T18:00:00.000Z',
+      }
+      const handler = makeHealthIngestHandler(deps)
+      const { res: resA } = makeRes()
+      const { res: resB } = makeRes()
+      await Promise.all([
+        handler(
+          makeReq({ token: VALID_TOKEN, body: { date: '2026-08-22', sleep: { total_min: 420, start: '2026-08-21T23:00:00Z', end: '2026-08-22T06:00:00Z' } } }),
+          resA,
+        ),
+        handler(
+          makeReq({ token: VALID_TOKEN, body: { date: '2026-08-22', vitals: { resting_hr_bpm: 58 } } }),
+          resB,
+        ),
+      ])
+      // Both fields must survive -- neither push clobbered the other.
+      const final = store.get('2026-08-22')
+      expect(final?.sleep?.durationMin).toBe(420)
+      expect(final?.vitals?.restingHr).toBe(58)
+      expect(final?.status).toBe('ok')
+    })
+
+    // merge(A, merge(B, empty)) == merge(B, merge(A, empty)): regardless of arrival order,
+    // all fields from both pushes survive. Pins that the merge is commutative.
+    it('merge commutativity: A-then-B and B-then-A both preserve all fields', async () => {
+      const DATE = '2026-09-22'
+      const bodyA = { date: DATE, sleep: { total_min: 420, start: '2026-09-21T23:00:00Z', end: '2026-09-22T06:00:00Z' } }
+      const bodyB = { date: DATE, vitals: { resting_hr_bpm: 58, hrv_rmssd_ms: 42 } }
+
+      async function runSequence(
+        first: Record<string, unknown>,
+        second: Record<string, unknown>,
+      ): Promise<ZeppDailySnapshot | undefined> {
+        const s = new Map<string, ZeppDailySnapshot>()
+        const d: HealthIngestDeps = {
+          readIngestToken: () => VALID_TOKEN,
+          readSnapshot: (date) => s.get(date) ?? null,
+          writeSnapshot: (snap) => { s.set(snap.date, snap) },
+          nowIso: () => `${DATE}T18:00:00.000Z`,
+        }
+        const h = makeHealthIngestHandler(d)
+        const { res: r1 } = makeRes()
+        const { res: r2 } = makeRes()
+        await h(makeReq({ token: VALID_TOKEN, body: first }), r1)
+        await h(makeReq({ token: VALID_TOKEN, body: second }), r2)
+        return s.get(DATE)
+      }
+
+      const ab = await runSequence(bodyA, bodyB)
+      const ba = await runSequence(bodyB, bodyA)
+
+      for (const result of [ab, ba]) {
+        expect(result?.sleep?.durationMin).toBe(420)
+        expect(result?.vitals?.restingHr).toBe(58)
+        expect(result?.vitals?.hrv).toBe(42)
+        expect(result?.status).toBe('ok')
+      }
+    })
+
+    // DANGEROUS direction: documents the race that would materialize if readSnapshot became
+    // async. Both handlers read null (stale snapshot) before either writes; the second
+    // writeSnapshot clobbers the first because mergeDailySnapshot(null, incoming) passes
+    // the incoming snapshot through unchanged. One field is silently lost.
+    it('[DANGEROUS] stale-read race: when both reads see null, the second write clobbers the first', async () => {
+      const writes: ZeppDailySnapshot[] = []
+      const staleDeps: HealthIngestDeps = {
+        readIngestToken: () => VALID_TOKEN,
+        readSnapshot: () => null,  // always null -- simulates async-gap stale read
+        writeSnapshot: (s) => { writes.push({ ...s }) },
+        nowIso: () => '2026-08-22T18:00:00.000Z',
+      }
+      const handler = makeHealthIngestHandler(staleDeps)
+      const { res: resA } = makeRes()
+      const { res: resB } = makeRes()
+      await Promise.all([
+        handler(makeReq({ token: VALID_TOKEN, body: { date: '2026-08-22', sleep: { total_min: 420, start: '2026-08-21T23:00:00Z', end: '2026-08-22T06:00:00Z' } } }), resA),
+        handler(makeReq({ token: VALID_TOKEN, body: { date: '2026-08-22', vitals: { resting_hr_bpm: 58 } } }), resB),
+      ])
+      // Two writes happen (one per push), but the last one is built on null -- it never sees
+      // the first write. The last stored snapshot has only one field, not both.
+      expect(writes).toHaveLength(2)
+      const lastSnap = writes[writes.length - 1]
+      const bothSurvived = !!(lastSnap.sleep && lastSnap.vitals)
+      // This MUST be false: the stale-read race causes data loss (the DANGEROUS direction).
+      expect(bothSurvived).toBe(false)
+    })
+
+    // steps is a cumulative daily counter: the merge keeps max(A, B), not A+B. Two concurrent
+    // pushes carrying different step counts (morning and evening delta) must not double-count.
+    it('steps are NOT double-counted across concurrent pushes (monotone-max, not additive)', async () => {
+      const store = new Map<string, ZeppDailySnapshot>()
+      const deps: HealthIngestDeps = {
+        readIngestToken: () => VALID_TOKEN,
+        readSnapshot: (d) => store.get(d) ?? null,
+        writeSnapshot: (s) => { store.set(s.date, s) },
+        nowIso: () => '2026-08-22T18:00:00.000Z',
+      }
+      const handler = makeHealthIngestHandler(deps)
+      const { res: resA } = makeRes()
+      const { res: resB } = makeRes()
+      await Promise.all([
+        handler(makeReq({ token: VALID_TOKEN, body: { date: '2026-08-22', activity: { steps: 8000 } } }), resA),
+        handler(makeReq({ token: VALID_TOKEN, body: { date: '2026-08-22', activity: { steps: 12000 } } }), resB),
+      ])
+      // max(8000, 12000) = 12000, NOT additive 20000
+      const final = store.get('2026-08-22')
+      expect(final?.steps).toBe(12000)
+      expect(final?.steps).not.toBe(20000)
     })
   })
 })
