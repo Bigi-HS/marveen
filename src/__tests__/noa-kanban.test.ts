@@ -925,6 +925,36 @@ describe('isCardStale', () => {
     const card2 = { status: 'planned', priority_score: 6, updated_at: now - 1 * 86400, last_moved: null }
     expect(isCardStale(card2, now)).toBe(false)
   })
+
+  it('a card with an open (non-done) blocker in depends_on is never stale', () => {
+    // Would be stale by age, but blocked by an open card.
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400, last_moved: null, depends_on: 'blocker-id' }
+    const lookup = (_id: string) => ({ status: 'in_progress', archived_at: null })
+    expect(isCardStale(card, now, lookup)).toBe(false)
+  })
+
+  it('a card with a done blocker is evaluated normally', () => {
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400, last_moved: null, depends_on: 'done-blocker' }
+    const lookup = (_id: string) => ({ status: 'done', archived_at: null })
+    expect(isCardStale(card, now, lookup)).toBe(true)
+  })
+
+  it('a card with an archived blocker is evaluated normally', () => {
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400, last_moved: null, depends_on: 'archived-blocker' }
+    const lookup = (_id: string) => ({ status: 'planned', archived_at: now - 100 })
+    expect(isCardStale(card, now, lookup)).toBe(true)
+  })
+
+  it('a card with a missing depends_on target is evaluated normally', () => {
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400, last_moved: null, depends_on: 'ghost-id' }
+    const lookup = (_id: string) => null  // blocker not found
+    expect(isCardStale(card, now, lookup)).toBe(true)
+  })
+
+  it('a card with no depends_on is unaffected by the lookup', () => {
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400, last_moved: null }
+    expect(isCardStale(card, now)).toBe(true)
+  })
 })
 
 describe('applyKanbanMigrations', () => {
