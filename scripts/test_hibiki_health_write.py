@@ -77,5 +77,98 @@ class RangeChecksSyncTests(unittest.TestCase):
         self.assertIs(stats.RANGE_CHECKS, hibiki_ranges.RANGE_CHECKS)
 
 
+class WeightSubcommandTests(unittest.TestCase):
+    """TDD fixtures for the weight subcommand (card ce19e4d6).
+
+    Red phase: these fail until write_weight() and 'weight' CLI subcommand are
+    implemented. All range-check behaviour is SEC-AC1; source requirement is
+    SEC-AC3; 0600 permissions are SEC-AC4b.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    # --- existence ---
+
+    def test_write_weight_exists(self):
+        self.assertTrue(callable(getattr(hw, "write_weight", None)), "write_weight not found")
+
+    # --- happy path ---
+
+    def test_write_weight_creates_log(self):
+        import os
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=82.5, source="manual")
+        path = os.path.join(self._tmpdir, "weight_log.json")
+        self.assertTrue(os.path.exists(path), "weight_log.json not created")
+        import json
+        data = json.loads(open(path).read())
+        entries = data.get("entries", [])
+        self.assertEqual(len(entries), 1)
+        e = entries[0]
+        self.assertEqual(e["date"], "2026-09-22")
+        self.assertEqual(e["weight_kg"], 82.5)
+        self.assertEqual(e["source"], "manual")
+
+    def test_write_weight_appends_second_date(self):
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-21", weight_kg=82.0, source="manual")
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=82.5, source="manual")
+        import json, os
+        data = json.loads(open(os.path.join(self._tmpdir, "weight_log.json")).read())
+        self.assertEqual(len(data["entries"]), 2)
+
+    def test_write_weight_updates_existing_date(self):
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=82.5, source="manual")
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=83.0, source="manual")
+        import json, os
+        data = json.loads(open(os.path.join(self._tmpdir, "weight_log.json")).read())
+        self.assertEqual(len(data["entries"]), 1)
+        self.assertEqual(data["entries"][0]["weight_kg"], 83.0)
+
+    def test_write_weight_file_permissions_0600(self):
+        import os, stat
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=82.5, source="manual")
+        path = os.path.join(self._tmpdir, "weight_log.json")
+        mode = os.stat(path).st_mode & 0o777
+        self.assertEqual(mode, 0o600, f"expected 0600, got {oct(mode)}")
+
+    # --- SEC-AC1 range checks ---
+
+    def test_weight_below_30_rejected(self):
+        with self.assertRaises(SystemExit):
+            hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=29.9, source="manual")
+
+    def test_weight_above_250_rejected(self):
+        with self.assertRaises(SystemExit):
+            hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=250.1, source="manual")
+
+    def test_weight_boundary_30_passes(self):
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=30.0, source="manual")
+
+    def test_weight_boundary_250_passes(self):
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-23", weight_kg=250.0, source="manual")
+
+    # --- SEC-AC3 source required ---
+
+    def test_invalid_source_rejected(self):
+        with self.assertRaises(SystemExit):
+            hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=82.5, source="guess")
+
+    def test_vision_confirmed_source_accepted(self):
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=82.5, source="vision-confirmed")
+
+    # --- WEIGHT_KG range pin (literal guard, value-carrying-assertion) ---
+
+    def test_weight_kg_range_pin(self):
+        # GOLDEN: 30-250 kg per card ce19e4d6 spec; if this changes, update the card too.
+        lo, hi = hw.RANGE_CHECKS["weight_kg"]
+        self.assertEqual(lo, 30)
+        self.assertEqual(hi, 250)
+
+
 if __name__ == "__main__":
     unittest.main()

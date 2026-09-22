@@ -17,6 +17,9 @@ Usage:
         --skipped "Berberine::forgot pre-lunch" \
         [--store STORE]
 
+    python3 scripts/hibiki-health-write.py weight \
+        --date 2026-09-22 --weight_kg 82.5 --source manual [--store STORE]
+
     python3 scripts/hibiki-health-write.py init-store [--store STORE]
 
 SEC-AC4: This script MUST NOT be called from a context that pipes output to
@@ -303,6 +306,44 @@ def write_dexa(
     )
 
 
+def write_weight(
+    store: str,
+    date_str: str,
+    weight_kg: float,
+    source: str,
+) -> None:
+    """Append or update a weight entry in weight_log.json (SEC-AC1/3/4b)."""
+    if source not in VALID_SOURCES:
+        print(f"ERROR: source must be one of {VALID_SOURCES}, got {source!r}", file=sys.stderr)
+        sys.exit(1)
+
+    errors = validate_ranges({"weight_kg": weight_kg})
+    if errors:
+        print("ERROR: range validation failed (SEC-AC1):", file=sys.stderr)
+        for e in errors:
+            print(f"  {e}", file=sys.stderr)
+        sys.exit(1)
+
+    path = os.path.join(store, "weight_log.json")
+    data = _open_store_file(path)
+    entries = data.get("entries", [])
+
+    entry: dict[str, Any] = {
+        "date": date_str,
+        "weight_kg": weight_kg,
+        "source": source,
+    }
+    existing = next((i for i, e in enumerate(entries) if e.get("date") == date_str), None)
+    if existing is not None:
+        entries[existing] = entry
+    else:
+        entries.append(entry)
+
+    data["entries"] = sorted(entries, key=lambda e: e.get("date", ""))
+    _write_store_file(path, data)
+    print(f"OK: weight entry written for {date_str} ({weight_kg} kg, source={source})")
+
+
 def write_nutrition_not_logged(store: str, date_str: str) -> None:
     """Write a logged:false sentinel for a day with no food log (NUT-AC1).
 
@@ -426,6 +467,13 @@ def main() -> None:
     d.add_argument("--notes", default=None)
     d.add_argument("--store", default=DEFAULT_STORE)
 
+    # weight subcommand
+    w = sub.add_parser("weight", help="Write a body weight entry (SEC-AC1/3/4b)")
+    w.add_argument("--date", default=str(date.today()))
+    w.add_argument("--weight_kg", type=float, required=True)
+    w.add_argument("--source", required=True, choices=list(VALID_SOURCES))
+    w.add_argument("--store", default=DEFAULT_STORE)
+
     # init-store subcommand
     i = sub.add_parser("init-store", help="Create store files with 0600 (SEC-AC4b)")
     i.add_argument("--store", default=DEFAULT_STORE)
@@ -473,6 +521,13 @@ def main() -> None:
             bone_density=args.bone_density,
             source=args.source,
             notes=args.notes,
+        )
+    elif args.cmd == "weight":
+        write_weight(
+            store=os.path.abspath(args.store),
+            date_str=args.date,
+            weight_kg=args.weight_kg,
+            source=args.source,
         )
     elif args.cmd == "init-store":
         init_store(os.path.abspath(args.store))
