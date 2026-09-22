@@ -120,4 +120,18 @@ describe('startOfBudapestDayMs (C4b: day boundary pinned to Europe/Budapest)', (
     process.env.TZ = 'Pacific/Midway' // UTC-11
     expect(startOfBudapestDayMs(nowMs)).toBe(Date.parse('2026-09-19T22:00:00Z'))
   })
+
+  it('DST fall-back: offset sampled at midnight (still CEST), not at the post-transition input', () => {
+    // 2026-10-25 fall-back: 03:00 CEST (UTC+2) -> 02:00 CET (UTC+1) at 01:00 UTC.
+    // Input: 10:00 UTC -- AFTER the transition (CET in effect at the input moment).
+    // The function samples tzOffsetSeconds at naiveUtcMs = 00:00 UTC on Oct 25,
+    // which is 02:00 CEST -- still 45 minutes BEFORE the 01:00 UTC clock-back.
+    // So the offset is CEST = +7200s, and midnight Budapest = Date.UTC(2026,9,24,22,0,0).
+    //
+    // Dangerous direction (old toLocaleString-style trick): sample offset at the
+    // INPUT moment (10:00 UTC = CET = UTC+1 = +3600s) -> naiveUtcMs - 3600000
+    //   = Date.UTC(2026,9,24,23,0,0) -- 1 hour too late. (C6-TZ-DST-FALL)
+    expect(startOfBudapestDayMs(Date.UTC(2026, 9, 25, 10, 0, 0)))
+      .toBe(Date.UTC(2026, 9, 24, 22, 0, 0))
+  })
 })
