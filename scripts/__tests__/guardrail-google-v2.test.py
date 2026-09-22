@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Acceptance tests for the Claudia Google MCP v2 ask-first registrations
-(SEC-AC5). Cross-pins the 7 new hard-guarded tools against the single source of
-truth in src/mcp/tool-names.ts so the python hook and the TypeScript server
-cannot drift apart, and pins that the new read/unguarded-write tools are NOT
-ask-first gated. The v1 test (guardrail-gmail-send.test.py) stays untouched
-(F-AC10); this is the v2 addition only.
+"""Acceptance tests for the Claudia + Big Ben Google MCP ask-first registrations.
+
+Covers:
+  - Claudia v2 (SEC-AC5): 7 hard-guarded tools (5 gmail catastrophe ops + v1
+    gmail_send + ENG-048 drive_upload_file).
+  - Big Ben Google MCP (card 5dbc9132): the same server wired under the
+    `bigben_google` key; the same 7 irreversible ops are guarded in lockstep.
+
+Cross-pins tool strings against the single source of truth in
+src/mcp/tool-names.ts so the python hook and the TypeScript server cannot drift
+apart. The v1 test (guardrail-gmail-send.test.py) stays untouched (F-AC10).
 
 Run: python3 scripts/__tests__/guardrail-google-v2.test.py
 """
@@ -113,11 +118,11 @@ class TestV2Registration(unittest.TestCase):
                 "%s must NOT be ask-first gated" % tool,
             )
 
-    def test_guarded_set_size_is_exactly_seven(self):
-        # 1 v1 (gmail_send) + 5 v2 gmail + 1 ENG-048 (drive_upload_file) = 7.
-        # The 2 calendar write ops were removed (card a7b62541). Catches an
-        # accidental extra/missing entry -- including a re-added calendar op.
-        self.assertEqual(len(hook.GUARDED_TOOLS), 7)
+    def test_guarded_set_size_is_exactly_fourteen(self):
+        # claudia_google: 1 v1 (gmail_send) + 5 v2 gmail + 1 drive_upload = 7
+        # bigben_google: same 7 ops in lockstep (card 5dbc9132)
+        # Total = 14. Calendar write ops are DELIBERATELY absent (card a7b62541).
+        self.assertEqual(len(hook.GUARDED_TOOLS), 14)
 
 
 class TestV2ClassifyBlocks(unittest.TestCase):
@@ -128,6 +133,63 @@ class TestV2ClassifyBlocks(unittest.TestCase):
             self.assertTrue(guarded, "%s should classify guarded" % name)
             self.assertEqual(hook.decide(guarded, "absent"), "block")
             self.assertEqual(hook.decide(guarded, "fresh"), "consume")
+
+
+# Big Ben google MCP (card 5dbc9132) -- same server key bigben_google.
+BIGBEN_GUARDED = [
+    "gmail_send",
+    "gmail_trash_message",
+    "gmail_delete_label",
+    "gmail_create_filter",
+    "gmail_delete_filter",
+    "gmail_update_vacation",
+    "drive_upload_file",
+]
+
+BIGBEN_UNGUARDED = [
+    "gmail_list_messages",
+    "gmail_get_message",
+    "gmail_get_thread",
+    "gmail_archive_message",
+    "gmail_mark_read",
+    "gmail_label_message",
+    "drive_list_files",
+    "drive_download_file",
+    "calendar_list_events",
+    "calendar_create_event",
+    "calendar_update_event",
+    "calendar_delete_event",
+    "calendar_update_event_all",
+]
+
+
+class TestBigBenGoogleRegistration(unittest.TestCase):
+    def test_bigben_guarded_tools_registered(self):
+        for tool in BIGBEN_GUARDED:
+            name = "mcp__bigben_google__%s" % tool
+            self.assertIn(name, hook.GUARDED_TOOLS, "%s not in GUARDED_TOOLS" % name)
+
+    def test_bigben_unguarded_tools_not_registered(self):
+        for tool in BIGBEN_UNGUARDED:
+            name = "mcp__bigben_google__%s" % tool
+            self.assertNotIn(name, hook.GUARDED_TOOLS, "%s must NOT be guarded" % name)
+
+    def test_bigben_guarded_tools_block_without_approval(self):
+        for tool in BIGBEN_GUARDED:
+            name = "mcp__bigben_google__%s" % tool
+            guarded, token = hook.classify({"tool_name": name, "tool_input": {"id": "x"}})
+            self.assertTrue(guarded, "%s should classify guarded" % name)
+            self.assertEqual(hook.decide(guarded, "absent"), "block")
+
+    def test_bigben_and_claudia_guarded_sets_are_symmetric(self):
+        # Same tool list under each server key -- a drift between the two sets
+        # means one agent has weaker guardrails than the other.
+        claudia_tools = {t.replace("mcp__claudia_google__", "") for t in hook.GUARDED_TOOLS
+                         if t.startswith("mcp__claudia_google__")}
+        bigben_tools = {t.replace("mcp__bigben_google__", "") for t in hook.GUARDED_TOOLS
+                        if t.startswith("mcp__bigben_google__")}
+        self.assertEqual(claudia_tools, bigben_tools,
+                         "claudia_google and bigben_google guarded sets have drifted")
 
 
 if __name__ == "__main__":
