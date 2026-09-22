@@ -92,9 +92,12 @@ import hashlib
 #     in src/mcp/tool-names.ts (GUARDED_DRIVE_UPLOAD) and cross-pinned by
 #     src/__tests__/google-mcp-tool-names-v2.test.ts (TS) +
 #     scripts/__tests__/guardrail-google-v2.test.py (python).
-#   - YouTube/Twitch publish: bigben has no MCP server configured; that guard
-#     should be added in the same change that introduces the publish tool, so
-#     the exact tool name is known and cannot drift.
+#   - Big Ben Google MCP (ENG-048 / card 5dbc9132): Big Ben receives the same
+#     google-mcp-server.js as Claudia under the mcpServers key `bigben_google`.
+#     The same irreversible/catastrophic operations are guarded here in lockstep
+#     with the claudia_google entries. Drive list/download remain unguarded
+#     (read-only). YouTube/Twitch publish tools are a separate future addition
+#     and will be guarded when they are wired in.
 GUARDED_TOOLS = frozenset(
     {
         "mcp__claudia_google__gmail_send",
@@ -110,6 +113,14 @@ GUARDED_TOOLS = frozenset(
         # ENG-048 -- Drive overwrite is an irreversible external write (guarded);
         # list/download are read-only and intentionally NOT guarded.
         "mcp__claudia_google__drive_upload_file",
+        # Big Ben Google MCP (card 5dbc9132) -- same server, same guarded ops.
+        "mcp__bigben_google__gmail_send",
+        "mcp__bigben_google__gmail_trash_message",
+        "mcp__bigben_google__gmail_delete_label",
+        "mcp__bigben_google__gmail_create_filter",
+        "mcp__bigben_google__gmail_delete_filter",
+        "mcp__bigben_google__gmail_update_vacation",
+        "mcp__bigben_google__drive_upload_file",
     }
 )
 
