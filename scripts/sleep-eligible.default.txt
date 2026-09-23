@@ -1,0 +1,12 @@
+# Sleep-eligible agents (card AGENT-a2b05be5): channel-LESS, rarely-used
+# specialists that fleet-supervisor routes to the on-demand sleep watchdog when
+# store/agent-sleep-mode.enabled is present. TRACKED default -- store/ is gitignored,
+# so this ships the shipped-in default set; an operator override may be placed at
+# store/sleep-eligible.txt (gitignored) and takes precedence. One agent id per line;
+# lines starting with # and blank lines are ignored. Absence of an id here (and no
+# override) = always-on (current behavior), the fail-safe default.
+vane
+bellamy
+kidd
+bonny
+roberts

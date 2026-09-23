@@ -322,12 +322,69 @@ ensure_dave_watchdog() {
 # (fresh launch + --channels + TELEGRAM_STATE_DIR), not the channel-less one.
 ensure_agent_watchdogs() {
   for n in gauge quill applegate radar blackbeard morgan roberts kidd rackham bonny avery vane bellamy; do
+    # Sleep-mode owns eligible ids when the flag is set (mutual exclusion): skip
+    # them here so they run under sleep-agent-watchdog.sh, not the always-on loop.
+    # Flag absent => is-eligible short-circuits false => no-op (current behavior).
+    if sleep_mode_enabled && is_sleep_eligible "$n"; then continue; fi
     pgrep -f "scripts/agent-watchdog.sh $n\$" >/dev/null 2>&1 && continue
     if [ -x "$INSTALL_DIR/scripts/agent-watchdog.sh" ]; then
       if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start agent-watchdog.sh $n"; continue; fi
       nohup bash "$INSTALL_DIR/scripts/agent-watchdog.sh" "$n" >> "$STORE/${n}-watchdog.log" 2>&1 9>&- &
       disown 2>/dev/null || true
       log "agent-watchdog $n: started"
+    fi
+  done
+}
+
+# --- Agent sleep-mode (card AGENT-a2b05be5) ---------------------------------
+# On-demand lifecycle for channel-less rare specialists: sleeping = 0 running
+# process (~200-350 MB reclaimed each). Gated by store/agent-sleep-mode.enabled;
+# absent => fully inert (eligible agents stay on the always-on agent-watchdog loop
+# above -- current behavior, fail-safe). Spec docs/design/agent-sleep-mode-spec-a2b05be5.md.
+sleep_mode_enabled() { [ -f "$INSTALL_DIR/store/agent-sleep-mode.enabled" ]; }
+
+# sleep_eligible_ids: the allowlist. Prefers the operator-editable
+# store/sleep-eligible.txt (gitignored runtime state) and falls back to the tracked
+# default shipped with the code (store/ is gitignored, so the deliverable default
+# lives under scripts/). One agent id per line; # comments and blank lines ignored.
+sleep_eligible_ids() {
+  local f="$INSTALL_DIR/store/sleep-eligible.txt"
+  [ -f "$f" ] || f="$INSTALL_DIR/scripts/sleep-eligible.default.txt"
+  [ -f "$f" ] || return 0
+  grep -vE '^[[:space:]]*(#|$)' "$f" | awk '{print $1}'
+}
+
+is_sleep_eligible() {
+  local want="$1" id
+  for id in $(sleep_eligible_ids); do [ "$id" = "$want" ] && return 0; done
+  return 1
+}
+
+# ensure_sleep_agent_watchdogs: start one scripts/sleep-agent-watchdog.sh per
+# eligible agent when the flag is set. Enforces mutual exclusion by first STOPPING
+# any already-running always-on agent-watchdog.sh for the same id (two loops must
+# never fight over one session -- one keeping it alive, one sleeping it; the
+# ensure_agent_watchdogs subtraction only prevents NEW always-on starts, not one
+# already running from before activation). Reboot-persistent via pgrep-skip.
+ensure_sleep_agent_watchdogs() {
+  sleep_mode_enabled || return 0
+  local n
+  for n in $(sleep_eligible_ids); do
+    [ -f "$INSTALL_DIR/agents/$n/agent-config.json" ] || continue
+    if pgrep -f "scripts/agent-watchdog.sh $n\$" >/dev/null 2>&1; then
+      if [ "$DRY_RUN" -eq 1 ]; then
+        log "DRY-RUN would: stop always-on agent-watchdog.sh $n (sleep-mode owns it)"
+      else
+        pkill -f "scripts/agent-watchdog.sh $n\$" 2>/dev/null || true
+        log "sleep-mode: stopped always-on agent-watchdog $n (mutual exclusion)"
+      fi
+    fi
+    pgrep -f "scripts/sleep-agent-watchdog.sh $n\$" >/dev/null 2>&1 && continue
+    if [ -x "$INSTALL_DIR/scripts/sleep-agent-watchdog.sh" ]; then
+      if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start sleep-agent-watchdog.sh $n"; continue; fi
+      nohup bash "$INSTALL_DIR/scripts/sleep-agent-watchdog.sh" "$n" >> "$STORE/${n}-sleep-watchdog.log" 2>&1 9>&- &
+      disown 2>/dev/null || true
+      log "sleep-agent-watchdog $n: started"
     fi
   done
 }
@@ -1089,6 +1146,9 @@ tick() {
   ensure_channel_watchdogs
   # 4) ROLE-AGENT WATCHDOGS (Forge/Gauge/Quill/Scout -- permanent, channel-less)
   ensure_agent_watchdogs
+  # 4b) SLEEP-MODE WATCHDOGS (on-demand for eligible channel-less specialists --
+  #     gated by store/agent-sleep-mode.enabled; fully inert when absent -- card AGENT-a2b05be5)
+  ensure_sleep_agent_watchdogs
   # 5) TELEGRAM MCP-PIPE WATCHDOG (orchestrator pipe recovery -- reboot-persistent)
   ensure_pipe_watchdog
   # 5b) MAIN-AGENT CHANNELS WATCHDOG (coarse net when dashboard down -- reboot-persistent loop, card da737e92)
