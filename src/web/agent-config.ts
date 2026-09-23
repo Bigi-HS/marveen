@@ -610,26 +610,36 @@ export function normalizeRecipient(
   return null
 }
 
-// The REVERSE of readAgentDisplayName (OPS-151, card 930bba69): resolve a
-// Boss-typed name -- a display name ("NoA", "Grace") OR a raw agent id ("dave")
-// -- back to the internal agent id, for the launch/route alias (a human terminal
-// typing "NoA" starts agent "marveen").
-//
-// Failure policy is FAIL-CLOSED, the OPPOSITE of the Boss-facing text guard: an
-// ambiguous name returns null (refuse), it never guesses. This feeds a
-// launch/route action, so a wrong resolution would spawn or address the WRONG
-// agent -- here silence is safer than a wrong pick. (The Boss-facing text guard
-// must never swallow a reply, so it rewrites/warns; this must never mis-launch,
-// so it refuses.)
-//
-// The reverse index maps BOTH each agent's display name and its raw id (case-
-// insensitively) to the id. A collision -- two agents sharing a display name, or
-// one agent's display equal to another agent's id -- marks that key ambiguous, so
-// it resolves to null. An agent's own id+display (e.g. dave/"Dave") is not a
-// self-collision (same id both ways).
-//
-// `roster` and `resolveDisplay` are injectable so the logic is unit-testable
-// without the filesystem (mirrors normalizeRecipient's isKnown seam).
+/**
+ * The REVERSE of readAgentDisplayName (OPS-151, card 930bba69): resolve a
+ * Boss-typed name -- a display name ("NoA", "Grace") OR a raw agent id ("dave")
+ * -- back to the internal agent id, for the launch/route alias (a human terminal
+ * typing "NoA" starts agent "marveen").
+ *
+ * Failure policy is FAIL-CLOSED, the OPPOSITE of the Boss-facing text guard: an
+ * ambiguous name returns null (refuse), it never guesses. This feeds a
+ * launch/route action, so a wrong resolution would spawn or address the WRONG
+ * agent -- here silence is safer than a wrong pick. (The Boss-facing text guard
+ * must never swallow a reply, so it rewrites/warns; this must never mis-launch,
+ * so it refuses.)
+ *
+ * The reverse index maps BOTH each agent's display name and its raw id (case-
+ * insensitively) to the id. A collision -- two agents sharing a display name, or
+ * one agent's display equal to another agent's id -- marks that key ambiguous, so
+ * it resolves to null. An agent's own id+display (e.g. dave/"Dave") is not a
+ * self-collision (same id both ways).
+ *
+ * @param input - The Boss-typed name or raw agent id to resolve.
+ * @param roster - The set of known agent ids to index. Production default is the
+ *   full fleet roster. Tests inject a smaller fixture to avoid the filesystem.
+ * @param resolveDisplay - Maps an agent id to its human-facing display name.
+ *   CONTRACT (card a1525229): must be a stable, non-throwing function. A resolver
+ *   that throws is handled gracefully (raw-id alias kept, display alias skipped),
+ *   but callers should not rely on this -- pass a resolver that does not throw.
+ *   A resolver that maps every agent to the SAME display name causes every display
+ *   key to collide and resolve to null; raw ids remain usable. This is the expected
+ *   degraded behaviour, not a bug.
+ */
 export function displayNameToAgentId(
   input: string,
   roster: string[] = [MAIN_AGENT_ID, ...listAgentNames()],
