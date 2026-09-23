@@ -82,6 +82,57 @@ describe('ZeppIngestStore', () => {
     expect(mode).toBe(0o700)
   })
 
+  // ---------------------------------------------------------------------------
+  // WELL-66e35b2c: hibiki hand-build writer emits `_date` instead of `date`.
+  // The reader must recover using the filename as the authoritative date key,
+  // so the freshness route never sees latestDate=null ("latest data never").
+  //
+  // Adversarial fixtures (3-fixture rule for a signal-detector change):
+  //   1. FALSE-NEGATIVE (the bug): _date-only file -> read() must return correct date
+  //   2. FALSE-POSITIVE guard: valid file with date field is returned unchanged
+  //   3. OPPOSITE combination: _date != filename -> filename wins (not _date)
+  // ---------------------------------------------------------------------------
+  describe('_date field normalisation (WELL-66e35b2c)', () => {
+    const { writeFileSync: wf } = require('node:fs') as typeof import('node:fs')
+
+    it('FALSE-NEGATIVE: a file written with _date (no date) is recovered via filename', () => {
+      // Reproduces the hibiki hand-build shape. Before the fix, read() returned
+      // the snapshot with date=undefined -> latest().date=undefined ->
+      // freshness route latestDate=null -> "latest data never" alert every day.
+      const raw = {
+        _date: '2026-09-21',
+        status: 'ok',
+        source: 'manual-vision',
+        sleep: { durationMin: 430, startAt: '2026-09-20T22:00:00Z', endAt: '2026-09-21T05:00:00Z', score: 80 },
+      }
+      wf(join(dir, 'daily-2026-09-21.json'), JSON.stringify(raw), { mode: 0o600 })
+
+      const snap = store.read('2026-09-21')
+      // Dangerous direction: date=undefined -> freshness route sees "never".
+      expect(snap).not.toBeNull()
+      expect(snap!.date).toBe('2026-09-21')
+      // latest() must also surface the correct date (not null / undefined)
+      expect(store.latest()?.date).toBe('2026-09-21')
+    })
+
+    it('FALSE-POSITIVE guard: a file with a valid date field is returned unchanged', () => {
+      // The normalisation must NOT mutate a well-formed snapshot.
+      const snap = makeSnapshot('2026-09-22', { status: 'ok' })
+      store.write(snap)
+      const read = store.read('2026-09-22')
+      expect(read!.date).toBe('2026-09-22')
+      expect(read).toEqual(snap)
+    })
+
+    it('OPPOSITE: if _date disagrees with filename, the filename (canonical key) wins', () => {
+      // daily-2026-09-20.json containing _date: 2026-09-19 must be read back
+      // with date='2026-09-20'. The filename is what listDates / latest() sort on.
+      const raw = { _date: '2026-09-19', status: 'ok' }
+      wf(join(dir, 'daily-2026-09-20.json'), JSON.stringify(raw), { mode: 0o600 })
+      expect(store.read('2026-09-20')!.date).toBe('2026-09-20')
+    })
+  })
+
   // ENG-083: the store must validate `date` before it reaches path.join, so a
   // crafted date cannot escape the store directory. Defence-in-depth: the HTTP
   // ingest route already screens date, but the store is a reusable component and
