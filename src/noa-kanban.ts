@@ -213,6 +213,18 @@ export interface KanbanCard {
    * bulk migrations (card 4326682b).
    */
   last_moved: number | null
+  /**
+   * Epoch-seconds until which this card is intentionally parked (card fc574fb3).
+   * While `parked_until > now` the card is NOT considered stale -- the owner is
+   * waiting for an external trigger and cannot act. NULL = no park set.
+   */
+  parked_until: number | null
+  /**
+   * Non-zero when the card is blocked on a Boss decision (card fc574fb3).
+   * While set the card is NOT considered stale -- it is legitimately waiting for
+   * Boss input, not neglected. 0 = not waiting.
+   */
+  boss_waiting: number
 }
 
 export interface BoardColumn {
@@ -246,6 +258,8 @@ export interface CreateCardParams {
   due_date?: number | null
   sort_order?: number
   suppressIntake?: boolean
+  parked_until?: number | null
+  boss_waiting?: number
 }
 
 export interface UpdateCardParams {
@@ -261,6 +275,8 @@ export interface UpdateCardParams {
   due_date?: number | null
   sort_order?: number
   suppressIntake?: boolean
+  parked_until?: number | null
+  boss_waiting?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -361,10 +377,17 @@ export function staleThresholdSeconds(score: number | null): number | null {
  * depends_on (card 19bb3852): if the card points to a non-done, non-archived blocker
  * the card is legitimately blocked and is NOT considered stale. Pass `lookupBlocker`
  * to enable this check; without it the depends_on field is ignored (backward compat).
+ *
+ * parked_until / boss_waiting (card fc574fb3): a card is NOT stale while its
+ * owner legitimately cannot act -- parked until a future epoch, or blocked on a
+ * Boss decision. Both checks come before the age test so they cannot produce a
+ * false-stale signal.
  */
 export function isCardStale(
   card: Pick<KanbanCard, 'priority_score' | 'updated_at' | 'last_moved' | 'status'> & {
     depends_on?: string | null
+    parked_until?: number | null
+    boss_waiting?: number
   },
   nowSec: number = Math.floor(Date.now() / 1000),
   lookupBlocker?: (id: string) => { status: string; archived_at?: number | null } | null | undefined,
@@ -379,6 +402,8 @@ export function isCardStale(
       return false
     }
   }
+  if (card.parked_until != null && card.parked_until > nowSec) return false
+  if (card.boss_waiting) return false
 
   if (card.last_moved !== null && card.last_moved !== undefined) {
     return nowSec - card.last_moved >= threshold
@@ -401,6 +426,8 @@ const KANBAN_MIGRATIONS = [
   `ALTER TABLE kanban_cards ADD COLUMN depends_on TEXT REFERENCES kanban_cards(id)`,
   `ALTER TABLE kanban_cards ADD COLUMN code TEXT`,
   `ALTER TABLE kanban_cards ADD COLUMN last_moved INTEGER`,
+  `ALTER TABLE kanban_cards ADD COLUMN parked_until INTEGER`,
+  `ALTER TABLE kanban_cards ADD COLUMN boss_waiting INTEGER NOT NULL DEFAULT 0`,
 ]
 
 // The 07-29 taxonomy-backfill burst rewrote updated_at on 253 cards within
@@ -710,13 +737,14 @@ export function createCard(params: CreateCardParams): KanbanCard {
   const code = project != null ? allocateCode(db, project) : null
 
   db.prepare(
-    `INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, priority_score, depends_on, code)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, priority_score, depends_on, code, parked_until, boss_waiting)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id, params.title, params.description ?? null, status,
     params.assignee ?? null, priority,
     project, params.parent_id ?? null, params.due_date ?? null,
     sortOrder, now, now, priorityScore, params.depends_on ?? null, code,
+    params.parked_until ?? null, params.boss_waiting ?? 0,
   )
 
   emitOrDefer({ type: 'kanban', id, action: 'created' })
@@ -775,6 +803,8 @@ export function updateCard(id: string, params: UpdateCardParams): boolean {
     updated_at: now,
     code: newCode,
     last_moved: card.last_moved,
+    parked_until: params.parked_until !== undefined ? params.parked_until : card.parked_until,
+    boss_waiting: params.boss_waiting !== undefined ? params.boss_waiting : card.boss_waiting,
   }
 
   // Set last_moved ONLY when status or assignee actually changes (write != change).
@@ -784,9 +814,9 @@ export function updateCard(id: string, params: UpdateCardParams): boolean {
   const newLastMoved = (statusMoved || assigneeMoved) ? now : card.last_moved
 
   const changed = getNoaDb().prepare(
-    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, depends_on=?, due_date=?, sort_order=?, updated_at=?, priority_score=?, code=?, last_moved=?
+    `UPDATE kanban_cards SET title=?, description=?, status=?, assignee=?, priority=?, project=?, parent_id=?, depends_on=?, due_date=?, sort_order=?, updated_at=?, priority_score=?, code=?, last_moved=?, parked_until=?, boss_waiting=?
      WHERE id=?`
-  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.depends_on, f.due_date, f.sort_order, f.updated_at, f.priority_score, f.code, newLastMoved, id).changes > 0
+  ).run(f.title, f.description, f.status, f.assignee, f.priority, f.project, f.parent_id, f.depends_on, f.due_date, f.sort_order, f.updated_at, f.priority_score, f.code, newLastMoved, f.parked_until, f.boss_waiting, id).changes > 0
 
   if (!changed) return false
 

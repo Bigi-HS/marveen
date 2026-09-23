@@ -212,6 +212,27 @@ describe('isCardStale (card 31f24bad)', () => {
     const c = ageCard({ last_moved: NOW - 1 * 86400, updated_at: NOW - 30 * 86400, priority_score: 6 })
     expect(isCardStale(c, NOW)).toBe(false)
   })
+
+  // --- parked_until + boss_waiting (fc574fb3) ---
+  it('returns false when parked_until is in the future', () => {
+    const c = ageCard({ last_moved: NOW - 4 * 86400, priority_score: 6, parked_until: NOW + 86400 })
+    expect(isCardStale(c, NOW)).toBe(false)
+  })
+
+  it('evaluates normally when parked_until is in the past', () => {
+    const c = ageCard({ last_moved: NOW - 4 * 86400, priority_score: 6, parked_until: NOW - 1 })
+    expect(isCardStale(c, NOW)).toBe(true)
+  })
+
+  it('returns false when boss_waiting is set', () => {
+    const c = ageCard({ last_moved: NOW - 4 * 86400, priority_score: 6, boss_waiting: 1 })
+    expect(isCardStale(c, NOW)).toBe(false)
+  })
+
+  it('evaluates normally when boss_waiting=0 and no parked_until', () => {
+    const c = ageCard({ last_moved: NOW - 4 * 86400, priority_score: 6, boss_waiting: 0 })
+    expect(isCardStale(c, NOW)).toBe(true)
+  })
 })
 
 describe('formatAge (card 31f24bad)', () => {

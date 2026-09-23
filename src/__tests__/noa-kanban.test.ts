@@ -955,6 +955,37 @@ describe('isCardStale', () => {
     const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400, last_moved: null }
     expect(isCardStale(card, now)).toBe(true)
   })
+
+  // --- parked_until + boss_waiting (fc574fb3) ---
+  it('a card with parked_until in the future is not stale', () => {
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400, last_moved: null,
+      parked_until: now + 86400, boss_waiting: 0 }
+    expect(isCardStale(card, now)).toBe(false)
+  })
+
+  it('a card with parked_until in the past is evaluated normally', () => {
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400, last_moved: null,
+      parked_until: now - 1, boss_waiting: 0 }
+    expect(isCardStale(card, now)).toBe(true)
+  })
+
+  it('a card with boss_waiting=1 is not stale', () => {
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400, last_moved: null,
+      parked_until: null, boss_waiting: 1 }
+    expect(isCardStale(card, now)).toBe(false)
+  })
+
+  it('a card with boss_waiting=0 and no parked_until is evaluated normally', () => {
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400, last_moved: null,
+      parked_until: null, boss_waiting: 0 }
+    expect(isCardStale(card, now)).toBe(true)
+  })
+
+  it('missing parked_until/boss_waiting fields leave the existing logic unchanged', () => {
+    // Backward compat: cards without these fields still work as before
+    const card = { status: 'planned', priority_score: 6, updated_at: now - 4 * 86400, last_moved: null }
+    expect(isCardStale(card, now)).toBe(true)
+  })
 })
 
 describe('applyKanbanMigrations', () => {

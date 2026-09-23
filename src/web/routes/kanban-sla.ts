@@ -55,6 +55,8 @@ interface CardRow {
   priority_score: number | null
   last_moved: number | null
   updated_at: number
+  parked_until: number | null
+  boss_waiting: number
 }
 
 export function computeSlaCards(
@@ -62,7 +64,7 @@ export function computeSlaCards(
   db: Database.Database = getNoaDb(),
 ): SlaCard[] {
   const rows = db.prepare(
-    `SELECT id, title, status, assignee, priority, priority_score, last_moved, updated_at
+    `SELECT id, title, status, assignee, priority, priority_score, last_moved, updated_at, parked_until, boss_waiting
        FROM kanban_cards
       WHERE status IN ('planned','in_progress','waiting')
         AND (archived_at IS NULL OR archived_at = 0)
@@ -70,6 +72,22 @@ export function computeSlaCards(
   ).all() as CardRow[]
 
   return rows.map((row) => {
+    // fc574fb3: intentionally-parked and boss-gated cards are not stale.
+    if ((row.parked_until != null && row.parked_until > nowSec) || row.boss_waiting) {
+      return {
+        id: row.id,
+        title: row.title,
+        status: row.status,
+        assignee: row.assignee,
+        priority: row.priority,
+        priority_score: row.priority_score ?? null,
+        age_seconds: null,
+        threshold_seconds: null,
+        breach_fraction: null,
+        sla_status: 'ok' as SlaStatus,
+      }
+    }
+
     const ts = row.last_moved ?? row.updated_at
     let ageSec: number | null = null
     if (ts >= BULK_STAMP_BURST_START && ts <= BULK_STAMP_BURST_END && row.last_moved === null) {
