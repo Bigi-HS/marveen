@@ -47,7 +47,14 @@ export class ZeppIngestStore {
     const path = join(this.root, fileName(date))
     if (!existsSync(path)) return null
     try {
-      return JSON.parse(readFileSync(path, 'utf8')) as ZeppDailySnapshot
+      const parsed = JSON.parse(readFileSync(path, 'utf8')) as ZeppDailySnapshot
+      // Normalise the date field: hibiki hand-build writes `_date` instead of `date`.
+      // The filename is the authoritative key (it was already validated above and is
+      // what listDates / latest() sort on), so recover by pinning parsed.date to the
+      // canonical value. This unstands every _date-only snapshot without touching the
+      // file on disk.
+      if (!isValidDate(parsed.date)) parsed.date = date
+      return parsed
     } catch {
       return null
     }
