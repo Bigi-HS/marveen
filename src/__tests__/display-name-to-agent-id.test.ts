@@ -66,4 +66,50 @@ describe('displayNameToAgentId', () => {
     expect(displayNameToAgentId('dave', roster, resolve)).toBe('dave')
     expect(displayNameToAgentId('Dave', roster, resolve)).toBe('dave')
   })
+
+  // --- resolveDisplay contract guard (cards 784a95a6 + a1525229, gauge PR#491) ---
+  // The injected resolveDisplay seam is by-design (testability). Production's
+  // default resolver never throws, but a future injected resolver that DID throw
+  // would crash this caller uncaught. The guard fails OPEN on a resolver error:
+  // skip that id's display alias but keep its raw-id alias, so raw-id lookups
+  // still resolve and the launch/route path never crashes. Ambiguity stays
+  // fail-closed.
+  it('does not throw when the injected resolver throws for one id', () => {
+    const boom = (id: string) => {
+      if (id === 'radar') throw new Error('resolver blew up')
+      return display[id] ?? id
+    }
+    expect(() => displayNameToAgentId('radar', roster, boom)).not.toThrow()
+  })
+
+  it('still resolves a raw id whose display resolution throws (fail-open)', () => {
+    // radar's display lookup throws, but its raw-id alias was added first, so
+    // the raw id still resolves; the (now-missing) display name resolves to null.
+    const boom = (id: string) => {
+      if (id === 'radar') throw new Error('resolver blew up')
+      return display[id] ?? id
+    }
+    expect(displayNameToAgentId('radar', roster, boom)).toBe('radar')
+    expect(displayNameToAgentId('Grace', roster, boom)).toBeNull()
+  })
+
+  it('a throwing id does not poison resolution of the other agents', () => {
+    const boom = (id: string) => {
+      if (id === 'radar') throw new Error('resolver blew up')
+      return display[id] ?? id
+    }
+    expect(displayNameToAgentId('NoA', roster, boom)).toBe('marveen')
+    expect(displayNameToAgentId('Dampier', roster, boom)).toBe('gauge')
+    expect(displayNameToAgentId('dave', roster, boom)).toBe('dave')
+  })
+
+  it('fails CLOSED when a buggy resolver maps ALL agents to one name (DoS seam)', () => {
+    // a1525229: a resolver collapsing every display to the same name makes every
+    // display key ambiguous -> null. Raw ids still resolve (added before display),
+    // so the launch/route path degrades to id-only rather than mis-launching.
+    const collapse = (_id: string) => 'Same'
+    expect(displayNameToAgentId('Same', roster, collapse)).toBeNull()
+    expect(displayNameToAgentId('marveen', roster, collapse)).toBe('marveen')
+    expect(displayNameToAgentId('dave', roster, collapse)).toBe('dave')
+  })
 })
