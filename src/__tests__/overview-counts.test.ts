@@ -3,9 +3,9 @@ import { computeOverviewCounts, type OverviewCountDeps } from '../web/routes/ove
 import { startOfBudapestDayMs } from '../db.js'
 
 // WELL-027 C4: overview count integrity.
-//   C4a -- the "tasks today" figure is the ARITHMETIC SUM of two independently
-//          counted sources. This suite PINS the current (known, bounded) overlap;
-//          real dedup is tracked separately in card 2fbfdb39.
+//   C4a -- tasksToday is a DISJOINT UNION: countUserTurns excludes scheduled-task
+//          echoes (already counted in task_runs), so arithmetic addition yields the
+//          true distinct activity count. Dedup implemented in card 2fbfdb39.
 //   C4b -- the day boundary must be pinned to Europe/Budapest, not the ambient
 //          server TZ.
 
@@ -21,29 +21,22 @@ function makeDeps(over: Partial<OverviewCountDeps> = {}): OverviewCountDeps {
 }
 
 describe('computeOverviewCounts', () => {
-  describe('C4a: producer double-count (known overlap, dedup tracked in card 2fbfdb39)', () => {
-    // tasksToday = countTaskRuns(scheduled task_runs) + countUserTurns(session
-    // JSONL user-turns). These sources are NOT disjoint by construction: a
-    // scheduled task writes a task_runs row AND its dispatched prompt can also
-    // land as a plain user-turn in a session JSONL, so a single logical activity
-    // is counted in BOTH sources. This test DELIBERATELY pins that arithmetic
-    // add as the current bounded behavior -- it must NOT be "corrected" to expect
-    // a de-duplicated (lower) number until event-identity dedup lands via card
-    // 2fbfdb39. Asserting the double-counted total is intentional (pin the live
-    // behavior, not the safe side).
-    it('sums both sources arithmetically, double-counting an overlapping activity', () => {
+  describe('C4a: disjoint union (scheduled echoes excluded from countUserTurns)', () => {
+    // countUserTurns (production impl) filters out scheduled-task echoes before
+    // returning -- those turns are already counted in task_runs. The deps seam here
+    // receives already-filtered counts, so arithmetic addition equals the true
+    // distinct activity count (no double-count).
+    it('counts distinct activities: task_runs plus non-echo user turns', () => {
       const counts = computeOverviewCounts(makeDeps({
-        // 3 scheduled runs and 2 user-turns where the 2 user-turns represent the
-        // SAME logical activity as 2 of the 3 runs (dispatched-prompt overlap).
+        // 3 scheduled runs today; countUserTurns returns 4 genuine (non-echo) turns.
         countTaskRuns: (from, to) => (to === undefined ? 3 : 0),
-        countUserTurns: (from, to) => (to === undefined ? 2 : 0),
+        countUserTurns: (from, to) => (to === undefined ? 4 : 0),
       }))
-      // Known limitation: 3 + 2 = 5, with zero dedup even though the true
-      // distinct count is 3. Pinned here; fixed under card 2fbfdb39.
-      expect(counts.tasksToday).toBe(5)
+      // Disjoint: 3 + 4 = 7 distinct activities.
+      expect(counts.tasksToday).toBe(7)
     })
 
-    it('sums both sources for the yesterday window as well', () => {
+    it('counts yesterday\'s distinct activities the same way', () => {
       const counts = computeOverviewCounts(makeDeps({
         countTaskRuns: (from, to) => (to === undefined ? 0 : 4),
         countUserTurns: (from, to) => (to === undefined ? 0 : 1),

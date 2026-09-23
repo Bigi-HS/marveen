@@ -12,17 +12,39 @@ import { json } from '../http-helpers.js'
 import { toPriorityString, type PriorityValue } from '../../priority.js'
 import type { RouteContext } from './types.js'
 
-// Count "real" user turns (operator prompts, Telegram messages) in every
-// Claude Code session JSONL under ~/.claude/projects/. Filters out
-// tool_result, local-command, and synthetic system events so a task-heavy
-// hour doesn't inflate the counter.
-function countUserTurns(fromMs: number, toMs: number = Number.POSITIVE_INFINITY): number {
-  const root = join(homedir(), '.claude', 'projects')
-  if (!existsSync(root)) return 0
+/**
+ * Returns true when a JSONL user-turn content was injected by the scheduler
+ * rather than typed by a human operator. The scheduler wraps every scheduled-task
+ * prompt with `<untrusted source="scheduled-task:...">` (see noa-scheduler.ts
+ * buildScheduledTaskPrompt). Those turns are already counted via task_runs; this
+ * guard prevents double-counting them in the user-turn total (C4a, card 2fbfdb39).
+ *
+ * Exported for unit tests.
+ */
+export function isScheduledTaskTurnContent(content: string | unknown[]): boolean {
+  if (typeof content !== 'string') return false
+  return content.includes('<untrusted source="scheduled-task:')
+}
+
+/**
+ * Count "real" user turns (operator prompts, Telegram messages) in every
+ * Claude Code session JSONL under the given projects root. Filters out
+ * tool_result, local-command, synthetic system events, AND scheduled-task
+ * echoes (C4a: those are already counted via task_runs, so including them
+ * here would double-count a single logical activity).
+ *
+ * @param projectsRoot - injectable for unit tests; defaults to ~/.claude/projects
+ */
+export function countUserTurns(
+  fromMs: number,
+  toMs: number = Number.POSITIVE_INFINITY,
+  projectsRoot: string = join(homedir(), '.claude', 'projects'),
+): number {
+  if (!existsSync(projectsRoot)) return 0
   let total = 0
   try {
-    for (const projectDir of readdirSync(root)) {
-      const absDir = join(root, projectDir)
+    for (const projectDir of readdirSync(projectsRoot)) {
+      const absDir = join(projectsRoot, projectDir)
       let stat: ReturnType<typeof statSync>
       try { stat = statSync(absDir) } catch { continue }
       if (!stat.isDirectory()) continue
@@ -44,6 +66,7 @@ function countUserTurns(fromMs: number, toMs: number = Number.POSITIVE_INFINITY)
             const content = e.message?.content
             if (typeof content === 'string') {
               if (content.startsWith('<local-command') || content.startsWith('<command-name>')) continue
+              if (isScheduledTaskTurnContent(content)) continue
               total++
             } else if (Array.isArray(content)) {
               const hasToolResult = content.some((b: any) => b && b.type === 'tool_result')
@@ -81,15 +104,13 @@ export interface OverviewCounts {
  * Combine the scheduled-task and user-turn counters into the overview's
  * "tasks today/yesterday" figures.
  *
+ * C4a: tasksToday is a disjoint union of two sources. countUserTurns excludes
+ * scheduled-task echoes (turns injected by the scheduler -- already counted in
+ * task_runs), so arithmetic addition is safe: each logical activity lands in
+ * exactly one source.
+ *
  * C4b: the day boundary is pinned to Europe/Budapest via startOfBudapestDayMs,
  * not the ambient server TZ.
- *
- * C4a KNOWN LIMITATION: tasksToday/tasksYesterday are the ARITHMETIC SUM of two
- * independently-counted, NOT-disjoint sources -- a scheduled task writes a
- * task_runs row AND its dispatched prompt can also appear as a user-turn in a
- * session JSONL, so one logical activity is counted in both. This overcount is
- * bounded and intentional here; event-identity dedup is tracked separately in
- * card 2fbfdb39. See overview-counts.test.ts (C4a) which pins this behavior.
  */
 export function computeOverviewCounts(deps: OverviewCountDeps): OverviewCounts {
   const startTs = startOfBudapestDayMs(deps.nowMs())
