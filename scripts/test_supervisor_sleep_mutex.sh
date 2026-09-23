@@ -77,6 +77,24 @@ run
 case "$RESULT" in *PKILL*) bad "no always-on running: must NOT pkill (got '$RESULT')" ;; *) ok "no always-on running -> no pkill" ;; esac
 case "$RESULT" in *"NOHUP[bash $TMP/scripts/sleep-agent-watchdog.sh $ID]"*) ok "still starts the sleep watchdog" ;; *) bad "should start sleep watchdog even with no old loop" ;; esac
 
+# ---- HARDENING (card 4251f1a1): drop regex-metachar ids from the operator override --
+# A hostile/typo'd store/sleep-eligible.txt must never widen the pgrep/pkill -f regex
+# onto another agent's watchdog. sleep_eligible_ids validates to [A-Za-z0-9_-].
+printf '%s\n' "$ID" "good_2" "ev.l" "a|b" ".*" 'a$b' > "$TMP/store/sleep-eligible.txt"
+EMIT=" $(sleep_eligible_ids | tr '\n' ' ') "
+case "$EMIT" in *" $ID "*)   ok "valid id kept" ;; *) bad "valid id '$ID' dropped (got '$EMIT')" ;; esac
+case "$EMIT" in *" good_2 "*) ok "valid id (underscore+digit) kept" ;; *) bad "good_2 dropped (got '$EMIT')" ;; esac
+for meta in 'ev.l' 'a|b' '.*' 'a$b'; do
+  case "$EMIT" in *" $meta "*) bad "metachar id '$meta' NOT dropped (regex-injection surface)" ;; *) ok "metachar id '$meta' dropped" ;; esac
+done
+# and no dropped id ever reaches a pkill/nohup pattern (they never enter the loop).
+MOCK_ALWAYSON_RUNNING=1; run
+case "$RESULT" in
+  *'.*'*|*'|b'*|*'ev.l'*|*'a$b'*) bad "a dropped metachar id reached a pkill/nohup pattern: '$RESULT'" ;;
+  *) ok "no dropped metachar id reaches pkill/nohup" ;;
+esac
+printf '%s\n' "$ID" > "$TMP/store/sleep-eligible.txt"   # restore single-id override
+
 echo "----"
 echo "c12 supervisor mutual-exclusion harness: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

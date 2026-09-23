@@ -351,7 +351,21 @@ sleep_eligible_ids() {
   local f="$INSTALL_DIR/store/sleep-eligible.txt"
   [ -f "$f" ] || f="$INSTALL_DIR/scripts/sleep-eligible.default.txt"
   [ -f "$f" ] || return 0
-  grep -vE '^[[:space:]]*(#|$)' "$f" | awk '{print $1}'
+  # Hardening (card 4251f1a1, Chad): ids from the operator-writable
+  # store/sleep-eligible.txt flow into `pgrep -f`/`pkill -f` REGEX patterns in
+  # ensure_sleep_agent_watchdogs. Emit ONLY ids in the safe agent-id charset
+  # [A-Za-z0-9_-] (NOTE: '.' is excluded -- it is a regex metachar; real agent ids
+  # never contain one). Anything with a metachar or whitespace is dropped with a
+  # warning, so a typo/hostile override can never widen a pkill onto another agent's
+  # watchdog. A validated id has no ERE metachar ('-'/'_' are literal), so the
+  # downstream patterns stay exact -- no escaping needed once the input is clean.
+  local id
+  grep -vE '^[[:space:]]*(#|$)' "$f" | awk '{print $1}' | while IFS= read -r id; do
+    case "$id" in
+      ''|*[!A-Za-z0-9_-]*) [ -n "$id" ] && log "sleep_eligible_ids: dropping invalid id '$id' (non-[A-Za-z0-9_-] char)" ;;
+      *) printf '%s\n' "$id" ;;
+    esac
+  done
 }
 
 is_sleep_eligible() {
