@@ -65,6 +65,17 @@ export function sessionEndMarkerHookEnabled(storeDir: string = STORE_DIR): boole
   return existsSync(join(storeDir, SESSION_END_MARKER_FLAG))
 }
 
+// The memory-continuity S3 checkpoint hooks (SessionStart replay + the
+// PreCompact/SessionEnd/UserPromptSubmit checkpoint-write triggers). These
+// share the SAME operator flag as the S1 SessionEnd marker so S1+S2+S3
+// co-activate on the single flag-touch: the checkpoint REPLAY must not go live
+// while the flag is off (a cold startup would classify absence as crash and
+// false-resume), so its INJECTION is gated identically. The two write hooks
+// (checkpoint-write.py) are harmless when the flag is off (they only stamp a
+// record nothing reads), but are gated together for one coherent activation.
+const CHECKPOINT_REPLAY_HOOK_MARKER = 'checkpoint-replay.py'
+const CHECKPOINT_WRITE_HOOK_MARKER = 'checkpoint-write.py'
+
 type HookCommand = { type?: string; command?: string; prompt?: string }
 type HookEntry = { matcher?: string; hooks?: HookCommand[] }
 type HooksBlock = Record<string, HookEntry[]>
@@ -192,6 +203,70 @@ export function stripSessionEndMarker(hooks: HooksBlock): void {
   if (hooks.SessionEnd.length === 0) delete hooks.SessionEnd
 }
 
+// Drop every memory-continuity S3 checkpoint hook from a template hooks block in
+// place, applied at template-load time when the operator flag is absent (the
+// SAME gate as stripSessionEndMarker so S3 co-activates with S1/S2). Removes the
+// SessionStart checkpoint-replay entry AND the PreCompact/SessionEnd/
+// UserPromptSubmit checkpoint-write entries, while PRESERVING any co-located
+// hook (e.g. the PreCompact type:agent memory-save prompt, the SessionEnd S1
+// marker when its own gate keeps it). An entry emptied of its hooks is removed;
+// an event array emptied of entries is deleted.
+export function stripCheckpointHooks(hooks: HooksBlock): void {
+  const isCheckpointCmd = (h: HookCommand): boolean =>
+    typeof h.command === 'string' &&
+    (h.command.includes(CHECKPOINT_REPLAY_HOOK_MARKER) || h.command.includes(CHECKPOINT_WRITE_HOOK_MARKER))
+  for (const evt of Object.keys(hooks)) {
+    const entries = hooks[evt]
+    if (!Array.isArray(entries)) continue
+    for (const entry of entries) {
+      if (Array.isArray(entry.hooks)) {
+        entry.hooks = entry.hooks.filter(h => !isCheckpointCmd(h))
+      }
+    }
+    // Drop entries that lost all their hooks (a checkpoint-only entry); keep any
+    // entry that still carries another hook (the co-located memory/marker hook).
+    hooks[evt] = entries.filter(e => !Array.isArray(e.hooks) || e.hooks.length > 0)
+    if (hooks[evt].length === 0) delete hooks[evt]
+  }
+}
+
+// Targeted idempotent backfill of the S3 SessionStart checkpoint-replay hook.
+// ADD-only; mirrors ensureMemoryHook. Gated at the call site on the shared flag.
+export function ensureCheckpointReplayHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.SessionStart ?? []).filter(e => entryReferences(e, CHECKPOINT_REPLAY_HOOK_MARKER))
+  if (entries.length === 0) return false
+  const existing = target.SessionStart ?? []
+  if (existing.some(e => entryReferences(e, CHECKPOINT_REPLAY_HOOK_MARKER))) return false
+  target.SessionStart = [...existing, ...entries]
+  return true
+}
+
+// Targeted idempotent backfill of the S3 checkpoint-write triggers. For each
+// event (PreCompact / SessionEnd / UserPromptSubmit) it appends a MINIMAL entry
+// carrying ONLY the checkpoint-write command, iff the agent does not already
+// carry that trigger. Extracting just the command (not the whole template entry)
+// avoids duplicating a co-located hook -- notably the PreCompact type:agent
+// memory-save prompt that shares the template entry. ADD-only; never rewrites an
+// existing hook. Gated at the call site on the shared flag.
+export function ensureCheckpointWriteHooks(target: HooksBlock, template: HooksBlock): boolean {
+  let changed = false
+  for (const evt of ['PreCompact', 'SessionEnd', 'UserPromptSubmit'] as const) {
+    const existing = target[evt] ?? []
+    if (existing.some(e => entryReferences(e, CHECKPOINT_WRITE_HOOK_MARKER))) continue
+    // Pull the checkpoint-write HookCommand(s) out of the template for this event.
+    const cmds: HookCommand[] = []
+    for (const tplEntry of template[evt] ?? []) {
+      for (const h of tplEntry.hooks ?? []) {
+        if (typeof h.command === 'string' && h.command.includes(CHECKPOINT_WRITE_HOOK_MARKER)) cmds.push(h)
+      }
+    }
+    if (cmds.length === 0) continue
+    target[evt] = [...existing, { hooks: cmds }]
+    changed = true
+  }
+  return changed
+}
+
 // Idempotent migration: every agent's settings.json should carry the shared
 // hooks (PreCompact memory-save/skill-reflection + the SessionStart taskstate
 // and memory auto-inject replays). Two cases:
@@ -215,7 +290,13 @@ export function ensureAgentHooks(name: string): boolean {
   // Operator c12-signoff flag-gate: until store/session-end-marker.enabled exists,
   // strip the fleet-wide SessionEnd marker from the template so NEITHER the full
   // seed nor the targeted backfill can inject it. Fail-closed; see the flag helper.
-  if (!sessionEndMarkerHookEnabled()) stripSessionEndMarker(tpl.hooks as HooksBlock)
+  if (!sessionEndMarkerHookEnabled()) {
+    stripSessionEndMarker(tpl.hooks as HooksBlock)
+    // S3 checkpoint hooks share the S1 gate (co-activate). Strip them from the
+    // template when the flag is off so NEITHER the full seed nor the targeted
+    // backfill can inject the replay/write hooks before the operator sign-off.
+    stripCheckpointHooks(tpl.hooks as HooksBlock)
+  }
   let existing: Record<string, unknown> = {}
   if (existsSync(settingsPath)) {
     try { existing = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { /* overwrite */ }
@@ -236,8 +317,13 @@ export function ensureAgentHooks(name: string): boolean {
     const sessionEnforceChanged = ensureSessionEnforceHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const freshnessNudgeChanged = ensureFreshnessNudgeHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const sessionEndMarkerChanged = ensureSessionEndMarkerHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    // S3 backfills: no-op when the flag is off (the template was stripped above,
+    // so tpl carries no checkpoint hooks to merge) -> co-activates with S1/S2.
+    const checkpointReplayChanged = ensureCheckpointReplayHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    const checkpointWriteChanged = ensureCheckpointWriteHooks(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     changed = memChanged || guardChanged || askFirstChanged || destructiveBashChanged || permRulesChanged
       || sessionEnforceChanged || freshnessNudgeChanged || sessionEndMarkerChanged
+      || checkpointReplayChanged || checkpointWriteChanged
   }
   if (!changed) return false
   mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
