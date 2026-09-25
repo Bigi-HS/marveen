@@ -386,6 +386,27 @@ dashboard server is untouched. Needs Genesis-GO (fleet-wide, re-launches every a
   /tmp/<x>.log 2>&1 &` -- reboot-persistence is already on disk, and the `ensure_<x>` fn dedups via
   `pgrep` so it won't double-start after the next supervisor restart. Verify the watcher's own log
   shows healthy cycles before declaring the feature live.
+- **RUNTIME-SOURCED .sh + IN-LOOP supervisor change** (confirmed 2026-09-25, #693 FINDING-2 pane-idle).
+  When a deploy is "no build, runtime-sourced .sh" (e.g. a shared `scripts/lib/*.sh` classifier +
+  edits to `sleep-agent-watchdog.sh` and the supervisor's OWN idle-nudge loop), a checkout ALONE is
+  NOT active: consumers `source lib/<x>.sh` ONCE at process start, so already-running consumers keep
+  the old code. Activation:
+  1. Surgical checkout of ONLY the runtime files (skip test/fixture files): `git checkout
+     origin/develop -- scripts/lib/pane-idle.sh scripts/sleep-agent-watchdog.sh scripts/fleet-supervisor.sh`.
+     This preserves unrelated WIP (e.g. an uncommitted `sleep-guard.sh` mod) and never touches dist/.
+  2. Sleep-watchdog side: `kill` the per-agent watchdog; the supervisor's `ensure_sleep_agent_watchdogs`
+     relaunches it within one TICK (60s) from the NEW on-disk file. No supervisor restart needed. Verify
+     the new pid + `grep -c pane_capture_classify` in the running script + no FATAL in its log.
+  3. Supervisor's OWN in-loop logic (idle-nudge): CANNOT be bridged (the fix is in the loop, not a new
+     `ensure_<x>` watcher) -> the supervisor MUST restart. Gotchas hit: (a) an fd-leaked child can briefly
+     hold the single-instance flock (`exec 9>LOCK; flock -n 9`) AFTER you kill the supervisor, despite
+     `9>&-` guards -> new instance refuses with "already running"; wait for the child to exit (`fuser
+     store/.fleet-supervisor.lock`) then relaunch. (b) A **supervisor-sentinel** auto-heals a down
+     supervisor and RACES your manual `setsid` relaunch -> the flock resolves to exactly ONE instance
+     (harmless). SIMPLEST: kill the supervisor and let the sentinel relaunch it, or relaunch via
+     `setsid bash scripts/fleet-supervisor.sh >> store/fleet-supervisor.log 2>&1 </dev/null &` and rely
+     on the flock. Verify: exactly one `fleet-supervisor.sh`, a fresh `fleet-supervisor up` log line, and
+     NO "pane-idle.sh source failed" WARN.
 
 ## Ellenőrzés
 - `ss -ltnp | grep 3420` -> exactly one node pid.
