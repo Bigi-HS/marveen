@@ -18,7 +18,7 @@
 : "${SG_DUE_POLL_SEC:=15}"                    # dedicated due-check poll cadence (R2)
 : "${SG_IDLE_SLEEP_SECONDS:=1800}"            # 30 min continuous idle -> sleep (5.2.3, AC1)
 : "${SG_STAY_UP_HORIZON_SECONDS:=3600}"       # stay up if a task is due within 1h (5.3 AC1)
-: "${SG_OBLIGATION_LOOKBACK_SECONDS:=21600}"  # 6h obligation lookback (matches supervisor)
+: "${SG_OBLIGATION_LOOKBACK_SECONDS:=3600}"   # 1h obligation lookback (86c3904e FINDING-1b; was 6h)
 : "${SG_LAUNCH_MARKER_TTL_SECONDS:=120}"      # cold-boot window for the .launching guard (R1)
 
 # _sg_sql_count <db> <sql> [params...]
@@ -93,13 +93,21 @@ sg_should_wake() {
 # ---------------------------------------------------------------------------
 
 # sg_has_open_obligation <db> <agent> <now> [lookback]  (5.2.1)
-# True iff <agent> has any incomplete inbound message (completed_at IS NULL)
-# created within the lookback window. Covers BOTH undelivered (pending) and
-# delivered-but-mid-task rows -- an agent mid-delegation must never sleep (R4).
+# True iff <agent> has an incomplete inbound message (completed_at IS NULL) created
+# within the lookback window that is a GENUINE obligation: either still undelivered
+# (delivered_at IS NULL -- also a wake trigger, so the agent will wake and handle it)
+# OR delivered with the sender expecting an ack/action (ack_expected=1).
+#
+# 86c3904e FINDING-1: the old predicate counted ANY uncompleted row, so a delivered
+# FYI/status message (ack_expected 0/NULL, which never gets completed_at) pinned an
+# eligible agent awake for the whole lookback. On a chatty fleet that meant sleep
+# almost never fired. Narrowing to (delivered_at IS NULL OR ack_expected=1) keeps R4
+# safe (a real delegation-wait arrives undelivered -> blocks + wakes; active work
+# keeps the pane busy / an in_progress card blocks) while letting FYIs pass.
 sg_has_open_obligation() {
   local db="$1" agent="$2" now="$3" lookback="${4:-$SG_OBLIGATION_LOOKBACK_SECONDS}" cutoff n
   cutoff=$(( now - lookback ))
-  n="$(_sg_sql_count "$db" "SELECT COUNT(*) FROM agent_messages WHERE to_agent=? AND completed_at IS NULL AND created_at>?" "$agent" "$cutoff")"
+  n="$(_sg_sql_count "$db" "SELECT COUNT(*) FROM agent_messages WHERE to_agent=? AND completed_at IS NULL AND created_at>? AND (delivered_at IS NULL OR ack_expected=1)" "$agent" "$cutoff")"
   [ "${n:-0}" -gt 0 ]
 }
 
