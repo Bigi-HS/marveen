@@ -230,3 +230,71 @@ wd_stuck_should_intervene() {
   local threshold="${2:-3}"
   [ "${count:-0}" -ge "${threshold:-3}" ]
 }
+
+# ---------------------------------------------------------------------------
+# Budget-pause guard (card e6ab511d, OPS-038).
+#
+# The dashboard server's opus-burn-monitor writes a budget-pause marker to
+# store/.<agent_name>-budget-pause when the agent's weekly output token burn
+# exceeds its configured threshold (~85% by default). This function is the
+# bash reader used by watchdog loops to skip launching a budget-exhausted agent.
+#
+# Fail-safe: missing / unreadable / expired / corrupt marker -> NOT paused.
+# An agent is never silenced from uncertainty (same principle as transport
+# marker edc8b7f8 and sleep-guard sg_should_wake).
+#
+# Marker format (JSON, written by opus-burn-monitor.ts):
+#   { "expiresAt": <epoch-ms>, "weekStartMs": <epoch-ms>, "triggeredAtPct": <n> }
+#
+# F7: the marker file path is passed to python via argv (sys.argv[1]), NEVER
+# string-interpolated, to prevent path-injection on agent names with metacharacters
+# (the slug is validated server-side, but bash-callers get the same F7 protection).
+# F4: set -u safe; all locals are initialised before use.
+#
+# WIRING NOTE: this function is a pure helper. Wiring it into the watchdog
+# restart loop is gated behind DA red-team + Buster/c12 sandbox-proof +
+# Boss deploy-window (same gate as wd_stuck_*, card e6ab511d). Do NOT add
+# the wiring in this PR.
+# ---------------------------------------------------------------------------
+
+# wd_budget_paused <agent_name> [store_dir]
+#
+# Returns 0 (shell TRUE = budget-paused, skip launch) when the server-written
+# marker exists and has not expired. Returns 1 in all other cases.
+#
+# store_dir defaults to $WD_STORE_DIR when set, otherwise the canonical
+# store/ directory two levels above the lib file (scripts/lib/ -> store/).
+#
+# Example usage in a watchdog loop:
+#   if wd_budget_paused "$AGENT_NAME"; then
+#     log "budget-paused this week -- skipping launch"
+#     sleep "$LONG_BACKOFF"
+#     continue
+#   fi
+wd_budget_paused() {
+  local agent="${1:-}"
+  local store_dir="${2:-${WD_STORE_DIR:-}}"
+  if [ -z "$agent" ]; then return 1; fi
+
+  # Derive store_dir from the lib file's own location when not provided.
+  if [ -z "$store_dir" ]; then
+    store_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)/store"
+  fi
+
+  local marker_file="${store_dir}/.${agent}-budget-pause"
+  [ -f "$marker_file" ] || return 1  # missing -> not paused (fail-safe)
+
+  # Parse expiresAt and compare with now (epoch ms).
+  # F7: path is argv, never interpolated into source.
+  python3 -c "
+import json, sys, time
+try:
+    m = json.load(open(sys.argv[1]))
+    exp = m.get('expiresAt')
+    if not isinstance(exp, (int, float)):
+        sys.exit(1)
+    sys.exit(0 if time.time() * 1000 < exp else 1)
+except Exception:
+    sys.exit(1)
+" "$marker_file" 2>/dev/null
+}
