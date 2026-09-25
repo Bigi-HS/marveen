@@ -212,4 +212,31 @@ describe('AC-2 measurable promotion criterion (FP-rate from anomaly-store histor
       }),
     ).toBe(true)
   })
+
+  // card 44783957 adversarial: concrete boundary pins (Thor delegation).
+
+  it('[boundary-a] episodes=9 (explicit) is NOT ready -- pins the hard numeric minimum independently of the constant', () => {
+    // Explicit 9, not MIN_EPISODES_FOR_PROMOTION-1, so the test fails loudly if the minimum
+    // is lowered below 9 without also reconsidering these fixtures.
+    expect(
+      isReadyForBlockPromotion({ ruleId: 'activeKcal-steps', episodes: 9, falsePositives: 0 }),
+    ).toBe(false)
+  })
+
+  it('[boundary-b] episodes=10 + FP=0 IS ready -- pins inclusive <= at the minimum episode count', () => {
+    // 10 * 0.05 = 0.5 -> no integer FP can represent fp_rate=5% at episodes=10.
+    // FP=0 (rate=0%) is the only integer case at or below the 5% threshold with 10 episodes;
+    // this confirms the comparison is <=, not <, and that 10 episodes satisfies the minimum.
+    expect(
+      isReadyForBlockPromotion({ ruleId: 'activeKcal-steps', episodes: 10, falsePositives: 0 }),
+    ).toBe(true)
+  })
+
+  it('[boundary-c] fp_rate just above threshold is NOT ready -- pins rejection at 5.1% (1000 eps)', () => {
+    // 51 / 1000 = 0.051 > 0.05 threshold by exactly 0.001.
+    // A lenient >= implementation would pass this; the correct <= must reject it.
+    expect(
+      isReadyForBlockPromotion({ ruleId: 'activeKcal-steps', episodes: 1000, falsePositives: 51 }),
+    ).toBe(false)
+  })
 })
