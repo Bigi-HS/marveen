@@ -64,8 +64,8 @@ describe('validateHealthPlausibility', () => {
       expect(v.some((x) => x.rule === 'distance/steps coherence')).toBe(true)
     })
 
-    it('accepts a healthy stride (0.75 m/step)', () => {
-      const v = validateHealthPlausibility(snap({ steps: 10000, activity: { distanceM: 7500 } }))
+    it('accepts a healthy stride (0.50 m/step, within recalibrated [0.25-0.65])', () => {
+      const v = validateHealthPlausibility(snap({ steps: 10000, activity: { distanceM: 5000 } }))
       expect(v.some((x) => x.rule === 'distance/steps coherence')).toBe(false)
     })
 
@@ -114,7 +114,7 @@ describe('validateHealthPlausibility', () => {
       const v = validateHealthPlausibility(
         snap({
           steps: 13694,
-          activity: { activeKcal: 1011, distanceM: 12040 },
+          activity: { activeKcal: 1011, distanceM: 8900 }, // 0.65 m/step, within recalibrated [0.25-0.65]
           vitals: { restingHr: 52, hrAvg: 78, hrMax: 165 },
         }),
       )
@@ -146,15 +146,15 @@ describe('validateHealthPlausibility', () => {
       expect(v.some((x) => x.rule === 'distance/steps coherence')).toBe(false)
     })
 
-    // Rule 2: upper bound is steps*0.9. 10000*0.9=9000 exactly must NOT flag.
-    it('[FP-catch] Rule 2: exactly at upper-bound stride (10000 steps, 9000m = 0.9 m/step) is NOT suspect', () => {
-      const v = validateHealthPlausibility(snap({ steps: 10000, activity: { distanceM: 9000 } }))
+    // Rule 2: upper bound is steps*0.65 (recalibrated). 10000*0.65=6500 exactly must NOT flag.
+    it('[FP-catch] Rule 2: exactly at upper-bound stride (10000 steps, 6500m = 0.65 m/step) is NOT suspect', () => {
+      const v = validateHealthPlausibility(snap({ steps: 10000, activity: { distanceM: 6500 } }))
       expect(v.some((x) => x.rule === 'distance/steps coherence')).toBe(false)
     })
 
-    // Rule 1: upper bound is steps*0.2. 3000*0.2=600 exactly must NOT flag.
-    it('[FP-catch] Rule 1: exactly at upper-bound kcal (3000 steps, 600 kcal = 0.20 ratio) is NOT suspect', () => {
-      const v = validateHealthPlausibility(snap({ steps: 3000, activity: { activeKcal: 600 } }))
+    // Rule 1: upper bound is steps*0.10 (recalibrated). 3000*0.10=300 exactly must NOT flag.
+    it('[FP-catch] Rule 1: exactly at upper-bound kcal (3000 steps, 300 kcal = 0.10 ratio) is NOT suspect', () => {
+      const v = validateHealthPlausibility(snap({ steps: 3000, activity: { activeKcal: 300 } }))
       expect(v.some((x) => x.rule === 'activeKcal/steps ratio')).toBe(false)
     })
 
@@ -169,15 +169,15 @@ describe('validateHealthPlausibility', () => {
     })
 
     // --- FN-catch: just past the threshold ---
-    // Rule 2: 3000 steps, 1499m = 0.4997 m/step -> just below lower bound -> MUST flag.
-    it('[FN-catch] Rule 2: 1m below lower bound (3000 steps, 1499m) IS suspect', () => {
-      const v = validateHealthPlausibility(snap({ steps: 3000, activity: { distanceM: 1499 } }))
+    // Rule 2: lower bound is steps*0.25 (recalibrated). 3000*0.25=750. 749m is just below -> MUST flag.
+    it('[FN-catch] Rule 2: 1m below lower bound (3000 steps, 749m) IS suspect', () => {
+      const v = validateHealthPlausibility(snap({ steps: 3000, activity: { distanceM: 749 } }))
       expect(v.some((x) => x.rule === 'distance/steps coherence')).toBe(true)
     })
 
-    // Rule 2: 10000 steps, 9001m -> 1m over upper bound -> MUST flag.
-    it('[FN-catch] Rule 2: 1m above upper bound (10000 steps, 9001m) IS suspect', () => {
-      const v = validateHealthPlausibility(snap({ steps: 10000, activity: { distanceM: 9001 } }))
+    // Rule 2: upper bound is steps*0.65 (recalibrated). 10000*0.65=6500. 6501m is just over -> MUST flag.
+    it('[FN-catch] Rule 2: 1m above upper bound (10000 steps, 6501m) IS suspect', () => {
+      const v = validateHealthPlausibility(snap({ steps: 10000, activity: { distanceM: 6501 } }))
       expect(v.some((x) => x.rule === 'distance/steps coherence')).toBe(true)
     })
 
@@ -207,9 +207,9 @@ describe('validateHealthPlausibility', () => {
 
     // Absurd kcal but valid distance -> only Rule 1 fires, Rule 2 silent.
     it('[opposing-pair] absurd kcal + valid distance: Rule 1 fires, Rule 2 silent', () => {
-      // 10000 steps, 5 kcal (ratio 0.0005, < 0.03 -> Rule 1 SUSPECT)
-      // 10000 steps, 7500m (ratio 0.75 in [0.5, 0.9] -> Rule 2 PASS)
-      const v = validateHealthPlausibility(snap({ steps: 10000, activity: { activeKcal: 5, distanceM: 7500 } }))
+      // 10000 steps, 5 kcal (ratio 0.0005, < 0.02 -> Rule 1 SUSPECT)
+      // 10000 steps, 5000m (ratio 0.50 in [0.25, 0.65] -> Rule 2 PASS, recalibrated)
+      const v = validateHealthPlausibility(snap({ steps: 10000, activity: { activeKcal: 5, distanceM: 5000 } }))
       expect(v.some((x) => x.rule === 'activeKcal/steps ratio')).toBe(true) // Rule 1 fires
       expect(v.some((x) => x.rule === 'distance/steps coherence')).toBe(false) // Rule 2 silent
       expect(hasSuspectViolation(v)).toBe(true)
