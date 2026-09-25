@@ -91,15 +91,20 @@ pane_classify() {
   # 2. Locate the composer prompt line: the one whose ANSI-stripped form BEGINS
   #    with a single chevron. The bottom hint bar starts with `❯❯` (double) and/or
   #    leading spaces, so it is excluded. Keep the LAST such line (the live prompt).
+  # Feed the captured lines via a QUOTED here-string. "$last6" is a single
+  # parameter expansion whose result is data -- bash does NOT re-scan it for
+  # command substitution, so a $(...) rendered in untrusted pane text (email,
+  # web, inter-agent) can never execute here (verified by repro). A here-string
+  # (not a pipe) also keeps this loop in the current shell so raw_prompt
+  # survives. NOTE: do NOT "harden" this to a quoted heredoc `<<'EOF'` -- that
+  # would suppress expansion of $last6 entirely and break prompt detection.
   while IFS= read -r rawline; do
     sline="$(printf '%s' "$rawline" | _pi_strip_sgr)"
     case "$sline" in
       '❯❯'*) : ;;               # hint/status bar -- not the composer
       '❯'*)  raw_prompt="$rawline" ;;
     esac
-  done <<EOF
-$last6
-EOF
+  done <<< "$last6"
   # No recognizable composer prompt (modal, menu, mid-render) -> not idle.
   [ -z "$raw_prompt" ] && { echo ambiguous; return; }
 
