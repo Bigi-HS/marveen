@@ -61,10 +61,12 @@ export function hasSuspectViolation(violations: PlausibilityViolation[]): boolea
  * 3,000 steps a sedentary day is allowed up to 200 kcal.
  */
 // Bounds for the activeKcal/steps ratio (gauge, health-ingest-plausibility-rules.md).
+// Recalibrated 2026-09-25 based on 33-day empirical Zepp corpus (d16a6451).
+// p10-p90 distribution: kcal/step median 0.042, p10 0.019, p90 0.096.
 const KCAL_STEPS_MIN = 100 // below this many steps a near-zero active burn is normal
 const KCAL_ACTIVE_STEP_FLOOR = 3000 // at/above this the active-day band applies
-const KCAL_LOWER_RATIO = 0.03 // kcal/step: walking floor
-const KCAL_UPPER_RATIO = 0.2 // kcal/step: running ceiling
+const KCAL_LOWER_RATIO = 0.02 // kcal/step: walking floor (was 0.03)
+const KCAL_UPPER_RATIO = 0.10 // kcal/step: running ceiling (was 0.2)
 const KCAL_SEDENTARY_MAX = 200 // max active kcal allowed on a <3k-step day
 
 /**
@@ -107,8 +109,10 @@ function checkKcalStepsRatio(steps: number, activeKcal?: number): PlausibilityVi
 
 /**
  * Rule 2: distance vs. steps.
- * Average adult stride is ~0.50-0.90 m/step. For >=3,000 steps the daily distance should
- * sit in [steps*0.50, steps*0.90]; below that a proportional 0.40-1.0 m/step band applies.
+ * Adult stride empirically 0.25-0.65 m/step (recalibrated 2026-09-25, d16a6451).
+ * p10-p90 distribution: dist/step median 0.491, p10 0.246, p90 0.651.
+ * For >=3,000 steps the daily distance should sit in [steps*0.25, steps*0.65];
+ * below that a proportional 0.40-1.0 m/step band applies (unchanged).
  */
 function checkDistanceStepsCoherence(steps: number, distanceM?: number): PlausibilityViolation[] {
   if (distanceM === undefined || distanceM === null) return []
@@ -118,8 +122,8 @@ function checkDistanceStepsCoherence(steps: number, distanceM?: number): Plausib
   const ratio = distanceM / steps
 
   if (steps >= 3000) {
-    const lowerBound = steps * 0.5
-    const upperBound = steps * 0.9
+    const lowerBound = steps * 0.25 // was 0.5
+    const upperBound = steps * 0.65 // was 0.9
     if (distanceM < lowerBound || distanceM > upperBound) {
       violations.push({
         rule: 'distance/steps coherence',
