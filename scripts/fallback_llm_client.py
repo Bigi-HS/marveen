@@ -470,8 +470,8 @@ def insert_kanban_card(db_path, card, now, id_factory):
         try:
             card_id = id_factory()
             con.execute(
-                "INSERT INTO kanban_cards (id, title, description, status, assignee, priority, created_at, updated_at, sort_order) "
-                "VALUES (?, ?, ?, 'planned', ?, ?, ?, ?, 0)",
+                "INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, created_at, updated_at, sort_order) "
+                "VALUES (?, ?, ?, 'planned', ?, ?, 'CORE', ?, ?, 0)",
                 (
                     card_id,
                     card["title"],
