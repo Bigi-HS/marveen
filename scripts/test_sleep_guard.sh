@@ -41,7 +41,7 @@ c=sqlite3.connect(sys.argv[1]); c.executescript(sys.argv[2]); c.commit(); c.clos
 fresh_db() {
   local db="$TMP/db-$RANDOM-$RANDOM.db"
   sgt_sql "$db" "
-    CREATE TABLE agent_messages(to_agent TEXT, status TEXT, delivered_at INTEGER, completed_at INTEGER, created_at INTEGER);
+    CREATE TABLE agent_messages(to_agent TEXT, status TEXT, delivered_at INTEGER, completed_at INTEGER, created_at INTEGER, ack_expected INTEGER);
     CREATE TABLE kanban_cards(assignee TEXT, status TEXT);
     CREATE TABLE scheduled_tasks(agent TEXT, status TEXT, next_run INTEGER);
   "
@@ -54,7 +54,7 @@ fresh_db() {
 D="$(fresh_db)"
 sg_has_undelivered_msg "$D" "vane" 2>/dev/null && bad "undelivered_msg: empty inbox must be false" || ok "undelivered_msg: empty inbox -> false"
 
-sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','pending',NULL,NULL,$NOW);"
+sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','pending',NULL,NULL,$NOW,0);"
 sg_has_undelivered_msg "$D" "vane" && ok "undelivered_msg: pending row (delivered_at NULL) -> true" || bad "undelivered_msg: pending row should be true"
 
 # A message addressed to ANOTHER agent must not wake vane.
@@ -62,7 +62,7 @@ sg_has_undelivered_msg "$D" "kidd" 2>/dev/null && bad "undelivered_msg: other-ag
 
 # A delivered message (delivered_at set) is NOT an undelivered wake trigger.
 D="$(fresh_db)"
-sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','delivered',$NOW,NULL,$NOW);"
+sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','delivered',$NOW,NULL,$NOW,0);"
 sg_has_undelivered_msg "$D" "vane" 2>/dev/null && bad "undelivered_msg: delivered row must not count as undelivered" || ok "undelivered_msg: delivered_at set -> false (already injected)"
 
 # ===========================================================================
@@ -112,7 +112,7 @@ sg_has_due_task "$D" "vane" "$NOW" 150 2>/dev/null && bad "due_task: paused must
 D="$(fresh_db)"
 sg_should_wake "$D" "vane" "$NOW" 150 2>/dev/null && bad "should_wake: quiet agent must not wake" || ok "should_wake: no trigger -> false"
 
-D="$(fresh_db)"; sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','pending',NULL,NULL,$NOW);"
+D="$(fresh_db)"; sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','pending',NULL,NULL,$NOW,0);"
 sg_should_wake "$D" "vane" "$NOW" 150 && ok "should_wake: undelivered msg -> wake" || bad "should_wake: msg should wake"
 
 D="$(fresh_db)"; sgt_sql "$D" "INSERT INTO kanban_cards VALUES('vane','in_progress');"
@@ -123,26 +123,47 @@ sg_should_wake "$D" "vane" "$NOW" 150 && ok "should_wake: imminent task -> wake"
 
 # ===========================================================================
 # 5.2.1  open obligation (completed_at IS NULL within lookback) -- for auto-sleep
+# card 86c3904e FINDING-1: a delivered message blocks sleep ONLY if the sender
+# expected an ack/action (ack_expected=1). A delivered FYI/status (ack_expected
+# 0 or NULL) is NOT an obligation. Undelivered (delivered_at NULL) ALWAYS blocks
+# (it is also a wake trigger, so the agent will wake and handle it).
+# Fixture INSERT positions: (to_agent,status,delivered_at,completed_at,created_at,ack_expected)
 # ===========================================================================
 LOOKBACK=21600
 D="$(fresh_db)"
 sg_has_open_obligation "$D" "vane" "$NOW" "$LOOKBACK" 2>/dev/null && bad "open_oblig: none must be false" || ok "open_oblig: clean inbox -> false"
 
-# Undelivered message is an open obligation (completed_at NULL).
-sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','pending',NULL,NULL,$NOW);"
-sg_has_open_obligation "$D" "vane" "$NOW" "$LOOKBACK" && ok "open_oblig: undelivered -> true" || bad "open_oblig: undelivered should count"
+# Undelivered message is an open obligation regardless of ack_expected (delivered_at NULL).
+sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','pending',NULL,NULL,$NOW,0);"
+sg_has_open_obligation "$D" "vane" "$NOW" "$LOOKBACK" && ok "open_oblig: undelivered (ack_expected 0) -> true (always blocks)" || bad "open_oblig: undelivered should count even with ack_expected=0"
 
-# Delivered-but-incomplete (mid-task) is an open obligation.
-D="$(fresh_db)"; sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','delivered',$NOW,NULL,$NOW);"
-sg_has_open_obligation "$D" "vane" "$NOW" "$LOOKBACK" && ok "open_oblig: delivered+incomplete -> true" || bad "open_oblig: delivered incomplete should count"
+# FINDING-1: delivered + ack_expected=1 (sender wants an ack/action) IS an obligation.
+D="$(fresh_db)"; sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','delivered',$NOW,NULL,$NOW,1);"
+sg_has_open_obligation "$D" "vane" "$NOW" "$LOOKBACK" && ok "open_oblig: delivered + ack_expected=1 -> true" || bad "open_oblig: delivered ack-expected should count"
 
-# Completed message is NOT an open obligation.
-D="$(fresh_db)"; sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','done',$NOW,$NOW,$NOW);"
+# FINDING-1 core: delivered + ack_expected=0 (FYI/status) is NOT an obligation -> allows sleep.
+D="$(fresh_db)"; sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','delivered',$NOW,NULL,$NOW,0);"
+sg_has_open_obligation "$D" "vane" "$NOW" "$LOOKBACK" 2>/dev/null && bad "open_oblig: delivered FYI (ack_expected=0) must NOT block" || ok "open_oblig: delivered + ack_expected=0 (FYI) -> false (FINDING-1)"
+
+# FINDING-1: delivered + ack_expected NULL (legacy row, no flag) also does NOT block.
+D="$(fresh_db)"; sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','delivered',$NOW,NULL,$NOW,NULL);"
+sg_has_open_obligation "$D" "vane" "$NOW" "$LOOKBACK" 2>/dev/null && bad "open_oblig: delivered ack_expected NULL must NOT block" || ok "open_oblig: delivered + ack_expected NULL -> false (FINDING-1)"
+
+# Completed message is NOT an open obligation (even if ack was expected).
+D="$(fresh_db)"; sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','done',$NOW,$NOW,$NOW,1);"
 sg_has_open_obligation "$D" "vane" "$NOW" "$LOOKBACK" 2>/dev/null && bad "open_oblig: completed must not count" || ok "open_oblig: completed (completed_at set) -> false"
 
-# An ancient incomplete message outside the lookback window does not pin the agent awake forever.
-D="$(fresh_db)"; sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','delivered',$((NOW-LOOKBACK-10)),NULL,$((NOW-LOOKBACK-10)));"
+# An ancient incomplete ack-expected message outside the lookback window does not pin the agent awake forever.
+D="$(fresh_db)"; sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','delivered',$((NOW-LOOKBACK-10)),NULL,$((NOW-LOOKBACK-10)),1);"
 sg_has_open_obligation "$D" "vane" "$NOW" "$LOOKBACK" 2>/dev/null && bad "open_oblig: pre-lookback must not count" || ok "open_oblig: older than lookback -> false"
+
+# FINDING-1 (b): the DEFAULT lookback is now 1h (3600), not 6h. A delivered ack-expected
+# message ~2h old is OUTSIDE the new default window -> no longer blocks when lookback is defaulted.
+D="$(fresh_db)"; sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','delivered',$((NOW-7200)),NULL,$((NOW-7200)),1);"
+( unset SG_OBLIGATION_LOOKBACK_SECONDS
+  sg_has_open_obligation "$D" "vane" "$NOW" 2>/dev/null ) \
+  && bad "open_oblig: 2h-old msg must be outside the new 3600 default lookback" \
+  || ok "open_oblig: default lookback = 3600 (2h-old ack-expected msg -> false, FINDING-1b)"
 
 # ===========================================================================
 # 5.4  pin marker (present AND now < expiry epoch)
@@ -239,13 +260,24 @@ else
   ok  "ADV-1: second trigger during in-flight boot -> NO double-launch"
 fi
 
-# ADV-2: an agent with an OPEN OBLIGATION must NOT sleep even when idle+clean otherwise.
+# ADV-2: an agent with an OPEN OBLIGATION (delivered + ack_expected=1, uncompleted) must NOT
+# sleep even when idle+clean otherwise. (86c3904e: ack_expected=1 is what makes it a real obligation.)
 D="$(fresh_db)"
-sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','delivered',$NOW,NULL,$NOW);"  # delivered, not completed
+sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','delivered',$NOW,NULL,$NOW,1);"  # delivered, ack-expected, not completed
 if sg_should_sleep "$D" "vane" "$NOW" "$IDLE_SINCE" "$NOPIN" 2>/dev/null; then
-  bad "ADV-2: slept with an open (uncompleted) obligation -- would drop in-flight work"
+  bad "ADV-2: slept with an open (ack-expected, uncompleted) obligation -- would drop in-flight work"
 else
-  ok  "ADV-2: open obligation blocks sleep (R4, 5.2.1)"
+  ok  "ADV-2: open obligation (ack_expected=1) blocks sleep (R4, 5.2.1)"
+fi
+
+# ADV-2b (86c3904e FINDING-1): a delivered FYI (ack_expected=0, uncompleted) must NOT block sleep --
+# this is the whole point of the fix (chatty fleet FYIs were pinning eligible agents awake).
+D="$(fresh_db)"
+sgt_sql "$D" "INSERT INTO agent_messages VALUES('vane','delivered',$NOW,NULL,$NOW,0);"  # delivered FYI, no ack expected
+if sg_should_sleep "$D" "vane" "$NOW" "$IDLE_SINCE" "$NOPIN" 2>/dev/null; then
+  ok  "ADV-2b: delivered FYI (ack_expected=0) -> sleep allowed (FINDING-1 fix)"
+else
+  bad "ADV-2b: delivered FYI still blocked sleep -- FINDING-1 not applied"
 fi
 
 # ADV-3: a PINNED agent must NOT sleep before 05:00 even when idle 30min+ and clean.
