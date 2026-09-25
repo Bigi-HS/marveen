@@ -100,6 +100,12 @@ def db_path():
 
 
 def _install_dir():
+    # HOT_CACHE_INSTALL_DIR is the shared test-seam so agent_id_from_cwd and
+    # db_path() resolve against the same fake root the sessionstart hook uses.
+    # Production never sets this env var -> falls through to the file-based default.
+    override = os.environ.get("HOT_CACHE_INSTALL_DIR")
+    if override:
+        return override
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.dirname(os.path.dirname(here))
 
