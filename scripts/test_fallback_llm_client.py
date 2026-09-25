@@ -421,13 +421,16 @@ class TestMainE2E(unittest.TestCase):
         self.assertEqual(rc, 0)
         con = sqlite3.connect(self.db)
         try:
-            row = con.execute("SELECT id, title, description, status, priority FROM kanban_cards WHERE id='deadbeef'").fetchone()
+            row = con.execute(
+                "SELECT id, title, description, status, priority, project FROM kanban_cards WHERE id='deadbeef'"
+            ).fetchone()
         finally:
             con.close()
         self.assertIsNotNone(row)
         self.assertEqual(row[1], "Renew domain")
         self.assertTrue(row[2].startswith(fl.FALLBACK_CARD_PREFIX))  # AC-10
         self.assertEqual(row[3], "planned")
+        self.assertEqual(row[5], "CORE")  # ed435f87: raw-insert must set canonical project
         self.assertEqual(self._rows()[0][0], "sent")
 
     def test_kanban_invalid_response(self):
