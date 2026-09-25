@@ -281,6 +281,51 @@ wd_stuck_should_intervene 2 3
 ) && ok "S7: wd_stuck_count/reset safe under set -u with empty args" \
   || bad "S7: set -u regression on empty args"
 
+# ---- Budget-pause guard (card e6ab511d, OPS-038) ----------------------------
+# Helpers: write a marker with a given expiresAt (epoch-ms).
+STORE_TMP="$(mktemp -d)"
+write_marker() {
+  local agent="$1" expires_at="$2"
+  printf '{"expiresAt":%s,"weekStartMs":0,"triggeredAtPct":85}' "$expires_at" \
+    > "${STORE_TMP}/.${agent}-budget-pause"
+}
+
+# B1: missing marker -> not paused (fail-safe).
+rm -f "${STORE_TMP}/.b1test-budget-pause"
+wd_budget_paused "b1test" "$STORE_TMP"
+[ $? -ne 0 ] \
+  && ok "B1: missing marker -> not paused (fail-safe)" \
+  || bad "B1: missing marker should return 1 (not paused)"
+
+# B2: active marker (expires far in future) -> paused.
+write_marker "b2test" "$(python3 -c 'import time; print(int((time.time()+86400)*1000))')"
+wd_budget_paused "b2test" "$STORE_TMP"
+[ $? -eq 0 ] \
+  && ok "B2: active marker (future expiresAt) -> paused (returns 0)" \
+  || bad "B2: expected paused (rc=0) for future expiresAt"
+
+# B3: expired marker (expiresAt in the past) -> not paused.
+write_marker "b3test" "1000"   # epoch-ms 1 = 1970; always expired
+wd_budget_paused "b3test" "$STORE_TMP"
+[ $? -ne 0 ] \
+  && ok "B3: expired marker (past expiresAt) -> not paused (fail-safe)" \
+  || bad "B3: expired marker should return 1 (not paused)"
+
+# B4: corrupt / non-JSON marker -> not paused (fail-safe).
+printf 'not json {{{' > "${STORE_TMP}/.b4test-budget-pause"
+wd_budget_paused "b4test" "$STORE_TMP"
+[ $? -ne 0 ] \
+  && ok "B4: corrupt marker -> not paused (fail-safe)" \
+  || bad "B4: corrupt marker should return 1 (not paused)"
+
+# B5: empty agent arg -> not paused (no state file path constructed).
+wd_budget_paused "" "$STORE_TMP"
+[ $? -ne 0 ] \
+  && ok "B5: empty agent arg -> not paused" \
+  || bad "B5: empty agent should return 1"
+
+rm -rf "$STORE_TMP"
+
 echo "----"
 echo "watchdog-common: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
