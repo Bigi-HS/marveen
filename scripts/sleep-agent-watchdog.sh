@@ -35,6 +35,7 @@ STATE_DIR="$INSTALL_DIR/store/.sleep-state"
 PIN_DIR="$INSTALL_DIR/store/.sleep-pin"
 MARKER="$STATE_DIR/${NAME}.launching"
 IDLE_FILE="$STATE_DIR/${NAME}.idle-since"
+BUSY_FILE="$STATE_DIR/${NAME}.busy-count"   # FINDING-2 debounce: consecutive ambiguous polls
 PIN="$PIN_DIR/${NAME}"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 
@@ -47,6 +48,7 @@ log() { echo "$(date -Is) $*" >> "$LOG"; }
 # and risk a wrong wake/sleep decision on live agent lifecycle.
 . "$(dirname "$0")/lib/watchdog-common.sh" || { log "FATAL: watchdog-common.sh source failed"; exit 1; }
 . "$(dirname "$0")/lib/sleep-guard.sh"     || { log "FATAL: sleep-guard.sh source failed"; exit 1; }
+. "$(dirname "$0")/lib/pane-idle.sh"       || { log "FATAL: pane-idle.sh source failed"; exit 1; }
 WD_LOG_FILE="$LOG"
 
 # resolve_db: honor NOA_DB_PATH only if it is a .db under INSTALL_DIR (no parent
@@ -69,17 +71,12 @@ DB="$(resolve_db)"
 
 read_model() { wd_read_model "$ACONF"; }
 
-# pane_idle <session>: 0 (true) iff the pane sits at a clean prompt with no working
-# indicator. Verbatim mirror of fleet-supervisor.sh pane_is_idle_at_prompt so the
-# idle detection stays byte-identical (working indicators reset the idle timer --
-# never sleep mid-turn, R5).
-pane_idle() {
-  local tail
-  tail="$(tmux capture-pane -t "$1" -p 2>/dev/null | tail -6)"
-  echo "$tail" | grep -qE "esc to interrupt|Thinking|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]" && return 1
-  echo "$tail" | grep -qE "^❯[[:space:]]*$" && return 0
-  return 1
-}
+# Pane idle/working detection lives in lib/pane-idle.sh (pane_capture_classify +
+# pane_idle_accrue), shared verbatim with fleet-supervisor.sh so the parse can
+# never diverge (FINDING-2 card 089e78db). The old exact-empty `^❯[[:space:]]*$`
+# regex on `capture-pane -p` never matched (empty composer is `❯`+U+00A0, and
+# ghost-text autosuggestions are indistinguishable once ANSI is stripped); the
+# shared classifier reads `-e` output and discriminates by SGR.
 
 # launch_fresh: mirror of agent-watchdog.sh launch_fresh (no --continue). Same env
 # scrub + CLAUDE_CONFIG_DIR + fleet-oauth-env sourcing so a woken specialist boots
@@ -107,20 +104,19 @@ while true; do
     # AWAKE: the boot succeeded -> clear the in-flight marker; track pane idle;
     # sleep when the full condition holds.
     rm -f "$MARKER"
-    if pane_idle "$SESSION"; then
-      [ -f "$IDLE_FILE" ] || echo "$now" > "$IDLE_FILE"   # start/continue idle timer
-      idle_since="$(cat "$IDLE_FILE" 2>/dev/null)"
-    else
-      rm -f "$IDLE_FILE"; idle_since=0                     # working -> reset idle timer (R5)
-    fi
+    # Classify the pane (working/idle/ambiguous) and fold it into the debounced
+    # idle timer. idle_since=0 means "not idle right now" -> sg_should_sleep stays
+    # (never sleeps mid-input or on a single ambiguous redraw frame, R5).
+    pane_state="$(pane_capture_classify "$SESSION")"
+    idle_since="$(pane_idle_accrue "$pane_state" "$IDLE_FILE" "$BUSY_FILE" "$now")"
     if sg_should_sleep "$DB" "$NAME" "$now" "${idle_since:-0}" "$PIN"; then
       tmux kill-session -t "=$SESSION" 2>/dev/null || true
-      rm -f "$IDLE_FILE" "$MARKER"
+      rm -f "$IDLE_FILE" "$BUSY_FILE" "$MARKER"
       log "slept $SESSION (idle>=${SG_IDLE_SLEEP_SECONDS}s; no obligation/card/due-task/pin)"
     fi
   else
     # ASLEEP: no session, no idle timer.
-    rm -f "$IDLE_FILE"
+    rm -f "$IDLE_FILE" "$BUSY_FILE"
     if sg_should_wake "$DB" "$NAME" "$now"; then
       # R1: only launch if no live session and no in-flight boot younger than the
       # cold-boot TTL. Mark BEFORE launch so a duplicate trigger cannot double-fire.

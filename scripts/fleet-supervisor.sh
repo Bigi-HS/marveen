@@ -159,6 +159,15 @@ TMUX_BIN="$(command -v tmux || true)"
 NODE="$(command -v node || true)"
 CURL="$(command -v curl || true)"
 
+# Shared pane idle/working classifier (card 089e78db, FINDING-2). Same source of
+# truth as sleep-agent-watchdog.sh so idle detection can never diverge. Sourced
+# AFTER TMUX_BIN so pane_capture_classify picks it up. Warn-and-continue on
+# failure -- the supervisor is the fleet's respawn brain and must never exit for a
+# degraded opt-in (idle-nudge is flag-gated and inert by default).
+# shellcheck source=scripts/lib/pane-idle.sh
+. "$INSTALL_DIR/scripts/lib/pane-idle.sh" 2>/dev/null \
+  || echo "WARN: pane-idle.sh source failed; idle-nudge pane detection degraded" >&2
+
 # Write to stderr only. The daemon (fleet-boot.sh) and cron invocations redirect
 # stderr into $LOG, so a single channel avoids the tee+redirect double-logging.
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [fleet-supervisor] $*" >&2; }
@@ -851,17 +860,24 @@ idle_nudge_due() {
   [ "$now" -ge "$next" ]
 }
 
-# Returns 0 (true) when the pane looks idle at the empty shell prompt.
-# Returns 1 when the pane shows any working indicator.
+# Returns 0 (true) when the pane looks idle at the empty composer prompt.
+# Returns 1 otherwise (working indicator, real input, modal, or unrecognized).
 # Accepts the tmux session name as $1.
+#
+# Detection is delegated to the shared pane_capture_classify (lib/pane-idle.sh,
+# card 089e78db) so this site and the sleep watchdog parse panes identically --
+# ghost-text-aware (`capture-pane -e` + faint-SGR discrimination), fixing the old
+# `^❯[[:space:]]*$` regex that never matched (empty composer is `❯`+U+00A0, and
+# an autosuggestion is indistinguishable once ANSI is stripped).
+#
+# NOTE on the intentional asymmetry with the sleep watchdog: only `idle` counts as
+# idle here (working AND ambiguous -> not idle). The debounce (pane_idle_accrue) is
+# deliberately NOT applied at this site -- a false not-idle here only DELAYS a
+# benign "please continue" nudge (the existing IDLE_NUDGE_GRACE window already
+# absorbs transient frames), whereas at the sleep watchdog a false idle sleeps an
+# agent mid-input = lost work, which is why debounce lives there.
 pane_is_idle_at_prompt() {
-  local session="$1" pane_tail
-  pane_tail=$("$TMUX_BIN" capture-pane -t "$session" -p 2>/dev/null | tail -6)
-  # Working indicators: "esc to interrupt" bar, Thinking text, braille spinner
-  echo "$pane_tail" | grep -qE "esc to interrupt|Thinking|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]" && return 1
-  # Idle indicator: clean ❯ prompt present in the last few lines
-  echo "$pane_tail" | grep -qE "^❯[[:space:]]*$" && return 0
-  return 1
+  [ "$(pane_capture_classify "$1")" = "idle" ]
 }
 
 # Returns 0 (true) when the pane's recent scrollback contains an "API Error:
