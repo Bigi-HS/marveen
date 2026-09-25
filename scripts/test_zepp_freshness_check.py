@@ -101,6 +101,25 @@ class DeadmanTests(unittest.TestCase):
         self.assertTrue(v["silent"])
         self.assertTrue(v["suppressed"])
 
+    def test_deadman_boundary_exactly_at_threshold_is_not_silent(self):
+        # Card 44783957 boundary: gap == DEADMAN_SECONDS exactly (not +1) must NOT
+        # trigger a silent alert -- the check is `gap <= deadman_seconds` (inclusive).
+        # Dangerous direction: if the code used strict `<` instead of `<=`, a missed
+        # tick that lands precisely on the boundary (a 30-min scheduler producing
+        # gap = 75*60 = DEADMAN exactly) would fire a false dead-man alert when the
+        # poller is actually alive.
+        state = {"last_ok_run": NOW - DEADMAN}  # gap == DEADMAN exactly
+        v = mod.deadman_verdict(state, NOW, DEADMAN)
+        self.assertFalse(v["silent"])
+
+    def test_deadman_fires_one_second_past_boundary(self):
+        # gap == DEADMAN_SECONDS + 1 (strictly exceeds threshold) -> IS silent.
+        # This is the companion to the boundary test above: one second past the
+        # threshold the poller is genuinely considered dead.
+        state = {"last_ok_run": NOW - (DEADMAN + 1)}
+        v = mod.deadman_verdict(state, NOW, DEADMAN)
+        self.assertTrue(v["silent"])
+
 
 if __name__ == "__main__":
     unittest.main()

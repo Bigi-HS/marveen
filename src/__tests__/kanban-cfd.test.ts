@@ -124,6 +124,32 @@ describe('buildCfdSnapshot -- C7a completeness (no silent drop of unknown status
     expect(snap.other).toBe(0)
     expect(snap.planned).toBe(1)
   })
+
+  it('three distinct unknown statuses each route to other; sum of all buckets equals active (non-icebox) count', () => {
+    // Card 44783957 boundary: 3 different unknown values -- 'blocked', 'review',
+    // 'custom' -- must ALL land in `other` (not silently dropped or collapsed into
+    // one). The flow buckets fill normally from the known statuses. Icebox excluded.
+    // Dangerous direction: a schema/query that only handles ONE unknown value per
+    // snapshot, or that COUNTs unknown statuses collectively rather than per-status,
+    // would collapse them and the total would fall below the actual active card count.
+    const db = getNoaDb()
+    db.prepare(`DELETE FROM kanban_cards`).run()
+    db.prepare(`INSERT INTO kanban_cards (id, title, status, priority, sort_order, created_at, updated_at)
+      VALUES ('a','A','blocked','normal',1,0,0),
+             ('b','B','review','normal',2,0,0),
+             ('c','C','custom','normal',3,0,0),
+             ('d','D','planned','normal',4,0,0),
+             ('e','E','planned','normal',5,0,0),
+             ('f','F','in_progress','normal',6,0,0),
+             ('z','Z','icebox','normal',7,0,0)`).run()
+
+    const snap = buildCfdSnapshot(db)
+    expect(snap.other).toBe(3)   // blocked + review + custom
+    expect(snap.planned).toBe(2)
+    expect(snap.in_progress).toBe(1)
+    const sum = snap.planned + snap.in_progress + snap.waiting + snap.done + snap.other
+    expect(sum).toBe(6)          // 7 cards - 1 icebox
+  })
 })
 
 // ---------------------------------------------------------------------------

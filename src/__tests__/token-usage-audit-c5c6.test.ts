@@ -90,6 +90,28 @@ describe('C5a getUnratedModels - unknown/renamed model must not silently price t
     expect(hits[0].calls).toBe(2)
     expect(hits[0].totalTokens).toBe(1800)
   })
+
+  it('two agents using the same unknown model yield two SEPARATE entries (GROUP BY agent,model)', async () => {
+    // Card 44783957 boundary: `getUnratedModels` groups by (agent, model), NOT just
+    // by model. Two agents consuming the same unrecognised model must each produce
+    // their own entry so per-agent attribution is preserved.
+    //
+    // Dangerous direction: if the query used GROUP BY model only, one agent's row
+    // would be silently absorbed into the other's total -- the per-agent cost
+    // attribution would be wrong and one agent would disappear from the report.
+    const { getUnratedModels } = await import('../web/token-usage.js')
+    insertRow('dave',  nowSec - HOUR,     'claude-phantom-5', 1000, 200)
+    insertRow('forge', nowSec - 2 * HOUR, 'claude-phantom-5',  500, 100)
+    const unrated = getUnratedModels(nowSec - DAY, nowSec)
+    const hits = unrated.filter((u) => u.model === 'claude-phantom-5')
+    expect(hits.length).toBe(2)                          // two agents, two entries
+    const daveEntry  = hits.find((u) => u.agent === 'dave')
+    const forgeEntry = hits.find((u) => u.agent === 'forge')
+    expect(daveEntry).toBeDefined()
+    expect(forgeEntry).toBeDefined()
+    expect(daveEntry!.totalTokens).toBe(1200)            // 1000+200
+    expect(forgeEntry!.totalTokens).toBe(600)            // 500+100
+  })
 })
 
 describe('C5b ingestJsonlFile - cursor re-parse must be idempotent (no double-count)', () => {
