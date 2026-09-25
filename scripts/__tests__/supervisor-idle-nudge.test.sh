@@ -72,37 +72,40 @@ echo 0 > "$STATE_DIR/idle-nudge.next"
 ensure_idle_nudge_watch; assert_eq "elapsed throttle -> dry-run fires" 0 "$?"
 assert_contains "elapsed throttle -> dry-run logs" "DRY-RUN would" "$(cat "$CAPTURE")"
 
-# --- pane_is_idle_at_prompt: working indicators block idle -------------------
-# Temporarily override tmux to emit controlled pane content
-TMUX_BIN_REAL="$TMUX_BIN"
+# --- pane_is_idle_at_prompt: REAL function via shared classifier (089e78db) ---
+# Drives the ACTUAL pane_is_idle_at_prompt (which now delegates to
+# pane_capture_classify in lib/pane-idle.sh) by overriding TMUX_BIN with a mock
+# that emits controlled `capture-pane -e` (ANSI-preserved) content. Real captures
+# + synthetic SGR, same mock-tmux pattern as pane_has_overloaded_error below.
+_pane_content_file="$TMP/pane-e.txt"
+_pane_mock_tmux="$TMP/mock-tmux-pane.sh"
+cat > "$_pane_mock_tmux" << SCRIPT
+#!/bin/bash
+cat "$_pane_content_file"
+SCRIPT
+chmod +x "$_pane_mock_tmux"
 
-# pane shows "esc to interrupt" -> NOT idle
-TMUX_BIN="echo"  # won't match any pattern -- let's use a function override
-pane_content_esc="❯ \n\n─── Buster ───\n❯ \nesc to interrupt"
-pane_is_idle_at_prompt_mock() {
-  echo "$pane_content_esc" | grep -qE "esc to interrupt|Thinking|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]" && return 1
-  echo "$pane_content_esc" | grep -qE "^❯[[:space:]]*$" && return 0
-  return 1
+assert_pane_idle() { # <label> <expected-rc> <raw-e-content>
+  printf '%s' "$3" > "$_pane_content_file"
+  local old="$TMUX_BIN"; TMUX_BIN="$_pane_mock_tmux"
+  pane_is_idle_at_prompt "fake-session"; local rc=$?
+  TMUX_BIN="$old"
+  assert_eq "$1" "$2" "$rc"
 }
-pane_is_idle_at_prompt_mock; assert_eq "esc-to-interrupt -> not idle" 1 "$?"
+_E=$'\x1b'; _CHEV=$'\xe2\x9d\xaf'; _NBSP=$'\xc2\xa0'
+FIXDIR="$INSTALL_DIR/scripts/__tests__/fixtures/pane"
 
-# pane shows "Thinking" -> NOT idle
-pane_content_thinking="❯ \nThinking...\n❯ "
-pane_is_idle_at_prompt_mock_thinking() {
-  echo "$pane_content_thinking" | grep -qE "esc to interrupt|Thinking|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]" && return 1
-  echo "$pane_content_thinking" | grep -qE "^❯[[:space:]]*$" && return 0
-  return 1
-}
-pane_is_idle_at_prompt_mock_thinking; assert_eq "Thinking -> not idle" 1 "$?"
-
-# pane shows clean ❯ only -> idle
-pane_content_idle="❯ "
-pane_is_idle_at_prompt_mock_idle() {
-  echo "$pane_content_idle" | grep -qE "esc to interrupt|Thinking|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]" && return 1
-  echo "$pane_content_idle" | grep -qE "^❯[[:space:]]*$" && return 0
-  return 1
-}
-pane_is_idle_at_prompt_mock_idle; assert_eq "clean ❯ -> idle" 0 "$?"
+# Real empty composer (❯ + U+00A0 + cursor) -> idle. The OLD regex failed this
+# (NBSP is not [[:space:]] under C.UTF-8) -- the core FINDING-2 regression.
+assert_pane_idle "real empty composer -> idle" 0 "$(cat "$FIXDIR/real-empty-composer.txt")"
+# Real ghost-text autosuggestion (faint SGR) -> idle
+assert_pane_idle "real ghost-text autosuggestion -> idle" 0 "$(cat "$FIXDIR/real-ghosttext.txt")"
+# esc-to-interrupt working bar -> NOT idle
+assert_pane_idle "esc to interrupt -> not idle" 1 "$(printf '%s[39m%s%s%s[7m %s[0m\nesc to interrupt' "$_E" "$_CHEV" "$_NBSP" "$_E" "$_E")"
+# Thinking -> NOT idle
+assert_pane_idle "Thinking -> not idle" 1 "$(printf 'Thinking...\n%s[39m%s%s%s[7m %s[0m' "$_E" "$_CHEV" "$_NBSP" "$_E" "$_E")"
+# Real typed input (normal intensity) -> NOT idle (must not nudge over live typing)
+assert_pane_idle "real typed input -> not idle" 1 "$(printf '%s[39m%s%s%s[7ml%s[0mekerem a kartyat' "$_E" "$_CHEV" "$_NBSP" "$_E" "$_E")"
 
 # --- IDLE_NUDGE_TEXT is a constant (Chad requirement) ------------------------
 assert_eq "IDLE_NUDGE_TEXT is static constant" "Please continue your current task." "$IDLE_NUDGE_TEXT"
