@@ -17,6 +17,36 @@ import json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ledger_lib  # noqa: E402
 
+
+def _project_root():
+    # scripts/hooks/ -> project root is two up.
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _suppress_marker_path(agent_id):
+    # DEDUP (memory-continuity S3): the checkpoint-replay path stamps this
+    # one-boot marker when it already injected the recent-turns window. We then
+    # SKIP our overlapping transcript window for THIS boot (the open-question is
+    # still surfaced -- it is a distinct signal the checkpoint does not carry).
+    safe = "".join(c for c in (agent_id or "") if c.isalnum() or c in "_-")
+    return os.path.join(_project_root(), "store", "agent-checkpoints", "%s.ledger-suppressed" % safe)
+
+
+def _consume_ledger_suppressed(agent_id):
+    """True iff the checkpoint already supplied the recent-turns window this
+    boot. Consumes (deletes) the marker so it only affects THIS start. Fail-open:
+    any error -> not suppressed (safe: at worst the window replays as before)."""
+    if not agent_id:
+        return False
+    path = _suppress_marker_path(agent_id)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            return True
+    except Exception:
+        pass
+    return False
+
 # Roughly 4000 tokens of transcript context (~4 chars/token). If the recent
 # window exceeds this, the OLDEST turns are dropped so the injected context
 # stays bounded regardless of how chatty the recent conversation was.
@@ -46,8 +76,14 @@ def main():
         pass
     agent_id = ledger_lib.agent_id_from_cwd(cwd)
 
+    # DEDUP with the S3 checkpoint: if the checkpoint-replay path already injected
+    # the recent-turns window this boot, drop OUR overlapping transcript window so
+    # the two never stack (combined SessionStart budget). The open-question is a
+    # distinct signal the checkpoint does not carry, so it is still surfaced.
+    suppress_window = _consume_ledger_suppressed(agent_id)
+
     try:
-        rows = ledger_lib.recent(agent_id, _window_limit())
+        rows = [] if suppress_window else ledger_lib.recent(agent_id, _window_limit())
         open_q = ledger_lib.open_question(agent_id)
     except Exception:
         sys.exit(0)  # ledger unavailable -> no-op
