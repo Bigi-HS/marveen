@@ -9,7 +9,7 @@
 // cloudflared process and keeps a single public entry point for the phone.
 //
 // Auth: none (public endpoint per public-paths.ts). n8n holds the ingest token.
-// Size cap: same as /api/health/ingest (64 KB).
+// Size cap: 512KB (raised from 64KB for multi-day backlog replay; see MAX_RAW_BYTES).
 //
 // Retention (card 0b467f56, P0.5): every incoming raw body is written to a bounded
 // buffer so TC-1 / AT-1 Layer-2 tests can use real captured payloads. The retain
@@ -19,6 +19,8 @@ import { IncomingMessage, ServerResponse } from 'node:http'
 import { readBody, RequestBodyTooLargeError, json } from '../http-helpers.js'
 import { logger } from '../../logger.js'
 import { defaultRawPushBuffer } from '../zepp/raw-push-buffer.js'
+import { createRateLimiter, type RateLimiter } from '../rate-limit.js'
+import { rateLimitKey } from '../dashboard-auth.js'
 import type { RouteContext } from './types.js'
 
 // 512KB (not 64KB) so a post-outage multi-day backlog replay (~100KB) is retained
@@ -27,15 +29,44 @@ import type { RouteContext } from './types.js'
 const MAX_RAW_BYTES = 512 * 1024
 const N8N_ZEPP_WEBHOOK = 'http://127.0.0.1:5678/webhook/zepp-hc'
 
+// Per-IP: 20 burst, 20/min (generous for a single health-tracker device syncing
+// every few minutes). Global: 60 burst, 60/min (DoS ceiling across all sources).
+const _defaultIpLimiter = createRateLimiter({ capacity: 20, refillPerSec: 20 / 60 })
+const _defaultGlobalLimiter = createRateLimiter({ capacity: 60, refillPerSec: 60 / 60 })
+
 export interface HealthIngestRawDeps {
   /** Called with the raw body string on every push (successful read). Used for retention corpus. */
   retain?: (rawBody: string) => void
+  /** Per-IP rate limiter (injectable for tests). Defaults to module-level singleton. */
+  ipLimiter?: RateLimiter
+  /** Global ceiling limiter (injectable for tests). Defaults to module-level singleton. */
+  globalLimiter?: RateLimiter
 }
 
 export function makeHealthIngestRawHandler(deps: HealthIngestRawDeps = {}) {
+  const ipLimiter = deps.ipLimiter ?? _defaultIpLimiter
+  const globalLimiter = deps.globalLimiter ?? _defaultGlobalLimiter
+
   return async function handleHealthIngestRaw(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (req.method !== 'POST') {
       json(res, { error: 'Method Not Allowed' }, 405)
+      return
+    }
+
+    // Per-IP rate limit (DoS/amplification defence on this zero-auth endpoint).
+    const ip = rateLimitKey((req.socket as { remoteAddress?: string } | null)?.remoteAddress)
+    const ipCheck = ipLimiter.allow(ip)
+    if (!ipCheck.allowed) {
+      const retryAfterSec = Math.ceil(ipCheck.retryAfterMs / 1000)
+      res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(retryAfterSec) })
+      res.end(JSON.stringify({ error: 'Too many requests' }))
+      return
+    }
+    const globalCheck = globalLimiter.allow('global')
+    if (!globalCheck.allowed) {
+      const retryAfterSec = Math.ceil(globalCheck.retryAfterMs / 1000)
+      res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(retryAfterSec) })
+      res.end(JSON.stringify({ error: 'Too many requests' }))
       return
     }
 
