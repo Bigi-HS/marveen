@@ -492,10 +492,15 @@ export function applyKanbanMigrations(db = getNoaDb()): void {
   } catch { /* board_columns absent in a partial schema -- ok */ }
   // Backfill bucket-centre scores for active cards that predate the column.
   // Parked (icebox) cards stay NULL by design (excluded from ordering).
+  // `status IS NOT 'icebox'` (not `!=`) so the lane test is NULL-safe: in SQLite
+  // `NULL != 'icebox'` is NULL (unknown) and would silently skip a NULL-status
+  // card, leaving it scoreless and unorderable; `NULL IS NOT 'icebox'` is TRUE,
+  // so a non-parked (incl. malformed NULL-status) card gets a score. Mirrors the
+  // buildCfdSnapshot fix in PR#709 (card aad1dc7e).
   try {
     db.exec(`UPDATE kanban_cards SET priority_score = CASE priority
         WHEN 'urgent' THEN 2 WHEN 'high' THEN 4 WHEN 'low' THEN 9 ELSE 6 END
-      WHERE priority_score IS NULL AND status != 'icebox' AND archived_at IS NULL`)
+      WHERE priority_score IS NULL AND status IS NOT 'icebox' AND archived_at IS NULL`)
   } catch { /* ok */ }
   // Fold pre-enforcement drifted project VALUES into the canonical taxonomy
   // (card cf0d1bfe S1). #439 closed the write-path gate, but rows created before
