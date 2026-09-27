@@ -183,7 +183,7 @@ function ensureHeartbeatWorkerCwd(): void {
     // 2026-06-02 14:00 hb-fire ran with an empty .claude.json (Claude
     // Code generated a fresh one in CLAUDE_CONFIG_DIR), so the sub-agent
     // saw zero user-level MCPs -- Gmail OAuth lost, Calendar fell back to
-    // the wrong default account (Szabi 14:27 report).
+    // the wrong default account (14:27 report).
     //
     // Copy the real ~/.claude.json into the isolated config dir AND
     // duplicate the `projects[PROJECT_ROOT]` entry under
@@ -211,7 +211,7 @@ function ensureHeartbeatWorkerCwd(): void {
       logger.warn({ err }, 'Heartbeat: failed to materialise .claude.json into isolated config dir (sub-agent will lack project MCPs)')
     }
 
-    // Dashboard-hide sentinel: Szabi 2026-06-02 asked that this technical
+    // Dashboard-hide sentinel: Dominik 2026-06-02 asked that this technical
     // worker NOT show up as a real agent on the dashboard. listAgentNames()
     // filters out any subdir of agents/ that contains this sentinel file.
     const sentinelPath = join(HEARTBEAT_AGENT_CWD, '.hidden-from-dashboard')
@@ -387,7 +387,7 @@ function buildAgentPrompt(data: HeartbeatData): string {
   // attacker-controlled strings (calendar/kanban/email titles) appear.
   let prompt = UNTRUSTED_PREAMBLE + '\n'
   prompt += `Heartbeat ellenorzes -- ${timeStr}\n\n`
-  prompt += `Az alabbi adatokat gyujtottem nativ modon (API/DB). Fogalmazz tomor, emberi osszefoglalot Szabolcsnak.\n`
+  prompt += `Az alabbi adatokat gyujtottem nativ modon (API/DB). Fogalmazz tomor, emberi osszefoglalot Dominiknak.\n`
   prompt += `FONTOS: Nezd meg az emaileket is MCP-n keresztul (search_emails, utolso 2 ora, olvasatlanok).\n`
   prompt += `Hasznald a HEARTBEAT.md formatumot.\n\n`
 
