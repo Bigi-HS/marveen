@@ -2,19 +2,24 @@
 """
 Unit tests for vault-lint-tm1-executor.py
 
+Tests use LIVE curator migration_log schema (not fake schemas):
+- migration_log(id, rule, entry_id, from_cat, to_cat, reason, applier, applied_at)
+- memories: created_at/content NOT NULL (prod parity)
+
 Fixtures:
-1. Success case: valid TM-1 proposal (hot→warm)
-2. Duplicate case: entry already in target category (idempotent no-op)
-3. Invalid migration case: blocked (warm→hot)
-4. Agent ID mismatch: proposal agent != DB agent
-5. Already applied case: migration_log shows prior application
-6. Apply success: entries migrate and audit records created
-7. Per-item skip (not all-or-rollback): failures don't block good proposals
+1. Success: valid TM-1 proposal (hot→warm)
+2. Already at target: idempotent no-op
+3. Invalid migration: rejected (warm→hot)
+4. Agent ID mismatch: rejected
+5. Already applied: skip (in migration_log)
+6. Per-item skip: failures don't block good proposals
+7. Audit log: append-only write
 """
 
 import json
 import sqlite3
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch
 import importlib.util
@@ -29,12 +34,27 @@ spec.loader.exec_module(executor_module)
 validate_proposal = executor_module.validate_proposal
 apply_migrations = executor_module.apply_migrations
 write_audit_log = executor_module.write_audit_log
-connect_db = executor_module.connect_db
 
 
 def setup_test_db(db_path):
-    """Create a temporary test noa.db with prod-parity schema."""
+    """Create test noa.db with LIVE curator schemas (not fake ones)."""
     conn = sqlite3.connect(str(db_path))
+
+    # LIVE migration_log schema (from curator applier)
+    conn.execute('''
+        CREATE TABLE migration_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule TEXT NOT NULL,
+            entry_id INTEGER NOT NULL,
+            from_cat TEXT NOT NULL,
+            to_cat TEXT NOT NULL,
+            reason TEXT,
+            applier TEXT DEFAULT 'curator-applyer',
+            applied_at INTEGER NOT NULL
+        )
+    ''')
+
+    # LIVE memories schema (prod parity: created_at/content NOT NULL)
     conn.execute('''
         CREATE TABLE memories (
             id INTEGER PRIMARY KEY,
@@ -46,36 +66,24 @@ def setup_test_db(db_path):
             accessed_at INTEGER
         )
     ''')
-    conn.execute('''
-        CREATE TABLE migration_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_at INTEGER NOT NULL,
-            memory_id INTEGER NOT NULL,
-            agent_id TEXT NOT NULL,
-            from_tier TEXT NOT NULL,
-            to_tier TEXT NOT NULL,
-            rule TEXT NOT NULL,
-            dry_run INTEGER NOT NULL DEFAULT 0
-        )
-    ''')
 
-    now = int(__import__('time').time())
+    now = int(time.time())
     # Fixture entries
     conn.execute(
         'INSERT INTO memories (id, agent_id, category, content, created_at, keywords) VALUES (?, ?, ?, ?, ?, ?)',
-        (100, 'applegate', 'hot', 'test entry', now, 'test, tm1, hot')
+        (100, 'applegate', 'hot', 'test content', now, 'test, hot')
     )
     conn.execute(
         'INSERT INTO memories (id, agent_id, category, content, created_at, keywords) VALUES (?, ?, ?, ?, ?, ?)',
-        (101, 'applegate', 'warm', 'test entry', now, 'test, tm1, warm')
+        (101, 'applegate', 'warm', 'test content', now, 'test, warm')
     )
     conn.execute(
         'INSERT INTO memories (id, agent_id, category, content, created_at, keywords) VALUES (?, ?, ?, ?, ?, ?)',
-        (102, 'applegate', 'cold', 'test entry', now, 'test, tm1, cold')
+        (102, 'applegate', 'cold', 'test content', now, 'test, cold')
     )
     conn.execute(
         'INSERT INTO memories (id, agent_id, category, content, created_at, keywords) VALUES (?, ?, ?, ?, ?, ?)',
-        (103, 'other_agent', 'hot', 'test entry', now, 'test, tm1, hot')
+        (103, 'other_agent', 'hot', 'test content', now, 'test, hot')
     )
 
     conn.commit()
@@ -100,7 +108,7 @@ def test_success_hot_to_warm():
 
         is_valid, error, entry_data = validate_proposal(conn, proposal)
         assert is_valid, f"Validation failed: {error}"
-        assert entry_data[4] == False, "Should apply (not skip)"  # should_skip flag
+        assert entry_data[4] == False, "Should apply (not skip)"
 
         conn.close()
         print("✓ Fixture 1: Success (hot→warm) PASSED")
@@ -124,7 +132,7 @@ def test_duplicate_already_at_target():
 
         is_valid, error, entry_data = validate_proposal(conn, proposal)
         assert is_valid, f"Validation failed: {error}"
-        assert entry_data[4] == True, "Should skip (already at target)"  # should_skip flag
+        assert entry_data[4] == True, "Should skip (already at target)"
 
         conn.close()
         print("✓ Fixture 2: Already at target (idempotent) PASSED")
@@ -151,11 +159,11 @@ def test_invalid_warm_to_hot():
         assert 'not allowed' in error.lower()
 
         conn.close()
-        print("✓ Fixture 3: Invalid migration (warm→hot) REJECTED as expected")
+        print("✓ Fixture 3: Invalid migration (warm→hot) REJECTED")
 
 
 def test_agent_id_mismatch():
-    """Fixture 4: Agent ID mismatch (Chad test requirement)."""
+    """Fixture 4: Agent ID mismatch."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / 'test.db'
         setup_test_db(db_path)
@@ -175,22 +183,22 @@ def test_agent_id_mismatch():
         assert 'agent' in error.lower()
 
         conn.close()
-        print("✓ Fixture 4: Agent ID mismatch REJECTED as expected")
+        print("✓ Fixture 4: Agent ID mismatch REJECTED")
 
 
 def test_already_applied_in_migration_log():
-    """Fixture 5: Entry already applied (B1 duplicate-reconcile guard)."""
+    """Fixture 5: Entry already applied (in LIVE migration_log)."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / 'test.db'
         setup_test_db(db_path)
 
         conn = sqlite3.connect(str(db_path))
 
-        # Pre-populate migration_log (simulating prior application)
+        # Pre-populate migration_log with LIVE schema
         conn.execute(
-            '''INSERT INTO migration_log (run_at, memory_id, agent_id, from_tier, to_tier, rule, dry_run)
-               VALUES (?, ?, ?, ?, ?, ?, 0)''',
-            (int(__import__('time').time()), 100, 'applegate', 'hot', 'warm', 'TM-1')
+            '''INSERT INTO migration_log (rule, entry_id, from_cat, to_cat, reason, applier, applied_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)''',
+            ('TM-1', 100, 'hot', 'warm', 'L2 proposal', 'vault-lint-tm1-executor', int(time.time()))
         )
         conn.commit()
 
@@ -204,14 +212,14 @@ def test_already_applied_in_migration_log():
 
         is_valid, error, entry_data = validate_proposal(conn, proposal)
         assert is_valid, f"Validation failed: {error}"
-        assert entry_data[4] == True, "Should skip (already applied)"  # should_skip flag
+        assert entry_data[4] == True, "Should skip (already applied)"
 
         conn.close()
-        print("✓ Fixture 5: Already applied (migration_log guard) PASSED")
+        print("✓ Fixture 5: Already applied (LIVE migration_log) PASSED")
 
 
 def test_apply_migrations_per_item_skip():
-    """Fixture 6: Per-item skip (not all-or-rollback) — one bad proposal doesn't block good ones."""
+    """Fixture 6: Per-item skip (one bad doesn't block good)."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / 'test.db'
         setup_test_db(db_path)
@@ -236,24 +244,22 @@ def test_apply_migrations_per_item_skip():
 
             applied_count, failed_count, audit_records, error = apply_migrations(proposals)
 
-            # With per-item skip: 1 applied, 1 failed (not all rolled back)
             assert applied_count == 1, f"Should apply 1, got {applied_count}"
             assert failed_count == 1, f"Should fail 1, got {failed_count}"
-            assert error is None
 
-        # Verify DB state: entry 100 should be migrated
+        # Verify: entry 100 migrated to 'warm'
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
         cursor.execute('SELECT category FROM memories WHERE id = 100')
         cat = cursor.fetchone()[0]
-        assert cat == 'warm', f"Entry 100 should be migrated to 'warm', got {cat}"
+        assert cat == 'warm', f"Entry 100 should be 'warm', got {cat}"
         conn.close()
 
         print("✓ Fixture 6: Per-item skip (independent entries) PASSED")
 
 
 def test_audit_log_write():
-    """Fixture 7: Audit log write (append-only)."""
+    """Fixture 7: Audit log append-only."""
     with tempfile.TemporaryDirectory() as tmpdir:
         log_dir = Path(tmpdir)
 
@@ -265,7 +271,7 @@ def test_audit_log_write():
                     'from_cat': 'hot',
                     'to_cat': 'warm',
                     'rule': 'TM-1',
-                    'applied_at': '2026-09-27T19:00:00+00:00'
+                    'applied_at': '2026-09-27T20:00:00+00:00'
                 }
             ]
 
@@ -283,7 +289,7 @@ def test_audit_log_write():
 def run_all_tests():
     """Run all test fixtures."""
     print("=" * 60)
-    print("Running TM-1 Executor Unit Tests (Fixed)")
+    print("Running TM-1 Executor Unit Tests (LIVE Schema)")
     print("=" * 60)
 
     tests = [

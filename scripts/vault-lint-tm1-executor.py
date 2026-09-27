@@ -9,9 +9,9 @@ TM-1: safe, category-only shifts, <5% FP (hot→warm, warm→cold)
 TM-2: manual review required (30% FP) — NEVER AUTO-APPLY
 TM-3: blocked (schema changes, curator-dependent) — NEVER AUTO-APPLY
 
-Design: Scope-guard against duplicate applier (vault-lint-apply-safe-tm.py, MEM-011).
-Checks migration_log for prior applications; already-at-target entries are idempotent no-ops.
-Per-item skip (not all-or-rollback) allows independent entries to apply despite bad proposals.
+LIVE SCHEMA: migration_log is owned by CURATOR applier (vault-curator-apply-verdicts.py).
+Schema: (id, rule, entry_id, from_cat, to_cat, reason, applier, applied_at)
+Applier field distinguishes between writers: 'curator-applyer' (default), 'vault-lint-tm1-executor', etc.
 """
 
 import json
@@ -26,6 +26,7 @@ PROPOSALS_FILE = Path('/home/domin/marveen/store/vault-lint-l2-proposals.json')
 DB_PATH = Path('/home/domin/marveen/store/noa.db')
 LOG_DIR = Path('/home/domin/marveen/store')
 ALLOWED_MIGRATIONS = {('hot', 'warm'), ('warm', 'cold')}
+APPLIER_NAME = 'vault-lint-tm1-executor'
 
 
 def load_proposals():
@@ -69,16 +70,21 @@ def validate_proposal(conn, proposal):
 
     db_id, db_cat, db_agent = row
 
-    # B1: Duplicate-reconcile guard — check if already applied in migration_log (MEM-011 conflict)
-    cursor.execute(
-        'SELECT COUNT(*) FROM migration_log WHERE memory_id = ? AND to_tier = ?',
-        (entry_id, to_cat)
-    )
-    count = cursor.fetchone()
-    already_applied = count and count[0] > 0
-    if already_applied:
-        # Idempotent no-op: already in target state via prior applier (MEM-011 or previous run)
-        return True, None, (db_id, db_cat, to_cat, db_agent, True)  # True = skip, no-op
+    # B1: Duplicate-reconcile guard — check if already applied in migration_log (LIVE curator schema)
+    # LIVE schema: migration_log(id, rule, entry_id, from_cat, to_cat, reason, applier, applied_at)
+    try:
+        cursor.execute(
+            'SELECT COUNT(*) FROM migration_log WHERE entry_id = ? AND to_cat = ?',
+            (entry_id, to_cat)
+        )
+        count = cursor.fetchone()
+        already_applied = count and count[0] > 0
+        if already_applied:
+            # Idempotent no-op: already in target state via prior applier (curator or previous run)
+            return True, None, (db_id, db_cat, to_cat, db_agent, True)  # True = skip, no-op
+    except sqlite3.OperationalError:
+        # Table missing or wrong schema: treat as not-applied, allow attempt (fail-safe)
+        pass
 
     # Verify current category matches proposal (corrupt proposal guard)
     if db_cat != from_cat:
@@ -140,16 +146,16 @@ def apply_migrations(proposals):
                 (to_cat, db_id)
             )
 
-            # Record migration in migration_log (SQLite table, for MEM-011 compat)
+            # Record migration in migration_log (LIVE curator schema)
             try:
                 cursor.execute(
-                    '''INSERT INTO migration_log (run_at, memory_id, agent_id, from_tier, to_tier, rule, dry_run)
-                       VALUES (unixepoch('now'), ?, ?, ?, ?, 'TM-1', 0)''',
-                    (db_id, agent_id, from_cat, to_cat)
+                    '''INSERT INTO migration_log (rule, entry_id, from_cat, to_cat, reason, applier, applied_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                    ('TM-1', db_id, from_cat, to_cat, 'L2 proposal', APPLIER_NAME, int(datetime.now(timezone.utc).timestamp()))
                 )
-            except sqlite3.OperationalError:
-                # migration_log table may not exist; catch and skip
-                pass
+            except sqlite3.OperationalError as e:
+                # Log schema issue but don't fail the migration
+                print(f"WARNING: migration_log write failed for entry {db_id}: {e}", file=sys.stderr)
 
             conn.execute('COMMIT')
 
