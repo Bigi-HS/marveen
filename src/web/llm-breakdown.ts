@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import { logger } from '../logger.js'
 import { listAgentNames } from './agent-config.js'
 import { resolveFromPath } from '../platform.js'
+import { OWNER_NAME } from '../config.js'
 
 export interface SubtaskSuggestion {
   title: string
@@ -49,7 +50,7 @@ function buildUserPrompt(title: string, description: string | null, agents: stri
 
 function getValidAssignees(): Set<string> {
   const agents = listAgentNames()
-  return new Set(['Dominik', 'Marveen', ...agents])
+  return new Set([OWNER_NAME, 'Marveen', ...agents])
 }
 
 function resolveClaudeBinary(): string {
