@@ -173,6 +173,7 @@ def md_to_html(md_text: str) -> str:
 
 def build_info_rows_html(rows) -> str:
     """Build <tr> HTML from a list of {label, value} dicts."""
+    from html import escape
     if not rows:
         return ""
     parts = []
@@ -183,7 +184,7 @@ def build_info_rows_html(rows) -> str:
         else:
             label, value = str(row), ""
         parts.append(
-            f'<tr><td class="field-label">{label}</td><td>{value}</td></tr>'
+            f'<tr><td class="field-label">{escape(str(label))}</td><td>{escape(str(value))}</td></tr>'
         )
     return "\n".join(parts)
 
@@ -221,9 +222,11 @@ def render(template_name: str, variables: dict, output_path: Path) -> None:
 
 def prepare_variables(fm: dict, body_md: str) -> dict:
     """Merge frontmatter + computed fields into a flat string dict for template filling."""
-    v = {k: (str(v) if not isinstance(v, (list, dict)) else "") for k, v in fm.items()}
+    from html import escape
+    v = {k: escape(str(val)) if not isinstance(val, (list, dict)) else ""
+         for k, val in fm.items()}
 
-    # Body markdown -> HTML
+    # Body markdown -> HTML (trusted output, no double-escape)
     v["body_html"] = md_to_html(body_md) if body_md.strip() else fm.get("body_html", "")
 
     # info_rows special handling for prospectus
