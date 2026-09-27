@@ -259,3 +259,41 @@ describe('POST /api/health/ingest-raw -- rate limiting (7b1a254c)', () => {
     expect(typeof key).toBe('string')
   })
 })
+
+// ── 8922a439: n8n response body size-cap ─────────────────────────────────────
+// Chad INFO-low (PR#512): the 2xx n8n response is forwarded without a size cap.
+// n8n is a trusted local service so the risk is low, but defense-in-depth.
+
+describe('POST /api/health/ingest-raw -- n8n response size-cap (8922a439)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('returns 502 when n8n 2xx response body exceeds cap', async () => {
+    const huge = 'x'.repeat(64 * 1024 + 1)
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ data: huge }), { status: 200, headers: { 'content-type': 'application/json' } })))
+    const { ctx, written } = makeCtx('{"foo":1}')
+    await tryHandleHealthIngestRaw(ctx)
+    expect(written().status).toBe(502)
+    expect(JSON.parse(written().body)).toEqual({ error: 'transform response too large' })
+  })
+
+  it('forwards a 2xx response at exactly the cap size', async () => {
+    // Body at exactly 64KB must pass through
+    const atCap = 'x'.repeat(64 * 1024)
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(atCap, { status: 200, headers: { 'content-type': 'application/json' } })))
+    const { ctx, written } = makeCtx('{"foo":1}')
+    await tryHandleHealthIngestRaw(ctx)
+    expect(written().status).toBe(200)
+  })
+
+  it('oversized n8n response is never forwarded to the caller', async () => {
+    const huge = JSON.stringify({ secret: 'x'.repeat(64 * 1024) })
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(huge, { status: 200, headers: { 'content-type': 'application/json' } })))
+    const { ctx, written } = makeCtx('{"foo":1}')
+    await tryHandleHealthIngestRaw(ctx)
+    // Must not leak the huge body to the unauthenticated caller
+    expect(written().body).not.toContain('secret')
+  })
+})
