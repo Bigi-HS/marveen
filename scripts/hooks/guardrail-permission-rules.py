@@ -524,9 +524,12 @@ _CURL_BODY_SHORT = frozenset({'d', 'F', 'T'})
 _ENV_FILE_RE = re.compile(r'(?:^|/)\.env(?:\.[^/\s]+)?$')
 
 # Fleet credential files (card 0680cf34): dashboard API token, GitHub PAT, Claude auth.
-# Reading these via shell print-verbs exposes raw secrets to the agent's output context.
+# .genesis-token (card 6f2d4ea4) is the PER-AGENT identity token used for gate
+# approvals and inter-agent auth -- as sensitive as .dashboard-token, and it was
+# missing from this set (readable via `cat .genesis-token` until this fix).
+# Reading any of these via shell print-verbs exposes raw secrets to the agent's output context.
 _TOKEN_PATHS_RE = re.compile(
-    r'(?:^|/)(?:\.dashboard-token|\.git-credentials|\.claude\.json)$'
+    r'(?:^|/)(?:\.dashboard-token|\.genesis-token|\.git-credentials|\.claude\.json)$'
 )
 
 
@@ -570,6 +573,30 @@ def _is_localhost_only_curl(command: str) -> bool:
     return bool(urls) and all(_LOCALHOST_RE.match(u) for u in urls)
 
 
+# Variable-indirection taint (card 6f2d4ea4): `F=<secret>; cat $F` splits into an
+# assignment piece (no read verb) and a read piece whose argument is `$F` -- which
+# matches no literal secret path, so R2 let it through. Track vars assigned a value
+# across the command, then treat a read verb's `$VAR`/`${VAR}` argument as that value.
+_ASSIGN_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
+_VARREF_RE = re.compile(r'\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?')
+
+
+def _collect_var_assignments(command: str) -> dict:
+    """Map every VAR -> assigned value string across all pieces of the command.
+    Handles bare `F=val` and `export F=val` (shlex yields the `F=val` token in
+    both). Later assignments overwrite earlier, mirroring shell order."""
+    assigned = {}
+    for piece in _split_subcommands(command):
+        tokens = _tokenize(piece)
+        if tokens is _PARSE_FAIL or not tokens:
+            continue
+        for tok in tokens:
+            m = _ASSIGN_RE.match(tok)
+            if m:
+                assigned[m.group(1)] = m.group(2)
+    return assigned
+
+
 def match_env_file_print(command: str) -> bool:
     """R2: A print-style Bash command reading a .env/.env.* file or a fleet
     credential file (store/.dashboard-token, ~/.git-credentials, ~/.claude.json).
@@ -607,6 +634,7 @@ def match_env_file_print(command: str) -> bool:
     # AFTER the curl, so `<loopback curl>; cat <token>` passed. Only the first
     # hurts anyone, which is why the tempting repair -- widening the carve-out --
     # is the one that makes the silent direction worse.
+    assigned = _collect_var_assignments(command)
     for segment in _split_subcommands(command, nested=False):
         sanctioned = _is_localhost_only_curl(segment)
         for piece in _split_subcommands(segment):
@@ -621,12 +649,17 @@ def match_env_file_print(command: str) -> bool:
                 continue
             if _command_word(tokens) not in _FILE_READ_VERBS:
                 continue
-            # Check every non-flag argument for a sensitive file pattern.
+            # Check every non-flag argument for a sensitive file pattern, either as
+            # a literal path or via a variable that was assigned one (var-indirect).
             for tok in tokens[1:]:
                 if tok.startswith('-'):
                     continue
                 if _is_sensitive(tok, sanctioned):
                     return True
+                for ref in _VARREF_RE.findall(tok):
+                    val = assigned.get(ref)
+                    if val is not None and _is_sensitive(val, sanctioned):
+                        return True
     return False
 
 
@@ -701,6 +734,72 @@ def match_interpreter_env_read(command: str) -> bool:
                 continue
             if code and (_OPEN_ENV_RE.search(code) or _OPEN_TOKEN_RE.search(code)):
                 return True
+    return False
+
+
+# ── R2c: base64 decode-then-exec obfuscation (card f8f5d506) ─────────────────
+# A base64-decoded payload piped into (`... | base64 -d | bash`) or command-
+# substituted into (`eval $(... base64 -d)`) a shell/interpreter runs code the
+# guard never sees -- the decoded string matches no pattern. The card's guidance
+# is to treat decode-then-exec as suspect regardless of payload, so the signal is
+# STRUCTURAL: a base64 *decode* co-present with a stdin/inline *exec sink*.
+#   - Decode is matched textually so it is still seen inside a quoted substitution
+#     (`sh -c "$(... base64 -d)"`), which the splitter keeps as one token.
+#   - The sink is matched on the split pieces: `eval`/`source`/`.`, or a
+#     shell/interpreter that reads stdin (bare, piped) or runs inline code (-c/-e).
+#     A shell/interpreter that runs a script FILE (`bash deploy.sh`) is NOT a sink.
+# Residual (out of scope): file-intermediary decode-exec (`base64 -d > f; bash f`)
+# needs dataflow tracking, not structural co-presence.
+_BASE64_DECODE_RE = re.compile(
+    r'\bbase64\s+(?:-\S+\s+)*(?:-[A-Za-z]*[dD][A-Za-z]*|--decode)\b'
+)
+_EXEC_SINK_ALWAYS = frozenset({'eval', 'source', '.'})
+_EXEC_SINK_SHELLS = frozenset({'bash', 'sh', 'zsh', 'dash', 'ksh'})
+_EXEC_SINK_INTERP = frozenset({'python', 'python3', 'node', 'nodejs'})
+
+
+def _is_exec_sink(tokens) -> bool:
+    """A piece that would EXECUTE text handed to it (stdin pipe or -c/-e inline),
+    as opposed to running a named script file."""
+    cw = _command_word(tokens)
+    if cw in _EXEC_SINK_ALWAYS:
+        return True
+    if cw not in _EXEC_SINK_SHELLS and cw not in _EXEC_SINK_INTERP:
+        return False
+    # Inline code flag (-c / -e) -> executes its argument directly.
+    if any(t in ('-c', '-e') or (t.startswith(('-c', '-e')) and len(t) > 2)
+           for t in tokens):
+        return True
+    # Otherwise: a positional (non-flag) arg after the command word is a SCRIPT
+    # FILE (not a stdin sink); its absence means the shell/interp reads stdin.
+    seen_cmd = False
+    for tok in tokens:
+        if not seen_cmd:
+            if os.path.basename(tok.lstrip('(')) == cw:
+                seen_cmd = True
+            continue
+        if tok.startswith('-'):
+            continue
+        if _ASSIGN_RE.match(tok) or tok in _SHELL_KEYWORDS:
+            continue
+        if not re.search(r'[A-Za-z0-9]', tok):  # punctuation like ) | & ;
+            continue
+        if tok == '-':
+            return True  # explicit stdin
+        return False     # a script filename -> runs a file, not a stdin sink
+    return True           # bare `bash` / `python3` -> reads stdin (the pipe)
+
+
+def match_base64_exec(command: str) -> bool:
+    """R2c: base64-decoded payload fed into a shell/interpreter for execution."""
+    if not _BASE64_DECODE_RE.search(command):
+        return False
+    for piece in _split_subcommands(command):
+        tokens = _tokenize(piece)
+        if tokens is _PARSE_FAIL or not tokens:
+            continue
+        if _is_exec_sink(tokens):
+            return True
     return False
 
 
@@ -998,6 +1097,13 @@ RULES = [
         'Bash interpreter (-c/-e inline code) opening a .env file '
         '(secret exfiltration via process-level read; bypasses shell print-verb R2)',
         lambda tool, inp: match_interpreter_env_read(inp) if tool == 'Bash' else False,
+    ),
+    Rule(
+        'base64-exec',
+        'Bash base64-decoded payload piped/substituted into a shell or interpreter '
+        '(eval/bash -c/… $(… base64 -d) or … | base64 -d | sh) -- obfuscated code '
+        'execution that hides the real command from every content-based rule',
+        lambda tool, inp: match_base64_exec(inp) if tool == 'Bash' else False,
     ),
     Rule(
         'external-curl',
