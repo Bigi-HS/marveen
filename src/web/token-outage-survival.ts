@@ -224,7 +224,7 @@ export async function runSurvivalCycle(deps: SurvivalDeps = DEFAULT_DEPS): Promi
         ...emptyState(),
         lastHealthIssues: state.lastHealthIssues,
         lastHealthAlertTs: state.lastHealthAlertTs,
-        healthAlertCount: state.healthAlertCount ?? 0,
+        healthAlertCount: Number.isFinite(state.healthAlertCount) ? (state.healthAlertCount as number) : 0,
       })
     }
     return { skipped: true, healthIssues: [], healthAlertSent: false, remindersDelivered: 0 }
@@ -238,7 +238,7 @@ export async function runSurvivalCycle(deps: SurvivalDeps = DEFAULT_DEPS): Promi
   // --- health check ---
   const issues = await Promise.resolve(deps.checkHealth())
   const issuesChanged = hasNewIssues(issues, state.lastHealthIssues)
-  const alertsSent = state.healthAlertCount ?? 0
+  const alertsSent = Number.isFinite(state.healthAlertCount) ? (state.healthAlertCount as number) : 0
   const backoffExpired = now - state.lastHealthAlertTs >= healthAlertBackoffMs(alertsSent)
   if (issues.length > 0 && (issuesChanged || backoffExpired)) {
     const text = `[Health-check token-outage] Problemak:\n${issues.map((i) => `- ${i}`).join('\n')}`
