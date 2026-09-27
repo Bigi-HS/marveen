@@ -18,6 +18,7 @@ import {
   exchangeCodeForTokens,
   awaitLoopbackCode,
   generateState,
+  generatePkce,
 } from '../src/mcp/google-authorize.js'
 import { YOUTUBE_UPLOAD_SCOPE } from '../src/mcp/youtube-upload.js'
 
@@ -36,7 +37,8 @@ async function main(): Promise<void> {
   // SEC-042: nonce into the consent URL, checked on the redirect; the shared
   // receiver binds loopback only.
   const state = generateState()
-  const authUrl = buildAuthUrl(client.clientId, REDIRECT_URI, [YOUTUBE_UPLOAD_SCOPE], state)
+  const { codeVerifier, codeChallenge } = generatePkce()
+  const authUrl = buildAuthUrl(client.clientId, REDIRECT_URI, [YOUTUBE_UPLOAD_SCOPE], state, { codeChallenge })
 
   console.error('\nOpen this URL in your browser and approve the YouTube upload')
   console.error('permission. "Google hasn\'t verified this app" is expected ->')
@@ -49,7 +51,7 @@ async function main(): Promise<void> {
     redirectUri: REDIRECT_URI,
     expectedState: state,
   })
-  const { refreshToken } = await exchangeCodeForTokens(client, code, REDIRECT_URI)
+  const { refreshToken } = await exchangeCodeForTokens(client, code, REDIRECT_URI, undefined, codeVerifier)
 
   await mkdir(OUT_DIR, { recursive: true })
   const outFile = join(OUT_DIR, 'oauth-tokens.json')

@@ -8,7 +8,7 @@
 // google-oauth.ts); the consent URL is an accounts.google.com page the human
 // opens in a browser, not a server fetch.
 import { createServer, type ServerResponse } from 'node:http'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, createHash } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import { OAUTH_TOKEN_URL, type FetchLike } from './google-oauth.js'
 
@@ -75,6 +75,7 @@ export function buildAuthUrl(
   redirectUri: string,
   scopes: string[] = SCOPES,
   state?: string,
+  pkce?: { codeChallenge: string },
 ): string {
   const u = new URL(AUTH_ENDPOINT)
   u.searchParams.set('client_id', clientId)
@@ -84,6 +85,10 @@ export function buildAuthUrl(
   u.searchParams.set('access_type', 'offline')
   u.searchParams.set('prompt', 'consent')
   if (state) u.searchParams.set('state', state)
+  if (pkce) {
+    u.searchParams.set('code_challenge', pkce.codeChallenge)
+    u.searchParams.set('code_challenge_method', 'S256')
+  }
   return u.toString()
 }
 
@@ -91,6 +96,15 @@ export function buildAuthUrl(
 // CSPRNG: the whole point is that a third party cannot guess or replay it.
 export function generateState(): string {
   return randomBytes(32).toString('hex')
+}
+
+// PKCE (OAuth 2.1, card 4186cdc3): S256 code_verifier/code_challenge pair.
+// code_verifier is a random 32-byte base64url string sent only during token
+// exchange; code_challenge = BASE64URL(SHA-256(verifier)) sent in the auth URL.
+export function generatePkce(): { codeVerifier: string; codeChallenge: string } {
+  const codeVerifier = randomBytes(32).toString('base64url')
+  const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url')
+  return { codeVerifier, codeChallenge }
 }
 
 const HTML_ESCAPES: Record<string, string> = {
@@ -210,6 +224,7 @@ export async function exchangeCodeForTokens(
   code: string,
   redirectUri: string,
   fetchFn: FetchLike = realFetch,
+  codeVerifier?: string,
 ): Promise<{ refreshToken: string; accessToken: string }> {
   const body = new URLSearchParams({
     client_id: client.clientId,
@@ -218,6 +233,7 @@ export async function exchangeCodeForTokens(
     redirect_uri: redirectUri,
     grant_type: 'authorization_code',
   })
+  if (codeVerifier) body.set('code_verifier', codeVerifier)
   const res = await fetchFn(OAUTH_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
