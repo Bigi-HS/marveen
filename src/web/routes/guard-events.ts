@@ -1,4 +1,5 @@
 // GET /api/guard-events/summary  -- aggregate view (any authed token)
+// GET /api/guard-events/probe    -- pipeline health probe (admin scope only)
 // GET /api/guard-events          -- raw rows (operator/admin scope only)
 //
 // SEC-030 / card 90c8c74b
@@ -6,6 +7,7 @@
 import { getGuardEvents, getGuardEventSummary } from '../../db.js'
 import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
 import { json } from '../http-helpers.js'
+import { runAiDefenceProbe } from '../aidefence-probe.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleGuardEvents(ctx: RouteContext): Promise<boolean> {
@@ -13,6 +15,18 @@ export async function tryHandleGuardEvents(ctx: RouteContext): Promise<boolean> 
 
   if (!path.startsWith('/api/guard-events')) return false
   if (method !== 'GET') { json(res, { error: 'Method not allowed' }, 405); return true }
+
+  // GET /api/guard-events/probe -- exercise guard+recorder end-to-end, return ok/fail.
+  // Admin-scoped: writes a synthetic probe row to guard_events.
+  if (path === '/api/guard-events/probe') {
+    if (!hasScope(identity?.scopes, ADMIN_SCOPE)) {
+      json(res, { error: 'Forbidden: admin scope required' }, 403)
+      return true
+    }
+    const probeResult = runAiDefenceProbe()
+    json(res, probeResult, probeResult.ok ? 200 : 500)
+    return true
+  }
 
   // GET /api/guard-events/summary -- aggregate counts, no raw content, open to any authed token
   if (path === '/api/guard-events/summary') {
