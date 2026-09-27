@@ -273,3 +273,57 @@ describe('runSurvivalCycle -- sendAlert failure resilience', () => {
     expect(deps._state().notifiedTaskIds).toEqual(['t2'])
   })
 })
+
+// Card 73178f8a (ENG-100): NaN guard on healthAlertCount reads.
+// `?? 0` does NOT sanitise NaN (NaN ?? 0 === NaN), so a corrupt state file
+// with a non-numeric healthAlertCount silently makes backoffExpired always
+// false -> health alerts never fire again.
+describe('runSurvivalCycle -- healthAlertCount NaN guard (ENG-100)', () => {
+  it('treats healthAlertCount: NaN as 0 in the outage branch (alert fires)', async () => {
+    const deps = makeDeps({ limited: true, issues: ['dashboard:down'] })
+    deps.writeState({
+      notifiedTaskIds: [], lastHealthIssues: [],
+      lastHealthAlertTs: 0, healthAlertCount: NaN,
+    })
+    const r = await runSurvivalCycle(deps)
+    // NaN must be coerced to 0 -> healthAlertBackoffMs(0)=healthAlertBackoffMs(1) -> backoffExpired=true
+    expect(r.healthAlertSent).toBe(true)
+    expect(deps._state().healthAlertCount).toBe(1)
+  })
+
+  it('treats healthAlertCount: NaN as 0 in the not-in-outage branch (state write stays clean)', async () => {
+    const deps = makeDeps({ limited: false })
+    deps.writeState({
+      notifiedTaskIds: ['t1'], lastHealthIssues: ['x'],
+      lastHealthAlertTs: 0, healthAlertCount: NaN,
+    })
+    await runSurvivalCycle(deps)
+    const written = deps._state().healthAlertCount
+    // Must be a finite number, not NaN
+    expect(Number.isFinite(written)).toBe(true)
+  })
+
+  it('treats healthAlertCount: "corrupt_string" as 0 (alert fires)', async () => {
+    const deps = makeDeps({ limited: true, issues: ['dashboard:down'] })
+    deps.writeState({
+      notifiedTaskIds: [], lastHealthIssues: [],
+      lastHealthAlertTs: 0, healthAlertCount: 'corrupt_string' as unknown as number,
+    })
+    const r = await runSurvivalCycle(deps)
+    expect(r.healthAlertSent).toBe(true)
+    expect(deps._state().healthAlertCount).toBe(1)
+  })
+
+  it('NaN healthAlertCount + SAME issues: backoff must expire correctly (not stay stuck)', async () => {
+    // issuesChanged=false (same issue), NaN makes backoffExpired=false without fix ->
+    // alert silently suppressed. With fix: NaN->0, backoffMs(0)=backoffMs(1)=5min,
+    // lastHealthAlertTs=0 -> backoffExpired=true -> alert fires.
+    const deps = makeDeps({ limited: true, issues: ['dashboard:down'] })
+    deps.writeState({
+      notifiedTaskIds: [], lastHealthIssues: ['dashboard:down'],
+      lastHealthAlertTs: 0, healthAlertCount: NaN,
+    })
+    const r = await runSurvivalCycle(deps)
+    expect(r.healthAlertSent).toBe(true)
+  })
+})
