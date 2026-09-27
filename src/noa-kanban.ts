@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type Database from 'better-sqlite3'
 import { getNoaDb } from './noa-db.js'
 import { emitDashboardEvent, type DashboardEvent } from './event-bus.js'
 import { MAIN_AGENT_ID, OWNER_NAME, BOT_NAME } from './config.js'
@@ -629,12 +630,20 @@ function maxSortOrderInStatus(status: string): number {
   return row?.m ?? 0
 }
 
-function checkAllChildrenDone(parentId: string): void {
-  const db = getNoaDb()
+// Exported + db-injectable for testability: the NULL-status boundary below is
+// unreachable through the public API (status is NOT NULL), so the regression
+// guard drives this directly with a minimal nullable schema (card 32fd645b).
+export function checkAllChildrenDone(parentId: string, db: Database.Database = getNoaDb()): void {
   const total = (db.prepare('SELECT COUNT(*) as n FROM kanban_cards WHERE parent_id = ?').get(parentId) as { n: number }).n
   if (total === 0) return
+  // `status IS NOT 'done'` (not `!=`) so the active-child test is NULL-safe:
+  // in SQLite `NULL != 'done'` is NULL (unknown) and would drop a NULL-status
+  // child from the active count, so a parent with one malformed (not-done) child
+  // and the rest done would FALSELY emit children_all_done. `NULL IS NOT 'done'`
+  // is TRUE, so a NULL-status child counts as active and blocks the false signal
+  // (fail-closed). Same NULL-safety class as PR#709 / PR#710 (card 32fd645b).
   const active = (db.prepare(
-    "SELECT COUNT(*) as n FROM kanban_cards WHERE parent_id = ? AND status != 'done' AND archived_at IS NULL"
+    "SELECT COUNT(*) as n FROM kanban_cards WHERE parent_id = ? AND status IS NOT 'done' AND archived_at IS NULL"
   ).get(parentId) as { n: number }).n
   if (active === 0) {
     emitOrDefer({ type: 'kanban', id: parentId, action: 'children_all_done' })
