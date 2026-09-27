@@ -408,4 +408,20 @@ describe('getGuardEventSummary -- probe rows excluded (7ca56576)', () => {
     expect(flagRow).toBeDefined()
     expect(flagRow!.count).toBe(1)
   })
+
+  it('NULL from_agent row (external/unauthenticated) still appears in byMechanismVerdict (IS NOT NULL-safe)', () => {
+    // SQLite: NULL != 'aidefence-probe' = NULL (falsy) -> would drop the row with != operator.
+    // IS NOT is NULL-safe: NULL IS NOT 'aidefence-probe' = TRUE -> row kept.
+    const now = Math.floor(Date.now() / 1000)
+    insertGuardEvent({
+      created_at: now, mechanism: 'messages-guard', route: '/api/messages',
+      verdict: 'BLOCK', from_agent: null, to_agent: null,
+      pattern_ids: 'pem-header', max_severity: 'critical', finding_count: 1,
+      content_hash: 'null-agent-h1', content_len: 40,
+    })
+    const summary = getGuardEventSummary(1)
+    const blockRow = summary.byMechanismVerdict.find(r => r.verdict === 'BLOCK')
+    expect(blockRow).toBeDefined()
+    expect(blockRow!.count).toBeGreaterThanOrEqual(1)
+  })
 })

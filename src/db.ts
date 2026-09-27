@@ -1602,14 +1602,14 @@ export function getGuardEventSummary(days = 14): {
   const byMechanismVerdict = db.prepare(
     `SELECT mechanism, verdict, NULL as pattern_ids, COUNT(*) as count
        FROM guard_events
-       WHERE created_at >= ? AND from_agent != 'aidefence-probe'
+       WHERE created_at >= ? AND from_agent IS NOT 'aidefence-probe'
        GROUP BY mechanism, verdict`
   ).all(since) as GuardEventSummary[]
   const byPattern = db.prepare(
     `SELECT mechanism, pattern_ids, NULL as verdict, COUNT(*) as count
        FROM guard_events
        WHERE verdict <> 'PASS' AND pattern_ids IS NOT NULL AND created_at >= ?
-         AND from_agent != 'aidefence-probe'
+         AND from_agent IS NOT 'aidefence-probe'
        GROUP BY mechanism, pattern_ids ORDER BY count DESC`
   ).all(since) as GuardEventSummary[]
   // Spec section 8: per-sender block counts. from_agent only -- no to_agent pair
