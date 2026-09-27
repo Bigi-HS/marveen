@@ -602,6 +602,7 @@ export interface MemoryPatch {
   category?: string
   keywords?: string | null
   agentId?: string
+  accessScope?: string | null
 }
 
 export function patchMemory(id: number, patch: MemoryPatch): string[] {
@@ -612,6 +613,7 @@ export function patchMemory(id: number, patch: MemoryPatch): string[] {
   if (patch.category !== undefined) { sets.push('category = ?'); cols.push('category'); params.push(patch.category) }
   if (patch.keywords !== undefined) { sets.push('keywords = ?'); cols.push('keywords'); params.push(patch.keywords) }
   if (patch.agentId !== undefined) { sets.push('agent_id = ?'); cols.push('agent_id'); params.push(patch.agentId) }
+  if (patch.accessScope !== undefined) { sets.push('access_scope = ?'); cols.push('access_scope'); params.push(patch.accessScope) }
   if (sets.length === 0) return []
   params.push(id)
   const changes = getNoaDb().prepare(`UPDATE memories SET ${sets.join(', ')} WHERE id = ?`).run(...params).changes
