@@ -8,12 +8,18 @@ to the live noa.db memoria table. Reduces curator load for low-risk shifts.
 TM-1: safe, category-only shifts, <5% FP (hot→warm, warm→cold)
 TM-2: manual review required (30% FP) — NEVER AUTO-APPLY
 TM-3: blocked (schema changes, curator-dependent) — NEVER AUTO-APPLY
+
+Design: Scope-guard against duplicate applier (vault-lint-apply-safe-tm.py, MEM-011).
+Checks migration_log for prior applications; already-at-target entries are idempotent no-ops.
+Per-item skip (not all-or-rollback) allows independent entries to apply despite bad proposals.
 """
 
 import json
 import sqlite3
 import sys
-from datetime import datetime
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROPOSALS_FILE = Path('/home/domin/marveen/store/vault-lint-l2-proposals.json')
@@ -63,8 +69,22 @@ def validate_proposal(conn, proposal):
 
     db_id, db_cat, db_agent = row
 
-    # Verify current category matches proposal (corrupt proposal guard) — check before migration validity
+    # B1: Duplicate-reconcile guard — check if already applied in migration_log (MEM-011 conflict)
+    cursor.execute(
+        'SELECT COUNT(*) FROM migration_log WHERE memory_id = ? AND to_tier = ?',
+        (entry_id, to_cat)
+    )
+    count = cursor.fetchone()
+    already_applied = count and count[0] > 0
+    if already_applied:
+        # Idempotent no-op: already in target state via prior applier (MEM-011 or previous run)
+        return True, None, (db_id, db_cat, to_cat, db_agent, True)  # True = skip, no-op
+
+    # Verify current category matches proposal (corrupt proposal guard)
     if db_cat != from_cat:
+        # Special case: already at target (idempotent no-op, not an error)
+        if db_cat == to_cat:
+            return True, None, (db_id, db_cat, to_cat, db_agent, True)  # skip
         return False, f"Entry {entry_id} current category {db_cat} != proposal {from_cat}", None
 
     # Verify agent_id matches (integrity check)
@@ -73,14 +93,14 @@ def validate_proposal(conn, proposal):
 
     # Safety: only allow known migrations
     if (from_cat, to_cat) not in ALLOWED_MIGRATIONS:
-        return False, f"Migration {from_cat}→{to_cat} not allowed (not in ALLOWED_MIGRATIONS)", None
+        return False, f"Migration {from_cat}→{to_cat} not allowed", None
 
-    return True, None, (db_id, db_cat, to_cat, db_agent)
+    return True, None, (db_id, db_cat, to_cat, db_agent, False)  # False = apply
 
 
 def apply_migrations(proposals):
     """
-    Apply all validated TM-1 proposals in a single transaction.
+    Apply validated TM-1 proposals. Per-item skip (not all-or-rollback).
 
     Returns: (applied_count, failed_count, audit_records, error)
     """
@@ -88,13 +108,12 @@ def apply_migrations(proposals):
         return 0, 0, [], None
 
     conn = connect_db()
-    try:
-        conn.execute('BEGIN TRANSACTION')
+    applied = []
+    failed = []
+    skipped = 0
 
-        applied = []
-        failed = []
-
-        for proposal in proposals:
+    for proposal in proposals:
+        try:
             is_valid, error_msg, entry_data = validate_proposal(conn, proposal)
 
             if not is_valid:
@@ -104,39 +123,59 @@ def apply_migrations(proposals):
                 })
                 continue
 
-            db_id, from_cat, to_cat, agent_id = entry_data
+            if not entry_data:
+                continue
 
-            # Apply migration
+            db_id, from_cat, to_cat, agent_id, should_skip = entry_data
+
+            if should_skip:
+                skipped += 1
+                continue
+
+            # B2: Apply migration WITHOUT bumping accessed_at (migration != access)
+            conn.execute('BEGIN TRANSACTION')
             cursor = conn.cursor()
             cursor.execute(
-                'UPDATE memories SET category = ?, accessed_at = unixepoch("now") WHERE id = ?',
+                'UPDATE memories SET category = ? WHERE id = ?',
                 (to_cat, db_id)
             )
 
-            # Build audit record
+            # Record migration in migration_log (SQLite table, for MEM-011 compat)
+            try:
+                cursor.execute(
+                    '''INSERT INTO migration_log (run_at, memory_id, agent_id, from_tier, to_tier, rule, dry_run)
+                       VALUES (unixepoch('now'), ?, ?, ?, ?, 'TM-1', 0)''',
+                    (db_id, agent_id, from_cat, to_cat)
+                )
+            except sqlite3.OperationalError:
+                # migration_log table may not exist; catch and skip
+                pass
+
+            conn.execute('COMMIT')
+
+            # Build JSON audit record (our sink)
             audit_record = {
                 'entry_id': db_id,
                 'agent_id': agent_id,
                 'from_cat': from_cat,
                 'to_cat': to_cat,
                 'rule': 'TM-1',
-                'applied_at': datetime.utcnow().isoformat() + 'Z'
+                'applied_at': datetime.now(timezone.utc).isoformat()
             }
             applied.append(audit_record)
 
-        # If any failures, rollback entire transaction (all-or-rollback)
-        if failed:
-            conn.execute('ROLLBACK')
-            return 0, len(failed), [], f"Rolled back: {len(failed)} entries failed validation"
+        except Exception as e:
+            try:
+                conn.execute('ROLLBACK')
+            except:
+                pass
+            failed.append({
+                'entry_id': proposal.get('entry_id'),
+                'error': str(e)
+            })
 
-        conn.execute('COMMIT')
-        return len(applied), 0, applied, None
-
-    except Exception as e:
-        conn.execute('ROLLBACK')
-        return 0, len(proposals), [], str(e)
-    finally:
-        conn.close()
+    conn.close()
+    return len(applied), len(failed), applied, None
 
 
 def write_audit_log(audit_records):
@@ -144,29 +183,33 @@ def write_audit_log(audit_records):
     if not audit_records:
         return None
 
-    today = datetime.utcnow().strftime('%Y-%m-%d')
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     log_file = LOG_DIR / f'migration-log-tm1-{today}.json'
 
-    # Load existing or create empty
-    if log_file.exists():
-        with open(log_file) as f:
-            existing = json.load(f)
-    else:
-        existing = []
+    try:
+        # Load existing or create empty
+        if log_file.exists():
+            with open(log_file) as f:
+                existing = json.load(f)
+        else:
+            existing = []
 
-    # Append new records
-    existing.extend(audit_records)
+        # Append new records
+        existing.extend(audit_records)
 
-    # Write back
-    with open(log_file, 'w') as f:
-        json.dump(existing, f, indent=2)
+        # Write back
+        with open(log_file, 'w') as f:
+            json.dump(existing, f, indent=2)
 
-    return str(log_file)
+        return str(log_file)
+    except Exception as e:
+        # Log to stderr (Chad low: audit-gap on write failure)
+        print(f"ERROR: write_audit_log failed: {e}", file=sys.stderr)
+        return None
 
 
 def report_to_daily_log(applied_count, failed_count, log_file):
-    """Post result to /api/daily-log."""
-    import subprocess
+    """Post result to /api/daily-log via urllib (no token in argv)."""
     import os
 
     token = os.environ.get('GENESIS_AGENT_TOKEN')
@@ -180,7 +223,7 @@ def report_to_daily_log(applied_count, failed_count, log_file):
     if applied_count == 0 and failed_count == 0:
         content = "## TM-1 Executor | No proposals to apply"
     else:
-        content = f"## TM-1 Executor | Applied: {applied_count}, Failed: {failed_count}\nAudit log: {log_file or '(none)'}"
+        content = f"## TM-1 Executor | Applied: {applied_count}, Failed: {failed_count}\nAudit: {log_file or '(none)'}"
 
     payload = json.dumps({
         'agent_id': 'applegate',
@@ -188,15 +231,19 @@ def report_to_daily_log(applied_count, failed_count, log_file):
     })
 
     try:
-        subprocess.run([
-            'curl', '-s', '-X', 'POST',
+        req = urllib.request.Request(
             'http://localhost:3420/api/daily-log',
-            '-H', 'Content-Type: application/json',
-            '-H', f'Authorization: Bearer {token}',
-            '-d', payload
-        ], check=True, capture_output=True)
-        return True
-    except:
+            data=payload.encode('utf-8'),
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {token}'
+            },
+            method='POST'
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status == 200
+    except Exception as e:
+        print(f"ERROR: report_to_daily_log failed: {e}", file=sys.stderr)
         return False
 
 
@@ -209,7 +256,7 @@ def main():
         report_to_daily_log(0, 0, None)
         return 0
 
-    # Apply migrations
+    # Apply migrations (per-item skip, not all-or-rollback)
     applied_count, failed_count, audit_records, error = apply_migrations(proposals)
 
     if error:
