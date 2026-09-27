@@ -65,6 +65,14 @@ def known_pairs(main_id: str) -> dict[tuple[str, str], str]:
             'name is deliberately descriptive and will not be renamed, so the '
             'mitigation is the "=" exact-match anchor at every call site '
             '(OPS-106), not a rename. Owner: OPS-106 / dave.',
+        ('agent-claudia', 'agent-claudia-local'):
+            'Naming scheme: claudia-local is the optional Ollama local-LLM '
+            'variant of the claudia agent (card ollama-hybrid). The session '
+            'names are "agent-claudia" and "agent-claudia-local" -- a strict '
+            'prefix pair BY CONSTRUCTION. Both sessions are rarely live '
+            'simultaneously (claudia-local is optional), and the mitigation is '
+            'the "=" exact-match anchor at every call site (OPS-106, same as '
+            'marveen/marveen-channels). Sanctioned ENG-068 / rackham 2026-09-28.',
     }
 
 
