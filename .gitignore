@@ -71,3 +71,11 @@ scripts/bin/
 
 # also ignore a node_modules symlink FILE at repo root (not just the dir)
 /node_modules
+
+# Repo-local git worktrees created via `git worktree add .worktrees/<card>`.
+# These are full checkouts of this repo; git does not auto-ignore them here, so
+# `git status` shows `?? .worktrees/` and a `git add -A`/`git add .` in the main
+# tree would stage all of them as tracked files -> repo corruption / 08:00
+# rebuild block (untracked->tracked rebuild-hazard, cf. PR#626). Nothing under
+# .worktrees/ is ever part of this repo's tracked tree. (card f24668a1)
+/.worktrees/
