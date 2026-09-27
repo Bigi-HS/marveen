@@ -338,3 +338,74 @@ describe('DA-35 -- key rotation warn fires on corrupt key file (not just I/O err
     expect((rotationCall![0] as { reason: string }).reason).toMatch(/not 64 hex/)
   })
 })
+
+// ── 7ca56576: probe rows excluded from summary aggregates ────────────────────
+// runAiDefenceProbe() writes from_agent='aidefence-probe' rows on every call.
+// These must not inflate byMechanismVerdict or byPattern, which Chad's daily
+// report reads -- they would show phantom FLAG/email-PII counts. The fix is in
+// the summary read layer; the rows ARE written (probe's recorded check depends
+// on it). bySender and highSevPass are already unaffected (probe writes FLAG +
+// medium, bySender only counts BLOCK, highSevPass only counts PASS+high).
+
+describe('getGuardEventSummary -- probe rows excluded (7ca56576)', () => {
+  it('probe FLAG row does NOT appear in byMechanismVerdict', () => {
+    const now = Math.floor(Date.now() / 1000)
+    insertGuardEvent({
+      created_at: now, mechanism: 'messages-guard', route: '/api/messages',
+      verdict: 'FLAG', from_agent: 'aidefence-probe', to_agent: null,
+      pattern_ids: 'email', max_severity: 'medium', finding_count: 1,
+      content_hash: 'probe-h1', content_len: 50,
+    })
+    const summary = getGuardEventSummary(1)
+    const flagRow = summary.byMechanismVerdict.find(r => r.verdict === 'FLAG')
+    expect(flagRow).toBeUndefined()
+  })
+
+  it('probe FLAG row does NOT appear in byPattern', () => {
+    const now = Math.floor(Date.now() / 1000)
+    insertGuardEvent({
+      created_at: now, mechanism: 'messages-guard', route: '/api/messages',
+      verdict: 'FLAG', from_agent: 'aidefence-probe', to_agent: null,
+      pattern_ids: 'email', max_severity: 'medium', finding_count: 1,
+      content_hash: 'probe-h2', content_len: 50,
+    })
+    const summary = getGuardEventSummary(1)
+    const emailPattern = summary.byPattern.find(r => r.pattern_ids === 'email')
+    expect(emailPattern).toBeUndefined()
+  })
+
+  it('real FLAG row (non-probe) still appears in byMechanismVerdict and byPattern', () => {
+    const now = Math.floor(Date.now() / 1000)
+    insertGuardEvent({
+      created_at: now, mechanism: 'messages-guard', route: '/api/messages',
+      verdict: 'FLAG', from_agent: 'scout', to_agent: null,
+      pattern_ids: 'email', max_severity: 'medium', finding_count: 1,
+      content_hash: 'real-h1', content_len: 30,
+    })
+    const summary = getGuardEventSummary(1)
+    expect(summary.byMechanismVerdict.find(r => r.verdict === 'FLAG')).toBeDefined()
+    expect(summary.byPattern.find(r => r.pattern_ids === 'email')).toBeDefined()
+  })
+
+  it('probe + real rows: only real row counted in byMechanismVerdict', () => {
+    const now = Math.floor(Date.now() / 1000)
+    // probe row
+    insertGuardEvent({
+      created_at: now, mechanism: 'messages-guard', route: '/api/messages',
+      verdict: 'FLAG', from_agent: 'aidefence-probe', to_agent: null,
+      pattern_ids: 'email', max_severity: 'medium', finding_count: 1,
+      content_hash: 'probe-h3', content_len: 50,
+    })
+    // real row
+    insertGuardEvent({
+      created_at: now, mechanism: 'messages-guard', route: '/api/messages',
+      verdict: 'FLAG', from_agent: 'dave', to_agent: null,
+      pattern_ids: 'email', max_severity: 'medium', finding_count: 1,
+      content_hash: 'real-h2', content_len: 25,
+    })
+    const summary = getGuardEventSummary(1)
+    const flagRow = summary.byMechanismVerdict.find(r => r.verdict === 'FLAG')
+    expect(flagRow).toBeDefined()
+    expect(flagRow!.count).toBe(1)
+  })
+})
