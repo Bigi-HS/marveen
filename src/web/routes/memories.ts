@@ -57,10 +57,13 @@ interface MemoryFilterResult {
 }
 
 // Combo escalation: two individually-high patterns that together form an
-// exfiltration-capable payload (fetch remote resource + pipe to shell).
-// Neither pattern alone warrants blocking; the combination does (SEC-054).
+// exfiltration-capable payload (fetch remote resource + execute locally).
+// Neither pattern alone warrants blocking; the combination does (SEC-054/069).
 const COMBO_ESCALATIONS: ReadonlyArray<[string, string]> = [
-  ['curl-external', 'shell-exec'],
+  ['curl-external', 'shell-exec'],      // curl ... | bash -c (SEC-054)
+  ['curl-external', 'code-eval'],       // eval(fetch(url))  (SEC-069)
+  ['curl-external', 'code-exec'],       // exec(fetch(url))  (SEC-069)
+  ['subprocess-import', 'shell-exec'],  // import subprocess + bash -c (SEC-069)
 ]
 
 function scanMemoryContent(content: string): MemoryFilterResult {
