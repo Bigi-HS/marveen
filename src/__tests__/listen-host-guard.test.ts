@@ -66,7 +66,12 @@ function splitTopLevel(args: string): string[] {
 }
 
 const isComment = (line: string) => /^(\/\/|\/\*|\*|#)/.test(line.trim())
-const isCallback = (arg: string) => /^(\(|function\b|async\b|lambda\b)/.test(arg)
+// DA-43: extend to also catch named callback identifiers (namedFn, onListening…).
+// A bare identifier in the 2nd arg position cannot be a host -- hosts are string
+// literals ('127.0.0.1') or numeric literals. An identifier is a callback reference.
+const isCallback = (arg: string) =>
+  /^(\(|function\b|async\b|lambda\b)/.test(arg) ||
+  /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(arg.trim())
 
 function hostlessListenSites(): string[] {
   const sites: string[] = []
@@ -79,7 +84,10 @@ function hostlessListenSites(): string[] {
         const m = /\.listen\((.*)\)/.exec(line)
         if (!m) return
         const args = splitTopLevel(m[1])
-        if (args.length < 2 || isCallback(args[1])) {
+        // host-less when: single arg (no host), or 2-arg where 2nd is a callback
+        // (listen(port, cb)). 3+-arg calls always have an explicit host as arg[1].
+        const hostless = args.length < 2 || (args.length === 2 && isCallback(args[1]))
+        if (hostless) {
           sites.push(`${relative(ROOT, file)}:${i + 1}`)
         }
       })
@@ -88,7 +96,7 @@ function hostlessListenSites(): string[] {
   return sites.sort()
 }
 
-describe('no server binds without an explicit host', () => {
+describe('no host-less listen() in src/ or scripts/', () => {
   it('finds exactly the known-unfixed sites, and no new ones', () => {
     const sites = hostlessListenSites()
 
@@ -109,7 +117,7 @@ describe('no server binds without an explicit host', () => {
       const m = /\.listen\((.*)\)/.exec(line)
       if (!m) return false
       const args = splitTopLevel(m[1])
-      return args.length < 2 || isCallback(args[1])
+      return args.length < 2 || (args.length === 2 && isCallback(args[1]))
     }
 
     expect(detect('    server.listen(PORT)')).toBe(true)
@@ -119,6 +127,28 @@ describe('no server binds without an explicit host', () => {
     expect(detect('    server.listen(3420)')).toBe(true)
     expect(detect("    server.listen(port, WEB_HOST, () => {})")).toBe(false)
     expect(detect("    server.listen(0, '127.0.0.1')")).toBe(false)
+    // DA-43: a named callback identifier (namedFn) in the 2nd arg is a host-less
+    // bind -- the callback form listen(port, cb) has no host. The bare identifier
+    // was previously missed because isCallback only matched anonymous syntax.
+    expect(detect('    server.listen(port, namedFn)')).toBe(true)
+    expect(detect('    server.listen(port, onListening)')).toBe(true)
+  })
+
+  // DA-44: multi-line listen() calls (port and host on separate lines) are not
+  // caught by the line-by-line scan. This is a known scope limitation -- AST-based
+  // analysis would be required. Documented here as a known gap; the line-scoped
+  // guard still prevents all single-line regressions.
+  it.skip('DA-44 (known gap): multi-line listen() call is not detected by line-by-line scan', () => {
+    // A future AST-based guard would catch this; the current regex-based scan cannot.
+    const detect = (line: string) => {
+      if (isComment(line)) return false
+      const m = /\.listen\((.*)\)/.exec(line)
+      if (!m) return false
+      const args = splitTopLevel(m[1])
+      return args.length < 2 || (args.length === 2 && isCallback(args[1]))
+    }
+    // This multi-line form is host-less but spans two lines, so neither line matches.
+    expect(detect('    server.listen(')).toBe(true) // would need multi-line parsing
   })
 
   it('CONTROL: a python socket listen is exempt only because bind() sets the host', () => {
