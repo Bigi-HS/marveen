@@ -1,8 +1,9 @@
 /**
  * Card 44783957 boundary (data-correctness slice): NULL-status card in buildCfdSnapshot.
  *
- * SKIPPED until the SQL is fixed -- kept here to document the bug and pin the
- * fix target. Move from it.skip -> it once Dave lands `WHERE status IS NOT 'icebox'`.
+ * Fixed by card 8d844f89: buildCfdSnapshot now uses `WHERE status IS NOT 'icebox'`
+ * (NULL-safe), so NULL-status rows are no longer silently dropped. These tests are
+ * the regression guard.
  *
  * Root cause: `WHERE status != 'icebox'` uses `!=`. In SQLite, `NULL != 'icebox'`
  * evaluates to NULL (unknown), so the WHERE clause silently excludes NULL-status rows.
@@ -32,8 +33,8 @@ const MINIMAL_SCHEMA = `
   )
 `
 
-describe('buildCfdSnapshot -- C7a NULL-status boundary (SKIPPED: bug open, fix = IS NOT)', () => {
-  it.skip('NULL status card is routed to other, not silently dropped', () => {
+describe('buildCfdSnapshot -- C7a NULL-status boundary (fixed: IS NOT)', () => {
+  it('NULL status card is routed to other, not silently dropped', () => {
     const db = new Database(':memory:')
     db.exec(MINIMAL_SCHEMA)
     db.prepare(
@@ -49,7 +50,7 @@ describe('buildCfdSnapshot -- C7a NULL-status boundary (SKIPPED: bug open, fix =
     expect(sum).toBe(2)
   })
 
-  it.skip('NULL status card with an icebox sibling: icebox excluded, NULL goes to other', () => {
+  it('NULL status card with an icebox sibling: icebox excluded, NULL goes to other', () => {
     const db = new Database(':memory:')
     db.exec(MINIMAL_SCHEMA)
     db.prepare(
