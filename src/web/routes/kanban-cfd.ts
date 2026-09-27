@@ -55,18 +55,24 @@ const FLOW_STATUSES = new Set(['planned', 'in_progress', 'waiting', 'done'])
  * and a silently-dropped status can never read as flow shrinking (C7a).
  */
 export function buildCfdSnapshot(db: Database.Database = getNoaDb()): CfdMetrics {
+  // `IS NOT` (not `!=`) so the exclusion is NULL-safe: in SQLite `NULL != 'icebox'`
+  // is NULL (unknown) and would silently drop a NULL-status row, whereas
+  // `NULL IS NOT 'icebox'` is TRUE, so it passes through and falls into `other`.
+  // Guards the C7a completeness invariant (no active card silently uncounted).
   const counts = db.prepare(
     `SELECT status, COUNT(*) as n
        FROM kanban_cards
-      WHERE status != 'icebox'
+      WHERE status IS NOT 'icebox'
       GROUP BY status`
-  ).all() as Array<{ status: string; n: number }>
+  ).all() as Array<{ status: string | null; n: number }>
 
   const metrics: CfdMetrics = { planned: 0, in_progress: 0, waiting: 0, done: 0, other: 0 }
   for (const row of counts) {
-    if (FLOW_STATUSES.has(row.status)) {
+    if (row.status !== null && FLOW_STATUSES.has(row.status)) {
       metrics[row.status as 'planned' | 'in_progress' | 'waiting' | 'done'] = row.n
     } else {
+      // Unexpected/new status, or a NULL status: surfaced in `other` so the
+      // total stays complete and no active card is silently uncounted (C7a).
       metrics.other += row.n
     }
   }
