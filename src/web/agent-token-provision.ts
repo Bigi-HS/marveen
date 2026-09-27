@@ -180,3 +180,54 @@ export function refreshTokenIfNeeded(
   provisionAgentToken(db, agentId, tokenFile, { now, ttlMs: opts.ttlMs })
   return { refreshed: true }
 }
+
+export interface TokenSweepDeps {
+  // Roster of agents to consider (typically listAgentNames()).
+  listAgents: () => string[]
+  // Resolves an agent's on-disk token file path (typically
+  // join(agentDir(id), '.genesis-token')).
+  tokenFileFor: (agentId: string) => string
+  now?: number
+  thresholdMs?: number
+  // Called when one agent's rotation throws, so the caller can log without the
+  // sweep taking a dependency on any particular logger.
+  onError?: (agentId: string, err: unknown) => void
+}
+
+export interface TokenSweepResult {
+  checked: number
+  refreshed: string[]
+  errored: string[]
+}
+
+// Sweep every agent in the roster and proactively rotate any token that is
+// expired or within the refresh threshold. This is the production caller that
+// card 02da7bb2 was missing: refreshTokenIfNeeded was defined + tested but never
+// invoked on a schedule, so a long-running agent's token silently expired after
+// 24h and every GitHub/gate call 401'd (ENG-341d6d70). A single agent's failure
+// (unreadable file, symlinked dir, provision error) is isolated via onError and
+// never aborts the sweep -- one bad agent must not starve the rest of the fleet
+// of rotation. Pure w.r.t. the roster + path resolver (both injected), so it
+// unit-tests without touching the real agents/ directory.
+export function sweepAgentTokenRotation(
+  db: Database.Database,
+  deps: TokenSweepDeps,
+): TokenSweepResult {
+  const refreshed: string[] = []
+  const errored: string[] = []
+  let checked = 0
+  for (const agentId of deps.listAgents()) {
+    checked++
+    try {
+      const { refreshed: didRefresh } = refreshTokenIfNeeded(db, agentId, deps.tokenFileFor(agentId), {
+        now: deps.now,
+        thresholdMs: deps.thresholdMs,
+      })
+      if (didRefresh) refreshed.push(agentId)
+    } catch (err) {
+      errored.push(agentId)
+      deps.onError?.(agentId, err)
+    }
+  }
+  return { checked, refreshed, errored }
+}

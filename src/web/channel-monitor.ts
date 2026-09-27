@@ -25,7 +25,8 @@ import {
   isBudgetPauseMarkerActive,
   writeBudgetPauseMarker,
 } from './opus-burn-monitor.js'
-import { createAgentMessage } from '../db.js'
+import { createAgentMessage, getDb } from '../db.js'
+import { sweepAgentTokenRotation } from './agent-token-provision.js'
 import {
   agentHasChannel,
   agentSessionName,
@@ -899,6 +900,28 @@ function shouldEscalateMarveenDown(): boolean {
 // startChannelPluginMonitor. Sends inter-agent messages to marveen at
 // 70% / 90% of the weekly Opus credit limit (deduped per week via file state).
 // Also checks per-agent budgets and writes budget-pause markers (card e6ab511d).
+// Proactively rotate per-agent Genesis tokens before they expire (ENG-341d6d70).
+// refreshTokenIfNeeded/needsRefresh (card 02da7bb2) were defined + tested but had
+// no production caller, so a long-running agent's 24h token silently expired and
+// every GitHub/gate POST 401'd. This is that missing caller: sweep the roster on
+// a schedule, rotating any token inside the 2h refresh threshold. Isolated
+// per-agent (one bad token file can't abort the sweep) and non-fatal overall.
+function checkAgentTokenRotation(): void {
+  try {
+    const res = sweepAgentTokenRotation(getDb(), {
+      listAgents: listAgentNames,
+      tokenFileFor: (agentId) => join(agentDir(agentId), '.genesis-token'),
+      onError: (agentId, err) =>
+        logger.warn({ err, agentId }, '[token-rotation] failed to rotate agent token -- will retry next tick'),
+    })
+    if (res.refreshed.length > 0) {
+      logger.info({ refreshed: res.refreshed, checked: res.checked }, '[token-rotation] rotated expiring agent tokens')
+    }
+  } catch (err) {
+    logger.warn({ err }, '[token-rotation] sweep failed -- non-fatal')
+  }
+}
+
 function checkOpusBurnThresholds(): void {
   try {
     const now = Date.now()
@@ -1230,6 +1253,13 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     checkOpusBurnThresholds()
     setInterval(checkOpusBurnThresholds, BURN_CHECK_INTERVAL_MS)
   }, 5 * 60 * 1000)
+  // Agent-token proactive rotation (ENG-341d6d70): sweep every 15 min, well
+  // inside the 2h refresh threshold so a token is renewed several times before it
+  // could expire. Run once at startup so an agent already near expiry at boot is
+  // renewed immediately rather than after the first interval.
+  const TOKEN_ROTATION_INTERVAL_MS = 15 * 60 * 1000
+  checkAgentTokenRotation()
+  setInterval(checkAgentTokenRotation, TOKEN_ROTATION_INTERVAL_MS)
   return setInterval(check, 60000)
 }
 
