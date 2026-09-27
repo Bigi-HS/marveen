@@ -27,6 +27,10 @@ import type { RouteContext } from './types.js'
 // rather than 413-rejected; still far below the generic 20MB default. See the
 // MAX_INGEST_BYTES rationale in health-ingest.ts.
 const MAX_RAW_BYTES = 512 * 1024
+// n8n response cap (8922a439): the 2xx response from n8n is forwarded to the
+// unauthenticated caller. Cap it to prevent runaway n8n transforms from sending
+// disproportionately large responses over the public Cloudflare tunnel.
+const MAX_N8N_RESPONSE_BYTES = 64 * 1024
 const N8N_ZEPP_WEBHOOK = 'http://127.0.0.1:5678/webhook/zepp-hc'
 
 // Per-IP: 20 burst, 20/min (generous for a single health-tracker device syncing
@@ -110,9 +114,20 @@ export function makeHealthIngestRawHandler(deps: HealthIngestRawDeps = {}) {
       return
     }
 
+    let rawResponse: string
+    try {
+      rawResponse = await n8nRes.text()
+    } catch {
+      rawResponse = '{}'
+    }
+    if (rawResponse.length > MAX_N8N_RESPONSE_BYTES) {
+      logger.warn({ size: rawResponse.length }, 'health ingest-raw: n8n response too large')
+      json(res, { error: 'transform response too large' }, 502)
+      return
+    }
     let body: unknown
     try {
-      body = await n8nRes.json()
+      body = JSON.parse(rawResponse)
     } catch {
       body = {}
     }
