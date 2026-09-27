@@ -1,6 +1,6 @@
 // Bootstrap helper for the dedicated `heartbeat` channel-less sub-agent.
 //
-// Background (Szabi 2026-06-02 14:09): the historical heartbeat path
+// Background (Dominik 2026-06-02 14:09): the historical heartbeat path
 // (src/heartbeat.ts -- the natív hourly module that called the
 // claude-agent-sdk's runAgent() and notifyTelegram()) routinely crashed
 // Marveen's channel plugin within 2-3 minutes of every fire. After a
@@ -15,7 +15,7 @@
 // (named "heartbeat"), driven by the existing scheduled-task system,
 // and have IT send the formatted summary to Marveen via inter-agent
 // message rather than directly to Telegram. Marveen then decides if
-// it relays to Szabi -- so the heartbeat output never spawns a
+// it relays to Dominik -- so the heartbeat output never spawns a
 // Marveen-token sendMessage, never produces a self-inbound event, and
 // the channel plugin stays untouched.
 //
@@ -76,7 +76,7 @@ const HEARTBEAT_AGENT_CONFIG = {
 //     the heartbeat output OUT of any bot-API call from this process,
 //     so Marveen's poller never sees a self-generated inbound.
 //   - The output goes to Marveen via inter-agent message. Marveen
-//     decides whether to relay it to Szabi on Telegram, in HER own
+//     decides whether to relay it to Dominik on Telegram, in HER own
 //     session, with HER own context.
 //   - Structured-text format so Marveen can either parse or relay-
 //     verbatim depending on signal-to-noise.
@@ -85,11 +85,11 @@ function renderClaudeMd(): string {
 
 You are the **heartbeat agent** — a dedicated, headless worker that
 runs on the hourly schedule and produces a structured summary of
-what is happening across Szabolcs' systems right now. You ALWAYS
+what is happening across Dominik's systems right now. You ALWAYS
 hand the result to Marveen via inter-agent message; you NEVER
-contact Szabi directly.
+contact Dominik directly.
 
-## Why this agent exists (Szabi 2026-06-02 14:09)
+## Why this agent exists (2026-06-02 14:09)
 
 The previous heartbeat ran from inside the dashboard process and
 called the Telegram Bot API directly. Every fire caused Marveen's
@@ -106,7 +106,7 @@ When you receive the heartbeat prompt:
 1. **Collect** the four data sources:
    - **Calendar (next 2 hours)** — use the
      \`mcp__server-google-calendar-mcp__list-events\` tool against
-     \`szota.szabolcs@gmail.com\`, timeMin=now, timeMax=now+2h.
+     \`dominik10023player@gmail.com\`, timeMin=now, timeMax=now+2h.
      If the call fails (token revoked / 401), record the failure
      reason rather than the events; Marveen can act on the failure.
    - **Kanban** — read the SQLite DB at
@@ -151,7 +151,7 @@ When you receive the heartbeat prompt:
 3. **Send** that string to Marveen via the dashboard API:
 
    \`\`\`bash
-   TOKEN=$(cat /Users/marvin/ClaudeClaw/store/.dashboard-token)
+   TOKEN=$(<store/.dashboard-token)
    curl -s -X POST http://localhost:3420/api/messages \\
      -H "Content-Type: application/json" \\
      -H "Authorization: Bearer $TOKEN" \\
