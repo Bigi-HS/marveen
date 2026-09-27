@@ -20,6 +20,7 @@ import {
   exchangeCodeForTokens,
   awaitLoopbackCode,
   generateState,
+  generatePkce,
   SCOPES,
 } from '../src/mcp/google-authorize.js'
 
@@ -38,7 +39,8 @@ async function main(): Promise<void> {
   // SEC-042: bind the nonce into the consent URL and require it back on the
   // redirect. The receiver (shared helper) listens on loopback only.
   const state = generateState()
-  const authUrl = buildAuthUrl(client.clientId, REDIRECT_URI, SCOPES, state)
+  const { codeVerifier, codeChallenge } = generatePkce()
+  const authUrl = buildAuthUrl(client.clientId, REDIRECT_URI, SCOPES, state, { codeChallenge })
 
   console.error('\nOpen this URL in your browser and approve the two permissions')
   console.error('(Calendar read-only + Gmail send). "Google hasn\'t verified this app"')
@@ -51,7 +53,7 @@ async function main(): Promise<void> {
     redirectUri: REDIRECT_URI,
     expectedState: state,
   })
-  const { refreshToken } = await exchangeCodeForTokens(client, code, REDIRECT_URI)
+  const { refreshToken } = await exchangeCodeForTokens(client, code, REDIRECT_URI, undefined, codeVerifier)
 
   await mkdir(OUT_DIR, { recursive: true })
   const outFile = join(OUT_DIR, 'oauth-tokens.json')

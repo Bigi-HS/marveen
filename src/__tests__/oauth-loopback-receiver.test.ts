@@ -2,11 +2,14 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
+import { createHash } from 'node:crypto'
 import {
   LOOPBACK_HOST,
   generateState,
+  generatePkce,
   buildAuthUrl,
   awaitLoopbackCode,
+  exchangeCodeForTokens,
 } from '../mcp/google-authorize.js'
 
 // SEC-042 (card 1d2a4fe0, DA-42). The one-time OAuth authorize scripts stood up a
@@ -155,5 +158,83 @@ describe('scripts/ authorize flows use the shared receiver', () => {
     expect(src).toContain('generateState()')
     // No local receiver left behind to drift out of sync with the shared one.
     expect(src).not.toContain('createServer(')
+  })
+})
+
+// ── 4186cdc3: PKCE (OAuth 2.1) ───────────────────────────────────────────────
+// Adds code_verifier/code_challenge to the loopback flow (S256 method).
+
+describe('generatePkce', () => {
+  it('returns codeVerifier and codeChallenge as base64url strings', () => {
+    const { codeVerifier, codeChallenge } = generatePkce()
+    expect(typeof codeVerifier).toBe('string')
+    expect(typeof codeChallenge).toBe('string')
+    // base64url: only A-Za-z0-9 + - _ (no padding = or + or /)
+    expect(codeVerifier).toMatch(/^[A-Za-z0-9_-]+$/)
+    expect(codeChallenge).toMatch(/^[A-Za-z0-9_-]+$/)
+  })
+
+  it('codeChallenge is BASE64URL(SHA-256(codeVerifier))', () => {
+    const { codeVerifier, codeChallenge } = generatePkce()
+    const expected = createHash('sha256').update(codeVerifier).digest('base64url')
+    expect(codeChallenge).toBe(expected)
+  })
+
+  it('each call returns a different verifier (CSPRNG)', () => {
+    const a = generatePkce()
+    const b = generatePkce()
+    expect(a.codeVerifier).not.toBe(b.codeVerifier)
+  })
+})
+
+describe('buildAuthUrl -- PKCE params (4186cdc3)', () => {
+  const CLIENT_ID = 'test-client'
+  const REDIRECT = 'http://localhost:9999/'
+
+  it('includes code_challenge and S256 method when pkce provided', () => {
+    const { codeChallenge } = generatePkce()
+    const url = new URL(buildAuthUrl(CLIENT_ID, REDIRECT, [], undefined, { codeChallenge }))
+    expect(url.searchParams.get('code_challenge')).toBe(codeChallenge)
+    expect(url.searchParams.get('code_challenge_method')).toBe('S256')
+  })
+
+  it('omits code_challenge params when pkce not provided (backward compat)', () => {
+    const url = new URL(buildAuthUrl(CLIENT_ID, REDIRECT))
+    expect(url.searchParams.get('code_challenge')).toBeNull()
+    expect(url.searchParams.get('code_challenge_method')).toBeNull()
+  })
+})
+
+describe('exchangeCodeForTokens -- code_verifier (4186cdc3)', () => {
+  it('includes code_verifier in the token request body when provided', async () => {
+    let capturedBody = ''
+    const mockFetch = async (_url: string, init?: RequestInit) => {
+      capturedBody = init?.body?.toString() ?? ''
+      return new Response(JSON.stringify({ refresh_token: 'rt', access_token: 'at' }), { status: 200 })
+    }
+    const { codeVerifier } = generatePkce()
+    await exchangeCodeForTokens(
+      { clientId: 'id', clientSecret: 'secret' },
+      'code',
+      'http://localhost/',
+      mockFetch as any,
+      codeVerifier,
+    )
+    expect(capturedBody).toContain(`code_verifier=${encodeURIComponent(codeVerifier)}`)
+  })
+
+  it('omits code_verifier when not provided (backward compat)', async () => {
+    let capturedBody = ''
+    const mockFetch = async (_url: string, init?: RequestInit) => {
+      capturedBody = init?.body?.toString() ?? ''
+      return new Response(JSON.stringify({ refresh_token: 'rt', access_token: 'at' }), { status: 200 })
+    }
+    await exchangeCodeForTokens(
+      { clientId: 'id', clientSecret: 'secret' },
+      'code',
+      'http://localhost/',
+      mockFetch as any,
+    )
+    expect(capturedBody).not.toContain('code_verifier')
   })
 })
