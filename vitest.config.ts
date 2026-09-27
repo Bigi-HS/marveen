@@ -18,6 +18,16 @@ export default defineConfig({
       '**/.claude/worktrees/**',
       '**/marveen-wt/**',
       '/tmp/wt-*/**',
+      // Repo-local git worktrees under .worktrees/ (created by `git worktree add
+      // .worktrees/<card>`). These are full stale checkouts of this repo, so their
+      // src/__tests__ copies get globbed here and run duplicate/divergent tests
+      // against the shared codetree test DB -> 103 flaky failures in the full suite
+      // (Thor gate side-finding #594/#595, 2026-08-30). The real suite lives in
+      // src/__tests__ at the repo root, never under .worktrees/, so excluding the
+      // whole subtree is safe. Both the top-level and any nested form are covered.
+      // (card a2c69cd6)
+      '.worktrees/**',
+      '**/.worktrees/**',
       // Exclude deploy-time dist backups (store/dist-backup-YYYYMMDD-HHMMSS/):
       // the backup dir contains __tests__ which vitest would otherwise glob.
       'store/dist-backup-*/**',
