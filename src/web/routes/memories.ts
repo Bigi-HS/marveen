@@ -6,7 +6,7 @@ import {
   deleteMemory, getNoaDb, type NoaMemory,
 } from '../../noa-memory.js'
 import { MAIN_AGENT_ID, OLLAMA_URL } from '../../config.js'
-import { listAgentNames } from '../agent-config.js'
+import { isKnownAgent } from '../agent-config.js'
 import { logger } from '../../logger.js'
 import { decideMemoryMutation, enforceFromBindingEnabled } from '../agent-identity-binding.js'
 import { recordGuardEvent } from '../guard-event-recorder.js'
@@ -130,11 +130,10 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     // Validate access_scope (card 97ed2d2c): must be null or a known agent_id.
     // Category names used here (e.g. 'shared') silently make the row invisible to
     // its owner -- applyScopeFilter matches by agent_id, not by category tier.
-    if (typeof accessScope === 'string') {
-      const knownAgents = new Set([MAIN_AGENT_ID, ...listAgentNames()])
-      if (!knownAgents.has(accessScope)) {
+    if (accessScope !== null && accessScope !== undefined) {
+      if (typeof accessScope !== 'string' || !isKnownAgent(accessScope)) {
         json(res, {
-          error: `"access_scope" must be null or an existing agent_id (got "${accessScope}"). Use the "category" field to set a visibility tier (hot/warm/cold/shared).`
+          error: `"access_scope" must be null or an existing agent_id (got ${JSON.stringify(accessScope)}). Use the "category" field to set a visibility tier (hot/warm/cold/shared).`
         }, 400)
         return true
       }
@@ -391,7 +390,7 @@ Respond ONLY with JSON, nothing else:
     const id = parseInt(memUpdateMatch[1], 10)
     const body = await readBody(req)
     const parsed = JSON.parse(body.toString()) as
-      { content?: unknown; category?: unknown; tier?: unknown; keywords?: unknown; agent_id?: unknown }
+      { content?: unknown; category?: unknown; tier?: unknown; keywords?: unknown; agent_id?: unknown; access_scope?: unknown }
 
     const patch: MemoryPatch = {}
     // `tier` is accepted as an alias for `category`, matching the PUT handler.
@@ -424,8 +423,20 @@ Respond ONLY with JSON, nothing else:
       }
       patch.agentId = parsed.agent_id
     }
+    if ('access_scope' in parsed) {
+      const as = parsed.access_scope
+      if (as !== null) {
+        if (typeof as !== 'string' || !isKnownAgent(as)) {
+          json(res, {
+            error: `"access_scope" must be null or an existing agent_id (got ${JSON.stringify(as)}). Use the "category" field to set a visibility tier (hot/warm/cold/shared).`
+          }, 400)
+          return true
+        }
+      }
+      patch.accessScope = as as string | null
+    }
     if (Object.keys(patch).length === 0) {
-      json(res, { error: 'no mutable fields provided (content, category/tier, keywords, agent_id)' }, 400)
+      json(res, { error: 'no mutable fields provided (content, category/tier, keywords, agent_id, access_scope)' }, 400)
       return true
     }
 
