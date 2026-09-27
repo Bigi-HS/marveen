@@ -49,7 +49,7 @@ function buildUserPrompt(title: string, description: string | null, agents: stri
 
 function getValidAssignees(): Set<string> {
   const agents = listAgentNames()
-  return new Set(['Szabolcs', 'Marveen', ...agents])
+  return new Set(['Dominik', 'Marveen', ...agents])
 }
 
 function resolveClaudeBinary(): string {
