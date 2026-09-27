@@ -468,6 +468,16 @@ export function makeHealthIngestHandler(deps: HealthIngestDeps) {
     // Read-modify-write: merge this push onto the existing day so a partial/empty push
     // never clobbers data an earlier push stored (AC-A8). First write of the day (no
     // existing record) passes through unchanged.
+    //
+    // CONCURRENCY (card ec71d168): this read-modify-write is NOT guarded by a lock; its
+    // atomicity relies on readSnapshot + writeSnapshot being SYNCHRONOUS. On Node's single
+    // event loop the whole section runs to completion before the next push's handler resumes,
+    // so a second same-date push always reads what the first wrote (fields accumulate). If
+    // readSnapshot/writeSnapshot are ever made async (e.g. an async SQLite/store migration),
+    // two concurrent same-date pushes can both read the pre-write snapshot and the second
+    // write clobbers the first delta (last-write-wins) -- the DANGEROUS direction pinned by
+    // the 'concurrent-push atomicity' tests in health-ingest.test.ts. Add a per-date write
+    // lock / serialize before introducing any async read or write here.
     const existing = deps.readSnapshot(date)
     const merged = mergeDailySnapshot(existing, snapshot)
     // Distance-estimate remediation (WELL-028): when the merged day's measured distance is
