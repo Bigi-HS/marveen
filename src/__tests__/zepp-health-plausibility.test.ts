@@ -140,8 +140,9 @@ describe('validateHealthPlausibility', () => {
   // (3) ensure the guard does NOT fire on valid physiological edge cases it wasn't designed to block.
   describe('adversarial fixtures (FP-catch / FN-catch / boundary / opposing pair)', () => {
     // --- FP-catch: boundary precision ---
-    // Rule 2: lower bound is steps*0.5 for >=3000 steps. 3000*0.5=1500 exactly must NOT flag.
-    it('[FP-catch] Rule 2: exactly at lower-bound stride (3000 steps, 1500m = 0.5 m/step) is NOT suspect', () => {
+    // Rule 2: recalibrated band is [steps*0.25, steps*0.65] for >=3000 steps. 3000 steps ->
+    // [750, 1950]; 1500m (0.5 m/step) sits mid-band and must NOT flag.
+    it('[FP-catch] Rule 2: a mid-band stride (3000 steps, 1500m = 0.5 m/step) is NOT suspect', () => {
       const v = validateHealthPlausibility(snap({ steps: 3000, activity: { distanceM: 1500 } }))
       expect(v.some((x) => x.rule === 'distance/steps coherence')).toBe(false)
     })
@@ -158,13 +159,13 @@ describe('validateHealthPlausibility', () => {
       expect(v.some((x) => x.rule === 'activeKcal/steps ratio')).toBe(false)
     })
 
-    // Rule 2: known calibration risk -- a tall runner with long strides can exceed 0.9 m/step.
-    // 5000 steps at 0.94 m/step = 4700m: physiologically valid for ~190cm athlete.
-    // The guard WILL flag this -- document it so the threshold can be recalibrated if Boss data shows it.
-    it('[FP-calibration-risk] Rule 2: tall-runner long strides (5000 steps, 4700m = 0.94 m/step) IS flagged', () => {
+    // Rule 2: known calibration risk -- the recalibrated upper bound is 0.65 m/step, so a
+    // genuine running stride (0.7-1.0 m/step) is flagged. 5000 steps at 0.94 m/step = 4700m
+    // is physiologically valid for a running ~190cm athlete, but 4700 > 5000*0.65=3250 -> suspect.
+    it('[FP-calibration-risk] Rule 2: running stride (5000 steps, 4700m = 0.94 m/step) IS flagged', () => {
       const v = validateHealthPlausibility(snap({ steps: 5000, activity: { distanceM: 4700 } }))
-      // This fires suspect -- known FP risk at upper stride bound. Calibration note: upper bound = 0.9 m/step
-      // may need adjustment if Dominik's real running data hits this range.
+      // Fires suspect -- known FP risk above the 0.65 m/step ceiling; revisit if real running
+      // data from Dominik lands consistently in the 0.7-1.0 m/step range.
       expect(v.some((x) => x.rule === 'distance/steps coherence')).toBe(true)
     })
 
@@ -197,8 +198,8 @@ describe('validateHealthPlausibility', () => {
     // Valid kcal but absurd distance -> only Rule 2 fires, Rule 1 silent.
     // Critical: the guard must not suppress a partial anomaly behind a passing sibling rule.
     it('[opposing-pair] valid kcal + absurd distance: Rule 2 fires, Rule 1 silent', () => {
-      // 10000 steps, 400 kcal (ratio 0.04, in [0.03, 0.20] -> Rule 1 PASS)
-      // 10000 steps, 100m (ratio 0.01, < 0.5 -> Rule 2 SUSPECT)
+      // 10000 steps, 400 kcal (ratio 0.04, in [0.02, 0.10] -> Rule 1 PASS)
+      // 10000 steps, 100m (ratio 0.01, < 0.25 -> Rule 2 SUSPECT)
       const v = validateHealthPlausibility(snap({ steps: 10000, activity: { activeKcal: 400, distanceM: 100 } }))
       expect(v.some((x) => x.rule === 'activeKcal/steps ratio')).toBe(false) // Rule 1 silent
       expect(v.some((x) => x.rule === 'distance/steps coherence')).toBe(true) // Rule 2 fires

@@ -56,9 +56,10 @@ export function hasSuspectViolation(violations: PlausibilityViolation[]): boolea
 
 /**
  * Rule 1: activeKcal vs. steps.
- * Active burn scales with movement: walking ~0.04-0.06 kcal/step, running up to ~0.15.
- * For >=3,000 steps the daily active kcal should sit in [steps*0.03, steps*0.20]; below
- * 3,000 steps a sedentary day is allowed up to 200 kcal.
+ * Active burn scales with movement. On the 33-day empirical Zepp corpus (d16a6451) the
+ * kcal/step ratio runs p10 0.019 to p90 0.096 (median 0.042). For >=3,000 steps the daily
+ * active kcal should sit in [steps*0.02, steps*0.10]; below 3,000 steps a sedentary day is
+ * allowed up to 200 kcal.
  */
 // Bounds for the activeKcal/steps ratio (gauge, health-ingest-plausibility-rules.md).
 // Recalibrated 2026-09-25 based on 33-day empirical Zepp corpus (d16a6451).
