@@ -34,18 +34,15 @@ from db_resolve import resolve_default_db  # noqa: E402
 
 DB_PATH = resolve_default_db(project_root=PROJECT_ROOT)
 
-MIGRATION_LOG_DDL = """
-CREATE TABLE IF NOT EXISTS migration_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_at       INTEGER NOT NULL,
-    memory_id    INTEGER NOT NULL,
-    agent_id     TEXT    NOT NULL,
-    from_tier    TEXT    NOT NULL,
-    to_tier      TEXT    NOT NULL,
-    rule         TEXT    NOT NULL,
-    dry_run      INTEGER NOT NULL DEFAULT 0
-)
-"""
+# migration_log is a shared, curator-OWNED audit table (created by
+# vault-curator-apply-verdicts.py / src/curator-verdicts.ts). Every tier-migration
+# writer inserts into the same table and is distinguished by the `applier` column:
+#   live schema: (id, rule, entry_id, from_cat, to_cat, reason, applier, applied_at)
+# This script does NOT own or create the table -- it only appends its own rows. An
+# earlier version declared a divergent schema (memory_id/from_tier/to_tier/run_at/
+# dry_run) and INSERTed those columns, which no-ops on CREATE (table pre-exists) and
+# then throws on INSERT against the live DB (MEM-011 latent DDL bug, card 60c40206).
+APPLIER_NAME = "vault-lint-apply-safe-tm"
 
 
 # ---------------------------------------------------------------------------
@@ -102,23 +99,29 @@ def load_memories(db_path: str) -> list:
 
 
 def apply_migrations(db_path: str, migrations: list, now: int, dry_run: bool) -> int:
-    """Apply tier migrations and record each in migration_log. Returns applied count."""
+    """Apply tier migrations and record each in migration_log. Returns the count.
+
+    Dry-run performs no writes at all and just reports the would-migrate count -- the
+    audit log records applied migrations only, matching the curator and #713 executor
+    (the live curator schema has no dry_run column). Real applies UPDATE the memory
+    category and append one row to the shared migration_log tagged with APPLIER_NAME.
+    """
     if not migrations:
         return 0
+    if dry_run:
+        return len(migrations)
     con = sqlite3.connect(db_path)
     try:
-        con.execute(MIGRATION_LOG_DDL)
         count = 0
         for (mem_id, agent_id, from_t, to_t, rule) in migrations:
-            if not dry_run:
-                con.execute(
-                    "UPDATE memories SET category = ? WHERE id = ?",
-                    (to_t, mem_id),
-                )
             con.execute(
-                "INSERT INTO migration_log (run_at, memory_id, agent_id, from_tier, to_tier, rule, dry_run) "
+                "UPDATE memories SET category = ? WHERE id = ?",
+                (to_t, mem_id),
+            )
+            con.execute(
+                "INSERT INTO migration_log (rule, entry_id, from_cat, to_cat, reason, applier, applied_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (now, mem_id, agent_id, from_t, to_t, rule, 1 if dry_run else 0),
+                (rule, mem_id, from_t, to_t, f"{rule} auto tier-migration {from_t}->{to_t}", APPLIER_NAME, now),
             )
             count += 1
         con.commit()

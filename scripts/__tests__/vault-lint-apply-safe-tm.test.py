@@ -7,8 +7,8 @@
   3. Safety: hot memory 5 days stale -> NOT migrated (below TM-1 threshold)
   4. TM-2 skip: hot memory with done-marker, 8 days stale -> migrated by TM-1
                (TM-2 is deliberately excluded; hot+stale hits TM-1 regardless)
-  5. Audit: migration_log row created for each applied migration
-  6. Dry-run: dry_run=True -> no category change, log row marked dry_run=1
+  5. Audit: migration_log row created for each applied migration (live curator schema)
+  6. Dry-run: dry_run=True -> no category change AND no log row (only real applies audited)
 
 Run: python3 scripts/__tests__/vault-lint-apply-safe-tm.test.py
 """
@@ -40,16 +40,22 @@ CREATE TABLE memories (
 )
 """
 
+# EXACT live curator-owned schema (dumped from store/noa.db). The table is owned
+# by the curator applier (vault-curator-apply-verdicts.py / src/curator-verdicts.ts);
+# all writers (curator, #713 tm1-executor, this script) share it and are distinguished
+# by the `applier` column. The test builds the fixture from THIS schema, not the
+# script's own DDL -- a test that creates the table from the script's CREATE would go
+# green while the script is DOA on the real DB (the #713 round-2 false-green lesson).
 MIGRATION_LOG_DDL = """
-CREATE TABLE IF NOT EXISTS migration_log (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_at    INTEGER NOT NULL,
-    memory_id INTEGER NOT NULL,
-    agent_id  TEXT    NOT NULL,
-    from_tier TEXT    NOT NULL,
-    to_tier   TEXT    NOT NULL,
-    rule      TEXT    NOT NULL,
-    dry_run   INTEGER NOT NULL DEFAULT 0
+CREATE TABLE migration_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule       TEXT    NOT NULL,
+    entry_id   INTEGER NOT NULL,
+    from_cat   TEXT    NOT NULL,
+    to_cat     TEXT    NOT NULL,
+    reason     TEXT    NOT NULL,
+    applier    TEXT    NOT NULL DEFAULT 'curator-applyer',
+    applied_at INTEGER NOT NULL
 )
 """
 
@@ -126,37 +132,49 @@ class TestComputeSafeMigrations(unittest.TestCase):
 
 class TestApplyMigrations(unittest.TestCase):
 
-    # Fixture 5: audit -- migration_log row created on apply
+    # Fixture 5: audit -- migration_log row written on apply, in the live curator
+    # schema, tagged with this script's applier so writers stay distinguishable.
     def test_audit_log_row_written_on_apply(self):
         rows = [{"agent_id": "a", "category": "hot", "created_at": days_ago(8), "accessed_at": None}]
         path = make_db(rows)
         memories = mod.load_memories(path)
         migrations = mod.compute_safe_migrations(memories, NOW, tm1_days=7, tm3_days=30)
-        mod.apply_migrations(path, migrations, NOW, dry_run=False)
+        applied = mod.apply_migrations(path, migrations, NOW, dry_run=False)
+        self.assertEqual(applied, 1)
 
         con = sqlite3.connect(path)
+        con.row_factory = sqlite3.Row
         logs = con.execute("SELECT * FROM migration_log").fetchall()
+        # memory row id (entry_id) for cross-check
+        mem_id = con.execute("SELECT id FROM memories").fetchone()[0]
         con.close()
         self.assertEqual(len(logs), 1)
-        # row: (id, run_at, memory_id, agent_id, from_tier, to_tier, rule, dry_run)
-        self.assertEqual(logs[0][4], "hot")    # from_tier
-        self.assertEqual(logs[0][5], "warm")   # to_tier
-        self.assertEqual(logs[0][7], 0)        # dry_run=0
+        row = logs[0]
+        self.assertEqual(row["rule"], "TM-1")
+        self.assertEqual(row["entry_id"], mem_id)
+        self.assertEqual(row["from_cat"], "hot")
+        self.assertEqual(row["to_cat"], "warm")
+        self.assertEqual(row["applier"], mod.APPLIER_NAME)
+        self.assertEqual(row["applied_at"], NOW)
+        self.assertTrue(row["reason"])  # non-empty audit reason
 
-    # Fixture 6: dry-run -- no category change, log row marked dry_run=1
-    def test_dry_run_does_not_mutate_category(self):
+    # Fixture 6: dry-run -- no category change AND no log row. Only real applies are
+    # audited (matches curator + #713 executor: the log records applied migrations,
+    # not previews). The live curator schema has no dry_run column.
+    def test_dry_run_mutates_nothing(self):
         rows = [{"agent_id": "a", "category": "hot", "created_at": days_ago(8), "accessed_at": None}]
         path = make_db(rows)
         memories = mod.load_memories(path)
         migrations = mod.compute_safe_migrations(memories, NOW, tm1_days=7, tm3_days=30)
-        mod.apply_migrations(path, migrations, NOW, dry_run=True)
+        applied = mod.apply_migrations(path, migrations, NOW, dry_run=True)
+        self.assertEqual(applied, 1)  # reports would-migrate count
 
         con = sqlite3.connect(path)
         cat = con.execute("SELECT category FROM memories").fetchone()[0]
-        log = con.execute("SELECT dry_run FROM migration_log").fetchone()
+        log_count = con.execute("SELECT COUNT(*) FROM migration_log").fetchone()[0]
         con.close()
-        self.assertEqual(cat, "hot")   # unchanged
-        self.assertEqual(log[0], 1)    # dry_run=1 in log
+        self.assertEqual(cat, "hot")     # category unchanged
+        self.assertEqual(log_count, 0)   # dry-run writes no audit row
 
 
 if __name__ == "__main__":
