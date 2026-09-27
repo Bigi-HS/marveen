@@ -5,6 +5,7 @@ Run from repo root: python3 scripts/__tests__/print-pdf-escape.test.py
 """
 import subprocess
 import sys
+import importlib.util
 import tempfile
 import os
 from pathlib import Path
@@ -26,6 +27,14 @@ def check(label: str, condition: bool) -> None:
         FAIL += 1
 
 
+def load_module():
+    """Import print-pdf.py as a module so we can call its functions directly."""
+    spec = importlib.util.spec_from_file_location("print_pdf", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def run_demo(template: str, out: Path) -> bool:
     r = subprocess.run(
         [sys.executable, str(SCRIPT), "--demo", template, "--out", str(out)],
@@ -44,6 +53,28 @@ def run_md(md_text: str, template: str, out: Path) -> tuple[bool, str]:
     )
     os.unlink(src)
     return r.returncode == 0, r.stderr
+
+
+def test_escape_unit():
+    """Value-carrying: verify html.escape is applied by build_info_rows_html and prepare_variables."""
+    mod = load_module()
+
+    # build_info_rows_html must escape label and value
+    rows_html = mod.build_info_rows_html([{"label": "<b>", "value": "A & B"}])
+    check("build_info_rows_html escapes < in label", "&lt;b&gt;" in rows_html)
+    check("build_info_rows_html escapes & in value", "&amp;" in rows_html)
+    check("build_info_rows_html does not emit raw <b>", "<b>" not in rows_html)
+
+    # prepare_variables must escape string frontmatter values
+    variables = mod.prepare_variables({"title": "<script>alert(1)</script>"}, "")
+    check(
+        "prepare_variables escapes <script> tag in title",
+        variables.get("title") == "&lt;script&gt;alert(1)&lt;/script&gt;",
+    )
+    check(
+        "prepare_variables does not emit raw <script> in title",
+        "<script>" not in variables.get("title", ""),
+    )
 
 
 def test_demo_renders():
@@ -96,6 +127,7 @@ Body here.
 
 if __name__ == "__main__":
     print("=== print-pdf html.escape fixture tests ===")
+    test_escape_unit()
     test_demo_renders()
     test_xss_frontmatter_does_not_crash()
     test_ampersand_apostrophe_frontmatter()
