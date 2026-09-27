@@ -26,7 +26,7 @@ import importlib.util
 
 spec = importlib.util.spec_from_file_location(
     "executor",
-    Path('.') / 'vault-lint-tm1-executor.py'
+    Path(__file__).resolve().parent / 'vault-lint-tm1-executor.py'
 )
 executor_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(executor_module)
