@@ -144,3 +144,49 @@ describe('SEC-030a -- content_hash is 64-char HMAC hex', () => {
     expect(row!.content_len).toBe(content.length)
   })
 })
+
+// ── 90c8c74b: chad BLOCK→FLAG exemption ──────────────────────────────────────
+// Chad's security verdicts cite injection-pattern examples as evidence, which
+// triggers messages-guard false positives. Downgrade BLOCK→FLAG for chad when
+// from-binding enforcement is ON (token identity is bound -- cannot be spoofed).
+// When binding is OFF, fall back to BLOCK (no guaranteed identity = no exemption).
+
+vi.mock('../web/agent-identity-binding.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../web/agent-identity-binding.js')>()
+  return { ...actual, enforceFromBindingEnabled: vi.fn(() => true) }
+})
+
+import { enforceFromBindingEnabled } from '../web/agent-identity-binding.js'
+
+// A typical Chad security verdict that contains injection-pattern evidence.
+// Uses the ignore-instructions pattern (BLOCK-level) cited as an example.
+const CHAD_EVIDENCE_CONTENT = 'SEC finding: payload tested "ignore previous instructions" -> BLOCK. Mitigated.'
+
+describe('chad BLOCK→FLAG exemption (card 90c8c74b)', () => {
+  it('chad BLOCK-worthy message passes through as FLAG when binding is ON', async () => {
+    vi.mocked(enforceFromBindingEnabled).mockReturnValue(true)
+    const { ctx, captured } = fakePostCtx('chad', 'marveen', CHAD_EVIDENCE_CONTENT)
+    await tryHandleMessages(ctx)
+    expect(captured.status).toBe(200)  // not 400 BLOCK
+    const row = getGuardEvents(1).find(r => r.from_agent === 'chad')
+    expect(row!.verdict).toBe('FLAG')  // downgraded, not BLOCK
+  })
+
+  it('chad BLOCK-worthy message is still BLOCKED when binding is OFF (no identity guarantee)', async () => {
+    vi.mocked(enforceFromBindingEnabled).mockReturnValue(false)
+    const { ctx, captured } = fakePostCtx('chad', 'marveen', CHAD_EVIDENCE_CONTENT)
+    await tryHandleMessages(ctx)
+    expect(captured.status).toBe(400)  // BLOCK: no identity binding = no exemption
+    const row = getGuardEvents(1).find(r => r.from_agent === 'chad')
+    expect(row!.verdict).toBe('BLOCK')
+  })
+
+  it('non-chad agent is still BLOCKED even when binding is ON (exemption is chad-only)', async () => {
+    vi.mocked(enforceFromBindingEnabled).mockReturnValue(true)
+    const { ctx, captured } = fakePostCtx('rogue', 'marveen', CHAD_EVIDENCE_CONTENT)
+    await tryHandleMessages(ctx)
+    expect(captured.status).toBe(400)
+    const row = getGuardEvents(1).find(r => r.from_agent === 'rogue')
+    expect(row!.verdict).toBe('BLOCK')
+  })
+})

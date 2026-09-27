@@ -65,13 +65,12 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     // the decideMessageFrom predicate internally -> never diverges from the C-BIND
     // enforcer and inherits the admin/operator-relay exclusion.
     logFromMismatch((line) => logger.warn(line), identity, from)
-    // Identity binding (card b1ce5118): the server DERIVES the effective sender
-    // from the token-resolved identity rather than trusting the body. This
+    // Identity binding (card b1ce5118 / db9bc192): the server DERIVES the effective
+    // sender from the token-resolved identity rather than trusting the body. This
     // GENERALIZES the single-id coordinator guard above to every agent_id -- a
     // per-agent token may only send as itself; admin/operator may impersonate.
-    // Gated behind ENFORCE_FROM_BINDING (default OFF) so it lands inert until
-    // the per-agent tokens are rolled out (C-BIND flips it ON). With the flag
-    // off the decision is the legacy pass-through, so behaviour is unchanged.
+    // ENFORCE_FROM_BINDING defaults ON (C-BIND, db9bc192); only an explicit
+    // ENFORCE_FROM_BINDING=false env-var disables it (non-provisioned environments).
     const fromDecision = decideMessageFrom(identity, from, enforceFromBindingEnabled())
     if (!fromDecision.ok) {
       logger.warn(
@@ -90,10 +89,22 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       (best, f) => best === null || SEVERITY_RANK[f.severity] > SEVERITY_RANK[best] ? f.severity : best,
       null,
     )
+    // Chad exemption (card 90c8c74b): Chad's security verdicts legitimately cite
+    // injection-pattern examples as evidence, triggering false positives. Downgrade
+    // BLOCK → FLAG when effectiveFrom === 'chad' AND from-binding is ON.
+    // SAFETY: only effective with binding ON -- that's when identity is token-bound
+    // and cannot be spoofed. With binding OFF, the exemption falls back to BLOCK.
+    // CAVEAT: admin-scope can impersonate chad (within the trust model: admin can
+    // disable the guard entirely; this does not expand the attack surface).
+    const bindingActive = enforceFromBindingEnabled()
+    const effectiveVerdict: typeof guard.verdict =
+      guard.verdict === 'BLOCK' && effectiveFrom === 'chad' && bindingActive
+        ? 'FLAG'
+        : guard.verdict
     recordGuardEvent({
       mechanism: 'messages-guard',
       route: '/api/messages',
-      verdict: guard.verdict,
+      verdict: effectiveVerdict,
       fromAgent: effectiveFrom,
       toAgent: to.trim(),
       patternIds: guard.findings.length > 0 ? [...new Set(guard.findings.map(f => f.pattern))].sort().join(',') : null,
@@ -101,7 +112,7 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       findingCount: guard.findings.length,
       content: content.trim(),
     })
-    if (guard.verdict === 'BLOCK') {
+    if (effectiveVerdict === 'BLOCK') {
       logger.warn(
         { from: effectiveFrom, to: to.trim(), findings: guard.findings },
         'AIDefence: message BLOCKED',
@@ -109,7 +120,7 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'Message blocked by AIDefence security guard', findings: guard.findings }, 400)
       return true
     }
-    if (guard.verdict === 'FLAG') {
+    if (effectiveVerdict === 'FLAG') {
       logger.warn(
         { from: effectiveFrom, to: to.trim(), findings: guard.findings },
         'AIDefence: message FLAGGED (allowed through)',
