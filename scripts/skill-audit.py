@@ -34,15 +34,35 @@ from pathlib import Path
 # Rationale: store/skills-supplychain-threat-model-0928.md (card 1b4a5b99).
 SUSPICIOUS_PATTERNS = [
     # S1: fake operational directive in caps (e.g. "OPERATIONAL OVERRIDE:")
+    # Intentionally case-sensitive: ALL-CAPS OVERRIDE is the injection marker;
+    # lowercase 'override' is a valid JS/TS keyword and is NOT flagged.
     (re.compile(r'\bOVERRIDE\b'), 'OVERRIDE directive', 'WARN'),
-    # E2: direct merge instruction bypassing gate
-    (re.compile(r'merge.?direct', re.IGNORECASE), 'direct merge instruction', 'WARN'),
-    # E1/E2: guard bypass instruction
-    (re.compile(r'bypass.?guard', re.IGNORECASE), 'guard bypass instruction', 'WARN'),
-    # I1: credential read (readFile path to token)
-    (re.compile(r'readFile.*token', re.IGNORECASE), 'credential read instruction', 'WARN'),
-    # I1: shell credential exfiltration (cat .../credentials)
-    (re.compile(r'cat.*credential', re.IGNORECASE), 'credential exfil instruction', 'WARN'),
+
+    # S1 addendum: canonical prompt-injection instruction phrase (sprint-2, AC26)
+    (re.compile(r'ignore.{0,20}(?:previous|above|prior).{0,5}instruction',
+                re.IGNORECASE), 'prompt-injection instruction phrase', 'WARN'),
+
+    # E2: direct merge instruction bypassing gate.
+    # \bdirect(?:ly)?\b closes FPs ('merge directory', 'merge direction') while
+    # still catching 'merge directly' and 'merge it directly'.
+    # (sprint-2: was 'merge.?direct' which matched subwords AND missed multi-word gaps)
+    (re.compile(r'merge.{0,20}\bdirect(?:ly)?\b', re.IGNORECASE), 'direct merge instruction', 'WARN'),
+
+    # E1/E2: guard bypass instruction -- covers multi-word gaps and synonyms.
+    # (sprint-2: was 'bypass.?guard' which missed 'bypass the guard' etc.)
+    (re.compile(r'(?:bypass|circumvent|evade|skip|disable).{0,20}guard(?:rail)?',
+                re.IGNORECASE), 'guard bypass instruction', 'WARN'),
+
+    # I1: credential/token read -- covers readFile, read_file, open() idioms.
+    # (sprint-2: was 'readFile.*token' only, missed Python open() and read_file)
+    (re.compile(r'(?:readFile|read_file|open)\b.{0,50}(?:token|secret|credential)',
+                re.IGNORECASE), 'credential read instruction', 'WARN'),
+
+    # I1: shell/print credential exfiltration with word-boundary on 'cat'.
+    # (sprint-2: was 'cat.*credential' which fired on 'concatenate credentials')
+    # Covers: cat, echo, print, head (shell and Python exfil idioms)
+    (re.compile(r'(?:\bcat\b|echo|print|head)\b.{0,30}(?:token|secret|credential|password)',
+                re.IGNORECASE), 'credential exfil instruction', 'WARN'),
 ]
 
 # D2: context poisoning -- oversized SKILL.md floods context window
