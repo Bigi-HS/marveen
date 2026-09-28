@@ -19,6 +19,28 @@ export interface AgentSummary {
 /** Derived live status (per AC-F0-4), normalised from the health board. */
 export type AgentLiveStatus = 'idle' | 'busy' | 'offline' | 'error' | 'unknown'
 
+/**
+ * Boss-spec 5-state work status for the corner KOR indicator (card 8c823cdc).
+ * Sourced from GET /api/agents/status (dave poller, contract 2026-09-28).
+ */
+export type AgentWorkStatus = 'WORKING' | 'RECEIVED' | 'ERROR' | 'NO-TOKEN' | 'IDLE-OK'
+
+/** Single entry from GET /api/agents/status. */
+export interface AgentWorkStatusEntry {
+  agent_id: string
+  /** Never 'NO-TOKEN' when token_data_fresh=false -- poller guarantees stale-guard. */
+  status: AgentWorkStatus
+  status_reason: string
+  last_updated: string
+  keepalive_age_s: number
+  token_data_fresh: boolean
+}
+
+export interface AgentWorkStatusResponse {
+  agents: AgentWorkStatusEntry[]
+  computed_at: string
+}
+
 /** GET /api/agents/health -- fleet health board (one record per agent). */
 export interface AgentHealth {
   name: string
@@ -83,6 +105,12 @@ export interface AgentGridItem {
   lastActiveTs: number | null
   hasAvatar: boolean
   isMain: boolean
+  /** Boss-spec work status for corner KOR dot (card 8c823cdc). Absent until poller lands. */
+  workStatus?: AgentWorkStatus
+  /** Human-readable reason for workStatus (tooltip). Non-null when workStatus present. */
+  statusReason?: string
+  /** ISO timestamp of last workStatus update. */
+  statusLastUpdated?: string
 }
 
 /**

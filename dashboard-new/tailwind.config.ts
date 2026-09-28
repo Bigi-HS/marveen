@@ -41,9 +41,25 @@ const config: Config = {
           waiting: 'var(--status-waiting)',
           done: 'var(--status-done)',
         },
+        // card 8c823cdc: Boss-spec work-status KOR colors
+        work: {
+          working: 'var(--work-working)',
+          received: 'var(--work-received)',
+          error: 'var(--work-error)',
+        },
       },
       boxShadow: {
         glow: '0 0 12px 0 var(--accent-glow)',
+      },
+      animation: {
+        // card 8c823cdc: WORKING state blink (purple, reduced-motion: static)
+        blink: 'blink 1.2s ease-in-out infinite',
+      },
+      keyframes: {
+        blink: {
+          '0%, 100%': { opacity: '1' },
+          '50%': { opacity: '0.15' },
+        },
       },
     },
   },

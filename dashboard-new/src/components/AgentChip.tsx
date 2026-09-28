@@ -2,6 +2,7 @@ import { cn } from '@/lib/cn'
 import { relativeTime } from '@/lib/format'
 import { AGENT_STATUS_CHIP, AGENT_STATUS_ACCENT, AGENT_STATUS_LABEL } from '@/lib/status'
 import { StatusDot } from './StatusDot'
+import { WorkStatusKor } from './WorkStatusKor'
 import { Avatar } from './Avatar'
 import type { AgentGridItem } from '@/types/api'
 
@@ -47,6 +48,9 @@ export function AgentChip({ agent, nowMs }: { agent: AgentGridItem; nowMs: numbe
         <StatusDot status={agent.status} />
         {AGENT_STATUS_LABEL[agent.status]}
       </span>
+      {agent.workStatus && (
+        <WorkStatusKor status={agent.workStatus} reason={agent.statusReason} />
+      )}
     </div>
   )
 }

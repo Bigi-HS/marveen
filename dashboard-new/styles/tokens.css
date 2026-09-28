@@ -33,4 +33,10 @@
   --status-in-progress: var(--accent);
   --status-waiting: var(--primary);
   --status-done: #4fb477;
+
+  /* agent work-status KOR (card 8c823cdc, Boss-spec 5-state) */
+  --work-working: #a855f7;  /* purple -- actively processing */
+  --work-received: #3b82f6; /* blue -- task received, pre-start */
+  --work-error: #ef4444;    /* red -- stuck / pipe dead / crash */
+  /* NO-TOKEN reuses --neutral; IDLE-OK reuses --status-done */
 }
