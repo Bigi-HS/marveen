@@ -197,6 +197,44 @@ check_tests() {
   else
     record tests BLOCK "vitest run failed (${summary})"
   fi
+  # Python tests: scripts/__tests__/*.test.py
+  # The skip-mutation scanner already watches these files; the gate must also
+  # run them so "tests PASS" is not a claim about unexecuted suites. Each file
+  # is run independently; a single failure records a BLOCK for that file so
+  # the gate output is specific (not a single opaque "python failed").
+  # Self-referential exclusion: test files that invoke pre-gate-bundle.sh
+  # themselves (da-sentinel-check, pre-gate-bundle, cross-model-bundle) are
+  # skipped to prevent recursive vitest invocations; they are integration tests
+  # for the bundle and must be run from outside it.
+  local py_dir="${INSTALL_DIR}/scripts/__tests__"
+  local py_failed=0 py_passed=0 py_skipped=0 py_total=0
+  local first_fail=""
+  for f in "$py_dir"/*.test.py; do
+    [ -f "$f" ] || continue
+    py_total=$((py_total + 1))
+    case "$(basename "$f")" in
+      da-sentinel-check.test.py|pre-gate-bundle.test.py|cross-model-bundle.test.py)
+        py_skipped=$((py_skipped + 1))
+        continue
+        ;;
+    esac
+    python3 "$f" >/dev/null 2>&1
+    if [ $? -eq 0 ]; then
+      py_passed=$((py_passed + 1))
+    else
+      py_failed=$((py_failed + 1))
+      [ -n "$first_fail" ] || first_fail="$(basename "$f")"
+    fi
+  done
+  if [ "$py_total" -eq 0 ]; then
+    record python-tests WARN "no scripts/__tests__/*.test.py found"
+  elif [ "$py_failed" -eq 0 ]; then
+    local skipped_note=""
+    [ "$py_skipped" -gt 0 ] && skipped_note=" (${py_skipped} bundle-integration skipped)"
+    record python-tests PASS "${py_passed}/$((py_total - py_skipped)) python test files green${skipped_note}"
+  else
+    record python-tests BLOCK "${py_failed}/$((py_total - py_skipped)) python test file(s) failed (first: ${first_fail})"
+  fi
 }
 
 check_diff_size() {
