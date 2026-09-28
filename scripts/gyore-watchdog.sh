@@ -9,6 +9,12 @@
 # not the session transcript, so a fresh session is safe.
 #
 # Model is read from agent-config.json on every (re)launch.
+#
+# LISTENER-DROP DETECTION (card 4a2683e6): periodically check the per-agent
+# gauge file written by scripts/hooks/channel-listener-gauge-write.py. If the
+# file is stale (> LISTENER_STALE_SECONDS) while the tmux session is alive, the
+# Telegram channel listener has silently dropped. Recovery: kill + fresh relaunch
+# + inter-agent notify marveen.
 
 SESSION=agent-gyore
 AGENT_DIR=/home/domin/marveen/agents/gyore
@@ -18,6 +24,16 @@ ACONF="$AGENT_DIR/agent-config.json"
 LOG=/home/domin/marveen/store/gyore-watchdog.log
 COOLDOWN=60
 MAX_PER_HOUR=8
+
+# Listener-drop config (env-overridable for Buster sandbox tests).
+LISTENER_STATE_FILE="${GYORE_LISTENER_STATE_FILE:-/tmp/metrics/.agent-channel-gyore.json}"
+LISTENER_STALE_SECONDS="${GYORE_LISTENER_STALE_SECONDS:-3600}"   # 60 min
+LISTENER_CHECK_TICKS="${GYORE_LISTENER_CHECK_TICKS:-20}"         # check every 20 * 15s = 5 min; 0 = disable
+DASH_PORT="${DASH_PORT:-3420}"
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Cross-reference: marveen's inbound keepalive. If this is also stale, the whole
+# fleet is quiet -- not a Gyore-specific listener drop. Env-overridable for tests.
+MARVEEN_KEEPALIVE_FILE="${GYORE_MARVEEN_KEEPALIVE_FILE:-$INSTALL_DIR/store/.channel-keepalive}"
 
 log() { echo "$(date -Is) $*" >> "$LOG"; }
 
@@ -67,6 +83,66 @@ under_cap() {
   [ "${#STAMPS[@]}" -lt "$MAX_PER_HOUR" ]
 }
 
+# Send inter-agent message to marveen (best-effort, never blocks watchdog).
+# Token is passed via env (not argv) to avoid ps-visibility.
+notify_marveen() {
+  local msg="$1"
+  local token_file="$INSTALL_DIR/store/.dashboard-token"
+  [ -f "$token_file" ] || return 0
+  local tok; tok=$(cat "$token_file" 2>/dev/null) || return 0
+  NOTIFY_TOKEN="$tok" python3 - "$msg" <<'PY' 2>/dev/null || true
+import json, sys, os, urllib.request, urllib.error
+token = os.environ.get('NOTIFY_TOKEN', '')
+if not token:
+    sys.exit(0)
+msg = sys.argv[1]
+body = json.dumps({'from': 'gyore', 'to': 'marveen', 'content': msg}).encode()
+req = urllib.request.Request('http://localhost:3420/api/messages',
+    data=body, method='POST',
+    headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})
+try:
+    urllib.request.urlopen(req, timeout=10)
+except Exception:
+    pass
+PY
+}
+
+# Check if the Telegram listener is still alive.
+# Returns 0 = OK (or no baseline / quiet period), 1 = confirmed listener drop.
+#
+# A stale gauge alone is NOT sufficient to declare a drop: a healthy-but-silent
+# agent (no incoming Boss messages to reply to) produces a stale gauge naturally.
+# Cross-check: if marveen's inbound keepalive is also stale for the same window,
+# the whole fleet is quiet -- no Boss messages arrived at all. Only when marveen's
+# keepalive is FRESH (Boss is sending, but Gyore hasn't replied) is the stale gauge
+# a genuine drop signal. (acd7fa13 live-re-probe pattern, adapted for bash mtime.)
+check_listener_drop() {
+  [ -f "$LISTENER_STATE_FILE" ] || return 0   # no gauge: no baseline, don't trigger
+
+  local mtime now age
+  mtime=$(stat -c %Y "$LISTENER_STATE_FILE" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  age=$(( now - mtime ))
+
+  [ "$age" -ge "$LISTENER_STALE_SECONDS" ] || return 0   # gauge fresh -> OK
+
+  # Gauge stale: cross-check marveen's inbound keepalive before declaring drop.
+  if [ -f "$MARVEEN_KEEPALIVE_FILE" ]; then
+    local ka_mtime ka_age
+    ka_mtime=$(stat -c %Y "$MARVEEN_KEEPALIVE_FILE" 2>/dev/null || echo 0)
+    ka_age=$(( now - ka_mtime ))
+    if [ "$ka_age" -ge "$LISTENER_STALE_SECONDS" ]; then
+      # Marveen is also quiet: fleet-wide quiet period, not a Gyore-specific drop.
+      log "check_listener_drop: gauge stale ${age}s but marveen keepalive also stale ${ka_age}s -- quiet period, no action"
+      return 0
+    fi
+  fi
+
+  log "LISTENER-DROP: gauge stale ${age}s, marveen keepalive fresh -- $SESSION listener appears dead"
+  return 1
+}
+
+_tick=0
 while true; do
   if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
     if under_cap; then
@@ -77,6 +153,25 @@ while true; do
     else
       log "$SESSION DOWN but relaunch cap (${MAX_PER_HOUR}/h) reached -- backing off 600s"
       sleep 600
+    fi
+  else
+    # Session is alive -- periodically probe for silent listener drop.
+    # LISTENER_CHECK_TICKS=0 disables the check (guard against div-by-zero).
+    _tick=$(( _tick + 1 ))
+    if [ "${LISTENER_CHECK_TICKS:-20}" -gt 0 ] && [ $(( _tick % LISTENER_CHECK_TICKS )) -eq 0 ]; then
+      if ! check_listener_drop; then
+        if under_cap; then
+          log "LISTENER-DROP: killing $SESSION and performing fresh --channels relaunch"
+          tmux kill-session -t "=$SESSION" 2>/dev/null || true
+          sleep 2
+          STAMPS+=("$(date +%s)")
+          launch
+          notify_marveen "gyore listener-drop auto-recovery: session killed and relaunched fresh (--channels). Messages received during the drop window may have been missed."
+        else
+          log "LISTENER-DROP: drop detected but relaunch cap (${MAX_PER_HOUR}/h) reached -- backing off"
+          notify_marveen "gyore listener-drop detected but relaunch cap reached -- manual intervention may be needed."
+        fi
+      fi
     fi
   fi
   sleep 15
