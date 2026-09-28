@@ -316,4 +316,123 @@ describe('computeFreshness', () => {
       expect(r.checkedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
     })
   })
+
+  // WELL-022 followup (card 9ed51205): a manual-vision snapshot legitimately has
+  // NO device sync timestamp -- it is EPISODIC hand-entered data, not a real-time
+  // sync. The old logic treated missing sourceSyncedAt as infinitely stale and
+  // false-alarmed ("no sync timestamp") on every manual entry. Fix (option B +
+  // manual-appropriate threshold): for source==='manual-vision' snapshots judge
+  // staleness by the DATA DATE with a manual threshold (default 3 days), NOT the
+  // 8h sync-age. A recent manual entry reads fresh; a genuinely old one still
+  // alerts, but with a correct data-date reason. The 3-week dead auto-sync is a
+  // SEPARATE concern (BUG-2 / auto-sync-liveness monitor), not this endpoint.
+  describe('manual-vision staleness (data-date based, card 9ed51205)', () => {
+    // A manual-vision snapshot as the old hibiki hand-build produces it: source
+    // marker present, NO sourceSyncedAt (that is exactly the FP-triggering shape).
+    const manual = (date: string) => ({ date, source: 'manual-vision' })
+
+    it('does NOT false-alarm on a same-day manual entry (0 days behind)', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => manual('2026-09-28'),
+        nowBudapest: () => ({ date: '2026-09-28', hours: 14, minutes: 0 }),
+        nowMs: () => Date.parse('2026-09-28T12:00:00Z'),
+      }))
+      expect(r.syncAgeHours).toBeNull()   // still no device sync timestamp
+      expect(r.alert).toBe(false)         // but NOT stale -- date is today
+      expect(r.alertReason).toBeNull()
+    })
+
+    it('does NOT alert on a manual entry from yesterday (1 day behind)', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => manual('2026-09-27'),
+        nowBudapest: () => ({ date: '2026-09-28', hours: 14, minutes: 0 }),
+        nowMs: () => Date.parse('2026-09-28T12:00:00Z'),
+      }))
+      expect(r.alert).toBe(false)
+    })
+
+    it('does NOT alert at exactly the 3-day threshold (strict greater-than)', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => manual('2026-09-25'),
+        nowBudapest: () => ({ date: '2026-09-28', hours: 14, minutes: 0 }),
+        nowMs: () => Date.parse('2026-09-28T12:00:00Z'),
+      }))
+      expect(r.daysBehind).toBe(3)
+      expect(r.alert).toBe(false)
+    })
+
+    it('ALERTS on a manual entry 4 days behind (past the manual threshold)', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => manual('2026-09-24'),
+        nowBudapest: () => ({ date: '2026-09-28', hours: 14, minutes: 0 }),
+        nowMs: () => Date.parse('2026-09-28T12:00:00Z'),
+      }))
+      expect(r.daysBehind).toBe(4)
+      expect(r.alert).toBe(true)
+    })
+
+    // The live 09-21 repro: manual data 7 days old, viewed on 09-28. The FIX is
+    // the alert REASON -- it must cite the stale DATA DATE, never "no sync
+    // timestamp" (that was the false-alarm framing).
+    it('ALERTS with a data-date reason (NOT "no sync timestamp") on the 7-day live repro', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => manual('2026-09-21'),
+        nowBudapest: () => ({ date: '2026-09-28', hours: 14, minutes: 0 }),
+        nowMs: () => Date.parse('2026-09-28T12:00:00Z'),
+      }))
+      expect(r.alert).toBe(true)
+      expect(r.daysBehind).toBe(7)
+      expect(r.alertReason).not.toContain('no sync timestamp')
+      expect(r.alertReason).toMatch(/7 days? old|data date|2026-09-21/i)
+    })
+
+    it('SUPPRESSES an old manual-entry alert inside the overnight quiet window', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => manual('2026-09-21'),
+        nowBudapest: () => ({ date: '2026-09-28', hours: 3, minutes: 0 }),
+        nowMs: () => Date.parse('2026-09-28T01:00:00Z'),
+      }))
+      expect(r.inQuietWindow).toBe(true)
+      expect(r.alert).toBe(false)
+      expect(r.alertReason).toBeNull()
+    })
+
+    it('honors a custom manual staleness threshold (config)', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => manual('2026-09-26'),
+        nowBudapest: () => ({ date: '2026-09-28', hours: 14, minutes: 0 }),
+        nowMs: () => Date.parse('2026-09-28T12:00:00Z'),
+        config: { manualStalenessThresholdDays: 1 },
+      }))
+      expect(r.daysBehind).toBe(2)
+      expect(r.manualThresholdDays).toBe(1)
+      expect(r.alert).toBe(true) // 2 days > 1-day custom threshold
+    })
+
+    it('exposes the manual source and default manual threshold in the result', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => manual('2026-09-28'),
+        nowBudapest: () => ({ date: '2026-09-28', hours: 14, minutes: 0 }),
+        nowMs: () => Date.parse('2026-09-28T12:00:00Z'),
+      }))
+      expect(r.source).toBe('manual-vision')
+      expect(r.manualThresholdDays).toBe(3)
+    })
+
+    // Guard: an AUTO snapshot (no manual-vision marker) with a sync timestamp is
+    // UNCHANGED -- still 8h sync-age, so the new writer's manual entries (which
+    // carry sourceSyncedAt and NO source marker) keep their existing behavior.
+    it('leaves an auto snapshot (with sync timestamp) on the 8h sync-age path', () => {
+      const sync = '2026-09-28T00:00:00Z'
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => ({ date: '2026-09-27', sourceSyncedAt: sync }),
+        nowBudapest: () => ({ date: '2026-09-28', hours: 12, minutes: 0 }),
+        nowMs: () => Date.parse(sync) + 10 * 3_600_000, // 10h > 8h
+      }))
+      expect(r.source).toBeNull()
+      expect(r.syncAgeHours).toBeCloseTo(10, 5)
+      expect(r.alert).toBe(true)
+      expect(r.alertReason).toContain('since last sync')
+    })
+  })
 })

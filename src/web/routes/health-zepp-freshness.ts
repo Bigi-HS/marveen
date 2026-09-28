@@ -16,6 +16,13 @@ import type { RouteContext } from './types.js'
 export interface ZeppFreshnessConfig {
   /** Alert when the last real sync is older than this many hours. Default 8. */
   syncAgeThresholdHours: number
+  /**
+   * Alert when a manual-vision (hand-entered) snapshot's DATA DATE is older than
+   * this many whole days. Manual entries are episodic input with no device sync
+   * timestamp, so the 8h sync-age threshold is meaningless for them -- staleness
+   * is judged by the data date instead (card 9ed51205). Default 3.
+   */
+  manualStalenessThresholdDays: number
   /** Quiet-window start hour (inclusive), Budapest local. Default 0 (midnight). */
   quietStartHour: number
   /** Quiet-window end hour (exclusive), Budapest local. Default 8. */
@@ -24,12 +31,16 @@ export interface ZeppFreshnessConfig {
 
 export const DEFAULT_FRESHNESS_CONFIG: ZeppFreshnessConfig = {
   syncAgeThresholdHours: 8,
+  manualStalenessThresholdDays: 3,
   quietStartHour: 0,
   quietEndHour: 8,
 }
 
+/** Marker on hand-entered snapshots that legitimately carry no device sync timestamp. */
+const MANUAL_VISION_SOURCE = 'manual-vision'
+
 export interface ZeppFreshnessDeps {
-  latestSnapshot: () => { date: string; sourceSyncedAt?: string } | null
+  latestSnapshot: () => { date: string; sourceSyncedAt?: string; source?: string } | null
   nowBudapest: () => { date: string; hours: number; minutes: number }
   /** Absolute wall-clock now in epoch ms, for sync-age math. Injectable for tests. */
   nowMs: () => number
@@ -40,6 +51,11 @@ export interface ZeppFreshnessDeps {
 export interface FreshnessResult {
   latestDate: string | null
   sourceSyncedAt: string | null
+  /**
+   * The snapshot's `source` marker (e.g. 'manual-vision'), or null when absent
+   * (auto-synced data). Drives whether staleness is judged by sync-age or data date.
+   */
+  source: string | null
   todayDate: string
   isToday: boolean
   /**
@@ -58,6 +74,8 @@ export interface FreshnessResult {
   syncAgeHours: number | null
   /** Effective sync-age alert threshold in hours (config, default 8). */
   thresholdHours: number
+  /** Effective manual-vision staleness threshold in whole days (config, default 3). */
+  manualThresholdDays: number
   /** True when current Budapest time is inside the overnight quiet window. */
   inQuietWindow: boolean
   /** 30-min blocks elapsed since 01:00 Budapest. Informational (legacy field). */
@@ -111,6 +129,8 @@ export function computeFreshness(deps: ZeppFreshnessDeps): FreshnessResult {
   const snap = deps.latestSnapshot()
   const latestDate = snap?.date ?? null
   const sourceSyncedAt = snap?.sourceSyncedAt ?? null
+  const source = snap?.source ?? null
+  const isManualVision = source === MANUAL_VISION_SOURCE
 
   const isToday = latestDate === todayDate
 
@@ -131,34 +151,54 @@ export function computeFreshness(deps: ZeppFreshnessDeps): FreshnessResult {
 
   // Alert driver: age of the last REAL sync. A missing/unparseable sync
   // timestamp counts as infinitely stale (a genuine gap can never read fresh).
+  // Informational for a manual-vision snapshot (which never has a sync stamp).
   const syncMs = sourceSyncedAt ? Date.parse(sourceSyncedAt) : NaN
   const syncAgeHours = Number.isNaN(syncMs) ? null : (deps.nowMs() - syncMs) / 3_600_000
 
-  // Stale when the last sync is older than the threshold, or when there is no
-  // sync timestamp at all.
-  const isStale = syncAgeHours === null || syncAgeHours > cfg.syncAgeThresholdHours
   const quiet = inQuietWindow(hours, cfg.quietStartHour, cfg.quietEndHour)
+
+  // Staleness has two regimes:
+  //   - manual-vision: episodic hand-entered data with no device sync stamp.
+  //     Judge by the DATA DATE against a manual-appropriate day threshold. The
+  //     8h sync-age is meaningless here -- using it would false-alarm on the
+  //     absent timestamp (the card 9ed51205 bug). A missing/unparseable date
+  //     still counts as stale.
+  //   - auto-synced (everything else, incl. the manual WRITER's entries that
+  //     carry a real sourceSyncedAt): last-sync age against the hour threshold;
+  //     a missing sync stamp is a genuine gap and reads as infinitely stale.
+  let isStale: boolean
+  let staleDetail: string
+  if (isManualVision) {
+    isStale = daysBehind === null || daysBehind > cfg.manualStalenessThresholdDays
+    staleDetail = daysBehind === null
+      ? 'manual entry has no valid data date'
+      : `manual entry ${latestDate} is ${daysBehind} day${daysBehind === 1 ? '' : 's'} old (threshold ${cfg.manualStalenessThresholdDays} days)`
+  } else {
+    isStale = syncAgeHours === null || syncAgeHours > cfg.syncAgeThresholdHours
+    staleDetail = syncAgeHours === null
+      ? `no sync timestamp (threshold ${cfg.syncAgeThresholdHours}h)`
+      : `${syncAgeHours.toFixed(1)}h since last sync (threshold ${cfg.syncAgeThresholdHours}h)`
+  }
 
   // Suppress alerts during the overnight quiet window: an aged sync at 03:00 is
   // expected (the phone syncs in the morning) and Dominik is asleep, so it must
   // not ping. Outside the window, a stale sync is a real signal.
   const alert = isStale && !quiet
 
-  const ageText = syncAgeHours === null
-    ? 'no sync timestamp'
-    : `${syncAgeHours.toFixed(1)}h since last sync`
   const alertReason = alert
-    ? `Zepp data stale: ${ageText} (threshold ${cfg.syncAgeThresholdHours}h). Last sync ${sourceSyncedAt ?? 'never'}, latest data ${latestDate ?? 'never'}, today ${todayDate}.`
+    ? `Zepp data stale: ${staleDetail}. Last sync ${sourceSyncedAt ?? 'never'}, latest data ${latestDate ?? 'never'}, today ${todayDate}.`
     : null
 
   return {
     latestDate,
     sourceSyncedAt,
+    source,
     todayDate,
     isToday,
     daysBehind,
     syncAgeHours,
     thresholdHours: cfg.syncAgeThresholdHours,
+    manualThresholdDays: cfg.manualStalenessThresholdDays,
     inQuietWindow: quiet,
     blocksSince1am,
     alert,
@@ -179,6 +219,7 @@ function envNum(name: string, fallback: number): number {
 export function freshnessConfigFromEnv(): ZeppFreshnessConfig {
   return {
     syncAgeThresholdHours: envNum('ZEPP_FRESHNESS_SYNC_AGE_HOURS', DEFAULT_FRESHNESS_CONFIG.syncAgeThresholdHours),
+    manualStalenessThresholdDays: envNum('ZEPP_FRESHNESS_MANUAL_STALE_DAYS', DEFAULT_FRESHNESS_CONFIG.manualStalenessThresholdDays),
     quietStartHour: envNum('ZEPP_FRESHNESS_QUIET_START_HOUR', DEFAULT_FRESHNESS_CONFIG.quietStartHour),
     quietEndHour: envNum('ZEPP_FRESHNESS_QUIET_END_HOUR', DEFAULT_FRESHNESS_CONFIG.quietEndHour),
   }
@@ -188,7 +229,11 @@ export function makeDefaultZeppFreshnessDeps(): ZeppFreshnessDeps {
   return {
     latestSnapshot: () => {
       const snap = defaultZeppStore.latest()
-      return snap ? { date: snap.date, sourceSyncedAt: snap.sourceSyncedAt } : null
+      if (!snap) return null
+      // `source` is not in the ZeppDailySnapshot type but hand-built manual
+      // entries carry it on disk (source: 'manual-vision'); read it defensively.
+      const source = (snap as { source?: string }).source
+      return { date: snap.date, sourceSyncedAt: snap.sourceSyncedAt, source }
     },
     nowBudapest: budapestNow,
     nowMs: () => Date.now(),
