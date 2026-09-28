@@ -336,7 +336,7 @@ ensure_dave_watchdog() {
 # they were given per-agent Telegram bots, so they need the channel-aware watchdog
 # (fresh launch + --channels + TELEGRAM_STATE_DIR), not the channel-less one.
 ensure_agent_watchdogs() {
-  for n in gauge quill applegate radar blackbeard morgan roberts kidd rackham bonny avery vane bellamy; do
+  for n in gauge quill applegate radar blackbeard morgan roberts kidd rackham bonny avery vane bellamy inkwell; do
     # Sleep-mode owns eligible ids when the flag is set (mutual exclusion): skip
     # them here so they run under sleep-agent-watchdog.sh, not the always-on loop.
     # Flag absent => is-eligible short-circuits false => no-op (current behavior).
