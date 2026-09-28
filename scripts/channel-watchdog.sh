@@ -84,7 +84,7 @@ MAIN_AGENT_ID="${MAIN_AGENT_ID//[^a-zA-Z0-9_-]/}"
 SESSION="${MAIN_AGENT_ID}-channels"
 
 TMUX="$(command -v tmux)"
-CLAUDE="$(command -v claude)"
+CLAUDE="${CLAUDE_BIN_OVERRIDE:-$(command -v claude)}"
 CURL="$(command -v curl)"
 
 # Dashboard liveness. Healthy = HTTP responds on the health port (any status,
