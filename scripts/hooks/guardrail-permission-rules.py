@@ -1110,13 +1110,21 @@ def _git_subcommand(args: 'list[str]') -> 'str | None':
 
 
 def _flag_values(args: 'list[str]', flag: str) -> 'list[str]':
-    """Return all values given for a space-separated single-value flag."""
+    """Return all values for a flag in both space-separated and equals-attached forms.
+
+    Handles `--flag value` (two tokens) and `--flag=value` (one token, card e903a481).
+    """
+    prefix = flag + '='
     values = []
     i = 0
     while i < len(args):
-        if args[i] == flag and i + 1 < len(args):
+        tok = args[i]
+        if tok == flag and i + 1 < len(args):
             values.append(args[i + 1])
             i += 2
+        elif tok.startswith(prefix):
+            values.append(tok[len(prefix):])
+            i += 1
         else:
             i += 1
     return values
