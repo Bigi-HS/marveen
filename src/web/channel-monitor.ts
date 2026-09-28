@@ -1045,18 +1045,20 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     // Batch pending-message snapshot for G5 staged-wedge-probe wiring (9644ed7c).
     // One query before the per-agent loop so the DB is hit once, not per-agent.
     // Maps agent_name -> { pendingCount, oldestCreatedAtMs }
-    type PendingSnapshot = { pendingCount: number; oldestCreatedAtMs: number }
+    // agent_messages.created_at is epoch SECONDS (db.ts: now=Math.floor(Date.now()/1000)).
+    // Store as seconds so the age calculation stays in one unit family.
+    type PendingSnapshot = { pendingCount: number; oldestCreatedAtSec: number }
     const pendingByAgent = new Map<string, PendingSnapshot>()
     try {
       const db = getDb()
       const rows = db.prepare(`
-        SELECT to_agent, COUNT(*) AS cnt, MIN(created_at) AS oldest_ms
+        SELECT to_agent, COUNT(*) AS cnt, MIN(created_at) AS oldest_sec
         FROM agent_messages
         WHERE delivered_at IS NULL
         GROUP BY to_agent
-      `).all() as { to_agent: string; cnt: number; oldest_ms: number }[]
+      `).all() as { to_agent: string; cnt: number; oldest_sec: number }[]
       for (const row of rows) {
-        pendingByAgent.set(row.to_agent, { pendingCount: row.cnt, oldestCreatedAtMs: row.oldest_ms })
+        pendingByAgent.set(row.to_agent, { pendingCount: row.cnt, oldestCreatedAtSec: row.oldest_sec })
       }
     } catch (err) {
       logger.warn({ err }, 'channel-monitor: staged-wedge pending-snapshot query failed (non-fatal)')
@@ -1240,11 +1242,10 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       // PR when the lastOutboundAgeMin + sawAbandonEvent signals are plumbed.
       if (!t.isMarveen && t.agentName) {
         const snap = pendingByAgent.get(t.agentName)
-        const nowMs = Date.now()
         const overdueMin = DEFAULT_STAGED_WEDGE_THRESHOLDS.overdueThresholdMin
         const hasPendingInbound = snap != null && snap.pendingCount > 0
         const oldestPendingAgeMin = hasPendingInbound
-          ? Math.floor((nowMs - snap!.oldestCreatedAtMs) / 60_000)
+          ? Math.floor((Date.now() / 1000 - snap!.oldestCreatedAtSec) / 60)
           : 0
         const paneState = pane != null ? detectPaneState(pane) : null
         const stagedVerdict = classifyStagedWedgeProbe({
