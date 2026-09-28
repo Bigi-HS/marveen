@@ -2229,6 +2229,16 @@ class SkillBashWriteTests(unittest.TestCase):
         self.assertFalse(guard.match_skill_bash_write(
             'ls ~/.claude/skills/'))
 
+    def test_install_to_skill_dir_is_blocked(self):
+        """install /tmp/evil ~/.claude/skills/foo/SKILL.md -- install last positional = dest."""
+        self.assertTrue(guard.match_skill_bash_write(
+            'install /tmp/evil ~/.claude/skills/foo/SKILL.md'))
+
+    def test_install_create_dir_non_skill_is_allowed(self):
+        """install -d /tmp/some-dir -- directory creation to non-skill path."""
+        self.assertFalse(guard.match_skill_bash_write(
+            'install -d /tmp/some-dir'))
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

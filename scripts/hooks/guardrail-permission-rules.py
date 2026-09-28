@@ -849,9 +849,6 @@ def _is_skill_path(path: str) -> bool:
     return False
 
 
-_SKILL_WRITE_DEST_VERBS = frozenset({'tee', 'cp', 'mv', 'install'})
-
-
 def match_skill_bash_write(command: str) -> bool:
     """K-1a: Block Bash commands that write to the global skills directory.
 
@@ -886,7 +883,7 @@ def match_skill_bash_write(command: str) -> bool:
             for t in exp_tokens[1:]:
                 if not t.startswith('-') and _is_skill_path(t):
                     return True
-        elif verb in ('cp', 'mv'):
+        elif verb in ('cp', 'mv', 'install'):
             # destination is the last positional argument
             args = [t for t in exp_tokens[1:] if not t.startswith('-')]
             if args and _is_skill_path(args[-1]):
