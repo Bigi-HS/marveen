@@ -124,12 +124,27 @@ def main(argv: list[str]) -> int:
     skipped_agents: list[str] = []
     heal_candidates: list[tuple[str, int]] = []  # (agent, consecutiveDead) for OPS-166 webhook
 
+    # install_dir: parent of the store/ directory (store/../ = repo root).
+    # Used to locate per-agent watchdog scripts for the parked-flag check (card 041c7dac).
+    install_dir = Path(args.store).parent
+
     for fpath in files:
         name = os.path.basename(fpath)
         if name == "telegram-pipe-watchdog.state.json":
             agent = "telegram"
         else:
             agent = name.replace("pipe-watchdog.", "").replace(".state.json", "")
+
+        # Skip parked agents: a watchdog script that is chmod -x is the canonical
+        # "parked" flag (park-channel-agent recipe). A parked agent has no live
+        # pipe to reconnect, so a stale gauge is expected and not actionable.
+        # Generic-watchdog agents (no dedicated script) are never parked this way.
+        watchdog_script = install_dir / "scripts" / f"{agent}-watchdog.sh"
+        if watchdog_script.exists() and not os.access(watchdog_script, os.X_OK):
+            skipped_agents.append(agent)
+            print(f"[{agent}] skip (watchdog not executable = parked)")
+            continue
+
         try:
             state = json.loads(Path(fpath).read_text())
         except Exception as e:

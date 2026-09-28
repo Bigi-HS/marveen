@@ -274,5 +274,79 @@ class TestTelegramAgent(unittest.TestCase):
             self.assertIn("DRY-RUN would alert", r.stdout)
 
 
+class TestParkedAgentSkip(unittest.TestCase):
+    """card 041c7dac: parked agents (watchdog chmod -x) must be skipped."""
+
+    def _make_env(self, d: str):
+        store = os.path.join(d, "store")
+        scripts = os.path.join(d, "scripts")
+        os.makedirs(store)
+        os.makedirs(scripts)
+        state = os.path.join(d, "state.json")
+        tok = os.path.join(d, "token")
+        Path(tok).write_text("fake-token")
+        return store, scripts, state, tok
+
+    def test_parked_agent_not_stale_alerted(self):
+        """Stale gauge for parked agent (watchdog chmod -x) -> skip, no alert."""
+        with tempfile.TemporaryDirectory() as d:
+            store, scripts, state, tok = self._make_env(d)
+            # Create stale state for bigben
+            write_state(store, "bigben", consecutive_dead=3,
+                        last_healthy_ms=NOW_MS - STALE_MS - 1_000)
+            # Mark bigben watchdog as parked (not executable)
+            wd = os.path.join(scripts, "bigben-watchdog.sh")
+            Path(wd).write_text("#!/bin/bash\n")
+            os.chmod(wd, 0o644)  # not executable
+
+            r = run(store, state, tok, ["--dry-run"])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("parked", r.stdout)
+            self.assertNotIn("DRY-RUN would alert", r.stdout)
+            self.assertNotIn("STALE", r.stdout)
+
+    def test_executable_watchdog_not_skipped(self):
+        """Stale gauge with executable watchdog -> still reported STALE."""
+        with tempfile.TemporaryDirectory() as d:
+            store, scripts, state, tok = self._make_env(d)
+            write_state(store, "bigben", consecutive_dead=3,
+                        last_healthy_ms=NOW_MS - STALE_MS - 1_000)
+            # Watchdog IS executable
+            wd = os.path.join(scripts, "bigben-watchdog.sh")
+            Path(wd).write_text("#!/bin/bash\n")
+            os.chmod(wd, 0o755)
+
+            r = run(store, state, tok, ["--dry-run"])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("DRY-RUN would alert", r.stdout)
+            self.assertIn("bigben", r.stdout)
+
+    def test_no_watchdog_script_not_skipped(self):
+        """Agent with no dedicated watchdog script (generic path) -> not parked."""
+        with tempfile.TemporaryDirectory() as d:
+            store, scripts, state, tok = self._make_env(d)
+            write_state(store, "gauge", consecutive_dead=2)
+            # No gauge-watchdog.sh in scripts/ -> not parked
+
+            r = run(store, state, tok, ["--dry-run"])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("DRY-RUN would alert", r.stdout)
+            self.assertIn("gauge", r.stdout)
+
+    def test_healthy_parked_agent_silent(self):
+        """Healthy gauge + parked -> still silent (no spurious ok line noise)."""
+        with tempfile.TemporaryDirectory() as d:
+            store, scripts, state, tok = self._make_env(d)
+            write_state(store, "bigben")  # fresh/healthy
+            wd = os.path.join(scripts, "bigben-watchdog.sh")
+            Path(wd).write_text("#!/bin/bash\n")
+            os.chmod(wd, 0o644)  # parked
+
+            r = run(store, state, tok, ["--dry-run"])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("parked", r.stdout)
+            self.assertNotIn("DRY-RUN would alert", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
