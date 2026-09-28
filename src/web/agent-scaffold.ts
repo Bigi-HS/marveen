@@ -230,18 +230,24 @@ export function stripCheckpointHooks(hooks: HooksBlock): void {
   }
 }
 
-// Apply the operator c12-signoff flag-gate to a template hooks block in place.
-// When store/session-end-marker.enabled is ABSENT (fail-closed default) it strips
-// the memory-continuity S1 SessionEnd marker AND the S3 checkpoint replay/write
-// hooks, so NO agent gets them live before the deliberate operator sign-off.
-// This is the SINGLE gate used by BOTH injection paths -- the ensureAgentHooks
-// boot backfill and the scaffoldAgentDir new-agent/c12-sandbox seed -- so a
-// brand-new agent (or the chameleon sandbox) can no longer bypass the gate by
-// seeding the raw template verbatim.
-export function applyFlagGate(hooks: HooksBlock, storeDir: string = STORE_DIR): void {
-  if (sessionEndMarkerHookEnabled(storeDir)) return
+// Apply the operator c12-signoff flag-gate to a hooks block in place. When
+// store/session-end-marker.enabled is ABSENT (fail-closed default) it strips the
+// memory-continuity S1 SessionEnd marker AND the S3 checkpoint replay/write hooks,
+// so NO agent carries them live before the deliberate operator sign-off. Returns
+// true iff it removed anything (so callers can flag a settings.json rewrite).
+//
+// This is the SINGLE gate used by every injection path. It is BIDIRECTIONALLY
+// idempotent: applied to a TEMPLATE it prevents injection (nothing to add), and
+// applied to an agent's EXISTING hooks it self-heals a block that was contaminated
+// before the gate existed (raw-seeded via scaffoldAgentDir, e.g. servo-skull, or a
+// stale c12 sandbox baseline). When the flag is ON it never mutates (early return),
+// so activation is a clean flip. See card 2493cafc S1 (marveen decision).
+export function applyFlagGate(hooks: HooksBlock, storeDir: string = STORE_DIR): boolean {
+  if (sessionEndMarkerHookEnabled(storeDir)) return false
+  const before = JSON.stringify(hooks)
   stripSessionEndMarker(hooks)
   stripCheckpointHooks(hooks)
+  return JSON.stringify(hooks) !== before
 }
 
 // Targeted idempotent backfill of the S3 SessionStart checkpoint-replay hook.
@@ -330,9 +336,15 @@ export function ensureAgentHooks(name: string): boolean {
     // so tpl carries no checkpoint hooks to merge) -> co-activates with S1/S2.
     const checkpointReplayChanged = ensureCheckpointReplayHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const checkpointWriteChanged = ensureCheckpointWriteHooks(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    // Bidirectional gate: when the flag is OFF, also STRIP any marker/checkpoint
+    // hooks already present in the agent's settings (contaminated before the gate
+    // fix -- raw-seeded via scaffoldAgentDir, e.g. servo-skull, or a stale sandbox
+    // baseline). This self-heals to the inert baseline on the next boot backfill
+    // without a manual file-edit, and is a no-op when the flag is ON.
+    const gateHealedChanged = applyFlagGate(existing.hooks as HooksBlock)
     changed = memChanged || guardChanged || askFirstChanged || destructiveBashChanged || permRulesChanged
       || sessionEnforceChanged || freshnessNudgeChanged || sessionEndMarkerChanged
-      || checkpointReplayChanged || checkpointWriteChanged
+      || checkpointReplayChanged || checkpointWriteChanged || gateHealedChanged
   }
   if (!changed) return false
   mkdirSync(join(agentDir(name), '.claude'), { recursive: true })

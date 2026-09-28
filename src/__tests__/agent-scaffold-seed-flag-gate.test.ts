@@ -44,6 +44,28 @@ describe('applyFlagGate (unifies the operator flag-gate across seed + backfill)'
     expect(JSON.stringify(hooks)).toContain('memory-replay.py')
   })
 
+  // Bidirectional idempotence (marveen decision, S1 followup): flag-OFF must also
+  // STRIP an already-present marker/checkpoint hook from an agent's EXISTING hooks
+  // block -- not merely refrain from adding -- so a contaminated agent (raw-seeded
+  // before the gate fix, e.g. servo-skull) and the c12 sandbox baseline self-heal
+  // to the inert baseline on the next boot backfill while the flag is still off.
+  it('flag ABSENT: reports a change when it removed hooks (returns true)', () => {
+    const hooks = templateHooks()
+    expect(applyFlagGate(hooks, store)).toBe(true)
+  })
+
+  it('flag ABSENT: returns false on an already-clean block (idempotent no-op)', () => {
+    const hooks = templateHooks()
+    applyFlagGate(hooks, store)          // first pass strips
+    expect(applyFlagGate(hooks, store)).toBe(false)  // second pass: nothing left to strip
+  })
+
+  it('flag PRESENT: returns false (never mutates when active)', () => {
+    writeFileSync(join(store, SESSION_END_MARKER_FLAG), '')
+    const hooks = templateHooks()
+    expect(applyFlagGate(hooks, store)).toBe(false)
+  })
+
   it('flag PRESENT: leaves all three memory-continuity hooks intact', () => {
     writeFileSync(join(store, SESSION_END_MARKER_FLAG), '')
     const hooks = templateHooks()
