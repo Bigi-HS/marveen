@@ -85,6 +85,15 @@ if [[ -d agents ]]; then
        -o -name 'access.json' -o -name '.env' \) \
     -print >> "${REPOLIST}"
 fi
+# Per-agent knowledge bases (agents/*/store/**). These are gitignored (.gitignore
+# rule `agents/*/*`) but contain irreplaceable agent KBs -- card a23ab5e2.
+# Note: stores can total 100MB+; the archive is kept local (not cloud-synced).
+# Shell glob for the store dirs so find recurses into all nested subdirs.
+if [[ -d agents ]]; then
+  for _storedir in agents/*/store; do
+    [[ -d "${_storedir}" ]] && find "${_storedir}" -type f -print
+  done >> "${REPOLIST}"
+fi
 
 # home/ group (relative to $HOME)
 add_if "${HOMELIST}" "${HOME}" .claude/skills
