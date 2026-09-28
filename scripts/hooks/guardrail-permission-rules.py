@@ -593,7 +593,11 @@ def _collect_var_assignments(command: str) -> dict:
         for tok in tokens:
             m = _ASSIGN_RE.match(tok)
             if m:
-                assigned[m.group(1)] = m.group(2)
+                name, val = m.group(1), m.group(2)
+                # Expand $-refs at assignment time using already-known vars so
+                # chained indirection (A=suffix; B=prefix/$A) resolves correctly.
+                val = _VARREF_RE.sub(lambda r: assigned.get(r.group(1), r.group(0)), val)
+                assigned[name] = val
     return assigned
 
 
