@@ -1742,5 +1742,87 @@ class SharedCheckoutCwdBypassTests(unittest.TestCase):
         self.assertFalse(denied)
 
 
+class FlagEqualsFormTests(unittest.TestCase):
+    """Adversarial fixtures for card e903a481.
+
+    _flag_values() handled only the space-separated form (--flag value).
+    The equals-attached form (--flag=value) is a single token and was not
+    extracted, so git --git-dir=/home/domin/marveen/.git commit bypassed
+    match_shared_checkout_git_op even after the card 500b5e13 fix.
+    """
+
+    SHARED = '/home/domin/marveen'
+    WORKTREE = '/home/domin/marveen-wt/eng-x'
+
+    # ---- FN tests: must block equals-attached form ----
+
+    def test_git_dir_equals_commit_from_worktree_is_blocked(self):
+        """git --git-dir=shared/.git commit from worktree cwd must be blocked."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git --git-dir={self.SHARED}/.git commit -m bypass',
+            self.WORKTREE,
+        ))
+
+    def test_git_dir_equals_merge_from_tmp_is_blocked(self):
+        """git --git-dir=shared/.git merge from /tmp must be blocked."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git --git-dir={self.SHARED}/.git merge origin/develop',
+            '/tmp',
+        ))
+
+    def test_git_dir_equals_rebase_from_worktree_is_blocked(self):
+        """git --git-dir=shared/.git rebase from worktree must be blocked."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git --git-dir={self.SHARED}/.git rebase HEAD~1',
+            self.WORKTREE,
+        ))
+
+    # ---- FP checks: equals-form to a non-shared path is allowed ----
+
+    def test_git_dir_equals_worktree_commit_is_allowed(self):
+        """--git-dir=worktree/.git is not the shared checkout, must not block."""
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            f'git --git-dir={self.WORKTREE}/.git commit -m ok',
+            self.WORKTREE,
+        ))
+
+    def test_git_dir_equals_shared_status_is_allowed(self):
+        """--git-dir=shared/.git status is a read op, not in blocked set."""
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            f'git --git-dir={self.SHARED}/.git status',
+            self.WORKTREE,
+        ))
+
+    # ---- regression: space-separated form still works ----
+
+    def test_git_dir_space_commit_still_blocked(self):
+        """Original space-separated form must still be detected (no regression)."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git --git-dir {self.SHARED}/.git commit -m x',
+            self.WORKTREE,
+        ))
+
+    # ---- opposing combo: end-to-end classify ----
+
+    def test_classify_blocks_git_dir_equals_commit_from_worktree(self):
+        """classify() must deny git --git-dir=shared/.git commit from worktree."""
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': f'git --git-dir={self.SHARED}/.git commit -m bypass'},
+            'cwd': self.WORKTREE,
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'shared-checkout-commit')
+
+    def test_classify_allows_git_dir_equals_worktree_commit(self):
+        """classify() must allow git --git-dir=worktree/.git commit."""
+        denied, _, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': f'git --git-dir={self.WORKTREE}/.git commit -m ok'},
+            'cwd': self.WORKTREE,
+        })
+        self.assertFalse(denied)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
