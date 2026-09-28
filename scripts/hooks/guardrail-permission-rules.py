@@ -650,15 +650,24 @@ def match_env_file_print(command: str) -> bool:
             if _command_word(tokens) not in _FILE_READ_VERBS:
                 continue
             # Check every non-flag argument for a sensitive file pattern, either as
-            # a literal path or via a variable that was assigned one (var-indirect).
+            # a literal path, via a single variable that was assigned one (var-indirect),
+            # or via the fully-expanded token when a path is split across multiple vars
+            # (card ef11f88a: A=store/.dashboard B=-token cat "$A$B" bypass).
             for tok in tokens[1:]:
                 if tok.startswith('-'):
                     continue
                 if _is_sensitive(tok, sanctioned):
                     return True
-                for ref in _VARREF_RE.findall(tok):
+                refs = _VARREF_RE.findall(tok)
+                for ref in refs:
                     val = assigned.get(ref)
                     if val is not None and _is_sensitive(val, sanctioned):
+                        return True
+                if refs:
+                    expanded = _VARREF_RE.sub(
+                        lambda m: assigned.get(m.group(1), m.group(0)), tok
+                    )
+                    if expanded != tok and _is_sensitive(expanded, sanctioned):
                         return True
     return False
 
