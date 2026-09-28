@@ -1967,5 +1967,60 @@ class VarAssignmentDeepHopTests(unittest.TestCase):
         self.assertFalse(denied)
 
 
+class WorkTreeFlagBypassTests(unittest.TestCase):
+    """--work-tree targeting bypass: git --work-tree=/shared/path --git-dir=.git commit.
+    card 500b5e13."""
+
+    SHARED = '/home/domin/marveen'
+
+    # ── must-DENY ──────────────────────────────────────────────────────────────
+
+    def test_work_tree_exact_shared_path_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git --work-tree={self.SHARED} --git-dir=.git commit -m "msg"', '/tmp'))
+
+    def test_work_tree_with_trailing_slash_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git --work-tree={self.SHARED}/ --git-dir=.git commit', '/tmp'))
+
+    def test_work_tree_equals_form_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git --work-tree={self.SHARED} merge origin/develop', '/tmp'))
+
+    def test_work_tree_space_form_is_blocked(self):
+        cmd = f'git --work-tree {self.SHARED} --git-dir .git rebase develop'
+        self.assertTrue(guard.match_shared_checkout_git_op(cmd, '/tmp'))
+
+    # ── must-ALLOW ─────────────────────────────────────────────────────────────
+
+    def test_work_tree_unrelated_path_is_allowed(self):
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git --work-tree=/tmp/my-repo --git-dir=.git commit', '/tmp'))
+
+    def test_work_tree_subdir_of_shared_is_allowed(self):
+        """A sub-repo INSIDE the shared checkout is NOT the shared checkout root."""
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            f'git --work-tree={self.SHARED}/agents/rackham --git-dir=.git commit', '/tmp'))
+
+    def test_classify_blocks_work_tree_targeting(self):
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {
+                'command': f'git --work-tree={self.SHARED} --git-dir=.git commit -m "x"',
+            },
+            'cwd': '/tmp',
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'shared-checkout-commit')
+
+    def test_classify_allows_unrelated_work_tree(self):
+        denied, _, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'git --work-tree=/tmp/repo --git-dir=.git commit'},
+            'cwd': '/tmp',
+        })
+        self.assertFalse(denied)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -1168,11 +1168,13 @@ def match_shared_checkout_git_op(command: str, cwd: 'str | None') -> bool:
     # Check if any targeting path reaches the shared checkout.
     c_paths = [v.rstrip('/') for v in _flag_values(git_args, '-C')]
     git_dirs = _flag_values(git_args, '--git-dir')
+    work_trees = [v.rstrip('/') for v in _flag_values(git_args, '--work-tree')]
 
     targets_shared = (
         cwd_norm == SHARED_CHECKOUT_PATH
         or SHARED_CHECKOUT_PATH in c_paths
         or any(d.startswith(SHARED_CHECKOUT_PATH + '/') for d in git_dirs)
+        or SHARED_CHECKOUT_PATH in work_trees
     )
     if not targets_shared:
         return False
