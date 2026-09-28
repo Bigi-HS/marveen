@@ -1907,5 +1907,65 @@ class VarAssignmentSplitPathTests(unittest.TestCase):
         self.assertFalse(denied)
 
 
+class VarAssignmentDeepHopTests(unittest.TestCase):
+    """Multi-level var-indirection FN: A=suffix; B=prefix/$A; cat "$B".
+    The sensitive path is split across two assignments chained via $-ref.
+    card 99265888."""
+
+    # ── must-DENY ──────────────────────────────────────────────────────────────
+
+    def test_two_hop_suffix_first_is_blocked(self):
+        """A=.dashboard-token; B=store/$A; cat "$B" -> B resolves to sensitive path."""
+        self.assertTrue(guard.match_env_file_print(
+            'A=.dashboard-token; B=store/$A; cat "$B"'))
+
+    def test_two_hop_prefix_first_is_blocked(self):
+        """A=store; B=$A/.dashboard-token; cat "$B" -> B resolves to sensitive path."""
+        self.assertTrue(guard.match_env_file_print(
+            'A=store; B=$A/.dashboard-token; cat "$B"'))
+
+    def test_two_hop_mid_split_is_blocked(self):
+        """A=store/.dashboard; B=${A}-token; cat "$B" -> B resolves to sensitive path."""
+        self.assertTrue(guard.match_env_file_print(
+            'A=store/.dashboard; B=${A}-token; cat "$B"'))
+
+    def test_two_hop_genesis_token_is_blocked(self):
+        """A=.genesis-token; B=agents/rackham/$A; cat "$B" -> sensitive."""
+        self.assertTrue(guard.match_env_file_print(
+            'A=.genesis-token; B=agents/rackham/$A; cat "$B"'))
+
+    # ── must-ALLOW ─────────────────────────────────────────────────────────────
+
+    def test_two_hop_benign_path_is_allowed(self):
+        """A=store; B=$A/noa.db; cat "$B" -> harmless DB path."""
+        self.assertFalse(guard.match_env_file_print(
+            'A=store; B=$A/noa.db; cat "$B"'))
+
+    def test_two_hop_log_path_is_allowed(self):
+        """A=/tmp; B=$A/output.log; cat "$B" -> harmless log path."""
+        self.assertFalse(guard.match_env_file_print(
+            'A=/tmp; B=$A/output.log; cat "$B"'))
+
+    def test_two_hop_partial_non_matching_is_allowed(self):
+        """A=.dashx; B=store/$A-token; cat "$B" -> 'store/.dashx-token' not in pattern."""
+        self.assertFalse(guard.match_env_file_print(
+            'A=.dashx; B=store/$A-token; cat "$B"'))
+
+    def test_classify_blocks_two_hop_chain(self):
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'A=.dashboard-token; B=store/$A; cat "$B"'},
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'env-file-print')
+
+    def test_classify_allows_two_hop_benign(self):
+        denied, _, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'A=store; B=$A/noa.db; cat "$B"'},
+        })
+        self.assertFalse(denied)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
