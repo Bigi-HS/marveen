@@ -1655,5 +1655,92 @@ class SharedCheckoutValueFlagTests(unittest.TestCase):
         self.assertFalse(denied)
 
 
+class SharedCheckoutCwdBypassTests(unittest.TestCase):
+    """Adversarial fixtures for card 500b5e13.
+
+    match_shared_checkout_git_op checked cwd only, so an agent in a worktree
+    could bypass the guard by supplying -C /home/domin/marveen or
+    --git-dir /home/domin/marveen/.git.  These tests prove the bypass (RED)
+    and then verify the fix lands cleanly (GREEN).
+    """
+
+    SHARED = '/home/domin/marveen'
+    WORKTREE = '/home/domin/marveen-wt/eng-x'
+
+    # ---- FN tests: guard must block these (bypass paths) ----
+
+    def test_dash_C_commit_from_worktree_cwd_is_blocked(self):
+        """git -C shared_path commit from a worktree cwd is a shared-checkout op."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git -C {self.SHARED} commit -m bypass',
+            self.WORKTREE,
+        ))
+
+    def test_dash_C_merge_from_worktree_cwd_is_blocked(self):
+        """git -C shared_path merge from a worktree cwd is a shared-checkout op."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git -C {self.SHARED} merge origin/develop',
+            self.WORKTREE,
+        ))
+
+    def test_git_dir_commit_from_worktree_cwd_is_blocked(self):
+        """git --git-dir shared/.git commit from a worktree cwd is blocked."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git --git-dir {self.SHARED}/.git commit -m bypass',
+            self.WORKTREE,
+        ))
+
+    def test_dash_C_rebase_from_tmp_cwd_is_blocked(self):
+        """git -C shared_path rebase from /tmp is also blocked."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git -C {self.SHARED} rebase HEAD~1',
+            '/tmp',
+        ))
+
+    # ---- FP checks: guard must NOT block these ----
+
+    def test_dash_C_to_worktree_status_from_worktree_is_allowed(self):
+        """git -C shared_path status is a read op, not blocked."""
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            f'git -C {self.SHARED} status',
+            self.WORKTREE,
+        ))
+
+    def test_dash_C_to_worktree_commit_from_worktree_is_allowed(self):
+        """-C pointing to a WORKTREE (not shared) is allowed."""
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            f'git -C {self.WORKTREE} commit -m ok',
+            self.WORKTREE,
+        ))
+
+    def test_git_dir_to_worktree_commit_is_allowed(self):
+        """--git-dir pointing to a worktree .git is allowed."""
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            f'git --git-dir {self.WORKTREE}/.git commit -m ok',
+            self.WORKTREE,
+        ))
+
+    # ---- opposing combo: end-to-end classify ----
+
+    def test_classify_blocks_dash_C_shared_commit_from_worktree(self):
+        """classify() denies git -C shared commit even when cwd is a worktree."""
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': f'git -C {self.SHARED} commit -m bypass'},
+            'cwd': self.WORKTREE,
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'shared-checkout-commit')
+
+    def test_classify_allows_dash_C_worktree_commit(self):
+        """classify() allows git -C worktree commit."""
+        denied, _, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': f'git -C {self.WORKTREE} commit -m ok'},
+            'cwd': self.WORKTREE,
+        })
+        self.assertFalse(denied)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
