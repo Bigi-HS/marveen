@@ -1303,6 +1303,34 @@ CASES = [
             "credential path is still there in both, so the rule fires",
         command="cat /home/domin/." + "git-" + "credentials $'\\xcc'",
     ),
+
+    # -- G: ENG-107 shared-checkout-commit guard FP-corpus (card 0aa0ad3b) -----
+    # The rule is cwd-gated: without a cwd in the payload it cannot fire.
+    # These cases verify that worktree-context (or no-cwd) commits remain ALLOW.
+    dict(
+        id="SC1", family="shared-checkout-guard", should=ALLOW,
+        note="git commit without cwd context: rule cannot fire (fail-open)",
+        why="no cwd in payload; rule requires cwd==/home/domin/marveen to block",
+        command='git commit -m "worktree: implement the feature"',
+    ),
+    dict(
+        id="SC2", family="shared-checkout-guard", should=ALLOW,
+        note="git rebase without cwd context: rule cannot fire",
+        why="no cwd; rule is cwd-gated",
+        command='git rebase origin/develop',
+    ),
+    dict(
+        id="SC3", family="shared-checkout-guard", should=ALLOW,
+        note="git add in shared checkout: not a commit/merge/rebase op",
+        why="git add is a staging op, not a history-mutating op; not in blocklist",
+        command='git add -A',
+    ),
+    dict(
+        id="SC4", family="shared-checkout-guard", should=ALLOW,
+        note="git status in shared checkout: read-only op",
+        why="git status does not mutate history",
+        command='git status --short',
+    ),
 ]
 
 
