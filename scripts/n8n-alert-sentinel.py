@@ -92,6 +92,31 @@ def http_probe_antipattern(node, workflow_refs_statuscode):
     resp = node.get("parameters", {}).get("options", {}).get("response", {}).get("response", {})
     return bool(resp.get("neverError")) and not resp.get("fullResponse") and workflow_refs_statuscode
 
+def parse_to_epoch(ts_str):
+    """Parse various n8n timestamp formats to Unix epoch float.
+
+    n8n stores at least three distinct formats in the same DB:
+      startedAt  = '2026-09-28 06:30:00.020'   (SPACE sep, millis, no TZ -> UTC)
+      updatedAt  = '2026-07-28T18:04:06.509Z'  (T sep, millis, Z suffix -> UTC)
+      boot_iso   = '2026-09-10T00:26:40+00:00' (Python isoformat -> UTC)
+    Lexicographic string comparison is broken across these (SPACE 0x20 < T 0x54).
+    This function normalises all three to a timezone-aware datetime and returns
+    the Unix epoch float, or None on any parse failure.
+    """
+    if not ts_str:
+        return None
+    s = ts_str.strip()
+    s = s.replace(' ', 'T', 1)    # '2026-09-28 06:...' -> '2026-09-28T06:...'
+    s = s.replace('Z', '+00:00')  # '...509Z' -> '...509+00:00'
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)  # space-sep has no TZ -> UTC
+        return dt.timestamp()
+    except ValueError:
+        return None
+
+
 def alert_fired(execdata_row):
     """Deflatten runData; return True if an alert node ran AND delivered."""
     try:
@@ -120,24 +145,42 @@ def main():
     con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
 
-    wfs = con.execute("SELECT id, name, active, nodes FROM workflow_entity").fetchall()
+    wfs = con.execute("SELECT id, name, active, nodes, updatedAt FROM workflow_entity").fetchall()
     boot = n8n_boot_epoch()
     boot_iso = datetime.fromtimestamp(boot, timezone.utc).isoformat() if boot else None
 
-    # ---- 1. GHOST triggers: active=0 but trigger-execs since boot ----
-    if boot_iso:
+    # ---- 1. GHOST triggers: active=0 but trigger-execs since deactivation ----
+    # Threshold = max(boot_epoch, deactivation_epoch). workflow_entity.updatedAt is
+    # set on every modification including active->0 transitions. A workflow
+    # deactivated AFTER boot must only flag execs that fired AFTER deactivation;
+    # pre-deactivation trigger-execs are legitimate and must not count.
+    #
+    # EPOCH-BASED COMPARISON (not lexicographic strings). n8n startedAt uses a
+    # SPACE separator ('2026-09-28 06:30:00.020'); boot/updatedAt use T. SPACE
+    # (0x20) < T (0x54) -> any same-day startedAt string is always LESS than a
+    # T-sep threshold string, causing false-negatives for post-deactivation execs
+    # on the same calendar day. Convert everything to epoch and compare numerically.
+    # CAST(strftime('%s', startedAt) AS INTEGER) handles both space-sep and T-sep.
+    if boot:
         for w in wfs:
             if w["active"]:
                 continue
+            updated_epoch = parse_to_epoch(w["updatedAt"] if "updatedAt" in w.keys() else None)
+            threshold_epoch = (
+                updated_epoch if (updated_epoch and updated_epoch > boot) else boot
+            )
             n = con.execute(
                 "SELECT COUNT(*) c FROM execution_entity "
-                "WHERE workflowId=? AND mode='trigger' AND startedAt > ?",
-                (w["id"], boot_iso),
+                "WHERE workflowId=? AND mode='trigger' "
+                "AND CAST(strftime('%s', startedAt) AS INTEGER) > ?",
+                (w["id"], int(threshold_epoch)),
             ).fetchone()["c"]
             if n > 0:
+                t_iso = datetime.fromtimestamp(threshold_epoch, timezone.utc).isoformat()
                 findings.append({"class": "GHOST_TRIGGER", "severity": "high",
                                  "workflow": w["name"], "id": w["id"],
-                                 "detail": f"active=0 but {n} trigger execs since boot {boot_iso}",
+                                 "detail": f"active=0 but {n} trigger execs after deactivation "
+                                           f"(threshold {t_iso}; boot {boot_iso})",
                                  "fix": "n8n-ops recipe 2: API activate->deactivate"})
 
     # ---- 2. CONFIG antipattern (only on workflows that CAN alert) ----
