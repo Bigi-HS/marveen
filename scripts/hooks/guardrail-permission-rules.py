@@ -1109,14 +1109,27 @@ def _git_subcommand(args: 'list[str]') -> 'str | None':
     return None
 
 
+def _flag_values(args: 'list[str]', flag: str) -> 'list[str]':
+    """Return all values given for a space-separated single-value flag."""
+    values = []
+    i = 0
+    while i < len(args):
+        if args[i] == flag and i + 1 < len(args):
+            values.append(args[i + 1])
+            i += 2
+        else:
+            i += 1
+    return values
+
+
 def match_shared_checkout_git_op(command: str, cwd: 'str | None') -> bool:
-    """True when the command is a gate-bypassing git op in the shared live checkout."""
-    if not cwd:
-        return False
-    # Normalise: strip trailing slash.
-    cwd_norm = cwd.rstrip('/')
-    if cwd_norm != SHARED_CHECKOUT_PATH:
-        return False
+    """True when the command is a gate-bypassing git op in the shared live checkout.
+
+    Detects three targeting paths (card 500b5e13):
+      A) process cwd is the shared checkout (original check)
+      B) a -C flag redirects to the shared checkout from any other cwd
+      C) --git-dir points into the shared checkout tree
+    """
     # Fast path: must mention 'git'.
     if 'git' not in command:
         return False
@@ -1127,8 +1140,24 @@ def match_shared_checkout_git_op(command: str, cwd: 'str | None') -> bool:
         return False  # malformed command: fail open
     if not tokens or tokens[0] != 'git':
         return False
+
+    git_args = tokens[1:]
+    cwd_norm = cwd.rstrip('/') if cwd else None
+
+    # Check if any targeting path reaches the shared checkout.
+    c_paths = [v.rstrip('/') for v in _flag_values(git_args, '-C')]
+    git_dirs = _flag_values(git_args, '--git-dir')
+
+    targets_shared = (
+        cwd_norm == SHARED_CHECKOUT_PATH
+        or SHARED_CHECKOUT_PATH in c_paths
+        or any(d.startswith(SHARED_CHECKOUT_PATH + '/') for d in git_dirs)
+    )
+    if not targets_shared:
+        return False
+
     # Resolve the subcommand past any value-taking global flags (card db0a45c6).
-    sub = _git_subcommand(tokens[1:])
+    sub = _git_subcommand(git_args)
     return sub in _SHARED_CHECKOUT_GIT_OPS
 
 
