@@ -1855,6 +1855,18 @@ class VarAssignmentSplitPathTests(unittest.TestCase):
             'X=.dashboard-tok; Y=en; cat "$X$Y"'
         ))
 
+    def test_single_var_literal_prefix_is_blocked(self):
+        """VAR=<suffix>; cat \"literal-prefix$VAR\" where expanded = sensitive path."""
+        self.assertTrue(guard.match_env_file_print(
+            'VAR=-token; cat "store/.dashboard$VAR"'
+        ))
+
+    def test_single_var_literal_prefix_genesis_is_blocked(self):
+        """Same class, genesis-token variant."""
+        self.assertTrue(guard.match_env_file_print(
+            'S=-token; cat "store/.genesis$S"'
+        ))
+
     # ---- FP checks: non-sensitive split paths must not block ----
 
     def test_noa_db_path_split_is_allowed(self):

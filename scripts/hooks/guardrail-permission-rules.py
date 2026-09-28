@@ -663,7 +663,7 @@ def match_env_file_print(command: str) -> bool:
                     val = assigned.get(ref)
                     if val is not None and _is_sensitive(val, sanctioned):
                         return True
-                if len(refs) > 1:
+                if refs:
                     expanded = _VARREF_RE.sub(
                         lambda m: assigned.get(m.group(1), m.group(0)), tok
                     )
