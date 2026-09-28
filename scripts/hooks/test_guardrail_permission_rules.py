@@ -687,7 +687,7 @@ class QuoteAwareSplitterTests(unittest.TestCase):
     Two independently discovered trigger cases:
       1. git commit -m "...(card id)" -- paren in double-quoted message
       2. curl -d '{"key":"val (with parens)"}' localhost -- paren in sq body
-    marveen also reported find -\( \) escapes triggering the interpreter rule.
+    marveen also reported find -\\( \\) escapes triggering the interpreter rule.
 
     Fix: quote-aware split after _CMD_SUBST_RE.sub -- ';' characters that land
     inside single- or double-quoted segments are NOT treated as split points.
