@@ -893,7 +893,9 @@ def match_external_curl(command: str) -> bool:
                 has_body = True
                 i += 1
                 continue
-            if (tok.startswith('http://') or tok.startswith('https://')):
+            if tok.startswith('--url='):
+                urls.append(tok[6:])
+            elif tok.startswith('http://') or tok.startswith('https://'):
                 urls.append(tok)
             i += 1
 
