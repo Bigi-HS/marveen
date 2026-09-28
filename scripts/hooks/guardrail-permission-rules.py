@@ -697,7 +697,7 @@ _OPEN_ENV_RE = re.compile(
 # (card 0680cf34). Covers any path ending in the credential basename.
 _OPEN_TOKEN_RE = re.compile(
     r'(?:open|readFileSync)\s*\(\s*[\'"][^\'"]*'
-    r'(?:\.dashboard-token|\.git-credentials|\.claude\.json)\s*[\'"]',
+    r'(?:\.dashboard-token|\.genesis-token|\.git-credentials|\.claude\.json)\s*[\'"]',
     re.IGNORECASE,
 )
 

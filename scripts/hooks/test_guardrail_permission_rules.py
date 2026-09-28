@@ -2069,5 +2069,43 @@ class CurlUrlEqualsFormBypassTests(unittest.TestCase):
         self.assertEqual(name, 'external-curl')
 
 
+class InterpreterGenesisTokenTests(unittest.TestCase):
+    """.genesis-token missing from _OPEN_TOKEN_RE -- R2b FN.
+    card 98a4377d."""
+
+    # ── must-DENY ──────────────────────────────────────────────────────────────
+
+    def test_python_open_genesis_token_is_blocked(self):
+        self.assertTrue(guard.match_interpreter_env_read(
+            "python3 -c \"print(open('agents/rackham/.genesis-token').read())\""))
+
+    def test_python_open_genesis_token_abs_path_is_blocked(self):
+        self.assertTrue(guard.match_interpreter_env_read(
+            "python3 -c \"open('/home/domin/marveen/agents/rackham/.genesis-token').read()\""))
+
+    def test_node_readfilesync_genesis_token_is_blocked(self):
+        self.assertTrue(guard.match_interpreter_env_read(
+            "node -e \"process.stdout.write(require('fs').readFileSync('.genesis-token','utf8'))\""))
+
+    # ── must-ALLOW ─────────────────────────────────────────────────────────────
+
+    def test_python_open_benign_file_is_allowed(self):
+        self.assertFalse(guard.match_interpreter_env_read(
+            "python3 -c \"print(open('store/noa.db').read())\""))
+
+    def test_python_open_dashboard_token_still_blocked(self):
+        """Regression: existing .dashboard-token detection must stay."""
+        self.assertTrue(guard.match_interpreter_env_read(
+            "python3 -c \"print(open('store/.dashboard-token').read())\""))
+
+    def test_classify_blocks_genesis_token_read(self):
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': "python3 -c \"print(open('agents/rackham/.genesis-token').read())\""},
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'interpreter-env-read')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
