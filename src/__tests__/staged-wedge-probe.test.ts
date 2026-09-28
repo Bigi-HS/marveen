@@ -19,6 +19,7 @@ import { describe, it, expect } from 'vitest'
 import {
   classifyStagedWedgeProbe,
   isTypingWedge,
+  pendingAgeMinutes,
   type StagedWedgeSignal,
   type StagedWedgeVerdict,
 } from '../web/staged-wedge-probe.js'
@@ -128,5 +129,37 @@ describe('classifyStagedWedgeProbe', () => {
     expect(isTypingWedge('busy')).toBe(false)
     expect(isTypingWedge('pending-idle')).toBe(false)
     expect(isTypingWedge('no-pending')).toBe(false)
+  })
+})
+
+// pendingAgeMinutes: value-carrying tests that probe the real ms-vs-sec path.
+// agent_messages.created_at is epoch SECONDS (db.ts: Math.floor(Date.now()/1000)).
+// The key guard: a 1-second-old message produces 0 min, not ~30M min (which the
+// buggy Date.now()-instead-of-Date.now()/1000 calculation would have returned).
+describe('pendingAgeMinutes (9644ed7c epoch-seconds helper)', () => {
+  const NOW_MS = 1_000_000_000_000 // fixed clock for deterministic assertions
+
+  it('1-sec-old message -> 0 min (guards against ms-as-sec producing ~30M)', () => {
+    const createdAtSec = Math.floor(NOW_MS / 1000) - 1
+    expect(pendingAgeMinutes(NOW_MS, createdAtSec)).toBe(0)
+  })
+
+  it('90-sec-old message -> 1 min', () => {
+    const createdAtSec = Math.floor(NOW_MS / 1000) - 90
+    expect(pendingAgeMinutes(NOW_MS, createdAtSec)).toBe(1)
+  })
+
+  it('30-min-old message -> 30 min', () => {
+    const createdAtSec = Math.floor(NOW_MS / 1000) - 30 * 60
+    expect(pendingAgeMinutes(NOW_MS, createdAtSec)).toBe(30)
+  })
+
+  it('concrete: pendingAgeMinutes(1_000_000_000_000, 999_999_100) === 15', () => {
+    expect(pendingAgeMinutes(1_000_000_000_000, 999_999_100)).toBe(15)
+  })
+
+  it('future created_at (clock skew) -> 0, never negative', () => {
+    const createdAtSec = Math.floor(NOW_MS / 1000) + 120
+    expect(pendingAgeMinutes(NOW_MS, createdAtSec)).toBe(0)
   })
 })
