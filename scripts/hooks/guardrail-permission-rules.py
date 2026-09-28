@@ -1067,6 +1067,42 @@ def match_frida_invocation(command: str) -> bool:
     return False
 
 
+# ── ENG-107: shared-checkout git-commit/merge/rebase guard ───────────────────
+# Direct git commit/merge/rebase in the SHARED live checkout (/home/domin/marveen)
+# bypasses the PR gate and is wiped by the 08:00 rebuild-pull (recurring incident
+# class: PR#626, 33c3d67, c525cb65). Worktree paths (.worktrees/ or -wt/) are
+# explicitly allowed -- they are the correct place for eng work.
+#
+# Detection: cwd == SHARED_CHECKOUT_PATH and git subcommand in (commit, merge, rebase).
+# The cwd check is the key discriminator; without it every worktree commit would fire.
+
+SHARED_CHECKOUT_PATH = '/home/domin/marveen'
+_SHARED_CHECKOUT_GIT_OPS = frozenset({'commit', 'merge', 'rebase'})
+
+
+def match_shared_checkout_git_op(command: str, cwd: 'str | None') -> bool:
+    """True when the command is a gate-bypassing git op in the shared live checkout."""
+    if not cwd:
+        return False
+    # Normalise: strip trailing slash.
+    cwd_norm = cwd.rstrip('/')
+    if cwd_norm != SHARED_CHECKOUT_PATH:
+        return False
+    # Fast path: must mention 'git'.
+    if 'git' not in command:
+        return False
+    try:
+        import shlex as _shlex
+        tokens = _shlex.split(command, posix=True)
+    except ValueError:
+        return False  # malformed command: fail open
+    if not tokens or tokens[0] != 'git':
+        return False
+    # Find the first non-flag token after 'git' -- that is the subcommand.
+    sub = next((t for t in tokens[1:] if t and not t.startswith('-')), None)
+    return sub in _SHARED_CHECKOUT_GIT_OPS
+
+
 # ── rule table & classifier ───────────────────────────────────────────────────
 
 class Rule:
@@ -1170,6 +1206,16 @@ def classify(payload):
         inp = tool_input.get('file_path')
     if not isinstance(inp, str) or not inp.strip():
         return (False, '', '')
+    # ENG-107: cwd-gated check (cannot fit in the Rule table -- requires cwd context).
+    if tool_name == 'Bash':
+        cwd = payload.get('cwd') if isinstance(payload, dict) else None
+        if match_shared_checkout_git_op(inp, cwd):
+            return (True,
+                    'shared-checkout-commit',
+                    'git commit/merge/rebase directly in the shared live checkout '
+                    '(/home/domin/marveen) bypasses the PR gate and is wiped by '
+                    'the 08:00 rebuild-pull. Use a worktree + branch + PR instead '
+                    '(fleet-pr-merge-gate, git-worktree-manager).')
     rule = first_denied_rule(tool_name, inp)
     if rule is None:
         return (False, '', '')
