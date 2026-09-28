@@ -1824,5 +1824,76 @@ class FlagEqualsFormTests(unittest.TestCase):
         self.assertFalse(denied)
 
 
+class VarAssignmentSplitPathTests(unittest.TestCase):
+    """Adversarial fixtures for card ef11f88a.
+
+    _collect_var_assignments catches individual var values against _TOKEN_PATHS_RE.
+    When the credential path is split across two vars so that NEITHER part matches
+    individually (e.g. A=store/.dashboard B=-token), the guard misses it even though
+    the shell concatenation $A$B resolves to the real path.
+
+    Fix: also check the fully var-expanded token string.
+    """
+
+    # ---- FN tests: split-path must be detected ----
+
+    def test_split_dashboard_token_is_blocked(self):
+        """A=store/.dashboard B=-token; cat \"$A$B\" must be blocked."""
+        self.assertTrue(guard.match_env_file_print(
+            'A=store/.dashboard; B=-token; cat "$A$B"'
+        ))
+
+    def test_split_genesis_token_is_blocked(self):
+        """P=store/.genesis S=-token; cat \"$P$S\" must be blocked."""
+        self.assertTrue(guard.match_env_file_print(
+            'P=store/.genesis; S=-token; cat "$P$S"'
+        ))
+
+    def test_right_truncated_token_name_is_blocked(self):
+        """X=.dashboard-tok Y=en; cat \"$X$Y\" must be blocked."""
+        self.assertTrue(guard.match_env_file_print(
+            'X=.dashboard-tok; Y=en; cat "$X$Y"'
+        ))
+
+    # ---- FP checks: non-sensitive split paths must not block ----
+
+    def test_noa_db_path_split_is_allowed(self):
+        """store/noa.db split across vars must not block."""
+        self.assertFalse(guard.match_env_file_print(
+            'A=store; B=noa.db; cat "$A/$B"'
+        ))
+
+    def test_log_path_split_is_allowed(self):
+        """Arbitrary /tmp/output.log split must not block."""
+        self.assertFalse(guard.match_env_file_print(
+            'D=/tmp; F=output.log; wc -l "$D/$F"'
+        ))
+
+    def test_partial_token_prefix_only_is_allowed(self):
+        """store/.dashxxx split that does NOT reassemble a real path must not block."""
+        self.assertFalse(guard.match_env_file_print(
+            'A=store/.dashx; B=yz-token; cat "$A$B"'
+        ))
+
+    # ---- opposing combo: end-to-end classify ----
+
+    def test_classify_blocks_split_dashboard_token(self):
+        """classify() must deny the split-path form end-to-end."""
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'A=store/.dashboard; B=-token; cat "$A$B"'},
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'env-file-print')
+
+    def test_classify_allows_noa_db_split(self):
+        """classify() must allow the non-sensitive split."""
+        denied, _, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'A=store; B=noa.db; cat "$A/$B"'},
+        })
+        self.assertFalse(denied)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
