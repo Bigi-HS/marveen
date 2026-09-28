@@ -206,7 +206,9 @@ check_tests() {
   # themselves (da-sentinel-check, pre-gate-bundle, cross-model-bundle) are
   # skipped to prevent recursive vitest invocations; they are integration tests
   # for the bundle and must be run from outside it.
-  local py_dir="${INSTALL_DIR}/scripts/__tests__"
+  # PGB_PYTEST_DIR overrides the scanned directory (test seam, same convention
+  # as GITLEAKS_BIN / DA_RUNS_DIR) so check_tests can be exercised in isolation.
+  local py_dir="${PGB_PYTEST_DIR:-${INSTALL_DIR}/scripts/__tests__}"
   local py_failed=0 py_passed=0 py_skipped=0 py_total=0
   local first_fail=""
   for f in "$py_dir"/*.test.py; do
@@ -226,14 +228,20 @@ check_tests() {
       [ -n "$first_fail" ] || first_fail="$(basename "$f")"
     fi
   done
+  local py_executed=$((py_total - py_skipped))
   if [ "$py_total" -eq 0 ]; then
     record python-tests WARN "no scripts/__tests__/*.test.py found"
+  elif [ "$py_executed" -eq 0 ]; then
+    # Degrade-guard (silent-guard-audit): every file was skipped, so zero tests
+    # actually ran. A "0/0 green" PASS would be a silent pass on nothing -- the
+    # gate must SAY it executed nothing instead of claiming green.
+    record python-tests WARN "all ${py_total} python test file(s) skipped (bundle-integration); 0 executed -- not a green claim"
   elif [ "$py_failed" -eq 0 ]; then
     local skipped_note=""
     [ "$py_skipped" -gt 0 ] && skipped_note=" (${py_skipped} bundle-integration skipped)"
-    record python-tests PASS "${py_passed}/$((py_total - py_skipped)) python test files green${skipped_note}"
+    record python-tests PASS "${py_passed}/${py_executed} python test files green${skipped_note}"
   else
-    record python-tests BLOCK "${py_failed}/$((py_total - py_skipped)) python test file(s) failed (first: ${first_fail})"
+    record python-tests BLOCK "${py_failed}/${py_executed} python test file(s) failed (first: ${first_fail})"
   fi
 }
 
@@ -356,6 +364,17 @@ check_gitleaks() {
 
   if [ "$gl_rc" -eq 0 ]; then
     record gitleaks PASS "gitleaks: no secrets detected"
+    return
+  fi
+
+  # Skip (WARN) is reserved EXCLUSIVELY for the named binary-absence case above.
+  # gitleaks with --exit-code 1 returns 1 iff leaks were found; ANY other
+  # non-zero code is an execution/config error, NOT a clean scan. Such an error
+  # must fail closed and be labelled honestly (not mislabelled as "findings"
+  # and never a silent pass) -- otherwise a real leak could slip through when
+  # the scanner merely failed to run.
+  if [ "$gl_rc" -ne 1 ]; then
+    record gitleaks BLOCK "gitleaks scan error (exit ${gl_rc}); fail-closed, NOT a clean pass"
     return
   fi
 
