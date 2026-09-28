@@ -1593,5 +1593,67 @@ class FridaInvocationTests(unittest.TestCase):
         self.assertFalse(denied)
 
 
+# ── ENG-107 follow-up: value-flag subcommand parse (card db0a45c6) ───────────
+# The shared-checkout guard located the git subcommand as "first non-flag token".
+# git global options that take a space-separated value (-c <k=v>, -C <path>,
+# --git-dir/--work-tree/--namespace <arg>) consume the following token, so that
+# value was mistaken for the subcommand and commit/merge/rebase slipped through.
+class SharedCheckoutValueFlagTests(unittest.TestCase):
+    SHARED = '/home/domin/marveen'
+
+    # ---- direct function: previously-bypassing forms must now be detected ----
+    def test_dash_c_commit_detected(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git -c user.name=x commit -m y', self.SHARED))
+
+    def test_dash_C_commit_detected(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git -C /home/domin/marveen commit -m y', self.SHARED))
+
+    def test_repeated_dash_c_commit_detected(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git -c a=b -c c=d commit -m y', self.SHARED))
+
+    def test_git_dir_value_flag_merge_detected(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git --git-dir /home/domin/marveen/.git merge origin/x', self.SHARED))
+
+    # ---- must NOT over-block: value-flag before a read op stays allowed ----
+    def test_dash_c_status_still_allowed(self):
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git -c color.ui=always status', self.SHARED))
+
+    def test_dash_c_log_still_allowed(self):
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git -c core.pager=cat log --oneline', self.SHARED))
+
+    # ---- unchanged core behaviour (regression anchors) ----
+    def test_bare_commit_still_detected(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git commit -m x', self.SHARED))
+
+    def test_worktree_commit_still_allowed(self):
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git commit -m x', '/home/domin/marveen-wt/eng-x'))
+
+    # ---- end-to-end via classify() with the cwd payload field ----
+    def test_classify_blocks_dash_c_commit_in_shared(self):
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'git -c user.name=x commit -m y'},
+            'cwd': self.SHARED,
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'shared-checkout-commit')
+
+    def test_classify_allows_dash_c_commit_in_worktree(self):
+        denied, _, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'git -c user.name=x commit -m y'},
+            'cwd': '/home/domin/marveen-wt/eng-x',
+        })
+        self.assertFalse(denied)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
