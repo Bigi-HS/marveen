@@ -42,7 +42,8 @@ import {
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { probeTelegramConflict } from './channel-conflict-probe.js'
 import { schedulePluginUnlockAfterRespawn } from './channel-plugin-unlock.js'
-import { detectPaneState, decidePaneErrorAlert, detectsUsageLimitMenu, detectsActiveLoginBox, decideSustainedPaneAlert, type PaneErrorAlertState, type PaneState, type SustainedPaneAlertState } from '../pane-state.js'
+import { detectPaneState, decidePaneErrorAlert, detectsUsageLimitMenu, detectsActiveLoginBox, detectsFeedbackModal, decideSustainedPaneAlert, type PaneErrorAlertState, type PaneState, type SustainedPaneAlertState } from '../pane-state.js'
+import { classifyStagedWedgeProbe, DEFAULT_STAGED_WEDGE_THRESHOLDS } from './staged-wedge-probe.js'
 import {
   decideUsageLimitRecovery,
   DEFAULT_USAGE_LIMIT_WEDGE_THRESHOLDS,
@@ -131,6 +132,16 @@ const CLEAN_SUSTAINED_ALERT_STATE: SustainedPaneAlertState = { firstSeenAt: null
 const LOGIN_WEDGE_CONFIRM_MS = 120_000
 const LOGIN_WEDGE_DEDUP_MS = 30 * 60 * 1000
 const LOGIN_WEDGE_CLEAR_MS = 5 * 60 * 1000
+
+// Session-feedback modal wedge alerting (9644ed7c G6, LOG-ONLY). Same confirm/
+// dedup/clear calibration as the login-wedge -- a 2-tick confirm before the
+// first alert so a one-shot modal dismissed by the agent itself is never
+// reported.  Name suffix "-Log" (not "-Alert") makes the LOG-ONLY scope visible
+// at each read site; recovery (send-keys "0") is SLICE 2 gated separately.
+const agentFeedbackModalLog: Map<string, SustainedPaneAlertState> = new Map()
+const FEEDBACK_MODAL_CONFIRM_MS = 120_000
+const FEEDBACK_MODAL_DEDUP_MS = 30 * 60 * 1000
+const FEEDBACK_MODAL_CLEAR_MS = 5 * 60 * 1000
 
 type MarveenRecoveryStage = 'soft' | 'save' | 'resume' | 'hard' | 'gave_up'
 interface MarveenDownState {
@@ -1031,6 +1042,26 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       }
     }
 
+    // Batch pending-message snapshot for G5 staged-wedge-probe wiring (9644ed7c).
+    // One query before the per-agent loop so the DB is hit once, not per-agent.
+    // Maps agent_name -> { pendingCount, oldestCreatedAtMs }
+    type PendingSnapshot = { pendingCount: number; oldestCreatedAtMs: number }
+    const pendingByAgent = new Map<string, PendingSnapshot>()
+    try {
+      const db = getDb()
+      const rows = db.prepare(`
+        SELECT to_agent, COUNT(*) AS cnt, MIN(created_at) AS oldest_ms
+        FROM agent_messages
+        WHERE delivered_at IS NULL
+        GROUP BY to_agent
+      `).all() as { to_agent: string; cnt: number; oldest_ms: number }[]
+      for (const row of rows) {
+        pendingByAgent.set(row.to_agent, { pendingCount: row.cnt, oldestCreatedAtMs: row.oldest_ms })
+      }
+    } catch (err) {
+      logger.warn({ err }, 'channel-monitor: staged-wedge pending-snapshot query failed (non-fatal)')
+    }
+
     // Pane-level thinking-block error detection. Independent of channel
     // plugin liveness: a session can keep a live plugin yet be wedged on
     // the API error, every injected prompt yielding another 400. Detect
@@ -1170,6 +1201,71 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           logger.warn({ agent: t.agentName, session: t.session }, 'Agent wedged on an active OAuth login-box -- delivery stalled, manual /login or fresh relaunch needed')
           sendAlert(`🔐 ${t.agentName}: aktív OAuth login-képernyőn ül (élő session, de semmit nem dolgoz fel -- minden kézbesítés elakad). Kézi beavatkozás kell: \`unset TMUX && tmux attach -t ${t.session}\`, majd jelentkezz be vagy indítsd újra friss sessionnel.`)
         }
+      }
+
+      // Session-feedback modal wedge (9644ed7c G6, LOG-ONLY). The "How is Claude
+      // doing this session?" overlay swallows the next keystroke and blocks all
+      // prompt delivery while visible. Alert after 2-tick confirm (a one-shot
+      // modal cleared by the agent itself is never reported). Recovery (send-keys
+      // "0") is SLICE 2, gated separately (fce12f45). Sub-agents only -- the main
+      // session dismissal is handled by agent-process.ts dismissSurveyModalIfPresent
+      // pre-flight. LIVE-VERIFIED: the feedback-modal regex must be confirmed against
+      // a real buster/c12 pane capture before this block ships in a live deploy
+      // (gate requirement, marveen 2026-09-29).
+      if (!t.isMarveen && t.agentName) {
+        const onFeedbackModal = pane != null && detectsFeedbackModal(pane)
+        const prevModal = agentFeedbackModalLog.get(t.agentName) ?? CLEAN_SUSTAINED_ALERT_STATE
+        const modalDecision = decideSustainedPaneAlert(onFeedbackModal, prevModal, Date.now(), {
+          confirmMs: FEEDBACK_MODAL_CONFIRM_MS,
+          dedupMs: FEEDBACK_MODAL_DEDUP_MS,
+          clearMs: FEEDBACK_MODAL_CLEAR_MS,
+        })
+        if (modalDecision.next.firstSeenAt === null) {
+          agentFeedbackModalLog.delete(t.agentName)
+        } else {
+          agentFeedbackModalLog.set(t.agentName, modalDecision.next)
+        }
+        if (modalDecision.alert) {
+          logger.warn({ agent: t.agentName, session: t.session }, 'Agent wedged on session-feedback modal -- delivery stalled (keystroke swallowed). Dismiss with send-keys "0" or wait for next agent turn.')
+        }
+      }
+
+      // Staged-input wedge probe (9644ed7c G5, LOG-ONLY). Classifies each sub-
+      // agent's current wedge state from pane + pending-inbox signals. The two
+      // pure decision cores (classifyStagedWedgeProbe from staged-wedge-probe.ts
+      // and decideWedgeRecovery from wedge-detector.ts) were previously dead code
+      // (no live caller). This block wires classifyStagedWedgeProbe into the per-
+      // agent scan; LOG-ONLY -- the actual recovery actions (send-keys Enter / restart)
+      // are SLICE 2 gated separately. decideWedgeRecovery is wired in a follow-up
+      // PR when the lastOutboundAgeMin + sawAbandonEvent signals are plumbed.
+      if (!t.isMarveen && t.agentName) {
+        const snap = pendingByAgent.get(t.agentName)
+        const nowMs = Date.now()
+        const overdueMin = DEFAULT_STAGED_WEDGE_THRESHOLDS.overdueThresholdMin
+        const hasPendingInbound = snap != null && snap.pendingCount > 0
+        const oldestPendingAgeMin = hasPendingInbound
+          ? Math.floor((nowMs - snap!.oldestCreatedAtMs) / 60_000)
+          : 0
+        const paneState = pane != null ? detectPaneState(pane) : null
+        const stagedVerdict = classifyStagedWedgeProbe({
+          hasPendingInbound,
+          oldestPendingAgeMin,
+          overdueThresholdMin: overdueMin,
+          paneState,
+        })
+        if (stagedVerdict === 'staged-wedge') {
+          logger.warn(
+            { agent: t.agentName, session: t.session, oldestPendingAgeMin, paneState },
+            'Agent staged-input wedge detected: overdue pending inbox + input non-empty (LOG-ONLY -- recovery not wired yet)',
+          )
+        } else if (stagedVerdict === 'pending-idle') {
+          logger.info(
+            { agent: t.agentName, session: t.session, oldestPendingAgeMin },
+            'Agent has overdue pending inbox + idle pane (pending-idle: routing/target issue, not pane-level wedge)',
+          )
+        }
+        // 'busy', 'no-pending', 'below-threshold', 'unknown', 'error' are all expected
+        // normal states; no log noise for them.
       }
     }
 
