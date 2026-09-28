@@ -1078,6 +1078,35 @@ def match_frida_invocation(command: str) -> bool:
 
 SHARED_CHECKOUT_PATH = '/home/domin/marveen'
 _SHARED_CHECKOUT_GIT_OPS = frozenset({'commit', 'merge', 'rebase'})
+# git global options that consume the FOLLOWING token as their value when given in
+# space-separated form (e.g. `git -c user.name=x commit`, `git -C <path> commit`).
+# The `=`-attached form (`--git-dir=/x`) is a single token and needs no handling.
+# Without skipping the value token, the naive "first non-flag token" scan mistakes
+# the value for the subcommand and the guard is bypassed (card db0a45c6).
+_GIT_VALUE_FLAGS = frozenset({'-C', '-c', '--git-dir', '--work-tree', '--namespace'})
+
+
+def _git_subcommand(args: 'list[str]') -> 'str | None':
+    """Return the git subcommand from the tokens after 'git', skipping global
+    flags and the values consumed by space-separated value-taking flags.
+
+    Skipping too much can only ever yield a later token or None (under-block);
+    it can never turn an allowed command into a blocked one, so this stays on the
+    fail-open side for anything unexpected.
+    """
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+        if not tok:
+            i += 1
+            continue
+        if tok.startswith('-'):
+            # Space-separated value flag consumes the next token as its value.
+            i += 2 if tok in _GIT_VALUE_FLAGS else 1
+            continue
+        return tok
+    return None
 
 
 def match_shared_checkout_git_op(command: str, cwd: 'str | None') -> bool:
@@ -1098,8 +1127,8 @@ def match_shared_checkout_git_op(command: str, cwd: 'str | None') -> bool:
         return False  # malformed command: fail open
     if not tokens or tokens[0] != 'git':
         return False
-    # Find the first non-flag token after 'git' -- that is the subcommand.
-    sub = next((t for t in tokens[1:] if t and not t.startswith('-')), None)
+    # Resolve the subcommand past any value-taking global flags (card db0a45c6).
+    sub = _git_subcommand(tokens[1:])
     return sub in _SHARED_CHECKOUT_GIT_OPS
 
 

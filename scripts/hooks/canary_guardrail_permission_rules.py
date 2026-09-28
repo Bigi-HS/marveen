@@ -84,6 +84,26 @@ def main(target):
                expect_denied=True)
     failures += not ok
 
+    # ── FN: value-flag bypass MUST be blocked (card db0a45c6) ───────────────────
+    # git global options that take a space-separated value (-c <k=v>, -C <path>,
+    # --git-dir/--work-tree/--namespace <arg>) consume the following token. A naive
+    # "first non-flag token is the subcommand" scan mistook that value for the
+    # subcommand, letting these commit/merge/rebase forms slip past the guard.
+    ok = check(mod, 'FN-4 shared-commit-with-c-flag',
+               bash('git -c user.name=x commit -m "bypass via -c"', cwd=SHARED),
+               expect_denied=True)
+    failures += not ok
+
+    ok = check(mod, 'FN-5 shared-commit-with-C-flag',
+               bash('git -C /home/domin/marveen commit -m "bypass via -C"', cwd=SHARED),
+               expect_denied=True)
+    failures += not ok
+
+    ok = check(mod, 'FN-6 shared-merge-with-c-flag',
+               bash('git -c core.editor=true merge origin/feature-x', cwd=SHARED),
+               expect_denied=True)
+    failures += not ok
+
     # ── OPP: boundary -- git read ops in shared checkout MUST pass ─────────────
     # git log, git status, git diff are read-only and must never be blocked.
     ok = check(mod, 'OPP-1 shared-status',
@@ -101,10 +121,17 @@ def main(target):
                expect_denied=False)
     failures += not ok
 
+    # A value-flag before a READ op must still pass -- the value-flag skip must not
+    # over-reach and start blocking read ops (card db0a45c6 regression guard).
+    ok = check(mod, 'OPP-4 shared-status-with-c-flag',
+               bash('git -c color.ui=always status', cwd=SHARED),
+               expect_denied=False)
+    failures += not ok
+
     if failures:
         print(f'\n{failures} adversarial fixture(s) FAILED -- promotion refused.')
         sys.exit(1)
-    print(f'All {9} adversarial fixtures passed.')
+    print(f'All {13} adversarial fixtures passed.')
     sys.exit(0)
 
 
