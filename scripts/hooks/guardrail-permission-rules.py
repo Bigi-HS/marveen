@@ -805,10 +805,15 @@ def _is_exec_sink(tokens) -> bool:
 
 def match_base64_exec(command: str) -> bool:
     """R2c: base64-decoded payload fed into a shell/interpreter for execution."""
-    if not _BASE64_DECODE_RE.search(command):
+    # Expand $VAR refs so var-indirected decode flags (FLAG=-d; base64 $FLAG | bash)
+    # and var-indirected exec sinks (SH=bash; ... | $SH) are visible structurally.
+    assigned = _collect_var_assignments(command)
+    expanded_cmd = _VARREF_RE.sub(lambda m: assigned.get(m.group(1), m.group(0)), command)
+    if not _BASE64_DECODE_RE.search(expanded_cmd):
         return False
     for piece in _split_subcommands(command):
-        tokens = _tokenize(piece)
+        expanded_piece = _VARREF_RE.sub(lambda m: assigned.get(m.group(1), m.group(0)), piece)
+        tokens = _tokenize(expanded_piece)
         if tokens is _PARSE_FAIL or not tokens:
             continue
         if _is_exec_sink(tokens):
