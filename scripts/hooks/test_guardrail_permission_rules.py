@@ -2163,5 +2163,72 @@ class Base64ExecVarIndirectTests(unittest.TestCase):
         self.assertEqual(name, 'base64-exec')
 
 
+class SkillBashWriteTests(unittest.TestCase):
+    """K-1a: match_skill_bash_write blocks Bash writes to ~/.claude/skills/."""
+
+    # ── must-BLOCK (FN fixtures) ────────────────────────────────────────────────
+
+    def test_echo_redirect_to_skill_dir_is_blocked(self):
+        """echo content > ~/.claude/skills/foo/SKILL.md -- redirect write."""
+        self.assertTrue(guard.match_skill_bash_write(
+            'echo "content" > ~/.claude/skills/foo/SKILL.md'))
+
+    def test_printf_append_to_skill_dir_is_blocked(self):
+        """printf >> ~/.claude/skills/foo/SKILL.md -- append redirect."""
+        self.assertTrue(guard.match_skill_bash_write(
+            "printf '%s\\n' 'line' >> ~/.claude/skills/foo/SKILL.md"))
+
+    def test_tee_to_skill_dir_is_blocked(self):
+        """tee ~/.claude/skills/foo/SKILL.md -- tee write."""
+        self.assertTrue(guard.match_skill_bash_write(
+            'tee ~/.claude/skills/foo/SKILL.md'))
+
+    def test_cp_to_skill_dir_is_blocked(self):
+        """cp /tmp/evil.md ~/.claude/skills/foo/SKILL.md -- cp destination."""
+        self.assertTrue(guard.match_skill_bash_write(
+            'cp /tmp/evil.md ~/.claude/skills/foo/SKILL.md'))
+
+    def test_mv_to_skill_dir_is_blocked(self):
+        """mv /tmp/payload ~/.claude/skills/foo/SKILL.md -- mv destination."""
+        self.assertTrue(guard.match_skill_bash_write(
+            'mv /tmp/payload ~/.claude/skills/foo/SKILL.md'))
+
+    def test_var_indirection_write_is_blocked(self):
+        """D=~/.claude/skills/foo; echo x > $D/SKILL.md -- var-indirection bypass."""
+        self.assertTrue(guard.match_skill_bash_write(
+            'D=~/.claude/skills/foo; echo x > $D/SKILL.md'))
+
+    def test_classify_blocks_skill_bash_write(self):
+        """classify() returns denied for echo redirect to skill dir."""
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'echo "x" > ~/.claude/skills/foo/SKILL.md'},
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'skill-bash-write')
+
+    # ── must-ALLOW (FP guard) ───────────────────────────────────────────────────
+
+    def test_cat_read_from_skill_dir_is_allowed(self):
+        """cat ~/.claude/skills/foo/SKILL.md -- read, not write."""
+        self.assertFalse(guard.match_skill_bash_write(
+            'cat ~/.claude/skills/foo/SKILL.md'))
+
+    def test_redirect_to_non_skill_path_is_allowed(self):
+        """echo x > /tmp/not-a-skill.md -- non-skill destination."""
+        self.assertFalse(guard.match_skill_bash_write(
+            'echo x > /tmp/not-a-skill.md'))
+
+    def test_cp_from_skill_dir_is_allowed(self):
+        """cp ~/.claude/skills/foo/SKILL.md /tmp/backup.md -- source is skill, dest is not."""
+        self.assertFalse(guard.match_skill_bash_write(
+            'cp ~/.claude/skills/foo/SKILL.md /tmp/backup.md'))
+
+    def test_ls_skill_dir_is_allowed(self):
+        """ls ~/.claude/skills/ -- listing, not writing."""
+        self.assertFalse(guard.match_skill_bash_write(
+            'ls ~/.claude/skills/'))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

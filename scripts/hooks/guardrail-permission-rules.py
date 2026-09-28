@@ -821,6 +821,86 @@ def match_base64_exec(command: str) -> bool:
     return False
 
 
+# ── K-1a/K-1d: skills supply-chain write + bundled script exec ──────────────
+
+def _is_skill_path(path: str) -> bool:
+    """True if path resolves under the global skills directory (~/.claude/skills/).
+
+    Applies realpath normalisation (K-1c) so a symlinked path reaching the same
+    directory is caught whether the agent uses the symlink or the real path.
+    Also matches relative .claude/skills/ references for project-local skill dirs.
+    """
+    skill_root = os.path.expanduser('~/.claude/skills')
+    expanded = os.path.expanduser(path)
+    # Literal match after ~ expansion
+    if expanded == skill_root or expanded.startswith(skill_root + '/'):
+        return True
+    # Symlink-normalised match (K-1c)
+    try:
+        real = os.path.realpath(expanded)
+        real_skill = os.path.realpath(skill_root)
+        if real == real_skill or real.startswith(real_skill + '/'):
+            return True
+    except Exception:
+        pass
+    # Relative .claude/skills/ reference (project-local skill dir)
+    if '/.claude/skills/' in path or path.startswith('.claude/skills/'):
+        return True
+    return False
+
+
+_SKILL_WRITE_DEST_VERBS = frozenset({'tee', 'cp', 'mv', 'install'})
+
+
+def match_skill_bash_write(command: str) -> bool:
+    """K-1a: Block Bash commands that write to the global skills directory.
+
+    Covers the primary injection vectors:
+    - Shell redirects:  echo/printf/cat/tee >> ~/.claude/skills/...
+    - Copy/move:        cp/mv ... ~/.claude/skills/...
+    - Var-indirection:  D=~/.claude/skills/foo; echo x > $D/SKILL.md
+    - Symlink bypass:   realpath() normalisation in _is_skill_path (K-1c)
+
+    Does NOT block reads (cat, head, grep) or listings (ls) from skill dirs.
+    Write/Edit tool writes to skill dirs are handled by a separate PostToolUse
+    hook (K-1b); only the Bash shell path is blocked here.
+    """
+    assigned = _collect_var_assignments(command)
+
+    def _expand(tok):
+        return _VARREF_RE.sub(lambda m: assigned.get(m.group(1), m.group(0)), tok)
+
+    for piece in _split_subcommands(command):
+        tokens = _tokenize(piece)
+        if tokens is _PARSE_FAIL or not tokens:
+            # Fail-closed: raw piece contains a skill path -> block
+            if _is_skill_path(_expand(piece)):
+                return True
+            continue
+
+        exp_tokens = [_expand(t) for t in tokens]
+        verb = _command_word(tokens)
+
+        if verb == 'tee':
+            # tee writes to each positional argument
+            for t in exp_tokens[1:]:
+                if not t.startswith('-') and _is_skill_path(t):
+                    return True
+        elif verb in ('cp', 'mv'):
+            # destination is the last positional argument
+            args = [t for t in exp_tokens[1:] if not t.startswith('-')]
+            if args and _is_skill_path(args[-1]):
+                return True
+
+        # Shell redirect: '>' or '>>' token followed by skill destination
+        for i, t in enumerate(exp_tokens):
+            if t in ('>', '>>') and i + 1 < len(exp_tokens):
+                if _is_skill_path(exp_tokens[i + 1]):
+                    return True
+
+    return False
+
+
 # ── R3: external curl with mutating method ───────────────────────────────────
 
 def _curl_body_flag(tok):
@@ -1258,6 +1338,14 @@ RULES = [
         'token capture must be Boss-manual in a terminal, never in agent context; '
         'card 8001dd41)',
         lambda tool, inp: match_frida_invocation(inp) if tool == 'Bash' else False,
+    ),
+    Rule(
+        'skill-bash-write',
+        'Bash write to ~/.claude/skills/ via shell redirect or copy/move '
+        '(supply-chain injection: Bash writes are silent and bypass the Write/Edit '
+        'audit path; use Write/Edit tool for skill authoring -- content is then '
+        'auditable by K-2 PostToolUse static check; card 6c2053b9 K-1a)',
+        lambda tool, inp: match_skill_bash_write(inp) if tool == 'Bash' else False,
     ),
 ]
 
