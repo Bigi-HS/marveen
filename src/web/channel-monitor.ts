@@ -43,7 +43,7 @@ import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller
 import { probeTelegramConflict } from './channel-conflict-probe.js'
 import { schedulePluginUnlockAfterRespawn } from './channel-plugin-unlock.js'
 import { detectPaneState, decidePaneErrorAlert, detectsUsageLimitMenu, detectsActiveLoginBox, detectsFeedbackModal, decideSustainedPaneAlert, type PaneErrorAlertState, type PaneState, type SustainedPaneAlertState } from '../pane-state.js'
-import { classifyStagedWedgeProbe, DEFAULT_STAGED_WEDGE_THRESHOLDS } from './staged-wedge-probe.js'
+import { classifyStagedWedgeProbe, pendingAgeMinutes, DEFAULT_STAGED_WEDGE_THRESHOLDS } from './staged-wedge-probe.js'
 import {
   decideUsageLimitRecovery,
   DEFAULT_USAGE_LIMIT_WEDGE_THRESHOLDS,
@@ -1245,7 +1245,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         const overdueMin = DEFAULT_STAGED_WEDGE_THRESHOLDS.overdueThresholdMin
         const hasPendingInbound = snap != null && snap.pendingCount > 0
         const oldestPendingAgeMin = hasPendingInbound
-          ? Math.floor((Date.now() / 1000 - snap!.oldestCreatedAtSec) / 60)
+          ? pendingAgeMinutes(Date.now(), snap!.oldestCreatedAtSec)
           : 0
         const paneState = pane != null ? detectPaneState(pane) : null
         const stagedVerdict = classifyStagedWedgeProbe({

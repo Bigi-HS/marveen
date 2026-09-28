@@ -107,3 +107,17 @@ export function isTypingWedge(verdict: StagedWedgeVerdict): verdict is 'staged-w
 export const DEFAULT_STAGED_WEDGE_THRESHOLDS = {
   overdueThresholdMin: 15,
 } as const
+
+/**
+ * Convert a DB-stored epoch-SECONDS timestamp (agent_messages.created_at,
+ * db.ts: Math.floor(Date.now()/1000)) to an age in whole minutes relative
+ * to a caller-supplied clock (nowMs in milliseconds).
+ *
+ * Extracted from channel-monitor.ts so the conversion is unit-testable and
+ * the call-site cannot accidentally mix epoch-ms with epoch-sec again.
+ * Returns 0 for future-dated created_at (clock skew guard, never negative).
+ */
+export function pendingAgeMinutes(nowMs: number, oldestCreatedAtSec: number): number {
+  const ageSec = Math.floor(nowMs / 1000) - oldestCreatedAtSec
+  return Math.max(0, Math.floor(ageSec / 60))
+}
