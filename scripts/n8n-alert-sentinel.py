@@ -120,24 +120,31 @@ def main():
     con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
 
-    wfs = con.execute("SELECT id, name, active, nodes FROM workflow_entity").fetchall()
+    wfs = con.execute("SELECT id, name, active, nodes, updatedAt FROM workflow_entity").fetchall()
     boot = n8n_boot_epoch()
     boot_iso = datetime.fromtimestamp(boot, timezone.utc).isoformat() if boot else None
 
-    # ---- 1. GHOST triggers: active=0 but trigger-execs since boot ----
+    # ---- 1. GHOST triggers: active=0 but trigger-execs since deactivation ----
+    # Threshold = max(boot_time, deactivation_time). workflow_entity.updatedAt is
+    # set on every modification including active->0 transitions. A workflow
+    # deactivated AFTER boot must only flag execs that fired AFTER deactivation;
+    # pre-deactivation trigger-execs are legitimate and must not count.
     if boot_iso:
         for w in wfs:
             if w["active"]:
                 continue
+            updated_at = w["updatedAt"] if "updatedAt" in w.keys() else None
+            threshold = updated_at if (updated_at and updated_at > boot_iso) else boot_iso
             n = con.execute(
                 "SELECT COUNT(*) c FROM execution_entity "
                 "WHERE workflowId=? AND mode='trigger' AND startedAt > ?",
-                (w["id"], boot_iso),
+                (w["id"], threshold),
             ).fetchone()["c"]
             if n > 0:
                 findings.append({"class": "GHOST_TRIGGER", "severity": "high",
                                  "workflow": w["name"], "id": w["id"],
-                                 "detail": f"active=0 but {n} trigger execs since boot {boot_iso}",
+                                 "detail": f"active=0 but {n} trigger execs after deactivation "
+                                           f"(threshold {threshold}; boot {boot_iso})",
                                  "fix": "n8n-ops recipe 2: API activate->deactivate"})
 
     # ---- 2. CONFIG antipattern (only on workflows that CAN alert) ----
