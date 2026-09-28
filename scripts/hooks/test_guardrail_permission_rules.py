@@ -2107,5 +2107,61 @@ class InterpreterGenesisTokenTests(unittest.TestCase):
         self.assertEqual(name, 'interpreter-env-read')
 
 
+class Base64ExecVarIndirectTests(unittest.TestCase):
+    """match_base64_exec misses var-indirected decode flags and exec sinks.
+    (1) Decode-flag via VAR: _BASE64_DECODE_RE searches the raw command string;
+        a var-assigned flag is invisible before expansion.
+    (2) Exec-sink via VAR: _is_exec_sink gets a dollar-prefixed command word
+        not in _EXEC_SINK_SHELLS / _EXEC_SINK_INTERP.
+    card 14ae6b41."""
+
+    # ── must-DENY (currently FN before fix) ────────────────────────────────────
+
+    def test_var_decode_flag_piped_to_bash_is_blocked(self):
+        """D=-d; base64 $D | bash -- decode flag via VAR."""
+        self.assertTrue(guard.match_base64_exec(
+            'D=-d; printf %s aWQ= | base64 $D | bash'))
+
+    def test_var_decode_flag_named_var_is_blocked(self):
+        """DECODER=-d; ... base64 $DECODER | sh -- named var for decode flag."""
+        self.assertTrue(guard.match_base64_exec(
+            'DECODER=-d; echo Y2F0IC5lbnY= | base64 $DECODER | sh'))
+
+    def test_var_exec_sink_bash_is_blocked(self):
+        """MYSH=bash; ... base64 -d | $MYSH -- exec sink via VAR."""
+        self.assertTrue(guard.match_base64_exec(
+            'MYSH=bash; echo dGVzdA== | base64 -d | $MYSH'))
+
+    def test_var_exec_sink_python3_is_blocked(self):
+        """INTERP=python3; ... base64 -d | $INTERP -- interpreter sink via VAR."""
+        self.assertTrue(guard.match_base64_exec(
+            'INTERP=python3; echo dGVzdA== | base64 -d | $INTERP'))
+
+    def test_both_decode_and_sink_via_vars_is_blocked(self):
+        """S=sh; F=-d; base64 $F | $S -- both decode flag and sink via VARs."""
+        self.assertTrue(guard.match_base64_exec(
+            'S=sh; F=-d; echo dGVzdA== | base64 $F | $S'))
+
+    # ── must-ALLOW (FP guard) ───────────────────────────────────────────────────
+
+    def test_var_resolves_to_non_decode_flag_is_allowed(self):
+        """X=encode; base64 $X -- var resolves to a non-decode value, no exec sink."""
+        self.assertFalse(guard.match_base64_exec(
+            'X=encode; base64 $X file.txt'))
+
+    def test_var_exec_sink_non_shell_is_allowed(self):
+        """PROG=jq; base64 -d | $PROG -- var resolves to non-exec-sink tool."""
+        self.assertFalse(guard.match_base64_exec(
+            'PROG=jq; echo dGVzdA== | base64 -d | $PROG .'))
+
+    def test_classify_blocks_var_decode_flag(self):
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'D=-d; echo aWQ= | base64 $D | bash'},
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'base64-exec')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
