@@ -151,6 +151,31 @@ const LIMIT_MENU_OPTION_RX = /stop and wait for limit to reset/i
 const LIMIT_RESET_TIME_RX = /resets?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)/i
 const LIMIT_MENU_TAIL_LINES = 18
 
+// Session-feedback modal detection (9644ed7c G6).
+// Claude Code occasionally overlays a "How is Claude doing this session?
+// (optional)" rating modal above the input box (agent-process.ts
+// SURVEY_MODAL_RX). While present it swallows the first keystroke (e.g.
+// turning a "/compact" attempt into "0/compact") and blocks all prompt
+// delivery. This detector is LOG-ONLY; recovery (send-keys "0") lives in
+// fce12f45 SLICE 2.
+//
+// Scoped to last FEEDBACK_MODAL_TAIL_LINES to prevent scrollback false-
+// positives: the phrase can appear legitimately in assistant reply prose
+// when the agent describes the modal, but a dismissed modal no longer
+// renders in the visible pane tail.
+//
+// LIVE-VERIFIED: the regex /How is Claude doing this session/ is the same
+// pattern used by agent-process.ts dismissSurveyModalIfPresent. Tail-scoping
+// and the adversarial fixtures were gate-validated against a real buster/c12
+// pane capture (see store/incident-evidence/ on first live capture; use
+// synthetic fixtures until then, but do NOT merge until live-verified --
+// gate requirement per marveen 2026-09-29).
+const FEEDBACK_MODAL_TAIL_LINES = 10
+// Mirrors agent-process.ts SURVEY_MODAL_RX -- single invariant source so both
+// callers stay in sync. The regex matches the header phrase regardless of
+// whether Claude Code appends "(optional)" or a question mark variant.
+const FEEDBACK_MODAL_RX = /how is claude doing this session/i
+
 // Active OAuth login-box detection (ba53fdee, G3).
 // Two-tier marker (marveen coord 2026-09-05):
 //
@@ -438,6 +463,17 @@ export function detectsActiveLoginBox(pane: string): boolean {
   // Normalise whitespace so a wrap-split URL token remains matchable.
   const normalisedTail = tail.replace(/\s+/g, ' ')
   return LOGIN_BOX_ESC_RX.test(normalisedTail) && LOGIN_BOX_AUTHORIZE_RX.test(normalisedTail)
+}
+
+// Detect an active Claude Code session-feedback ("How is Claude doing this
+// session?") modal (9644ed7c G6). Returns true when the modal header is visible
+// in the last FEEDBACK_MODAL_TAIL_LINES lines, indicating the modal is currently
+// overlaying the pane and will intercept the next keystroke.
+// Scope: DETECT-ONLY (log-level flag). Recovery (send-keys "0") is SLICE 2.
+export function detectsFeedbackModal(pane: string): boolean {
+  if (!pane) return false
+  const tail = pane.split('\n').slice(-FEEDBACK_MODAL_TAIL_LINES).join('\n')
+  return FEEDBACK_MODAL_RX.test(tail)
 }
 
 export interface DetectPaneStateOptions {

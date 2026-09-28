@@ -104,6 +104,24 @@ describe('classifyStagedWedgeProbe', () => {
     expect(v).toBe('below-threshold')
   })
 
+  // Regression: created_at unit-mismatch (dave BLOCK PR#766).
+  // agent_messages.created_at is epoch SECONDS (db.ts: Math.floor(Date.now()/1000)).
+  // A naive `Date.now() - created_at_seconds` yields ~30M minutes (always overdue).
+  // The correct computation: `(Date.now()/1000 - created_at_seconds) / 60`.
+  // A 1-second-old message has age ~0 minutes -> below any reasonable threshold.
+  // This fixture would FAIL under the buggy (ms - sec) calculation because
+  // oldestPendingAgeMin would be ~30M, making `paneState: 'typing'` fire staged-wedge.
+  it('F8 (regression unit-mismatch): 0-min-old pending + typing pane => below-threshold, not staged-wedge', () => {
+    // 0 minutes old: a message enqueued <1 min ago is never a wedge candidate yet.
+    const v = classifyStagedWedgeProbe(sig({
+      hasPendingInbound: true,
+      oldestPendingAgeMin: 0, // would be ~30M under the buggy ms-epoch computation
+      overdueThresholdMin: 15,
+      paneState: 'typing',
+    }))
+    expect(v).toBe('below-threshold')
+  })
+
   // The staged-wedge verdict is also a predicate: isTypingWedge.
   it('isTypingWedge is true only for staged-wedge verdict', () => {
     expect(isTypingWedge('staged-wedge')).toBe(true)

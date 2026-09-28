@@ -4,6 +4,7 @@ import {
   detectsThinkingBlockError,
   detectsUsageLimitMenu,
   detectsActiveLoginBox,
+  detectsFeedbackModal,
   detectsStalledIdle,
   isReadyForPrompt,
   isActivelyWorking,
@@ -2448,5 +2449,138 @@ describe('active OAuth login-box detector (ba53fdee G3)', () => {
 
   it('returns false on empty pane', () => {
     expect(detectsActiveLoginBox('')).toBe(false)
+  })
+})
+
+// ── 9644ed7c G6: session-feedback modal fixtures ──────────────────────────────
+//
+// Claude Code occasionally shows a "How is Claude doing this session? (optional)"
+// rating modal above the input box (agent-process.ts SURVEY_MODAL_RX). While
+// present, it swallows the first keystroke and blocks all prompt delivery.
+// The detector is DETECT-ONLY (log-level flag); recovery (send-keys "0") is
+// wired separately (fce12f45 SLICE 2).
+//
+// FP hard-traps:
+//   - The phrase in normal agent reply prose (discussed in scrollback)
+//   - Modal text scrolled above the 10-line tail window (already dismissed)
+//   - `❯ 0/compact` input pollution (100%-context overlay intercepted a keystroke;
+//     the MODAL HEADER is no longer visible -- only the polluted input remains).
+//
+// FN concern: modal may render with or without the "(optional)" suffix; detector
+// must match the invariant prefix "How is Claude doing this session".
+
+// FN-guard 1: real survey modal visible in the last 10 lines.
+// Mirrors the agent-process.ts SURVEY_MODAL_RX behaviour but adds last-N-lines
+// scoping to prevent scrollback false-positives.
+const FEEDBACK_MODAL_ACTIVE = [
+  '  (prior assistant output here)',
+  '  OK, reading the file now.',
+  '',
+  'How is Claude doing this session? (optional)',
+  '  1: Amazing — I\'m getting a lot done',
+  '  2: Good',
+  '  3: Could be improved',
+  '  0: Dismiss',
+  '',
+  SEP,
+  '❯ ',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n')
+
+// FN-guard 2: compact presentation (no description lines, header-only).
+// Covers a shorter modal variant or a narrow terminal that wrapped options.
+const FEEDBACK_MODAL_COMPACT = [
+  '',
+  'How is Claude doing this session?',
+  '  0: Dismiss',
+  '',
+  SEP,
+  '❯ ',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n')
+
+// FP-guard 1: the phrase appears in an agent reply discussing the modal, but
+// it is far above the 10-line tail window — only a live idle prompt is at the tail.
+const FP_FEEDBACK_MODAL_PROSE = [
+  '  Anyway, you asked me about the survey that appears sometimes.',
+  '  The text "How is Claude doing this session?" is the header of the',
+  '  rating modal that Claude Code shows occasionally. To dismiss it,',
+  '  just press 0. If the modal swallows a keystroke you can re-type.',
+  '  --- end of explanation ---',
+  '',
+  '  Continuing with the original task now.',
+  '  Reading the config file.',
+  '  Found 3 keys.',
+  '  Processing each one.',
+  '  Done.',
+  '  Summary: no errors.',
+  '  ',
+  SEP,
+  '❯ ',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n')
+
+// FP-guard 2: modal text scrolled above the 10-line window; the tail shows
+// only the idle prompt (modal was already dismissed).
+const FP_FEEDBACK_MODAL_SCROLLED = [
+  'How is Claude doing this session? (optional)',  // scrolled above the 10-line window
+  '  1: Amazing',
+  '  0: Dismiss',
+  '  (dismissed)',
+  '  Resuming the original task.',
+  '  Reading the config file.',
+  '  Found 3 keys.',
+  '  Processing each one.',
+  '  Done.',
+  '  Summary: no errors.',
+  '  ',
+  SEP,
+  '❯ ',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n')
+
+// OC (opposing combination): 100%-context survey-overlay pollution. The modal
+// intercepted the "0" from a "/compact" attempt, leaving "0/compact" in the
+// input box. The MODAL HEADER is no longer visible -- must NOT fire (the modal
+// is gone; the input needs clearing, not a "0" dismiss).
+const OC_ZERO_COMPACT_POLLUTION = [
+  '  100% context used',
+  '',
+  '  You\'ve used 100% of the context window.',
+  '  Consider starting a new session or compacting.',
+  '',
+  SEP,
+  '❯ 0/compact',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n')
+
+describe('session-feedback modal detector (9644ed7c G6)', () => {
+  it('FN-guard: real survey modal in last 10 lines -> fires', () => {
+    expect(detectsFeedbackModal(FEEDBACK_MODAL_ACTIVE)).toBe(true)
+  })
+
+  it('FN-guard compact: short modal variant still fires', () => {
+    expect(detectsFeedbackModal(FEEDBACK_MODAL_COMPACT)).toBe(true)
+  })
+
+  it('FP-guard prose: phrase in scrollback prose above 10-line window -> no fire', () => {
+    expect(detectsFeedbackModal(FP_FEEDBACK_MODAL_PROSE)).toBe(false)
+  })
+
+  it('FP-guard scrolled: modal text scrolled above 10-line window, live idle tail -> no fire', () => {
+    expect(detectsFeedbackModal(FP_FEEDBACK_MODAL_SCROLLED)).toBe(false)
+  })
+
+  it('OC: 0/compact input pollution (modal gone, only input polluted) -> no fire', () => {
+    expect(detectsFeedbackModal(OC_ZERO_COMPACT_POLLUTION)).toBe(false)
+  })
+
+  it('returns false on empty pane', () => {
+    expect(detectsFeedbackModal('')).toBe(false)
   })
 })
