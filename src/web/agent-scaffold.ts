@@ -230,6 +230,20 @@ export function stripCheckpointHooks(hooks: HooksBlock): void {
   }
 }
 
+// Apply the operator c12-signoff flag-gate to a template hooks block in place.
+// When store/session-end-marker.enabled is ABSENT (fail-closed default) it strips
+// the memory-continuity S1 SessionEnd marker AND the S3 checkpoint replay/write
+// hooks, so NO agent gets them live before the deliberate operator sign-off.
+// This is the SINGLE gate used by BOTH injection paths -- the ensureAgentHooks
+// boot backfill and the scaffoldAgentDir new-agent/c12-sandbox seed -- so a
+// brand-new agent (or the chameleon sandbox) can no longer bypass the gate by
+// seeding the raw template verbatim.
+export function applyFlagGate(hooks: HooksBlock, storeDir: string = STORE_DIR): void {
+  if (sessionEndMarkerHookEnabled(storeDir)) return
+  stripSessionEndMarker(hooks)
+  stripCheckpointHooks(hooks)
+}
+
 // Targeted idempotent backfill of the S3 SessionStart checkpoint-replay hook.
 // ADD-only; mirrors ensureMemoryHook. Gated at the call site on the shared flag.
 export function ensureCheckpointReplayHook(target: HooksBlock, template: HooksBlock): boolean {
@@ -288,15 +302,10 @@ export function ensureAgentHooks(name: string): boolean {
   }
   if (!tpl.hooks) return false
   // Operator c12-signoff flag-gate: until store/session-end-marker.enabled exists,
-  // strip the fleet-wide SessionEnd marker from the template so NEITHER the full
-  // seed nor the targeted backfill can inject it. Fail-closed; see the flag helper.
-  if (!sessionEndMarkerHookEnabled()) {
-    stripSessionEndMarker(tpl.hooks as HooksBlock)
-    // S3 checkpoint hooks share the S1 gate (co-activate). Strip them from the
-    // template when the flag is off so NEITHER the full seed nor the targeted
-    // backfill can inject the replay/write hooks before the operator sign-off.
-    stripCheckpointHooks(tpl.hooks as HooksBlock)
-  }
+  // strip the fleet-wide SessionEnd marker + the co-activating S3 checkpoint hooks
+  // from the template so NEITHER the full seed nor the targeted backfill can inject
+  // them. Fail-closed; the SAME gate runs in scaffoldAgentDir's seed path.
+  applyFlagGate(tpl.hooks as HooksBlock)
   let existing: Record<string, unknown> = {}
   if (existsSync(settingsPath)) {
     try { existing = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { /* overwrite */ }
@@ -430,7 +439,18 @@ export function scaffoldAgentDir(name: string) {
     const tplPath = join(PROJECT_ROOT, 'templates', 'settings.json.template')
     if (existsSync(tplPath)) {
       const resolved = resolveTemplatePlaceholders(readFileSync(tplPath, 'utf-8'))
-      atomicWriteFileSync(settingsJson, resolved)
+      // Apply the SAME operator flag-gate as ensureAgentHooks so a brand-new agent
+      // (or the c12 chameleon sandbox, which seeds through this path) does not get
+      // the S1/S3 memory-continuity hooks live before the deliberate sign-off.
+      // Parse -> gate -> reserialize; fall back to the raw copy on malformed JSON
+      // so the seed never loses the file (mirrors copyTaskConfigWithAgentRewrite).
+      try {
+        const parsed = JSON.parse(resolved) as Record<string, unknown>
+        if (parsed.hooks) applyFlagGate(parsed.hooks as HooksBlock)
+        atomicWriteFileSync(settingsJson, JSON.stringify(parsed, null, 2))
+      } catch {
+        atomicWriteFileSync(settingsJson, resolved)
+      }
     }
   }
 }
