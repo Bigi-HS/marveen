@@ -1,4 +1,4 @@
-import type { AgentLiveStatus, KanbanStatus, Priority, AgentHealth } from '@/types/api'
+import type { AgentLiveStatus, AgentWorkStatus, KanbanStatus, Priority, AgentHealth } from '@/types/api'
 
 // Named colour mappings (AC-F0-4 requires a named constant, not inline ternaries
 // scattered across components). Every value is a Tailwind class that resolves to a
@@ -76,6 +76,26 @@ export function liveStatusFromHealth(status: AgentHealth['status']): AgentLiveSt
 /** An agent needs attention when it is neither idle nor busy (AC-F0-5). */
 export function agentNeedsAttention(status: AgentLiveStatus): boolean {
   return status === 'error' || status === 'offline' || status === 'unknown'
+}
+
+// --- card 8c823cdc: Boss-spec work-status KOR (corner dot) ---
+
+/** Corner KOR dot colour per Boss-spec state (palette tokens only, INV-3). */
+export const WORK_STATUS_DOT: Record<AgentWorkStatus, string> = {
+  WORKING: 'bg-work-working animate-blink motion-reduce:animate-none',
+  RECEIVED: 'bg-work-received',
+  ERROR: 'bg-work-error',
+  'NO-TOKEN': 'bg-neutral',
+  'IDLE-OK': 'bg-status-done',
+}
+
+/** Hungarian label for tooltip / a11y. */
+export const WORK_STATUS_LABEL: Record<AgentWorkStatus, string> = {
+  WORKING: 'Dolgozik',
+  RECEIVED: 'Feladat érkezett',
+  ERROR: 'Hiba',
+  'NO-TOKEN': 'Token kimerülve',
+  'IDLE-OK': 'Készenlét',
 }
 
 // Kanban columns in fixed display order (AC-F0-7). 'someday' is intentionally
