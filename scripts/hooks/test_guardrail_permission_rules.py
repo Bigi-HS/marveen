@@ -2239,6 +2239,21 @@ class SkillBashWriteTests(unittest.TestCase):
         self.assertFalse(guard.match_skill_bash_write(
             'install -d /tmp/some-dir'))
 
+    def test_nospace_redirect_to_skill_dir_is_blocked(self):
+        """echo evil >~/.claude/skills/x/SKILL.md -- no space before path (FN dave-id:1308)."""
+        self.assertTrue(guard.match_skill_bash_write(
+            'echo evil >~/.claude/skills/x/SKILL.md'))
+
+    def test_nospace_append_to_skill_dir_is_blocked(self):
+        """printf x >>~/.claude/skills/x/SKILL.md -- no space append (FN dave-id:1308)."""
+        self.assertTrue(guard.match_skill_bash_write(
+            'printf x >>~/.claude/skills/x/SKILL.md'))
+
+    def test_fd_qualified_redirect_to_skill_dir_is_blocked(self):
+        """echo x 1>~/.claude/skills/x/SKILL.md -- fd-qualified redirect (FN dave-id:1308)."""
+        self.assertTrue(guard.match_skill_bash_write(
+            'echo x 1>~/.claude/skills/x/SKILL.md'))
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

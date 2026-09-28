@@ -849,12 +849,21 @@ def _is_skill_path(path: str) -> bool:
     return False
 
 
+# Matches any shell redirect token of the form [digits|&]>>[?]tail.
+# Groups: group(1) = tail after the operator (dest if non-empty; otherwise the
+# NEXT token is the dest).  Handles: '>path', '>>path', '1>path', '1>>path',
+# '&>path', '&>>path', and bare '>', '>>', '1>', '1>>' (space before dest).
+_REDIRECT_RE = re.compile(r'^(?:\d+|&)?>>?(.*)$')
+
+
 def match_skill_bash_write(command: str) -> bool:
     """K-1a: Block Bash commands that write to the global skills directory.
 
     Covers the primary injection vectors:
     - Shell redirects:  echo/printf/cat/tee >> ~/.claude/skills/...
-    - Copy/move:        cp/mv ... ~/.claude/skills/...
+                        echo evil >~/.claude/skills/foo/SKILL.md  (no-space)
+                        echo x 1>~/.claude/skills/foo/SKILL.md   (fd-qualified)
+    - Copy/move:        cp/mv/install ... ~/.claude/skills/...
     - Var-indirection:  D=~/.claude/skills/foo; echo x > $D/SKILL.md
     - Symlink bypass:   realpath() normalisation in _is_skill_path (K-1c)
 
@@ -889,10 +898,14 @@ def match_skill_bash_write(command: str) -> bool:
             if args and _is_skill_path(args[-1]):
                 return True
 
-        # Shell redirect: '>' or '>>' token followed by skill destination
+        # Shell redirect: handles '>', '>>', '>path', '>>path', '1>path',
+        # '1>>path', '&>path' and their no-space variants.
         for i, t in enumerate(exp_tokens):
-            if t in ('>', '>>') and i + 1 < len(exp_tokens):
-                if _is_skill_path(exp_tokens[i + 1]):
+            m = _REDIRECT_RE.match(t)
+            if m:
+                tail = m.group(1)
+                dest = tail if tail else (exp_tokens[i + 1] if i + 1 < len(exp_tokens) else None)
+                if dest and _is_skill_path(dest):
                     return True
 
     return False
