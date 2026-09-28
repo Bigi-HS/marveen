@@ -12,6 +12,7 @@ AC5: T1/T2 runs with only MEDIUM/LOW findings do NOT create follow-up task
 import importlib.util
 import json
 import os
+import socket
 import sys
 import tempfile
 import time
@@ -29,6 +30,54 @@ sys.modules["da_followup_check"] = mod
 _spec.loader.exec_module(mod)
 
 FOLLOWUP_DELAY = 72 * 3600  # 72h in seconds
+
+
+# --------------------------------------------------------------------------- #
+# Network guard (card c5455904 item 3)
+#
+# da-followup-check.py makes urllib calls with a 10s timeout in three helpers
+# (check_for_reply / send_followup_message / delete_task). check_for_reply
+# additionally SWALLOWS every exception and returns False -- so a real network
+# timeout during a test would be a SILENT ~30s stall (3 x 10s) plus a false
+# "no reply", never surfacing as a failure. These tests must be deterministic:
+# they mock the I/O helpers, so no real socket is ever needed. This module-level
+# guard makes ANY real connection attempt fail IMMEDIATELY and LOUDLY, turning a
+# would-be silent hang (e.g. from a regressed mock) into an instant assertion.
+# --------------------------------------------------------------------------- #
+_REAL_SOCKET_CONNECT = socket.socket.connect
+_REAL_CREATE_CONNECTION = socket.create_connection
+
+
+def _blocked_connect(*args, **kwargs):
+    raise RuntimeError(
+        "real network access is blocked in da-followup unit tests -- a mock "
+        "regressed (check_for_reply / send_followup_message / delete_task). "
+        "This guard converts a silent ~30s urllib timeout into a loud failure."
+    )
+
+
+def setUpModule():
+    socket.socket.connect = _blocked_connect
+    socket.create_connection = _blocked_connect
+
+
+def tearDownModule():
+    socket.socket.connect = _REAL_SOCKET_CONNECT
+    socket.create_connection = _REAL_CREATE_CONNECTION
+
+
+class NetworkGuardTests(unittest.TestCase):
+    """The suite can never make a real network call and thus can never silently
+    hang on the module's 10s timeouts -- an unmocked connection fails fast."""
+
+    def test_real_network_blocked_and_fast(self):
+        start = time.monotonic()
+        with self.assertRaises(RuntimeError):
+            # Unroutable host: without the guard this would hang until timeout
+            # and raise OSError; with the guard it raises RuntimeError at once.
+            socket.create_connection(("10.255.255.1", 80), timeout=2)
+        self.assertLess(time.monotonic() - start, 1.0,
+            "network guard must fail fast, not hang until the socket timeout")
 
 
 def _make_sentinel(critical_count=0, high_block_count=0, trigger="T3", run_id="abc12345",

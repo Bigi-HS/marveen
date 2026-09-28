@@ -416,6 +416,140 @@ class BaseBranchResolutionTests(unittest.TestCase):
             'pre-gate-bundle must rewrite bare branch names to origin/<branch>')
 
 
+class PythonTestDegradeGuardTests(unittest.TestCase):
+    """Silent-guard-audit degrade-guard (card c5455904 item 2).
+
+    check_tests must NOT report python-tests PASS when EVERY python test file
+    was skipped (bundle-integration recursion-guard). A "0/0 green" record is a
+    silent pass on zero executed tests -- it must degrade to WARN so the gate
+    SAYS it ran nothing rather than claiming green. Uses PGB_PYTEST_DIR to scope
+    the python-test directory to a controlled fixture set (same override
+    convention as GITLEAKS_BIN / DA_RUNS_DIR).
+    """
+
+    _SKIP_NAMES = ["da-sentinel-check.test.py", "pre-gate-bundle.test.py",
+                   "cross-model-bundle.test.py"]
+
+    def _py_dir(self, d: str, names: list) -> str:
+        """Create a scoped __tests__ dir; each file is a trivial passing program."""
+        py_dir = os.path.join(d, "pytests")
+        os.makedirs(py_dir, exist_ok=True)
+        for n in names:
+            with open(os.path.join(py_dir, n), "w", encoding="utf-8") as f:
+                f.write("import sys\nsys.exit(0)\n")
+        return py_dir
+
+    def _python_line(self, stdout: str) -> str:
+        for line in stdout.splitlines():
+            if "python-tests" in line:
+                return line
+        return ""
+
+    def test_all_skipped_degrades_to_warn_not_pass(self):
+        """All files skipped (0 executed) -> WARN, never a PASS green-claim."""
+        with tempfile.TemporaryDirectory() as d:
+            _make_npx_stub(d)
+            _make_git_stub(d)
+            py_dir = self._py_dir(d, list(self._SKIP_NAMES))
+            r = _run_bundle(d, [], env_extra={"PGB_PYTEST_DIR": py_dir})
+            line = self._python_line(r.stdout)
+            self.assertIn("python-tests", line, f"no python-tests line\n{r.stdout}")
+            self.assertIn("WARN", line,
+                f"all-skipped must degrade to WARN (silent-guard-audit), got: {line}")
+            self.assertNotIn("PASS", line,
+                f"all-skipped must NOT claim PASS, got: {line}")
+
+    def test_partial_skip_still_passes(self):
+        """Regression: guard fires ONLY when ALL skipped. Mix -> honest PASS."""
+        with tempfile.TemporaryDirectory() as d:
+            _make_npx_stub(d)
+            _make_git_stub(d)
+            py_dir = self._py_dir(d, ["da-sentinel-check.test.py", "widget.test.py"])
+            r = _run_bundle(d, [], env_extra={"PGB_PYTEST_DIR": py_dir})
+            line = self._python_line(r.stdout)
+            self.assertIn("PASS", line, f"one real passing test -> PASS, got: {line}")
+            self.assertIn("1/1", line, f"honest denominator 1/1, got: {line}")
+
+
+class GitleaksScanErrorTests(unittest.TestCase):
+    """Silent-guard-audit: gitleaks skip keyed to NAMED tool-absence, not a
+    generic scan failure (card c5455904 item 1).
+
+    A gitleaks EXECUTION error (binary present, exit code that is neither 0
+    'clean' nor the documented 1 'leaks found' -- e.g. a config/parse error,
+    exit 2) must be a loud fail-closed BLOCK labelled as a scan error, NEVER a
+    silent PASS and NEVER mislabelled as 'findings'. The WARN skip is reserved
+    exclusively for the named binary-absence case.
+
+    Standalone (not inheriting GitleaksCheckTests) so it does not re-run the
+    parent's full-suite integration tests; PGB_PYTEST_DIR scopes check_tests to
+    a trivial fixture so the verdict reflects the gitleaks step alone.
+    """
+
+    def _make_gitleaks_stub(self, d: str, *, exit_code: int, output: str = "") -> str:
+        json_file = os.path.join(d, "_gl_err_output")
+        with open(json_file, "w", encoding="utf-8") as f:
+            f.write(output)
+        stub_path = os.path.join(d, "fake-gitleaks")
+        _make_stub(f"cat {json_file}\nexit {exit_code}\n", stub_path)
+        return stub_path
+
+    def _make_git_stub_with_diff(self, d: str) -> None:
+        content = """if [[ "$*" == *"--numstat"* ]]; then
+  echo "5\t0\tsrc/fake.ts"
+elif [[ "$*" == *"diff"* ]]; then
+  printf '+fake_content_for_gitleaks_scan\\n'
+elif [[ "$*" == *"grep"* ]]; then
+  echo ""
+else
+  exec /usr/bin/git "$@"
+fi
+"""
+        _make_stub(content, os.path.join(d, "git"))
+
+    def _scoped_pytests(self, d: str) -> str:
+        py_dir = os.path.join(d, "pytests")
+        os.makedirs(py_dir, exist_ok=True)
+        with open(os.path.join(py_dir, "noop.test.py"), "w", encoding="utf-8") as f:
+            f.write("import sys\nsys.exit(0)\n")
+        return py_dir
+
+    def test_scan_error_is_block_not_silent_pass(self):
+        with tempfile.TemporaryDirectory() as d:
+            _make_npx_stub(d)
+            self._make_git_stub_with_diff(d)
+            # exit 2 = neither clean(0) nor findings(1): a scan/config error.
+            stub = self._make_gitleaks_stub(d, exit_code=2, output="")
+            r = _run_bundle(d, [], env_extra={"GITLEAKS_BIN": stub,
+                                              "PGB_PYTEST_DIR": self._scoped_pytests(d)})
+            self.assertEqual(r.returncode, 1,
+                f"gitleaks scan error must fail closed (BLOCK/exit 1); got {r.returncode}\n"
+                f"stdout:\n{r.stdout}")
+            gl_line = next((l for l in r.stdout.splitlines() if "gitleaks" in l.lower()), "")
+            self.assertIn("BLOCK", gl_line, f"scan error must BLOCK, got: {gl_line}")
+            self.assertNotIn("no secrets detected", gl_line,
+                "a scan error must NOT be reported as a clean pass")
+            self.assertRegex(gl_line.lower(), r"scan error|exit 2",
+                f"scan error must be labelled honestly (not 'findings'), got: {gl_line}")
+
+    def test_findings_still_labelled_findings(self):
+        """Regression: a genuine finding (exit 1) is still a BLOCK reported as a
+        finding -- the scan-error branch must not swallow the real-leak path."""
+        with tempfile.TemporaryDirectory() as d:
+            _make_npx_stub(d)
+            self._make_git_stub_with_diff(d)
+            finding = json.dumps([{"RuleID": "generic-api-key", "File": "src/x.ts"}])
+            stub = self._make_gitleaks_stub(d, exit_code=1, output=finding)
+            r = _run_bundle(d, [], env_extra={"GITLEAKS_BIN": stub,
+                                              "PGB_PYTEST_DIR": self._scoped_pytests(d)})
+            self.assertEqual(r.returncode, 1, f"finding must BLOCK\n{r.stdout}")
+            gl_line = next((l for l in r.stdout.splitlines() if "gitleaks" in l.lower()), "")
+            self.assertIn("findings", gl_line.lower(),
+                f"exit 1 must be reported as findings, got: {gl_line}")
+            self.assertNotIn("scan error", gl_line.lower(),
+                f"a real finding must not be mislabelled a scan error, got: {gl_line}")
+
+
 if __name__ == '__main__':
     if not os.path.exists(BUNDLE_SCRIPT):
         print(f'SKIP: {BUNDLE_SCRIPT} not yet implemented (expected -- scaffold test)')
