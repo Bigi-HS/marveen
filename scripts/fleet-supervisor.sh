@@ -146,6 +146,12 @@ mkdir -p "$STORE" "$STATE_DIR"
 # Full PATH so bun/node/claude/tmux resolve identically to channels.sh, whether
 # we were launched from a login shell or the bare /etc/wsl.conf [boot] context.
 export PATH="$HOME/.npm-global/bin:/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# Pin CLI version-watch to the system binary so npm auto-updates can never
+# cause spurious drift events. All per-agent watchdogs already hardcode
+# /usr/bin/claude; this aligns the supervisor's cli-version-check to the same
+# binary. Override at runtime with CLAUDE_BIN_OVERRIDE if the system path changes.
+# (card a8f36180)
+export CLAUDE_BIN_OVERRIDE="${CLAUDE_BIN_OVERRIDE:-/usr/bin/claude}"
 
 # Scrub tmux's own socket env var. If the supervisor is launched from inside a
 # tmux pane (e.g. a manual run, or relaunched by channels.sh), an inherited
