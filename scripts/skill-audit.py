@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""K-2: Static audit of ~/.claude/skills/ SKILL.md files for injection patterns.
+"""K-2: Static audit of ~/.claude/skills/ SKILL.md files for injection patterns. v3.
 
 Periodically scans the global skills directory for suspicious content that
 could indicate supply-chain injection (S1/E1/E2/I1 from the STRIDE threat
@@ -29,8 +29,26 @@ import sys
 import urllib.request
 from pathlib import Path
 
+# I1 co-occurrence helpers (v3, card 9ca7448d): exfil requires read+egress on same line.
+# Left \b on all verbs closes subword FPs ('footprint'->'print', 'lookahead'->'head').
+_EXFIL_READ_RE = re.compile(
+    r'\b(?:cat|echo|print|head)\b.{0,30}(?:token|secret|credential|password)',
+    re.IGNORECASE,
+)
+_EXFIL_EGRESS_RE = re.compile(
+    r'(?:curl|wget|https?://|\bPOST\b|\bnc\b|/dev/tcp|base64\s*\|)',
+    re.IGNORECASE,
+)
+
+
+def _exfil_cooccurrence(line: str) -> bool:
+    """Return True only when a credential-read verb and an egress indicator co-occur."""
+    return bool(_EXFIL_READ_RE.search(line) and _EXFIL_EGRESS_RE.search(line))
+
+
 # Regex patterns that signal potential injection in a SKILL.md.
-# Each entry: (compiled pattern, human-readable description, severity).
+# Each entry: (check, human-readable description, severity) where check is either
+# a compiled regex (supports .search(line)) or a callable(line) -> bool.
 # Rationale: store/skills-supplychain-threat-model-0928.md (card 1b4a5b99).
 SUSPICIOUS_PATTERNS = [
     # S1: fake operational directive in caps (e.g. "OPERATIONAL OVERRIDE:")
@@ -58,11 +76,13 @@ SUSPICIOUS_PATTERNS = [
     (re.compile(r'(?:readFile|read_file|open)\b.{0,50}(?:token|secret|credential)',
                 re.IGNORECASE), 'credential read instruction', 'WARN'),
 
-    # I1: shell/print credential exfiltration with word-boundary on 'cat'.
-    # (sprint-2: was 'cat.*credential' which fired on 'concatenate credentials')
-    # Covers: cat, echo, print, head (shell and Python exfil idioms)
-    (re.compile(r'(?:\bcat\b|echo|print|head)\b.{0,30}(?:token|secret|credential|password)',
-                re.IGNORECASE), 'credential exfil instruction', 'WARN'),
+    # I1: shell/print credential exfiltration -- requires read+egress co-occurrence.
+    # (v3, 9ca7448d: was '(?:\bcat\b|echo|print|head)\b...' which fired on
+    #  security-doc mentions with no egress, causing ~64 FPs in live corpus.
+    #  Left-\b added to all verbs for consistency; co-occurrence with egress required.)
+    # Fires only when a credential-read verb AND an egress indicator appear on the
+    # same line -- 'cat credentials' in a security doc is not an exfil attempt.
+    (_exfil_cooccurrence, 'credential exfil instruction', 'WARN'),
 ]
 
 # D2: context poisoning -- oversized SKILL.md floods context window
@@ -90,8 +110,9 @@ def audit_skill_file(path: Path) -> list:
         })
 
     for lineno, line in enumerate(lines, 1):
-        for pattern, desc, severity in SUSPICIOUS_PATTERNS:
-            if pattern.search(line):
+        for check, desc, severity in SUSPICIOUS_PATTERNS:
+            matched = check(line) if callable(check) else bool(check.search(line))
+            if matched:
                 findings.append({
                     'path': str(path),
                     'line': lineno,
