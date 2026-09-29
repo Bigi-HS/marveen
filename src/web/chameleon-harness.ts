@@ -60,6 +60,7 @@ import {
   sendPromptToSession,
 } from './agent-process.js'
 import { createAgentMessage, listAgentMessages } from '../db.js'
+import { profileExists, HARDCODED_RESTRICTIVE_PROFILE } from './profiles.js'
 
 // The persistent sandbox agent. Its tmux session is `agent-buster` (distinct
 // from every live agent), satisfying the "distinct session name" hard
@@ -153,7 +154,15 @@ export function sanitizeMorphedConfig(
 
   const out: Record<string, unknown> = {}
   if (typeof parsed.model === 'string') out.model = parsed.model
-  if (typeof parsed.securityProfile === 'string') out.securityProfile = parsed.securityProfile
+  // SEC-098 PR-2: guard the morphed securityProfile -- a morph must not smuggle
+  // an unknown/invalid profile into the sandbox baseline. Unknown id -> drop to
+  // restricted-fallback (strict, deny-all) rather than the permissive baseline-
+  // default, so a typo in the target config does not widen the sandbox's access.
+  if (typeof parsed.securityProfile === 'string') {
+    out.securityProfile = profileExists(parsed.securityProfile)
+      ? parsed.securityProfile
+      : HARDCODED_RESTRICTIVE_PROFILE.id
+  }
   // Buster's OWN channel (never the target's). null/empty -> omit the field so
   // the launcher falls back to the host default CHANNEL_PROVIDER, which is still
   // Buster's own bot. Either way the target's provider never reaches the clone.

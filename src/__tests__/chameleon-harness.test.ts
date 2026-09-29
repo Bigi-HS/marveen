@@ -39,7 +39,10 @@ vi.mock('../web/agent-config-dir.js', () => ({
     'discord@claude-plugins-official',
   ],
 }))
-vi.mock('../config.js', () => ({ MAIN_AGENT_ID: 'genesis' }))
+vi.mock('../config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../config.js')>()
+  return { ...actual, MAIN_AGENT_ID: 'genesis' }
+})
 vi.mock('../logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }))
@@ -105,10 +108,22 @@ describe('isProtectedFromReset', () => {
 })
 
 describe('sanitizeMorphedConfig', () => {
-  it('keeps model and securityProfile from the target', () => {
-    const cfg = sanitizeMorphedConfig('{"model":"claude-opus-4-8[1m]","securityProfile":"standard"}', 'dave', 'telegram')
-    expect(cfg.model).toBe('claude-opus-4-8[1m]')
-    expect(cfg.securityProfile).toBe('standard')
+  it('keeps model and a VALID securityProfile from the target', () => {
+    const cfg = sanitizeMorphedConfig('{"model":"claude-opus-4-8","securityProfile":"developer-senior"}', 'dave', 'telegram')
+    expect(cfg.model).toBe('claude-opus-4-8')
+    expect(cfg.securityProfile).toBe('developer-senior')
+  })
+
+  it('SEC-098 PR-2: unknown securityProfile in target config -> restricted-fallback (not permissive default)', () => {
+    // 'standard' was a real-world typo (heartbeat, buster pre-PR#777). A morph
+    // of such an agent must NOT smuggle the invalid profile into the sandbox.
+    const cfg = sanitizeMorphedConfig('{"model":"claude-haiku-4-5","securityProfile":"standard"}', 'buster', 'telegram')
+    expect(cfg.securityProfile).toBe('restricted-fallback')
+  })
+
+  it('SEC-098 PR-2: completely unknown securityProfile -> restricted-fallback', () => {
+    const cfg = sanitizeMorphedConfig('{"model":"claude-haiku-4-5","securityProfile":"nonexistent-profile"}', 'some-agent', 'telegram')
+    expect(cfg.securityProfile).toBe('restricted-fallback')
   })
   it('pins the SANDBOX own channel provider, ignoring the target, with shared auth and clone source', () => {
     // Target says telegram+api; the clone must take BUSTER's own provider, never
