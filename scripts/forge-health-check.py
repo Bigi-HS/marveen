@@ -9,8 +9,7 @@ Designed for */10 min heartbeat scheduling. Contract:
 Checks (forge SRE spec, OPS/dc178f99):
   F1  Server alive   -- GET /api/agents -> HTTP 200 + valid JSON
   F2  Sessions live  -- tmux session agent-forge exists + forge-watchdog.sh running
-  F3  Channel state  -- forge channel_state in {"enabled", "disabled"}
-                        ("configured_but_disabled" = death-loop risk, FAIL)
+  F3  Channel healthy -- forge channelHealthy == True (False = channel down, FAIL)
   F4  Token vault    -- store/.dashboard-token present + non-empty
 """
 import json
@@ -24,8 +23,6 @@ DASHBOARD_URL = "http://127.0.0.1:3420"
 TOKEN_FILE = "/home/domin/marveen/store/.dashboard-token"
 FORGE_SESSION = "agent-forge"
 FORGE_WATCHDOG_PATTERN = "forge-watchdog.sh"
-_ALLOWED_CHANNEL_STATES = frozenset({"enabled", "disabled"})
-
 
 def read_token():
     try:
@@ -69,17 +66,20 @@ def check_f2_sessions():
 
 
 def check_f3_channel(token, agents):
-    """F3: forge channel_state is 'enabled' or 'disabled'.
+    """F3: forge channelHealthy is True.
 
-    'configured_but_disabled' is a death-loop source -- explicit FAIL.
+    channelHealthy=False means the Telegram channel is down (FAIL).
+    Missing field also treated as FAIL (unknown state).
     """
     forge = next((a for a in agents if a.get("name") == "forge"), None)
     if forge is None:
         return False, "forge agent not found in /api/agents"
-    state = forge.get("channel_state", "")
-    if state in _ALLOWED_CHANNEL_STATES:
-        return True, f"channel_state={state}"
-    return False, f"channel_state={state!r} (expected enabled/disabled)"
+    if "channelHealthy" not in forge:
+        return False, "channelHealthy field missing from agent record"
+    healthy = forge["channelHealthy"]
+    if healthy:
+        return True, "channelHealthy=True"
+    return False, "channelHealthy=False"
 
 
 def check_f4_token():

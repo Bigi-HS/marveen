@@ -79,33 +79,29 @@ class TestF2Sessions(unittest.TestCase):
         self.assertFalse(ok)
 
 
-# ── F3: channel state ─────────────────────────────────────────────────────────
+# ── F3: channel healthy ───────────────────────────────────────────────────────
 
 class TestF3Channel(unittest.TestCase):
-    def _agents(self, state):
-        return [{"name": "forge", "channel_state": state}]
+    def _agents(self, channel_healthy):
+        return [{"name": "forge", "channelHealthy": channel_healthy}]
 
-    def test_pass_enabled(self):
-        ok, detail = fhc.check_f3_channel("tok", self._agents("enabled"))
+    def test_pass_channel_healthy_true(self):
+        ok, detail = fhc.check_f3_channel("tok", self._agents(True))
         self.assertTrue(ok)
-        self.assertIn("enabled", detail)
+        self.assertIn("channelHealthy=True", detail)
 
-    def test_pass_disabled(self):
-        ok, detail = fhc.check_f3_channel("tok", self._agents("disabled"))
-        self.assertTrue(ok)
-        self.assertIn("disabled", detail)
-
-    def test_fail_configured_but_disabled(self):
-        ok, detail = fhc.check_f3_channel("tok", self._agents("configured_but_disabled"))
+    def test_fail_channel_healthy_false(self):
+        ok, detail = fhc.check_f3_channel("tok", self._agents(False))
         self.assertFalse(ok)
-        self.assertIn("configured_but_disabled", detail)
+        self.assertIn("channelHealthy=False", detail)
 
-    def test_fail_unknown_state(self):
-        ok, _ = fhc.check_f3_channel("tok", self._agents("broken_state"))
+    def test_fail_missing_field(self):
+        ok, detail = fhc.check_f3_channel("tok", [{"name": "forge"}])
         self.assertFalse(ok)
+        self.assertIn("channelHealthy", detail)
 
     def test_fail_agent_not_found(self):
-        ok, detail = fhc.check_f3_channel("tok", [{"name": "other", "channel_state": "enabled"}])
+        ok, detail = fhc.check_f3_channel("tok", [{"name": "other", "channelHealthy": True}])
         self.assertFalse(ok)
         self.assertIn("not found", detail)
 
