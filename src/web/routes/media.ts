@@ -57,6 +57,13 @@ export async function tryHandleMedia(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  // Shelves must come before idMatch -- /api/media/shelves would otherwise
+  // be captured as an item ID lookup, returning 404 instead of the shelf list.
+  if (path === '/api/media/shelves' && method === 'GET') {
+    json(res, listShelves())
+    return true
+  }
+
   const idMatch = path.match(/^\/api\/media\/([^/]+)$/)
 
   if (idMatch && method === 'GET') {
@@ -93,11 +100,6 @@ export async function tryHandleMedia(ctx: RouteContext): Promise<boolean> {
     const id = decodeURIComponent(idMatch[1])
     if (!deleteMediaItem(id)) { json(res, { error: 'Nem található' }, 404); return true }
     json(res, { ok: true })
-    return true
-  }
-
-  if (path === '/api/media/shelves' && method === 'GET') {
-    json(res, listShelves())
     return true
   }
 
