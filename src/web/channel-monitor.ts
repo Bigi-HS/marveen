@@ -49,6 +49,12 @@ import {
   DEFAULT_USAGE_LIMIT_WEDGE_THRESHOLDS,
   type UsageLimitWedgeState,
 } from './usage-limit-wedge.js'
+import {
+  decideLoginWedgeRecovery,
+  DEFAULT_LOGIN_WEDGE_RECOVERY_THRESHOLDS,
+  type LoginWedgeRecoveryState,
+  type LoginWedgeSignal,
+} from './login-wedge-recovery.js'
 import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
 import { notifyChannel } from '../notify.js'
 import { getProvider, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
@@ -126,7 +132,15 @@ const PANE_ERROR_CLEAR_MS = 5 * 60 * 1000
 // confirm/dedup/clear gate and calibration as the pane-error alert (60s tick):
 // a box must persist ~2 ticks before the first alert (a legit one-tick reauth
 // clears itself), re-alert every 30 min while it stays, clear after 5 min
-// login-free. Alert-only -- no recovery/relaunch here (that is SLICE 2, gated).
+// login-free. Slice 1 (LOG-ONLY) tracked separately; SLICE 2 uses recovery state.
+const agentLoginWedgeRecovery: Map<string, LoginWedgeRecoveryState> = new Map()
+const CLEAN_LOGIN_WEDGE_RECOVERY_STATE: LoginWedgeRecoveryState = {
+  consecutiveWedgeTicks: 0,
+  lastActionAtMs: null,
+  relaunchCount: 0,
+  escalationCount: 0,
+}
+// Legacy (SLICE 1 alert-only, may deprecate once SLICE 2 validates):
 const agentLoginWedgeAlert: Map<string, SustainedPaneAlertState> = new Map()
 const CLEAN_SUSTAINED_ALERT_STATE: SustainedPaneAlertState = { firstSeenAt: null, lastAlertAt: null, lastErrorAt: null }
 const LOGIN_WEDGE_CONFIRM_MS = 120_000
@@ -1175,33 +1189,58 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         }
       }
 
-      // Active OAuth login-box wedge (ba53fdee SLICE 1, LOG-ONLY). The session is
-      // ALIVE and the process RUNS, but the pane sits on a /login prompt the agent
-      // cannot self-exit, so it processes nothing and every delivery stalls -- all
-      // the liveness checks above are blind to it (liveness != progress; the 08-04
-      // incident dark-ed 19 then 6 agents unseen). Detect it on the pane and ALERT
-      // the operator. Recovery (a fresh, --continue-dropping relaunch) is SLICE 2
-      // and stays gated behind the c12 sandbox-proof -- nothing here mutates agent
-      // lifecycle. Scope mirrors the usage-limit block: sub-agents only, since the
-      // main session's login/reauth is owned by reauth-healer + the keepalive path
-      // and must not be double-probed. The shared confirm/dedup/clear gate means a
-      // one-tick legitimate reauth that clears on its own is never reported.
+      // Active OAuth login-box wedge (ba53fdee SLICE 1+2). The session is ALIVE and
+      // the process RUNS, but the pane sits on a /login prompt the agent cannot
+      // self-exit, so it processes nothing and every delivery stalls (liveness !=
+      // progress; the 08-04 incident dark-ed 19 then 6 agents unseen). SLICE 1:
+      // detect + alert. SLICE 2: two-stage gate (pane marker + overdue inbox) ->
+      // auto-recovery (fresh, --continue-dropping relaunch). Scope mirrors the
+      // usage-limit block: sub-agents only, since the main session's login/reauth
+      // is owned by reauth-healer + keepalive, not double-probed.
       if (!t.isMarveen && t.agentName) {
         const onLoginBox = pane != null && detectsActiveLoginBox(pane)
-        const prevLogin = agentLoginWedgeAlert.get(t.agentName) ?? CLEAN_SUSTAINED_ALERT_STATE
-        const loginDecision = decideSustainedPaneAlert(onLoginBox, prevLogin, Date.now(), {
-          confirmMs: LOGIN_WEDGE_CONFIRM_MS,
-          dedupMs: LOGIN_WEDGE_DEDUP_MS,
-          clearMs: LOGIN_WEDGE_CLEAR_MS,
-        })
-        if (loginDecision.next.firstSeenAt === null) {
-          agentLoginWedgeAlert.delete(t.agentName)
+        // Stage 2 (effect probe): is an overdue pending inbound NOT draining?
+        // If inbox is backing up (old pending msgs), the brain is genuinely frozen.
+        const snap = pendingByAgent.get(t.agentName)
+        const overdueMinForLoginWedge = 5 // 5 min: brain truly stuck if login-box + old unprocessed msgs
+        const hasPendingInbound = snap != null && snap.pendingCount > 0
+        const oldestPendingAgeMin = hasPendingInbound
+          ? pendingAgeMinutes(Date.now(), snap!.oldestCreatedAtSec)
+          : 0
+        const inboxStuck = hasPendingInbound && oldestPendingAgeMin > overdueMinForLoginWedge
+
+        const prevRecovery = agentLoginWedgeRecovery.get(t.agentName) ?? CLEAN_LOGIN_WEDGE_RECOVERY_STATE
+        const recoveryDecision = decideLoginWedgeRecovery(
+          { onLoginBox, inboxStuck },
+          prevRecovery,
+          Date.now(),
+          DEFAULT_LOGIN_WEDGE_RECOVERY_THRESHOLDS,
+        )
+        if (recoveryDecision.next.consecutiveWedgeTicks === 0) {
+          agentLoginWedgeRecovery.delete(t.agentName)
         } else {
-          agentLoginWedgeAlert.set(t.agentName, loginDecision.next)
+          agentLoginWedgeRecovery.set(t.agentName, recoveryDecision.next)
         }
-        if (loginDecision.alert) {
-          logger.warn({ agent: t.agentName, session: t.session }, 'Agent wedged on an active OAuth login-box -- delivery stalled, manual /login or fresh relaunch needed')
-          sendAlert(`🔐 ${t.agentName}: aktív OAuth login-képernyőn ül (élő session, de semmit nem dolgoz fel -- minden kézbesítés elakad). Kézi beavatkozás kell: \`unset TMUX && tmux attach -t ${t.session}\`, majd jelentkezz be vagy indítsd újra friss sessionnel.`)
+
+        // Recovery actions (SLICE 2).
+        if (recoveryDecision.action === 'recover') {
+          logger.error(
+            { agent: t.agentName, session: t.session, reason: recoveryDecision.reason },
+            'Login wedge confirmed (pane + stuck inbox) -- triggering fresh relaunch (drops --continue)',
+          )
+          try {
+            stopAgentProcess(t.agentName)
+            startAgentProcess(t.agentName, { fresh: true })
+            sendAlert(`🔐 ${t.agentName}: OAuth login-képernyőn elakadt, friss újraindítás indul (kontextus veszítés). Jelentkezz be majd.`)
+          } catch (err) {
+            logger.error({ err, agent: t.agentName }, 'Failed to auto-recover from login wedge')
+          }
+        } else if (recoveryDecision.action === 'escalate') {
+          logger.error(
+            { agent: t.agentName, session: t.session, reason: recoveryDecision.reason },
+            'Login wedge persists after recovery attempts -- operator attention needed',
+          )
+          sendAlert(`🚨 ${t.agentName}: OAuth login-képernyő ${DEFAULT_LOGIN_WEDGE_RECOVERY_THRESHOLDS.maxRelaunches} friss újraindítás után is fennáll -- feltehetőleg érvénytelen creds. Kézi beavatkozás kell: tmux attach -t ${t.session}`)
         }
       }
 
