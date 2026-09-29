@@ -161,10 +161,14 @@ describe('computeFreshness', () => {
     })
 
     it('alerts when the last sync is older than 8h outside the quiet window', () => {
+      // Use a daytime sync (Budapest 10:00 = UTC 08:00) to stay clearly outside
+      // the overnight quiet window [00:00,08:00) Budapest = [22:00Z,06:00Z).
+      // nowMs = sync+12h = UTC 20:00 = Budapest 22:00. Consistent midnightMs = UTC 22:00 prev day.
+      const sync2 = '2026-08-24T08:00:00Z'
       const r = computeFreshness(makeDeps({
-        latestSnapshot: () => ({ date: '2026-08-23', sourceSyncedAt: sync }),
-        nowBudapest: () => ({ date: '2026-08-24', hours: 12, minutes: 0 }),
-        nowMs: () => msAfter(sync, 12),
+        latestSnapshot: () => ({ date: '2026-08-23', sourceSyncedAt: sync2 }),
+        nowBudapest: () => ({ date: '2026-08-24', hours: 22, minutes: 0 }),
+        nowMs: () => msAfter(sync2, 12),
       }))
       expect(r.alert).toBe(true)
       expect(r.alertReason).toContain('12.0h since last sync')
@@ -182,10 +186,12 @@ describe('computeFreshness', () => {
     })
 
     it('alerts just past the threshold (8.1h)', () => {
+      // Daytime sync (Budapest 10:00 = UTC 08:00); now = sync+8.1h = UTC 16:06 = Budapest 18:06.
+      const sync2 = '2026-08-24T08:00:00Z'
       const r = computeFreshness(makeDeps({
-        latestSnapshot: () => ({ date: '2026-08-24', sourceSyncedAt: sync }),
-        nowBudapest: () => ({ date: '2026-08-24', hours: 12, minutes: 0 }),
-        nowMs: () => msAfter(sync, 8.1),
+        latestSnapshot: () => ({ date: '2026-08-24', sourceSyncedAt: sync2 }),
+        nowBudapest: () => ({ date: '2026-08-24', hours: 18, minutes: 6 }),
+        nowMs: () => msAfter(sync2, 8.1),
       }))
       expect(r.alert).toBe(true)
     })
@@ -260,14 +266,16 @@ describe('computeFreshness', () => {
     })
 
     it('honors a custom sync-age threshold', () => {
+      // Daytime sync (Budapest 10:00 = UTC 08:00); now = sync+7h = UTC 15:00 = Budapest 17:00.
+      const sync2 = '2026-08-24T08:00:00Z'
       const r = computeFreshness(makeDeps({
-        latestSnapshot: () => ({ date: '2026-08-24', sourceSyncedAt: sync }),
-        nowBudapest: () => ({ date: '2026-08-24', hours: 12, minutes: 0 }),
-        nowMs: () => msAfter(sync, 5),
+        latestSnapshot: () => ({ date: '2026-08-24', sourceSyncedAt: sync2 }),
+        nowBudapest: () => ({ date: '2026-08-24', hours: 17, minutes: 0 }),
+        nowMs: () => msAfter(sync2, 7),
         config: { syncAgeThresholdHours: 4 },
       }))
       expect(r.thresholdHours).toBe(4)
-      expect(r.alert).toBe(true) // 5h > 4h
+      expect(r.alert).toBe(true) // 7h > 4h
     })
 
     it('honors a custom quiet window (22:00-06:00 wrapping midnight)', () => {
@@ -314,6 +322,72 @@ describe('computeFreshness', () => {
     it('checkedAt is an ISO string', () => {
       const r = computeFreshness(makeDeps())
       expect(r.checkedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    })
+  })
+
+  // d0d306e1: midnight auto-sync false-alarm fix.
+  // Root: sync at 00:10 Budapest is 8h old when the quiet window ends at 08:00,
+  // so it tripped the 8h threshold immediately at 08:10.
+  // Fix: clock-freeze -- measure effective sync age from max(syncMs, quietWindowEndMs).
+  // Only applied when the sync happened DURING the quiet window.
+  describe('morning-grace (clock-freeze for midnight auto-sync, card d0d306e1)', () => {
+    // Budapest midnight on 2026-09-29 = 2026-09-28T22:00:00Z (CEST UTC+2)
+    const MIDNIGHT_BP_MS = Date.parse('2026-09-28T22:00:00Z')
+    const bpMs = (h: number, m = 0) => MIDNIGHT_BP_MS + (h * 60 + m) * 60_000
+
+    it('midnight auto-sync (00:10): NO alert at 08:10 right after quiet window closes', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => ({ date: '2026-09-29', sourceSyncedAt: new Date(bpMs(0, 10)).toISOString() }),
+        nowBudapest: () => ({ date: '2026-09-29', hours: 8, minutes: 10 }),
+        nowMs: () => bpMs(8, 10),
+      }))
+      expect(r.alert).toBe(false)
+      // effectiveSyncAge ~ 10 min (frozen at QW end 08:00)
+      expect(r.effectiveSyncAgeHours).not.toBeNull()
+      expect(r.effectiveSyncAgeHours!).toBeCloseTo(10 / 60, 1)
+    })
+
+    it('midnight auto-sync (00:10): ALERT at 17:00 (9h since quiet window end)', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => ({ date: '2026-09-29', sourceSyncedAt: new Date(bpMs(0, 10)).toISOString() }),
+        nowBudapest: () => ({ date: '2026-09-29', hours: 17, minutes: 0 }),
+        nowMs: () => bpMs(17, 0),
+      }))
+      expect(r.alert).toBe(true)
+      // effectiveSyncAge = 17:00 - 08:00 = 9h > 8h
+      expect(r.effectiveSyncAgeHours!).toBeCloseTo(9, 1)
+    })
+
+    it('daytime sync (10:00): ALERT at 19:00 (9h elapsed, sync not in quiet window)', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => ({ date: '2026-09-29', sourceSyncedAt: new Date(bpMs(10, 0)).toISOString() }),
+        nowBudapest: () => ({ date: '2026-09-29', hours: 19, minutes: 0 }),
+        nowMs: () => bpMs(19, 0),
+      }))
+      expect(r.alert).toBe(true)
+      // no clock-freeze: sync after QW end, effectiveAge = actual age = 9h
+      expect(r.effectiveSyncAgeHours!).toBeCloseTo(9, 1)
+    })
+
+    it('daytime sync (10:00): NO alert at 17:00 (7h elapsed)', () => {
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => ({ date: '2026-09-29', sourceSyncedAt: new Date(bpMs(10, 0)).toISOString() }),
+        nowBudapest: () => ({ date: '2026-09-29', hours: 17, minutes: 0 }),
+        nowMs: () => bpMs(17, 0),
+      }))
+      expect(r.alert).toBe(false)
+    })
+
+    it('sync before quiet window (yesterday 21:00): no clock-freeze, alerts normally', () => {
+      // Sync at 21:00 Budapest previous day = well before midnight quiet window
+      const r = computeFreshness(makeDeps({
+        latestSnapshot: () => ({ date: '2026-09-28', sourceSyncedAt: new Date(bpMs(-1, 0)).toISOString() }),
+        nowBudapest: () => ({ date: '2026-09-29', hours: 12, minutes: 0 }),
+        nowMs: () => bpMs(12, 0),
+      }))
+      // 12h - (-1h) = 13h since sync > 8h threshold; no freeze since not in QW
+      expect(r.alert).toBe(true)
+      expect(r.effectiveSyncAgeHours!).toBeCloseTo(13, 0)
     })
   })
 
@@ -423,10 +497,12 @@ describe('computeFreshness', () => {
     // UNCHANGED -- still 8h sync-age, so the new writer's manual entries (which
     // carry sourceSyncedAt and NO source marker) keep their existing behavior.
     it('leaves an auto snapshot (with sync timestamp) on the 8h sync-age path', () => {
-      const sync = '2026-09-28T00:00:00Z'
+      // Daytime sync (Budapest 10:00 = UTC 08:00) to stay outside the quiet window.
+      // now = sync+10h = UTC 18:00 = Budapest 20:00. midnightMs = UTC 22:00 prev day ✓.
+      const sync = '2026-09-28T08:00:00Z'
       const r = computeFreshness(makeDeps({
         latestSnapshot: () => ({ date: '2026-09-27', sourceSyncedAt: sync }),
-        nowBudapest: () => ({ date: '2026-09-28', hours: 12, minutes: 0 }),
+        nowBudapest: () => ({ date: '2026-09-28', hours: 20, minutes: 0 }),
         nowMs: () => Date.parse(sync) + 10 * 3_600_000, // 10h > 8h
       }))
       expect(r.source).toBeNull()
