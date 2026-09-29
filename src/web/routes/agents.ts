@@ -95,6 +95,7 @@ import { getChannelHealth } from '../channel-health-monitor.js'
 import { readAgentState } from '../per-agent-pipe-watchdog.js'
 import {
   loadProfileTemplate,
+  profileExists,
   resolveProfilePlaceholders,
 } from '../profiles.js'
 import { sanitizeAgentName } from '../sanitize.js'
@@ -536,6 +537,9 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     if (!name) { json(res, { error: 'Name is required' }, 400); return true }
     if (!description) { json(res, { error: 'Description is required' }, 400); return true }
     if (existsSync(agentDir(name))) { json(res, { error: 'Agent already exists' }, 409); return true }
+    // SEC-098: reject an unknown securityProfile up front (mirrors the /security
+    // PUT guard) so a typo never silently persists a fail-open permissive config.
+    if (!profileExists(profileId)) { json(res, { error: `Unknown profile: ${profileId}` }, 400); return true }
 
     scaffoldAgentDir(name)
     writeAgentModel(name, model)
