@@ -30,9 +30,10 @@ import time
 import urllib.request
 from pathlib import Path
 
-DEFAULT_DB = os.environ.get("NOA_DB_PATH", "store/noa.db")
-DEFAULT_STATE = "store/.todo-freshness-state.json"
-DEFAULT_TOKEN = "store/.dashboard-token"
+_INSTALL_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_DB = os.environ.get("NOA_DB_PATH", str(_INSTALL_DIR / "store" / "noa.db"))
+DEFAULT_STATE = str(_INSTALL_DIR / "store" / ".todo-freshness-state.json")
+DEFAULT_TOKEN = str(_INSTALL_DIR / "store" / ".dashboard-token")
 # Sender identity for the inter-agent alert. This is an automated ops heartbeat,
 # not a message from Dave the engineer; default to the ops/release agent so the
 # alert is not mis-attributed (overridable at deploy via --from).
