@@ -1010,7 +1010,7 @@ function checkPerAgentBudgetPause(perAgent: Record<string, number>, nowMs: numbe
         { agent: d.agentName, burnPct: d.burnPct.toFixed(1), burnTokens: d.burnTokens, limitTokens: d.limitTokens },
         `[opus-burn] agent ${d.agentName} exceeded budget (${d.burnPct.toFixed(1)}%) -- writing budget-pause marker`,
       )
-      writeBudgetPauseMarker(d.agentName, nowMs)
+      writeBudgetPauseMarker(d.agentName, nowMs, undefined, d.burnPct)
       try {
         createAgentMessage(
           'server',
