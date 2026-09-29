@@ -1,0 +1,12 @@
+{
+  "model": "claude-sonnet-4-6",
+  "securityProfile": "developer-mid",
+  "displayName": "InkWell",
+  "team": {
+    "role": "member",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": ["marveen"]
+  }
+}
