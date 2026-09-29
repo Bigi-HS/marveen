@@ -813,6 +813,47 @@ export function getDailyLogDates(agentId: string, limit: number = 14): string[] 
   ).all(agentId, limit) as { date: string }[]).map(r => r.date)
 }
 
+// getDailyLogStreak: streak (consecutive days with entry) + missed_days counter.
+// Uses Europe/Budapest local date so the day boundary matches Gelim's journal.
+export function getDailyLogStreak(agentId: string): {
+  streak: number
+  missed_days: number
+  last_entry_date: string | null
+  today: string
+} {
+  const dates = (getNoaDb().prepare(
+    'SELECT DISTINCT date FROM daily_logs WHERE agent_id = ? ORDER BY date DESC LIMIT 400'
+  ).all(agentId) as { date: string }[]).map(r => r.date)
+
+  // Today in Budapest local time (YYYY-MM-DD)
+  const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Budapest' }).format(new Date())
+
+  if (dates.length === 0) return { streak: 0, missed_days: 0, last_entry_date: null, today }
+
+  const last = dates[0]
+  const msPerDay = 86400_000
+
+  // missed_days: how many calendar days since the last entry (0 = entry today)
+  const lastMs = new Date(last + 'T00:00:00+02:00').getTime()
+  const todayMs = new Date(today + 'T00:00:00+02:00').getTime()
+  const missed_days = Math.max(0, Math.round((todayMs - lastMs) / msPerDay))
+
+  // streak: walk backward from the most recent entry counting consecutive days
+  const dateSet = new Set(dates)
+  let streak = 0
+  // Start anchor: today if has entry, else yesterday (missed today doesn't break prior streak)
+  const anchor = dateSet.has(today) ? today : new Date(todayMs - msPerDay).toISOString().slice(0, 10)
+  let cursor = new Date(anchor + 'T00:00:00+02:00').getTime()
+  while (true) {
+    const d = new Date(cursor).toISOString().slice(0, 10)
+    if (!dateSet.has(d)) break
+    streak++
+    cursor -= msPerDay
+  }
+
+  return { streak, missed_days, last_entry_date: last, today }
+}
+
 // RecallResult type (mirrors src/db.ts for W1 route-wiring).
 export interface RecallResult {
   logs: { id: number; agent_id: string; date: string; content: string; created_at: number }[]

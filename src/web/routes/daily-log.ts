@@ -1,4 +1,4 @@
-import { appendDailyLog, getDailyLogDates, recallByDateRange } from '../../noa-memory.js'
+import { appendDailyLog, getDailyLogDates, getDailyLogStreak, recallByDateRange } from '../../noa-memory.js'
 import { MAIN_AGENT_ID } from '../../config.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
@@ -28,6 +28,12 @@ export async function tryHandleDailyLog(ctx: RouteContext): Promise<boolean> {
   if (path === '/api/daily-log/dates' && method === 'GET') {
     const agent = url.searchParams.get('agent') || MAIN_AGENT_ID
     json(res, getDailyLogDates(agent))
+    return true
+  }
+
+  if (path === '/api/daily-log/streak' && method === 'GET') {
+    const agent = url.searchParams.get('agent') || MAIN_AGENT_ID
+    json(res, getDailyLogStreak(agent))
     return true
   }
 
