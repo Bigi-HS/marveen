@@ -49,6 +49,13 @@ import {
   DEFAULT_USAGE_LIMIT_WEDGE_THRESHOLDS,
   type UsageLimitWedgeState,
 } from './usage-limit-wedge.js'
+import {
+  decideSurveyModalRecovery,
+  DEFAULT_SURVEY_MODAL_RECOVERY_THRESHOLDS,
+  CLEAN_SURVEY_MODAL_RECOVERY_STATE,
+  type SurveyModalRecoveryState,
+  type SurveyModalSignal,
+} from './survey-modal-recovery.js'
 import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
 import { notifyChannel } from '../notify.js'
 import { getProvider, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
@@ -127,6 +134,10 @@ const PANE_ERROR_CLEAR_MS = 5 * 60 * 1000
 // a box must persist ~2 ticks before the first alert (a legit one-tick reauth
 // clears itself), re-alert every 30 min while it stays, clear after 5 min
 // login-free. Alert-only -- no recovery/relaunch here (that is SLICE 2, gated).
+// Survey-modal auto-dismiss recovery (fce12f45 SLICE 2). When modal + inbox-stuck
+// is confirmed over 2 ticks, send-keys 0 to dismiss. Separate recovery state from
+// the LOG-ONLY alert tracker below.
+const agentSurveyModalRecovery: Map<string, SurveyModalRecoveryState> = new Map()
 const agentLoginWedgeAlert: Map<string, SustainedPaneAlertState> = new Map()
 const CLEAN_SUSTAINED_ALERT_STATE: SustainedPaneAlertState = { firstSeenAt: null, lastAlertAt: null, lastErrorAt: null }
 const LOGIN_WEDGE_CONFIRM_MS = 120_000
@@ -1229,6 +1240,48 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         }
         if (modalDecision.alert) {
           logger.warn({ agent: t.agentName, session: t.session }, 'Agent wedged on session-feedback modal -- delivery stalled (keystroke swallowed). Dismiss with send-keys "0" or wait for next agent turn.')
+        }
+
+        // Survey-modal auto-dismiss recovery (fce12f45 SLICE 2). When the feedback
+        // modal is confirmed present over 2 ticks AND the inbox has overdue pending
+        // messages, send keystroke "0" to dismiss. Same 5-min cooldown as login-wedge
+        // to prevent dismissal spam. Non-destructive: just sends a keystroke, no
+        // relaunch or session manipulation.
+        const onFeedbackModalForRecovery = pane != null && detectsFeedbackModal(pane)
+        const snap = pendingByAgent.get(t.agentName)
+        const overdueMinForSurveyModal = 5 // Same threshold as login-wedge
+        const hasPendingInbound = snap != null && snap.pendingCount > 0
+        const oldestPendingAgeMin = hasPendingInbound
+          ? pendingAgeMinutes(Date.now(), snap!.oldestCreatedAtSec)
+          : 0
+        const inboxStuckForSurveyModal = hasPendingInbound && oldestPendingAgeMin > overdueMinForSurveyModal
+
+        const prevSurveyRecovery = agentSurveyModalRecovery.get(t.agentName) ?? {
+          ...CLEAN_SURVEY_MODAL_RECOVERY_STATE,
+        }
+        const surveyRecoveryDecision = decideSurveyModalRecovery(
+          { onFeedbackModal: onFeedbackModalForRecovery, inboxStuck: inboxStuckForSurveyModal },
+          prevSurveyRecovery,
+          Date.now(),
+          DEFAULT_SURVEY_MODAL_RECOVERY_THRESHOLDS,
+        )
+        if (surveyRecoveryDecision.next.consecutiveDetections === 0 && surveyRecoveryDecision.next.lastDismissalTs === null) {
+          agentSurveyModalRecovery.delete(t.agentName)
+        } else {
+          agentSurveyModalRecovery.set(t.agentName, surveyRecoveryDecision.next)
+        }
+
+        // Recovery action: send-keys 0 to dismiss.
+        if (surveyRecoveryDecision.action === 'dismiss') {
+          logger.error(
+            { agent: t.agentName, session: t.session, reason: surveyRecoveryDecision.reason },
+            'Survey-modal confirmed (pane + stuck inbox) -- sending keystroke "0" to dismiss',
+          )
+          try {
+            execFileSync(TMUX, ['send-keys', '-t', `=${t.session}:`, '0'], { timeout: 5000 })
+          } catch (err) {
+            logger.error({ err, agent: t.agentName, session: t.session }, 'Failed to send survey-modal dismissal keystroke')
+          }
         }
       }
 
