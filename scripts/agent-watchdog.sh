@@ -90,12 +90,8 @@ PY
 }
 
 log "watchdog started for $SESSION (pid $$)"
-declare -a STAMPS=()
-under_cap() {
-  local now; now=$(date +%s); local kept=(); local s
-  for s in "${STAMPS[@]}"; do [ $((now - s)) -lt 3600 ] && kept+=("$s"); done
-  STAMPS=("${kept[@]}"); [ "${#STAMPS[@]}" -lt "$MAX_PER_HOUR" ]
-}
+# Relaunch-rate cap: file-backed sliding 1h window (0b282eb0 Phase-3).
+STAMP_FILE="/tmp/wd-stamps-${NAME}"
 last_launch=0
 consecutive_short=0
 while true; do
@@ -112,8 +108,8 @@ while true; do
       log "$SESSION DOWN (lived ${lived}s) -- cooldown ${COOLDOWN}s"; sleep "$COOLDOWN"
     fi
     if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
-      if under_cap; then
-        STAMPS+=("$(date +%s)")
+      if wd_under_cap_file "$STAMP_FILE" "$MAX_PER_HOUR"; then
+        wd_under_cap_stamp "$STAMP_FILE"
         if [ "$consecutive_short" -ge "$CRASH_LOOP_N" ]; then
           log "CRASH-LOOP: ${consecutive_short} consecutive sub-${CRASH_LOOP_THRESHOLD}s deaths -- ONE fresh relaunch (drop --continue)"
           alert_crash_loop "$consecutive_short"
