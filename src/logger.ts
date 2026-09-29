@@ -32,7 +32,7 @@ function ensureLogDirWritable(dir: string): void {
 }
 
 export function buildLoggerOptions(env: NodeJS.ProcessEnv = process.env) {
-  const logDir = validateLogDir(env.LOG_DIR ?? 'logs')
+  const logDir = validateLogDir(env.LOG_DIR || 'logs')
   ensureLogDirWritable(logDir)
 
   const terminalTarget =
@@ -46,7 +46,7 @@ export function buildLoggerOptions(env: NodeJS.ProcessEnv = process.env) {
   }
 
   return {
-    level: env.LOG_LEVEL ?? 'info',
+    level: env.LOG_LEVEL || 'info',
     transport: { targets: [terminalTarget, fileTarget] },
   }
 }
@@ -90,7 +90,7 @@ export function logCrashSync(
       err: serialisedErr,
       msg: `${event}: server crash trace (last-gasp sync flush)`,
     }
-    const logDir = validateLogDir(process.env.LOG_DIR ?? 'logs')
+    const logDir = validateLogDir(process.env.LOG_DIR || 'logs')
     mkdirSync(logDir, { recursive: true })
     appendFileSync(`${logDir}/server.log`, JSON.stringify(rec) + '\n')
   } catch (writeErr) {
