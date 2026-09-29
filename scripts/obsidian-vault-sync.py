@@ -3,9 +3,9 @@
 Obsidian vault mirror for the NoA fleet knowledge base.
 
 Read-only mirror: the source of truth stays the noa.db memory system + daily-log.
-This script pulls cold + shared memories and the daily log via the dashboard API
-and renders a browsable, wiki-linked Obsidian vault. Safe to re-run (idempotent):
-it rewrites the generated files under Memories/ and Daily Log/ each run.
+This script pulls cold + shared memories, the daily log, and the kanban board via
+the dashboard API and renders a browsable, wiki-linked Obsidian vault. Safe to
+re-run (idempotent): it rewrites the generated files each run.
 
 Layout produced:
   NoA-Vault/
@@ -14,6 +14,7 @@ Layout produced:
       Cold/<agent>.md           -- lessons / decisions / archive
       Shared/<agent>.md         -- cross-agent relevant knowledge
     Daily Log/<date>.md         -- fleet-wide journal, merged per day
+    Kanban/<project>/<id> - <title>.md  -- live kanban cards (Bases-queryable)
 
 Usage: python3 scripts/obsidian-vault-sync.py
 """
@@ -86,10 +87,15 @@ def write(path, content):
 PROPERTY_TYPES = {
     "date": "date",
     "updated": "date",
+    "due_date": "date",
     "count": "number",
     "agent": "text",
     "tier": "text",
     "type": "text",
+    "status": "text",
+    "priority": "text",
+    "assignee": "text",
+    "project": "text",
     "tags": "tags",
     "generated": "checkbox",
 }
@@ -181,7 +187,96 @@ views:
       - date
       - count
 """,
+    "Kanban": """filters:
+  and:
+    - 'type == "kanban-card"'
+properties:
+  status:
+    displayName: Statusz
+  priority:
+    displayName: Prioritas
+  assignee:
+    displayName: Felelos
+  project:
+    displayName: Projekt
+  due_date:
+    displayName: Hatarido
+  updated:
+    displayName: Frissitve
+views:
+  - type: kanban
+    name: Kanban tabla
+    groupBy: status
+  - type: table
+    name: Lista
+    order:
+      - status
+      - priority
+      - assignee
+      - project
+      - due_date
+""",
 }
+
+
+def sync_kanban(vault, cards, today, stamp):
+    """Write one Obsidian note per active kanban card under Kanban/<project>/<id> - <title>.md.
+
+    Frontmatter schema is Obsidian Bases-compatible (card 3f62811c): status/priority/assignee
+    are text properties registered in types.json, due_date is a Date property. The Kanban.base
+    view groups these notes into a drag-visible board by status.
+    """
+    written = 0
+    for card in cards:
+        if card.get("archived_at"):
+            continue  # skip archived
+        cid = card.get("id") or ""
+        title = (card.get("title") or "").strip()
+        status = card.get("status") or "planned"
+        priority = card.get("priority") or "normal"
+        assignee = card.get("assignee") or ""
+        project = card.get("project") or "MISC"
+        due_raw = card.get("due_date") or ""
+        updated_epoch = card.get("updated_at") or card.get("created_at") or 0
+
+        # due_date from API is a date-string (YYYY-MM-DD) or empty
+        due_line = f"due_date: {due_raw}" if due_raw else "due_date: "
+        updated_date = fmt_date(updated_epoch)
+
+        safe_title = re.sub(r'[\\/:*?"<>|]', " ", title).strip()[:80]
+        filename = f"{cid} - {safe_title}.md" if safe_title else f"{cid}.md"
+        path = os.path.join(vault, "Kanban", project, filename)
+
+        tags = ["kanban", status]
+        if assignee:
+            tags.append(assignee)
+
+        lines = [
+            "---",
+            "type: kanban-card",
+            f"id: {cid}",
+            f"status: {status}",
+            f"priority: {priority}",
+            f"assignee: {assignee}",
+            f"project: {project}",
+            due_line,
+            f"updated: {updated_date}",
+            f"tags: [{', '.join(tags)}]",
+            "generated: true",
+            "---",
+            f"# {title}",
+            "",
+            f"> Forrás: noa.db kanban. Frissítve: {stamp}. [[Home]]",
+            "",
+        ]
+        desc = (card.get("description") or "").strip()
+        if desc:
+            lines.append(desc)
+            lines.append("")
+
+        write(path, "\n".join(lines))
+        written += 1
+    return written
 
 
 def write_bases(vault):
@@ -205,6 +300,15 @@ def write_bases(vault):
 
 
 def main():
+    # --- Kanban cards ---
+    try:
+        all_cards = api("/api/kanban")
+        if isinstance(all_cards, dict):
+            all_cards = all_cards.get("cards", [])
+    except Exception as e:
+        print(f"  kanban skip: {e}", file=sys.stderr)
+        all_cards = []
+
     agents = api("/api/agents")
     if isinstance(agents, dict):
         agents = agents.get("agents", [])
@@ -334,6 +438,23 @@ def main():
     home += ["", "## Napi napló", ""]
     for date in sorted(daily, reverse=True):
         home.append(f"- [[{date}]] ({len(daily[date])} bejegyzés)")
+    # --- Kanban sync ---
+    n_kanban = sync_kanban(VAULT, all_cards, today, stamp)
+    active_cards = [c for c in all_cards if not c.get("archived_at")]
+    by_project = {}
+    for c in active_cards:
+        by_project.setdefault(c.get("project") or "MISC", []).append(c)
+
+    home += ["", "## Kanban", ""]
+    if by_project:
+        for proj in sorted(by_project):
+            cards_in_proj = by_project[proj]
+            home.append(f"- **{proj}** ({len(cards_in_proj)} kártya): "
+                        + ", ".join(c.get("status", "?") for c in cards_in_proj[:5])
+                        + ("…" if len(cards_in_proj) > 5 else ""))
+    else:
+        home.append("_(nincs aktív kártya)_")
+
     home += [
         "",
         "## Adatnézetek (Bases)",
@@ -342,6 +463,7 @@ def main():
         "- `Memories.base` - memóriák agentenként (tier / darab / dátum)",
         "- `Daily Log.base` - napi napló idővonal (nap / bejegyzésszám)",
         "- `Knowledge.base` - minden generált jegyzet egy táblában (típus szerint)",
+        "- `Kanban.base` - élő kanban tábla (Bases kanban nézet, státusz szerint csoportosítva)",
         "",
     ]
     write(os.path.join(VAULT, "Home.md"), "\n".join(home))
@@ -359,7 +481,8 @@ def main():
     n_daily = sum(len(v) for v in daily.values())
     print(f"OK: {len(cold_by_agent)} cold-file ({n_cold} mem), "
           f"{len(shared_by_agent)} shared-file ({n_shared} mem), "
-          f"{len(daily)} napi-napló-nap ({n_daily} bejegyzés) -> {VAULT}")
+          f"{len(daily)} napi-napló-nap ({n_daily} bejegyzés), "
+          f"{n_kanban} kanban-kártya -> {VAULT}")
 
 
 if __name__ == "__main__":
