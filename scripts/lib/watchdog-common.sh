@@ -298,3 +298,90 @@ except Exception:
     sys.exit(1)
 " "$marker_file" 2>/dev/null
 }
+
+# ---------------------------------------------------------------------------
+# Relaunch-rate cap: file-backed sliding 1-hour window (card 0b282eb0 Phase-2).
+#
+# Replaces the inline `declare -a STAMPS=() / under_cap()` block present in
+# 14 watchdogs (G3, ~110 LOC). File-backed design resolves DA finding F3
+# (nameref silent-fail risk) by avoiding bash namerefs entirely: the stamp
+# list is a plain text file with one epoch-second per line.
+#
+# F6 contract (DA verdict): wd_under_cap_file does NOT record a new stamp.
+# The caller must call wd_under_cap_stamp explicitly BEFORE launch so that a
+# failed launch still counts toward the rate cap (matches the original
+# STAMPS+=(...) placement in every watchdog).
+#
+# F4 (set -u safety): all functions are safe under `set -u` in a sourcing
+# context; every variable is initialised before use.
+#
+# Wiring note: these functions are pure helpers. Replacing the per-watchdog
+# inline STAMPS+under_cap with these calls is the live-rollout step (Boss
+# deploy-window gated), not this PR.
+# ---------------------------------------------------------------------------
+
+# wd_under_cap_file <stamp_file> <max_per_hour>
+#
+# Sliding 1-hour relaunch-rate cap, backed by a plain-text stamp file.
+#
+# Reads newline-separated epoch-second timestamps from stamp_file, prunes
+# entries older than 3600 s (keeping future timestamps too -- they are not
+# yet expired), writes the pruned list back atomically, then returns 0 when
+# the remaining count is strictly less than max_per_hour.
+#
+# Fail-safe behaviour:
+#   - Missing stamp_file   -> treated as empty (0 stamps) -> under cap.
+#   - Empty stamp_file     -> 0 stamps -> under cap.
+#   - Empty/unset argument -> under cap (no crash).
+#   - Non-numeric lines    -> skipped silently (corrupt entry tolerance).
+#   - Write failure        -> decision still made from in-memory count;
+#                             next call re-prunes from the unmodified file.
+#
+# stdout: nothing.
+# exit 0: under cap (count < max_per_hour).
+# exit 1: at or over cap (count >= max_per_hour).
+wd_under_cap_file() {
+  local stamp_file="${1:-}"
+  local max="${2:-8}"
+
+  # Empty stampfile: fail-safe under cap.
+  if [ -z "$stamp_file" ]; then return 0; fi
+
+  local now; now=$(date +%s)
+  local kept=()
+
+  if [ -f "$stamp_file" ]; then
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -z "$line" ] && continue              # skip blank lines
+      [[ "$line" =~ ^[0-9]+$ ]] || continue  # skip non-numeric (corrupt)
+      # Keep if not yet expired: now - stamp < 3600 (includes future stamps).
+      [ $((now - line)) -lt 3600 ] && kept+=("$line")
+    done < "$stamp_file"
+  fi
+
+  # Write pruned list back atomically.
+  local tmp="${stamp_file}.tmp.$$"
+  if [ "${#kept[@]}" -gt 0 ]; then
+    printf '%s\n' "${kept[@]}" > "$tmp"
+  else
+    : > "$tmp"
+  fi
+  mv -f "$tmp" "$stamp_file" 2>/dev/null || rm -f "$tmp"
+
+  # Under cap when remaining count is strictly less than max.
+  [ "${#kept[@]}" -lt "$max" ]
+}
+
+# wd_under_cap_stamp <stamp_file>
+#
+# Append the current epoch second to stamp_file, creating the file if absent.
+# Call BEFORE each launch (after wd_under_cap_file returned 0) so that a
+# failed launch still counts toward the rate cap (F6 contract).
+#
+# Empty/unset argument: no-op (no crash).
+wd_under_cap_stamp() {
+  local stamp_file="${1:-}"
+  [ -n "$stamp_file" ] || return 0
+  printf '%s\n' "$(date +%s)" >> "$stamp_file"
+}
