@@ -95,6 +95,15 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/channel-listener-gauge-write.py",
+            "timeout": 3
+          }
+        ]
       }
     ],
     "PreToolUse": [
