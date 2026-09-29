@@ -22,7 +22,7 @@ import { Readable } from 'node:stream'
 import { rmSync } from 'node:fs'
 import { initDatabase, getDb } from '../db.js'
 import { tryHandleGithub, __setGithubMergeDeps, __resetGithubMergeDeps } from '../web/routes/github.js'
-import { insertApproval, insertOverride, insertCiRun, insertPrAuthor } from '../web/gate-db.js'
+import { insertApproval, insertOverride, insertCiRun, insertPrAuthor, hasActiveOverride } from '../web/gate-db.js'
 import type { GithubPrInfo } from '../web/gate-check.js'
 import type { AgentIdentity } from '../web/agent-token-registry.js'
 
@@ -181,6 +181,21 @@ describe('POST /api/github/merge -- same-final-head gate enforcement (card 194f4
 
     expect(r.status).toBe(200)
     expect(merge.calls).toHaveLength(1)
+  })
+
+  it('(f2) a successful override-merge consumes the override (single-use, card c5cd0af6)', async () => {
+    // Boss grants an override for (PR, SHA_A). The merge succeeds.
+    // After the merge, the override must be consumed so it cannot be reused.
+    insertOverride(getDb(), { pr_number: PR, head_sha: SHA_A, reason: 'boss emergency', recorded_by: 'marveen' }, 1000)
+    const merge = mergeSpy()
+    wire({ liveHead: SHA_A, merge })
+
+    const r = await callMerge({ pr_number: PR, head_sha: SHA_A, merge_method: 'merge' })
+
+    expect(r.status).toBe(200)
+    expect(merge.calls).toHaveLength(1)
+    // Override must be consumed after a successful merge (single-use).
+    expect(hasActiveOverride(getDb(), PR, SHA_A)).toBe(false)
   })
 
   it('(g) an override bound to the OLD head does NOT clear the gate on the new head -> 403', async () => {

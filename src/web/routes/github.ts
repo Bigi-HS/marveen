@@ -15,7 +15,7 @@ import { readBody, json } from '../http-helpers.js'
 import { openPullRequest, closePullRequest, PrRequestError, fetchPrInfo, type ClosePrResult } from '../github-pr.js'
 import { mergePullRequest, MergeRequestError, validateMergeParams } from '../github-merge.js'
 import { runGateCheck, resolveCiStatus, isGateCiRequired, type GithubPrInfo } from '../gate-check.js'
-import { readApprovals, hasActiveOverride, insertPrAuthor, readPrAuthor, readLatestCiRun } from '../gate-db.js'
+import { readApprovals, hasActiveOverride, consumeOverride, insertPrAuthor, readPrAuthor, readLatestCiRun } from '../gate-db.js'
 import { getDb } from '../../db.js'
 import type { RouteContext } from './types.js'
 
@@ -141,6 +141,10 @@ export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
         { caller: identity.agentId, pr: v.pr, sha: result.sha, mergeMethod: v.mergeMethod },
         'merged GitHub PR server-side',
       )
+      // MG-AC8: consume override after successful merge (single-use, card c5cd0af6).
+      if (gateResult.override_active) {
+        consumeOverride(getDb(), v.pr, v.headSha, Date.now())
+      }
       json(res, { merged: true, sha: result.sha, message: result.message }, 200)
     } catch (err) {
       const status = err instanceof MergeRequestError ? err.status : 500
