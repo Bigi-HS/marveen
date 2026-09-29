@@ -15,7 +15,7 @@
  *   F6. pane error     -- thinking-block error wedge (separate escalation path).
  *   F7. overdue guard  -- pending exists but below the overdue threshold -> not yet a wedge.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeAll } from 'vitest'
 import {
   classifyStagedWedgeProbe,
   isTypingWedge,
@@ -161,5 +161,60 @@ describe('pendingAgeMinutes (9644ed7c epoch-seconds helper)', () => {
   it('future created_at (clock skew) -> 0, never negative', () => {
     const createdAtSec = Math.floor(NOW_MS / 1000) + 120
     expect(pendingAgeMinutes(NOW_MS, createdAtSec)).toBe(0)
+  })
+})
+
+describe('decideStagedWedgeEnter (4702232f SLICE-2 recovery)', () => {
+  const T0 = 1_700_000_000_000
+  const COOL = 60_000
+  const clean: import('../web/staged-wedge-probe.js').StagedWedgeEnterState = {
+    lastEnterAt: null, attempts: 0,
+  }
+  const thresholds = { cooldownMs: COOL, maxAttempts: 3 }
+
+  let decide: typeof import('../web/staged-wedge-probe.js').decideStagedWedgeEnter
+
+  beforeAll(async () => {
+    const mod = await import('../web/staged-wedge-probe.js')
+    decide = mod.decideStagedWedgeEnter
+  })
+
+  it('non staged-wedge verdict -> no send, resets state', () => {
+    const prev = { lastEnterAt: T0, attempts: 2 }
+    for (const v of ['busy', 'pending-idle', 'no-pending', 'below-threshold', 'unknown', 'error'] as const) {
+      const r = decide(v, prev, T0 + 1, thresholds)
+      expect(r.send).toBe(false)
+      expect(r.next.attempts).toBe(0)
+      expect(r.next.lastEnterAt).toBeNull()
+    }
+  })
+
+  it('staged-wedge first detection -> sends Enter immediately', () => {
+    const r = decide('staged-wedge', clean, T0, thresholds)
+    expect(r.send).toBe(true)
+    expect(r.next.attempts).toBe(1)
+    expect(r.next.lastEnterAt).toBe(T0)
+  })
+
+  it('staged-wedge within cooldown -> no send, state preserved', () => {
+    const prev = { lastEnterAt: T0, attempts: 1 }
+    const r = decide('staged-wedge', prev, T0 + COOL - 1, thresholds)
+    expect(r.send).toBe(false)
+    expect(r.next.attempts).toBe(1)
+  })
+
+  it('staged-wedge past cooldown -> sends again', () => {
+    const prev = { lastEnterAt: T0, attempts: 1 }
+    const r = decide('staged-wedge', prev, T0 + COOL, thresholds)
+    expect(r.send).toBe(true)
+    expect(r.next.attempts).toBe(2)
+    expect(r.next.lastEnterAt).toBe(T0 + COOL)
+  })
+
+  it('staged-wedge at max attempts -> no more sends', () => {
+    const prev = { lastEnterAt: T0, attempts: 3 }
+    const r = decide('staged-wedge', prev, T0 + COOL * 10, thresholds)
+    expect(r.send).toBe(false)
+    expect(r.next.attempts).toBe(3)
   })
 })

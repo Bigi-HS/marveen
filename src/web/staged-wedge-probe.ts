@@ -108,6 +108,52 @@ export const DEFAULT_STAGED_WEDGE_THRESHOLDS = {
   overdueThresholdMin: 15,
 } as const
 
+// Per-agent bookkeeping for the SLICE-2 recovery Enter (card 4702232f).
+// Once a staged-wedge is confirmed (15-min overdue threshold already done by
+// classifyStagedWedgeProbe), a single Enter typically unblocks it. Track the
+// last send and attempt count so the watcher does not hammer a session that
+// is stuck for a reason a bare Enter cannot fix.
+export interface StagedWedgeEnterState {
+  /** Epoch-ms of the last recovery Enter sent, or null if none yet. */
+  lastEnterAt: number | null
+  /** How many recovery Enters have been sent in the current spell. */
+  attempts: number
+}
+
+export interface StagedWedgeEnterThresholds {
+  /** Minimum gap between recovery Enters (ms). Default 60s. */
+  cooldownMs: number
+  /** Max Enters per spell before giving up -- Enter is not fixing it. Default 3. */
+  maxAttempts: number
+}
+
+export const DEFAULT_STAGED_WEDGE_ENTER_THRESHOLDS: StagedWedgeEnterThresholds = {
+  cooldownMs: 60_000,
+  maxAttempts: 3,
+}
+
+/**
+ * Pure decision: should a recovery Enter be sent to the wedged agent?
+ *
+ * Non staged-wedge verdicts always reset state (spell ended / healthy).
+ * On staged-wedge: send immediately the first time; then respect the
+ * cooldown; give up after maxAttempts (the wedge is not Enter-recoverable).
+ */
+export function decideStagedWedgeEnter(
+  verdict: StagedWedgeVerdict,
+  prev: StagedWedgeEnterState,
+  nowMs: number,
+  t: StagedWedgeEnterThresholds = DEFAULT_STAGED_WEDGE_ENTER_THRESHOLDS,
+): { send: boolean; next: StagedWedgeEnterState } {
+  const clean: StagedWedgeEnterState = { lastEnterAt: null, attempts: 0 }
+  if (verdict !== 'staged-wedge') return { send: false, next: clean }
+  if (prev.attempts >= t.maxAttempts) return { send: false, next: prev }
+  if (prev.lastEnterAt !== null && nowMs - prev.lastEnterAt < t.cooldownMs) {
+    return { send: false, next: prev }
+  }
+  return { send: true, next: { lastEnterAt: nowMs, attempts: prev.attempts + 1 } }
+}
+
 /**
  * Convert a DB-stored epoch-SECONDS timestamp (agent_messages.created_at,
  * db.ts: Math.floor(Date.now()/1000)) to an age in whole minutes relative
