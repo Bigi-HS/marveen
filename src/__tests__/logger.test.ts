@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { buildLoggerOptions } from '../logger.js'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 // SRE L1a durable log sink (fleet-expansion Phase 1). The load-bearing
 // guarantee: regardless of env, one transport target appends JSON to
@@ -29,38 +32,54 @@ describe('buildLoggerOptions level', () => {
 })
 
 describe('durable file sink is present in every env', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'logger-test-'))
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
   it('dev: pretty terminal + json file', () => {
-    const ts = targets({ NODE_ENV: 'development' })
+    const ts = targets({ NODE_ENV: 'development', LOG_DIR: tmpDir })
     expect(ts.some((t) => t.target === 'pino-pretty')).toBe(true)
-    const f = fileTarget(ts)
+    const f = fileTarget(ts, `${tmpDir}/server.log`)
     expect(f).toBeDefined()
-    expect(f!.options?.mkdir).toBe(true)
   })
 
   it('production: raw stdout + json file (no pino-pretty)', () => {
-    const ts = targets({ NODE_ENV: 'production' })
+    const ts = targets({ NODE_ENV: 'production', LOG_DIR: tmpDir })
     // no colorized pretty transport in production
     expect(ts.some((t) => t.target === 'pino-pretty')).toBe(false)
     // terminal target is raw JSON to stdout (destination 1)
     expect(ts.some((t) => t.target === 'pino/file' && t.options?.destination === 1)).toBe(true)
     // the durable file sink is STILL there
-    expect(fileTarget(ts)).toBeDefined()
+    expect(fileTarget(ts, `${tmpDir}/server.log`)).toBeDefined()
   })
 })
 
 describe('LOG_DIR override', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'logger-test-'))
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
   it('redirects the file sink but keeps the filename', () => {
-    const ts = targets({ NODE_ENV: 'production', LOG_DIR: '/tmp/noa-logs' })
-    expect(fileTarget(ts, '/tmp/noa-logs/server.log')).toBeDefined()
+    const ts = targets({ NODE_ENV: 'production', LOG_DIR: tmpDir })
+    expect(fileTarget(ts, `${tmpDir}/server.log`)).toBeDefined()
   })
 })
 
-describe('file sink always creates its dir', () => {
-  it('mkdir:true in both envs so a missing logs/ cannot crash boot', () => {
-    for (const NODE_ENV of ['development', 'production']) {
-      const f = fileTarget(targets({ NODE_ENV }))
-      expect(f?.options?.mkdir).toBe(true)
-    }
+describe('file sink dir creation (c57d0fee)', () => {
+  it('throws on LOG_DIR that cannot be created (mkdir failure is fatal)', () => {
+    expect(() => buildLoggerOptions({ LOG_DIR: '' } as NodeJS.ProcessEnv)).toThrow()
   })
 })
 
@@ -82,18 +101,33 @@ describe('LOG_DIR path traversal guard (a49270c0)', () => {
   })
 
   it('[FP-catch] accepts a plain relative path without traversal (logs)', () => {
-    expect(() => buildLoggerOptions({ LOG_DIR: 'logs' } as NodeJS.ProcessEnv)).not.toThrow()
-    const ts = targets({ LOG_DIR: 'logs' })
-    expect(fileTarget(ts, 'logs/server.log')).toBeDefined()
+    let logDir = 'logs-test-' + Date.now()
+    try {
+      expect(() => buildLoggerOptions({ LOG_DIR: logDir } as NodeJS.ProcessEnv)).not.toThrow()
+      const ts = targets({ LOG_DIR: logDir })
+      expect(fileTarget(ts, `${logDir}/server.log`)).toBeDefined()
+    } finally {
+      rmSync(logDir, { recursive: true, force: true })
+    }
   })
 
-  it('[FP-catch] accepts an absolute path without traversal (/var/log/noa)', () => {
-    expect(() => buildLoggerOptions({ LOG_DIR: '/var/log/noa' } as NodeJS.ProcessEnv)).not.toThrow()
-    const ts = targets({ LOG_DIR: '/var/log/noa' })
-    expect(fileTarget(ts, '/var/log/noa/server.log')).toBeDefined()
+  it('[FP-catch] accepts an absolute path without traversal', () => {
+    let tmpDir = mkdtempSync(join(tmpdir(), 'logger-test-'))
+    try {
+      expect(() => buildLoggerOptions({ LOG_DIR: tmpDir } as NodeJS.ProcessEnv)).not.toThrow()
+      const ts = targets({ LOG_DIR: tmpDir })
+      expect(fileTarget(ts, `${tmpDir}/server.log`)).toBeDefined()
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
   })
 
   it('[FP-catch] accepts a path that contains the word "dotdot" without being a traversal', () => {
-    expect(() => buildLoggerOptions({ LOG_DIR: 'logs-dotdot-test' } as NodeJS.ProcessEnv)).not.toThrow()
+    let logDir = 'logs-dotdot-test-' + Date.now()
+    try {
+      expect(() => buildLoggerOptions({ LOG_DIR: logDir } as NodeJS.ProcessEnv)).not.toThrow()
+    } finally {
+      rmSync(logDir, { recursive: true, force: true })
+    }
   })
 })

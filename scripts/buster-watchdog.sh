@@ -63,6 +63,7 @@ while true; do
       log "$SESSION DOWN -- cooldown ${COOLDOWN}s then fresh relaunch"
       sleep "$COOLDOWN"
       STAMPS+=("$(date +%s)")
+      tmux kill-session -t "=$SESSION" 2>/dev/null || true
       launch
     else
       log "$SESSION DOWN but relaunch cap (${MAX_PER_HOUR}/h) reached -- backing off 600s"

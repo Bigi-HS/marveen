@@ -15,6 +15,7 @@
 # Backoff: after a death, wait COOLDOWN before relaunch (avoid hammering during
 # a 429 storm). Caps relaunches per hour.
 
+NAME=dave
 SESSION=agent-dave
 AGENT_DIR=/home/domin/marveen/agents/dave
 CFG="$AGENT_DIR/.claude-config"
@@ -74,7 +75,7 @@ try:
 except OSError:
     sys.exit(1)
 msg = f"CRASH-LOOP alert: agent-dave had {count} consecutive sub-120s deaths -- still relaunching fresh+channels. Check store/dave-watchdog.log."
-data = json.dumps({"from":"forge","to":"marveen","content":msg}).encode()
+data = json.dumps({"from":"dave","to":"marveen","content":msg}).encode()
 req = urllib.request.Request("http://localhost:3420/api/messages", data=data,
       headers={"Content-Type":"application/json","Authorization":f"Bearer {tok}"}, method="POST")
 urllib.request.urlopen(req, timeout=5)
