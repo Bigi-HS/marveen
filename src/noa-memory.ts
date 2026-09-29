@@ -813,6 +813,50 @@ export function getDailyLogDates(agentId: string, limit: number = 14): string[] 
   ).all(agentId, limit) as { date: string }[]).map(r => r.date)
 }
 
+// getDailyLogStreak: streak (consecutive days with entry) + missed_days counter.
+// Uses Europe/Budapest local date (DST-safe: works in both CEST +02:00 and CET +01:00).
+export function getDailyLogStreak(agentId: string): {
+  streak: number
+  missed_days: number
+  last_entry_date: string | null
+  today: string
+} {
+  const dates = (getNoaDb().prepare(
+    'SELECT DISTINCT date FROM daily_logs WHERE agent_id = ? ORDER BY date DESC LIMIT 400'
+  ).all(agentId) as { date: string }[]).map(r => r.date)
+
+  const bpFmt = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Budapest' })
+  const today = bpFmt.format(new Date())
+
+  if (dates.length === 0) return { streak: 0, missed_days: 0, last_entry_date: null, today }
+
+  const last = dates[0]
+  const dateSet = new Set(dates)
+
+  // missed_days: iterate back from now until we reach the last entry date.
+  // Intl-based formatting avoids hardcoding the UTC offset across DST transitions.
+  let missed_days = 0
+  {
+    let cur = new Date()
+    while (bpFmt.format(cur) > last) {
+      missed_days++
+      cur = new Date(cur.getTime() - 86400_000)
+    }
+  }
+
+  // streak: count consecutive Budapest-calendar days ending at the most recent entry.
+  // Missing today does not reset the prior streak -- start anchor from yesterday if no today.
+  let streak = 0
+  let cur = new Date()
+  if (!dateSet.has(bpFmt.format(cur))) cur = new Date(cur.getTime() - 86400_000)
+  while (dateSet.has(bpFmt.format(cur))) {
+    streak++
+    cur = new Date(cur.getTime() - 86400_000)
+  }
+
+  return { streak, missed_days, last_entry_date: last, today }
+}
+
 // RecallResult type (mirrors src/db.ts for W1 route-wiring).
 export interface RecallResult {
   logs: { id: number; agent_id: string; date: string; content: string; created_at: number }[]
