@@ -348,5 +348,145 @@ class TestParkedAgentSkip(unittest.TestCase):
             self.assertNotIn("DRY-RUN would alert", r.stdout)
 
 
+def write_fake_probe(d: str) -> str:
+    """A fake per-agent-pipe-probe CLI: argv = [mode, agent].
+    mode in {healthy,dead,inconclusive} -> prints verdict=<mode>, exit 0.
+    mode == error -> exit 1 (probe failure).
+    mode == timeout -> sleeps long (drives the caller's probe timeout).
+    """
+    path = os.path.join(d, "fake_probe.py")
+    Path(path).write_text(
+        "import sys, time\n"
+        "mode = sys.argv[1] if len(sys.argv) > 1 else 'healthy'\n"
+        "if mode == 'error':\n"
+        "    sys.stderr.write('boom\\n'); sys.exit(1)\n"
+        "if mode == 'timeout':\n"
+        "    time.sleep(30)\n"
+        "print('verdict=' + mode)\n"
+    )
+    return path
+
+
+class TestLiveReprobe(unittest.TestCase):
+    """card acd7fa13: an AGE-ONLY stale gauge (consecutiveDead<2, aged
+    lastHealthyTs) is re-probed live; alerted only if the probe confirms dead.
+    consecutiveDead>=2 bypasses (already live-confirmed). Probe error/timeout
+    fails OPEN. Every suppression is logged (no silent suppression)."""
+
+    def _env(self, d: str):
+        store = os.path.join(d, "store")
+        os.makedirs(store)
+        state = os.path.join(d, "state.json")
+        tok = os.path.join(d, "token")
+        Path(tok).write_text("fake-token")
+        return store, state, tok
+
+    def _probe_cmd(self, d: str, mode: str) -> str:
+        fake = write_fake_probe(d)
+        return f"{sys.executable} {fake} {mode}"
+
+    def test_age_stale_probe_healthy_suppressed(self):
+        """The repro: age-only STALE but a live probe says healthy -> NOT alerted."""
+        with tempfile.TemporaryDirectory() as d:
+            store, state, tok = self._env(d)
+            write_state(store, "bond", consecutive_dead=0,
+                        last_healthy_ms=NOW_MS - STALE_MS - 1_000)
+            r = run(store, state, tok,
+                    ["--dry-run", "--probe-command", self._probe_cmd(d, "healthy")])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("false-STALE SUPPRESSED", r.stdout)  # logged, not silent
+            self.assertNotIn("DRY-RUN would alert", r.stdout)
+
+    def test_age_stale_probe_dead_alerts(self):
+        """Age-only STALE and the live probe confirms dead -> alert."""
+        with tempfile.TemporaryDirectory() as d:
+            store, state, tok = self._env(d)
+            write_state(store, "bond", consecutive_dead=0,
+                        last_healthy_ms=NOW_MS - STALE_MS - 1_000)
+            r = run(store, state, tok,
+                    ["--dry-run", "--probe-command", self._probe_cmd(d, "dead")])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("re-probe=dead -> confirmed", r.stdout)
+            self.assertIn("DRY-RUN would alert", r.stdout)
+            self.assertIn("bond", r.stdout)
+
+    def test_age_stale_probe_inconclusive_suppressed(self):
+        """A clean 'inconclusive' verdict is not a confirmed outage -> suppress + log."""
+        with tempfile.TemporaryDirectory() as d:
+            store, state, tok = self._env(d)
+            write_state(store, "bond", consecutive_dead=0,
+                        last_healthy_ms=NOW_MS - STALE_MS - 1_000)
+            r = run(store, state, tok,
+                    ["--dry-run", "--probe-command", self._probe_cmd(d, "inconclusive")])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("false-STALE SUPPRESSED", r.stdout)
+            self.assertNotIn("DRY-RUN would alert", r.stdout)
+
+    def test_sustained_dead_bypasses_probe(self):
+        """consecutiveDead>=2 must alert WITHOUT calling the probe (bypass)."""
+        with tempfile.TemporaryDirectory() as d:
+            store, state, tok = self._env(d)
+            write_state(store, "scout", consecutive_dead=2)
+            # probe set to 'healthy': if it were consulted, scout would be suppressed.
+            r = run(store, state, tok,
+                    ["--dry-run", "--probe-command", self._probe_cmd(d, "healthy")])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("probe bypassed", r.stdout)
+            self.assertIn("DRY-RUN would alert", r.stdout)
+            self.assertIn("scout", r.stdout)
+
+    def test_probe_error_fails_open(self):
+        """Probe failure (non-zero exit) must FAIL OPEN -> still alert."""
+        with tempfile.TemporaryDirectory() as d:
+            store, state, tok = self._env(d)
+            write_state(store, "bond", consecutive_dead=0,
+                        last_healthy_ms=NOW_MS - STALE_MS - 1_000)
+            r = run(store, state, tok,
+                    ["--dry-run", "--probe-command", self._probe_cmd(d, "error")])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("FAIL-OPEN", r.stdout)
+            self.assertIn("DRY-RUN would alert", r.stdout)
+            self.assertIn("probe-inconclusive", r.stdout)
+
+    def test_probe_timeout_fails_open(self):
+        """Probe timeout must FAIL OPEN -> still alert."""
+        with tempfile.TemporaryDirectory() as d:
+            store, state, tok = self._env(d)
+            write_state(store, "bond", consecutive_dead=0,
+                        last_healthy_ms=NOW_MS - STALE_MS - 1_000)
+            r = run(store, state, tok,
+                    ["--dry-run", "--probe-timeout", "1",
+                     "--probe-command", self._probe_cmd(d, "timeout")])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("FAIL-OPEN", r.stdout)
+            self.assertIn("DRY-RUN would alert", r.stdout)
+
+    def test_dry_run_default_skips_probe(self):
+        """Without an explicit --probe-command, dry-run must NOT shell out
+        (n8n dry path stays side-effect-free) -> legacy keep-and-report."""
+        with tempfile.TemporaryDirectory() as d:
+            store, state, tok = self._env(d)
+            write_state(store, "bond", consecutive_dead=0,
+                        last_healthy_ms=NOW_MS - STALE_MS - 1_000)
+            r = run(store, state, tok, ["--dry-run"])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("would re-probe (skipped: dry-run default)", r.stdout)
+            self.assertIn("DRY-RUN would alert", r.stdout)
+
+    def test_no_probe_flag_keeps_legacy_behavior(self):
+        """--no-probe disables the re-probe entirely (safe escape) -> alert as before."""
+        with tempfile.TemporaryDirectory() as d:
+            store, state, tok = self._env(d)
+            write_state(store, "bond", consecutive_dead=0,
+                        last_healthy_ms=NOW_MS - STALE_MS - 1_000)
+            r = run(store, state, tok,
+                    ["--dry-run", "--no-probe",
+                     "--probe-command", self._probe_cmd(d, "healthy")])
+            self.assertEqual(r.returncode, 0)
+            # --no-probe wins even with a healthy probe available: legacy alert stands.
+            self.assertIn("DRY-RUN would alert", r.stdout)
+            self.assertNotIn("false-STALE SUPPRESSED", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
