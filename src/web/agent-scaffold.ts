@@ -44,6 +44,11 @@ const SESSION_ENFORCE_HOOK_MARKER = 'session-start-enforce.py'
 // And the UserPromptSubmit long-session anti-bloat freshness nudge (card 705381e3):
 // threshold-gated + rate-limited, fleet-wide, no-ops on normal turns.
 const FRESHNESS_NUDGE_HOOK_MARKER = 'prompt-freshness-nudge.py'
+// And the UserPromptSubmit channel-listener gauge heartbeat (card d2f8dae2):
+// writes /tmp/metrics/.agent-channel-{id}.json on every incoming prompt (including
+// channel-injected messages), so the gauge measures RECEIVE liveness not just
+// outgoing-reply liveness. Fails open (write error is logged, not fatal).
+const GAUGE_RECEIVE_HOOK_MARKER = 'channel-listener-gauge-write.py'
 // And the SessionEnd per-agent clean-shutdown marker (memory-continuity Phase 1 S1):
 // stamps a clean-shutdown marker on any orderly session end; absence at the next
 // startup = crash (read by S2). Fleet-wide, fail-open, no read-side behavior yet.
@@ -172,6 +177,20 @@ export function ensureFreshnessNudgeHook(target: HooksBlock, template: HooksBloc
   if (entries.length === 0) return false
   const existing = target.UserPromptSubmit ?? []
   if (existing.some(e => entryReferences(e, FRESHNESS_NUDGE_HOOK_MARKER))) return false
+  target.UserPromptSubmit = [...existing, ...entries]
+  return true
+}
+
+// Targeted idempotent merge of the UserPromptSubmit channel-listener gauge
+// heartbeat (card d2f8dae2). ADD-only; creates the UserPromptSubmit block if the
+// agent has none, never rewrites existing entries. The hook writes the per-agent
+// listener-alive gauge on every incoming prompt so the gyore/channel watchdogs
+// measure RECEIVE liveness, not just outgoing-reply liveness.
+export function ensureGaugeReceiveHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.UserPromptSubmit ?? []).filter(e => entryReferences(e, GAUGE_RECEIVE_HOOK_MARKER))
+  if (entries.length === 0) return false
+  const existing = target.UserPromptSubmit ?? []
+  if (existing.some(e => entryReferences(e, GAUGE_RECEIVE_HOOK_MARKER))) return false
   target.UserPromptSubmit = [...existing, ...entries]
   return true
 }
@@ -331,6 +350,7 @@ export function ensureAgentHooks(name: string): boolean {
     const permRulesChanged = ensurePermissionRulesHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const sessionEnforceChanged = ensureSessionEnforceHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const freshnessNudgeChanged = ensureFreshnessNudgeHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    const gaugeReceiveChanged = ensureGaugeReceiveHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const sessionEndMarkerChanged = ensureSessionEndMarkerHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     // S3 backfills: no-op when the flag is off (the template was stripped above,
     // so tpl carries no checkpoint hooks to merge) -> co-activates with S1/S2.
@@ -343,7 +363,7 @@ export function ensureAgentHooks(name: string): boolean {
     // without a manual file-edit, and is a no-op when the flag is ON.
     const gateHealedChanged = applyFlagGate(existing.hooks as HooksBlock)
     changed = memChanged || guardChanged || askFirstChanged || destructiveBashChanged || permRulesChanged
-      || sessionEnforceChanged || freshnessNudgeChanged || sessionEndMarkerChanged
+      || sessionEnforceChanged || freshnessNudgeChanged || gaugeReceiveChanged || sessionEndMarkerChanged
       || checkpointReplayChanged || checkpointWriteChanged || gateHealedChanged
   }
   if (!changed) return false
