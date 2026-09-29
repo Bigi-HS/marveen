@@ -18,6 +18,7 @@
  */
 import type Database from 'better-sqlite3'
 import { getNoaDb } from '../../noa-db.js'
+import { NOT_ARCHIVED_SQL } from '../../noa-kanban.js'
 import { json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
 
@@ -35,7 +36,7 @@ export interface KanbanCardRow {
   created_at: number
 }
 
-const VALID_STATUSES = new Set(['planned', 'in_progress', 'waiting', 'done', 'icebox', 'someday'])
+const VALID_STATUSES = new Set(['planned', 'in_progress', 'waiting', 'done', 'icebox'])
 const VALID_PRIORITIES = new Set(['low', 'normal', 'high', 'urgent'])
 const VALID_GROUP_BY = new Set(['status', 'project', 'assignee'])
 
@@ -99,7 +100,7 @@ export function queryCards(
   const rows = db.prepare(
     `SELECT id, title, status, assignee, priority, project, code, priority_score, last_moved, updated_at, created_at
        FROM kanban_cards
-      WHERE archived_at IS NULL OR archived_at = 0
+      WHERE ${NOT_ARCHIVED_SQL}
       ORDER BY sort_order ASC, created_at ASC`
   ).all() as KanbanCardRow[]
   return applyFilter(rows, filter)

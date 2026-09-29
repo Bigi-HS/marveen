@@ -437,8 +437,12 @@ const KANBAN_MIGRATIONS = [
 // value reflects when the migration ran, not when the card last moved).
 // isCardStale returns 'unknown' for such cards -- never collapses to false.
 // Card 4326682b.
-const BULK_STAMP_BURST_START = 1785334212
-const BULK_STAMP_BURST_END   = 1785334253
+export const BULK_STAMP_BURST_START = 1785334212
+export const BULK_STAMP_BURST_END   = 1785334253
+
+// SQL predicate for non-archived cards. Includes the `= 0` guard for legacy
+// rows stamped before NULL became the canonical non-archived value.
+export const NOT_ARCHIVED_SQL = 'archived_at IS NULL OR archived_at = 0'
 
 // ---------------------------------------------------------------------------
 // Card-code auto-sequence (card cf0d1bfe S2)

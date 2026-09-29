@@ -11,20 +11,9 @@
  */
 import type Database from 'better-sqlite3'
 import { getNoaDb } from '../../noa-db.js'
+import { staleThresholdSeconds, BULK_STAMP_BURST_START, BULK_STAMP_BURST_END, NOT_ARCHIVED_SQL } from '../../noa-kanban.js'
 import { json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
-
-// Per-priority-score stale threshold in seconds (mirrors noa-kanban.ts + kanban.ts).
-const STALE_THRESHOLD_SECONDS: Record<number, number> = {
-  1: 2 * 3600, 2: 12 * 3600,
-  3: 24 * 3600, 4: 24 * 3600,
-  5: 3 * 86400, 6: 3 * 86400, 7: 3 * 86400,
-  8: 7 * 86400, 9: 7 * 86400, 10: 7 * 86400,
-}
-
-// 07-29 bulk-stamp burst: updated_at in this range is unmeasured.
-const BULK_STAMP_BURST_START = 1785334212
-const BULK_STAMP_BURST_END   = 1785334253
 
 const ACTIVE_STATUSES = new Set(['planned', 'in_progress', 'waiting'])
 
@@ -67,7 +56,7 @@ export function computeSlaCards(
     `SELECT id, title, status, assignee, priority, priority_score, last_moved, updated_at, parked_until, boss_waiting
        FROM kanban_cards
       WHERE status IN ('planned','in_progress','waiting')
-        AND (archived_at IS NULL OR archived_at = 0)
+        AND (${NOT_ARCHIVED_SQL})
       ORDER BY sort_order ASC`
   ).all() as CardRow[]
 
@@ -97,7 +86,7 @@ export function computeSlaCards(
     }
 
     const score = row.priority_score
-    const threshold = score != null ? (STALE_THRESHOLD_SECONDS[score] ?? null) : null
+    const threshold = staleThresholdSeconds(score)
 
     let breachFraction: number | null = null
     let slaStatus: SlaStatus = 'unknown'
