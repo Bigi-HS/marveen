@@ -97,6 +97,8 @@ import { tryHandleHealthIngest } from './web/routes/health-ingest.js'
 import { tryHandleHealthIngestRaw } from './web/routes/health-ingest-raw.js'
 import { tryHandleZeppFreshness } from './web/routes/health-zepp-freshness.js'
 import { tryHandleZeppAnomalies } from './web/routes/health-zepp-anomalies.js'
+import { tryHandleMedia } from './web/routes/media.js'
+import { applyMediaMigrations } from './noa-media.js'
 import { isPublicApiPath } from './web/public-paths.js'
 import { tryHandleStatic } from './web/routes/static.js'
 import { tryHandleDashboardNew } from './web/routes/dashboard-new.js'
@@ -375,6 +377,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleHealthIngestRaw(routeCtx)) return
       if (await tryHandleZeppFreshness(routeCtx)) return
       if (await tryHandleZeppAnomalies(routeCtx)) return
+      if (await tryHandleMedia(routeCtx)) return
       // dashboard-new SPA on /v2, side-by-side with the legacy web/ app on '/'.
       // Mounted before the legacy static handler so the /v2 prefix is claimed first.
       if (tryHandleDashboardNew(routeCtx, DASHBOARD_NEW_DIST)) return
@@ -509,6 +512,9 @@ export function startWebServer(port = 3420): http.Server {
   // startup path (NOT fixture-only) -> a live noa.db gains it on the next boot.
   applyCheckpointMigrations()
   logger.info('Checkpoint migrations applied (agent_checkpoints, S3)')
+
+  applyMediaMigrations()
+  logger.info('Media migrations applied (media_items)')
 
   const scheduleInterval = startScheduleRunner()
   logger.info('Schedule runner started (60s poll)')
