@@ -72,6 +72,14 @@ export interface FreshnessResult {
    * unparseable) -- treated as an infinitely stale, genuine gap.
    */
   syncAgeHours: number | null
+  /**
+   * Clock-frozen sync age used for the alert decision (card d0d306e1).
+   * When the last sync happened during the overnight quiet window, the effective
+   * age is measured from the quiet-window END rather than the sync timestamp, so
+   * a healthy midnight auto-sync does not immediately trip the threshold at 08:00.
+   * Equals syncAgeHours when no freeze applies (sync outside quiet window).
+   */
+  effectiveSyncAgeHours: number | null
   /** Effective sync-age alert threshold in hours (config, default 8). */
   thresholdHours: number
   /** Effective manual-vision staleness threshold in whole days (config, default 3). */
@@ -157,6 +165,24 @@ export function computeFreshness(deps: ZeppFreshnessDeps): FreshnessResult {
 
   const quiet = inQuietWindow(hours, cfg.quietStartHour, cfg.quietEndHour)
 
+  // Clock-freeze (card d0d306e1): if the last sync happened DURING today's quiet
+  // window, measure the effective age from the quiet-window END instead of the
+  // actual sync timestamp. This prevents a false alarm immediately after 08:00
+  // when the only real sync was the overnight auto-sync at ~00:10 (which would be
+  // exactly 8h old when the window closes). The freeze only applies to syncs
+  // inside [quietStart, quietEnd) for today; a sync from yesterday afternoon
+  // (outside today's quiet window) is measured at full face-value.
+  let effectiveSyncAgeHours: number | null = syncAgeHours
+  if (!Number.isNaN(syncMs) && syncAgeHours !== null && !quiet) {
+    const minutesPastMidnight = hours * 60 + minutes
+    const midnightMs = deps.nowMs() - minutesPastMidnight * 60_000
+    const quietWindowStartMs = midnightMs + cfg.quietStartHour * 3_600_000
+    const quietWindowEndMs = midnightMs + cfg.quietEndHour * 3_600_000
+    if (syncMs >= quietWindowStartMs && syncMs < quietWindowEndMs) {
+      effectiveSyncAgeHours = (deps.nowMs() - quietWindowEndMs) / 3_600_000
+    }
+  }
+
   // Staleness has two regimes:
   //   - manual-vision: episodic hand-entered data with no device sync stamp.
   //     Judge by the DATA DATE against a manual-appropriate day threshold. The
@@ -174,10 +200,10 @@ export function computeFreshness(deps: ZeppFreshnessDeps): FreshnessResult {
       ? 'manual entry has no valid data date'
       : `manual entry ${latestDate} is ${daysBehind} day${daysBehind === 1 ? '' : 's'} old (threshold ${cfg.manualStalenessThresholdDays} days)`
   } else {
-    isStale = syncAgeHours === null || syncAgeHours > cfg.syncAgeThresholdHours
-    staleDetail = syncAgeHours === null
+    isStale = effectiveSyncAgeHours === null || effectiveSyncAgeHours > cfg.syncAgeThresholdHours
+    staleDetail = effectiveSyncAgeHours === null
       ? `no sync timestamp (threshold ${cfg.syncAgeThresholdHours}h)`
-      : `${syncAgeHours.toFixed(1)}h since last sync (threshold ${cfg.syncAgeThresholdHours}h)`
+      : `${effectiveSyncAgeHours.toFixed(1)}h since last sync (threshold ${cfg.syncAgeThresholdHours}h)`
   }
 
   // Suppress alerts during the overnight quiet window: an aged sync at 03:00 is
@@ -197,6 +223,7 @@ export function computeFreshness(deps: ZeppFreshnessDeps): FreshnessResult {
     isToday,
     daysBehind,
     syncAgeHours,
+    effectiveSyncAgeHours,
     thresholdHours: cfg.syncAgeThresholdHours,
     manualThresholdDays: cfg.manualStalenessThresholdDays,
     inQuietWindow: quiet,
