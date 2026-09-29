@@ -5216,6 +5216,19 @@ main {
   margin: 8px 0 0;
 }
 .agent-channel-warn { font-size: 11px; color: #b45309; font-weight: 600; flex: 1; }
+/* Pending pairing banner (card 86e0c042): blue, matches invite-link style. */
+.agent-pairing-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: color-mix(in srgb, #3b82f6 12%, transparent);
+  border: 1px solid #3b82f6;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin: 8px 0 0;
+}
+.agent-pairing-warn { font-size: 11px; color: #1d4ed8; font-weight: 600; flex: 1; }
 .btn-danger {
   background: #ef4444;
   color: #fff;

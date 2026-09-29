@@ -220,6 +220,17 @@ function resolveAccessPath(name: string, provider: ChannelProviderType): string 
   return join(dir, 'access.json')
 }
 
+function countPendingPairings(name: string): number {
+  const accessPath = resolveAccessPath(name, 'telegram')
+  try {
+    const access = JSON.parse(readFileSync(accessPath, 'utf-8')) as { pending?: Record<string, { expiresAt: number }> }
+    const now = Date.now()
+    return Object.values(access.pending ?? {}).filter((e) => e.expiresAt > now).length
+  } catch {
+    return 0
+  }
+}
+
 function extractBotId(token: string): string | null {
   const colon = token.indexOf(':')
   if (colon < 1) return null
@@ -311,6 +322,8 @@ interface AgentSummary {
   pipeHealthy: boolean | null
   /** Epoch-ms of the last pipe watchdog check, or null if unknown. */
   pipeLastCheckedTs: number | null
+  /** Number of pending Telegram pairing codes waiting for operator approval. */
+  pendingPairingCount: number
 }
 
 interface AgentDetail extends AgentSummary {
@@ -379,6 +392,7 @@ function getAgentSummary(name: string): AgentSummary {
     channelHealthy: channelHealth ? channelHealth.healthy : null,
     channelReconnectAttempts: channelHealth ? channelHealth.reconnectAttempts : 0,
     ...computePipeHealth(name),
+    pendingPairingCount: tg.hasTelegram ? countPendingPairings(name) : 0,
   }
 }
 
