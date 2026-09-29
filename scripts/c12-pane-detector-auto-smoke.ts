@@ -57,7 +57,7 @@ function getCurrentCliVersion(): string | null {
 
 function captureBusterPane(): string | null {
   try {
-    const out = execFileSync('tmux', ['capture-pane', '-p', '-t', BUSTER_SESSION],
+    const out = execFileSync('tmux', ['capture-pane', '-p', '-t', `=${BUSTER_SESSION}:`],
       { encoding: 'utf-8', timeout: 5_000 })
     return out
   } catch {
