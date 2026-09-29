@@ -295,12 +295,12 @@ export function budgetPauseMarkerPath(agentName: string, storeDir = STORE_DIR): 
   return join(storeDir, `.${agentName}-budget-pause`)
 }
 
-export function writeBudgetPauseMarker(agentName: string, nowMs: number, storeDir = STORE_DIR): void {
+export function writeBudgetPauseMarker(agentName: string, nowMs: number, storeDir = STORE_DIR, burnPct = 0): void {
   // budgetPauseMarkerPath throws on invalid slug; catch -> fail-safe (no marker written).
   // Dashboard-server is sole caller -- export is intentional (30-min monitor only).
   const weekStartMs = currentWeekStartMs(nowMs)
   const expiresAt = weekStartMs + 7 * 24 * 3600 * 1000
-  const marker: BudgetPauseMarker = { expiresAt, weekStartMs, triggeredAtPct: 0 }
+  const marker: BudgetPauseMarker = { expiresAt, weekStartMs, triggeredAtPct: burnPct }
   try {
     mkdirSync(storeDir, { recursive: true })
     atomicWriteFileSync(budgetPauseMarkerPath(agentName, storeDir), JSON.stringify(marker), { mode: 0o600 })

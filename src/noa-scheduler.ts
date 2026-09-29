@@ -19,6 +19,7 @@ import { toPendingRetryView, shouldRetryNow } from './pending-retries.js'
 import { sendPendingRetryAlert } from './web/pending-retry-alert.js'
 import { sweepStuckTasks } from './web/stuck-task-sentinel.js'
 import { resolveFromPath } from './platform.js'
+import { isBudgetPauseMarkerActive } from './web/opus-burn-monitor.js'
 
 // Lazy tmux path -- resolved on first use so module load never throws if tmux absent in test env
 let _tmux: string | null = null
@@ -461,7 +462,7 @@ export function buildScheduledTaskPrompt(task: ScheduledTask, agentName: string)
 // 'unknown' = pane unreadable after re-probe; effect-bearing tasks are rolled
 // forward with last_result='unconfirmed' and the operator is alerted. Heartbeat
 // tasks return 'parked' instead (idempotent -- safe to retry).
-type FireResult = 'fired' | 'busy' | 'missing' | 'error' | 'parked' | 'unknown'
+type FireResult = 'fired' | 'busy' | 'missing' | 'error' | 'parked' | 'unknown' | 'budget-paused'
 
 // Snapshot the live tmux session names once. Resolved at the top of a sweep tick
 // and shared across every attemptFireTask call so we spawn `tmux list-sessions`
@@ -498,6 +499,14 @@ function attemptFireTask(
   if (!isSessionReadyForPrompt(session)) {
     logger.warn({ task: task.id, agent: agentName, session }, 'scheduler: target session busy, will retry')
     return 'busy'
+  }
+
+  // Budget-pause gate (card cfcdc941): skip proactive/scheduled tasks when the
+  // weekly Opus budget marker is active. Boss-DM / reactive replies are not
+  // affected -- those arrive through the Telegram channel, not the scheduler.
+  if (isBudgetPauseMarkerActive(agentName, Date.now())) {
+    logger.info({ task: task.id, agent: agentName }, 'scheduler: agent budget-paused, skipping task')
+    return 'budget-paused'
   }
 
   try {
@@ -769,6 +778,12 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb(), nowMsOverride?:
 
     if (result === 'fired') {
       rollForwardFired(task, nowMs, nowS, db)
+    } else if (result === 'budget-paused') {
+      // Roll next_run forward so the task is not perpetually due during the
+      // pause week. It re-fires at its regular cadence after the marker expires
+      // (weekly rollover). last_result records the reason for visibility.
+      rollForwardFired(task, nowMs, nowS, db)
+      db.prepare(`UPDATE scheduled_tasks SET last_result = 'budget-paused' WHERE id = ?`).run(task.id)
     } else if (result === 'busy' || result === 'parked') {
       // Same handling, distinct reason: 'parked' names a send that was
       // written but never submitted, so the retry queue records WHY the
