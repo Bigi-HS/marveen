@@ -494,3 +494,94 @@ describe('tryHandleTokenUsage route handler', () => {
     expect(handled).toBe(false)
   })
 })
+
+describe('getUnratedModels', () => {
+  const baseTs = 1716200000
+  const insertWithModel = (
+    db: ReturnType<typeof getDb>,
+    agent: string, session: string, ts: number,
+    tokens: number, model: string | null,
+  ) => db.prepare(`
+    INSERT OR IGNORE INTO token_usage
+    (agent, session_id, timestamp, input_tokens, output_tokens,
+     cache_read_tokens, cache_creation_tokens, model)
+    VALUES (?, ?, ?, ?, ?, 0, 0, ?)
+  `).run(agent, session, ts, tokens, 0, model)
+
+  beforeEach(() => {
+    const db = getDb()
+    db.exec("DELETE FROM token_usage WHERE agent LIKE 'unrated-test-%'")
+  })
+
+  it('returns empty array when all models are known', async () => {
+    const db = getDb()
+    insertWithModel(db, 'unrated-test-a', 'sess-ur1', baseTs, 1000, 'claude-sonnet-4-6')
+    const { getUnratedModels } = await import('../web/token-usage.js')
+    const result = getUnratedModels(baseTs - 1, baseTs + 1)
+    const entry = result.find(r => r.agent === 'unrated-test-a')
+    expect(entry).toBeUndefined()
+  })
+
+  it('returns entry for an unknown model', async () => {
+    const db = getDb()
+    insertWithModel(db, 'unrated-test-b', 'sess-ur2', baseTs, 5000, 'totally-unknown-model-xyz')
+    const { getUnratedModels } = await import('../web/token-usage.js')
+    const result = getUnratedModels(baseTs - 1, baseTs + 1)
+    const entry = result.find(r => r.agent === 'unrated-test-b')
+    expect(entry).toBeDefined()
+    expect(entry?.model).toBe('totally-unknown-model-xyz')
+    expect(entry?.calls).toBe(1)
+    expect(entry?.totalTokens).toBe(5000)
+  })
+
+  it('excludes fable models', async () => {
+    const db = getDb()
+    insertWithModel(db, 'unrated-test-c', 'sess-ur3', baseTs, 3000, 'claude-fable-5')
+    const { getUnratedModels } = await import('../web/token-usage.js')
+    const result = getUnratedModels(baseTs - 1, baseTs + 1)
+    const entry = result.find(r => r.agent === 'unrated-test-c')
+    expect(entry).toBeUndefined()
+  })
+
+  it('aggregates multiple calls for same agent+model', async () => {
+    const db = getDb()
+    insertWithModel(db, 'unrated-test-d', 'sess-ur4a', baseTs, 2000, 'mystery-model')
+    insertWithModel(db, 'unrated-test-d', 'sess-ur4b', baseTs + 1, 3000, 'mystery-model')
+    const { getUnratedModels } = await import('../web/token-usage.js')
+    const result = getUnratedModels(baseTs - 1, baseTs + 2)
+    const entry = result.find(r => r.agent === 'unrated-test-d')
+    expect(entry).toBeDefined()
+    expect(entry?.calls).toBe(2)
+    expect(entry?.totalTokens).toBe(5000)
+  })
+
+  it('respects time range filter', async () => {
+    const db = getDb()
+    insertWithModel(db, 'unrated-test-e', 'sess-ur5', baseTs + 9999, 1000, 'ghost-model')
+    const { getUnratedModels } = await import('../web/token-usage.js')
+    const result = getUnratedModels(baseTs - 1, baseTs + 100)
+    const entry = result.find(r => r.agent === 'unrated-test-e')
+    expect(entry).toBeUndefined()
+  })
+
+  it('/api/token-usage/cost response includes unrated field', async () => {
+    const db = getDb()
+    insertWithModel(db, 'unrated-test-f', 'sess-ur6', baseTs, 4000, 'alien-model')
+    const { tryHandleTokenUsage } = await import('../web/routes/token-usage.js')
+    const url = new URL('http://localhost:3420/api/token-usage/cost')
+    let responseBody = ''
+    const res = {
+      writeHead: (_s: number, _h?: Record<string, string>) => {},
+      end: (b?: string) => { responseBody = b || '' },
+    }
+    const ctx = {
+      req: {} as any, res: res as any,
+      path: '/api/token-usage/cost', method: 'GET', url,
+      identity: { agentId: 'operator', scopes: ['admin:*'], source: 'operator' as const },
+    }
+    const handled = await tryHandleTokenUsage(ctx)
+    expect(handled).toBe(true)
+    const body = JSON.parse(responseBody)
+    expect(Array.isArray(body.unrated)).toBe(true)
+  })
+})
