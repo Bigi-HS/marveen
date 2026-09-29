@@ -56,22 +56,16 @@ launch() {
 
 log "bigben-watchdog started (pid $$)"
 
-# Relaunch-rate cap with hourly window.
-declare -a STAMPS=()
-under_cap() {
-  local now; now=$(date +%s)
-  local kept=(); local s
-  for s in "${STAMPS[@]}"; do [ $((now - s)) -lt 3600 ] && kept+=("$s"); done
-  STAMPS=("${kept[@]}")
-  [ "${#STAMPS[@]}" -lt "$MAX_PER_HOUR" ]
-}
+# Relaunch-rate cap: file-backed sliding 1h window (0b282eb0 Phase-3).
+STAMP_FILE="/tmp/wd-stamps-bigben"
+
 
 while true; do
   if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
-    if under_cap; then
+    if wd_under_cap_file "$STAMP_FILE" "$MAX_PER_HOUR"; then
       log "$SESSION DOWN -- cooldown ${COOLDOWN}s then fresh relaunch"
       sleep "$COOLDOWN"
-      STAMPS+=("$(date +%s)")
+      wd_under_cap_stamp "$STAMP_FILE"
       launch
     else
       log "$SESSION DOWN but relaunch cap (${MAX_PER_HOUR}/h) reached -- backing off 600s"

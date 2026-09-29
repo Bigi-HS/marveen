@@ -89,12 +89,8 @@ launch_fresh() {
   log "woke $SESSION (FRESH, model=$model)"
 }
 
-declare -a STAMPS=()
-under_cap() {
-  local now; now=$(date +%s); local kept=(); local s
-  for s in "${STAMPS[@]}"; do [ $((now - s)) -lt 3600 ] && kept+=("$s"); done
-  STAMPS=("${kept[@]}"); [ "${#STAMPS[@]}" -lt "$MAX_PER_HOUR" ]
-}
+# Relaunch-rate cap: file-backed sliding 1h window (0b282eb0 Phase-3).
+STAMP_FILE="/tmp/wd-stamps-${NAME}"
 
 log "sleep-watchdog started for $SESSION (pid $$, db=$DB)"
 POLL="${SG_DUE_POLL_SEC:-15}"
@@ -121,9 +117,9 @@ while true; do
       # R1: only launch if no live session and no in-flight boot younger than the
       # cold-boot TTL. Mark BEFORE launch so a duplicate trigger cannot double-fire.
       if sg_launch_allowed "$MARKER" "$now" 0; then
-        if under_cap; then
+        if wd_under_cap_file "$STAMP_FILE" "$MAX_PER_HOUR"; then
           echo "$now" > "$MARKER"
-          STAMPS+=("$now")
+          wd_under_cap_stamp "$STAMP_FILE"
           launch_fresh
         else
           log "$SESSION wake-trigger but relaunch cap (${MAX_PER_HOUR}/h) reached -- backoff ${LONG_BACKOFF}s"
