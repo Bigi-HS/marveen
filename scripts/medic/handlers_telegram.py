@@ -80,7 +80,7 @@ def _send_mcp(ctx: HandlerContext) -> bool:
     zero-exit send. argv only -- the enum-safe arg only ever lands inside the
     "-t agent-<arg>" target element."""
     session = _session(ctx.arg)
-    res = ctx.ex.run(["tmux", "send-keys", "-t", session, "/mcp", "Enter"])
+    res = ctx.ex.run(["tmux", "send-keys", "-t", f"={session}:", "/mcp", "Enter"])
     return res.code == 0
 
 

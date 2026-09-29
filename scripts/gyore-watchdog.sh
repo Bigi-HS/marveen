@@ -60,11 +60,11 @@ launch() {
   local i pane
   for i in $(seq 1 20); do
     sleep 1
-    pane="$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)"
+    pane="$(tmux capture-pane -t "=$SESSION:" -p 2>/dev/null || true)"
     case "$pane" in
-      *"Bypass Permissions mode"*"Yes, I accept"*) tmux send-keys -t "$SESSION" "2" Enter; sleep 1 ;;
-      *"Do you trust the files"*) tmux send-keys -t "$SESSION" "1" Enter; sleep 1 ;;
-      *"Welcome to Claude Code"*) tmux send-keys -t "$SESSION" Enter; sleep 1 ;;
+      *"Bypass Permissions mode"*"Yes, I accept"*) tmux send-keys -t "=$SESSION:" "2" Enter; sleep 1 ;;
+      *"Do you trust the files"*) tmux send-keys -t "=$SESSION:" "1" Enter; sleep 1 ;;
+      *"Welcome to Claude Code"*) tmux send-keys -t "=$SESSION:" Enter; sleep 1 ;;
       *"Listening for channel messages"*) log "$SESSION ready (channel listening)"; return 0 ;;
     esac
   done

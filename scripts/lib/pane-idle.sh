@@ -123,7 +123,7 @@ pane_classify() {
 # classify it. Uses $TMUX_BIN if the caller set one (fleet-supervisor), else the
 # plain `tmux` on PATH (sleep-agent-watchdog). Empty capture -> ambiguous.
 pane_capture_classify() {
-  "${TMUX_BIN:-tmux}" capture-pane -t "$1" -p -e 2>/dev/null | pane_classify
+  "${TMUX_BIN:-tmux}" capture-pane -t "=$1:" -p -e 2>/dev/null | pane_classify
 }
 
 # pane_idle_accrue <state> <idle_file> <busy_file> <now> [debounce_polls]

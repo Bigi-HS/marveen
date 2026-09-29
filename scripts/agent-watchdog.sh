@@ -44,9 +44,9 @@ answer_resume_prompt() {
   local i pane
   for i in $(seq 1 20); do
     sleep 2
-    pane="$(tmux capture-pane -t "$SESSION" -p 2>/dev/null)"
+    pane="$(tmux capture-pane -t "=$SESSION:" -p 2>/dev/null)"
     if printf '%s' "$pane" | grep -q 'Resume from summary'; then
-      tmux send-keys -t "$SESSION" '1'; sleep 1; tmux send-keys -t "$SESSION" Enter
+      tmux send-keys -t "=$SESSION:" '1'; sleep 1; tmux send-keys -t "=$SESSION:" Enter
       log "answered resume-prompt -> 1"; return 0
     fi
     printf '%s' "$pane" | grep -q 'bypass permissions on' && { log "$SESSION active prompt"; return 0; }
