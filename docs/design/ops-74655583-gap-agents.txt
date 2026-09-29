@@ -1,0 +1,51 @@
+OPS-74655583: UNWATCHED AGENTS (Gap Closure Target)
+
+CURRENT STATE: 6 agents lack watchdog coverage
+
+1. gelim
+   Status: channel-less, NO agent-config.json, NO dedicated watchdog
+   Current: NOT watched by any mechanism
+   Solution: Add to agent-roster.sh discovery, launch via agent-watchdog.sh
+
+2. gourmet
+   Status: channel-less, NO agent-config.json, NO dedicated watchdog
+   Current: NOT watched by any mechanism
+   Solution: Add to agent-roster.sh discovery, launch via agent-watchdog.sh
+
+3. inkwell
+   Status: channel-less, NO agent-config.json, NO dedicated watchdog
+   Current: NOT watched by any mechanism
+   Solution: Add to agent-roster.sh discovery, launch via agent-watchdog.sh
+
+4. kerrigan
+   Status: channel-less, NO agent-config.json, NO dedicated watchdog
+   Current: NOT watched by any mechanism
+   Solution: Add to agent-roster.sh discovery, launch via agent-watchdog.sh
+
+5. servo-skull
+   Status: channel-less, NO agent-config.json, NO dedicated watchdog
+   Current: NOT watched by any mechanism
+   Solution: Add to agent-roster.sh discovery, launch via agent-watchdog.sh
+
+6. heartbeat
+   Status: channel-less, HAS agent-config.json, NO dedicated watchdog
+   Current: NOT in any watchdog launcher list
+   Note: This is a special agent (heartbeat monitoring), but still needs watch
+   Solution: Add to agent-roster.sh discovery OR special-case in bootstrap
+
+TOTAL GAP: 6 agents (17% of fleet)
+
+CLOSURE PLAN:
+1. Implement agent-roster.sh to auto-discover all agents in AGENTS_BASE_DIR
+2. Implement watchdog.sh meta-launcher to route agents to appropriate watchdog
+3. Implement watchdog-bootstrap.sh to call watchdog.sh for all agents
+4. Update agent-watchdog.sh to source agent-roster.sh and use dynamic list
+5. Test: verify all 6 gap agents have active watchdog + running sessions
+6. Deploy: update cron/systemd to call watchdog-bootstrap.sh at boot + 6h intervals
+
+VERIFICATION:
+After deployment, run:
+  pgrep -a agent-watchdog | wc -l  (should be 6+)
+  for agent in gelim gourmet inkwell kerrigan servo-skull heartbeat; do
+    tmux has-session -t agent-$agent 2>/dev/null && echo "$agent: WATCHED" || echo "$agent: GAP"
+  done
