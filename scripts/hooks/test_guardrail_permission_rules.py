@@ -1278,12 +1278,24 @@ class ConfigWriteBypassTests(unittest.TestCase):
     # ── BLOCK expected ────────────────────────────────────────────────────────
 
     BLOCKED = [
-        # redirect
+        # redirect -- bare forms
         ('redirect-echo',           "echo '{\"mcpServers\":{}}' > .mcp.json"),
         ('redirect-python',         "python3 -c 'import json; print(json.dumps({}))' > .mcp.json"),
         ('redirect-append',         "echo '{}' >> settings.json"),
         ('redirect-full-path',      "echo '{}' > /home/domin/marveen/agents/dave/.claude-config/settings.json"),
         ('redirect-mcp-full-path',  "echo '{}' > /home/domin/.claude/mcp-config/.mcp.json"),
+        # redirect -- fd-qualified forms (441eadc2 variant-matrix: 1>, 2>, &>, 1>>, 2>>, &>>)
+        ('redirect-fd1-settings',   "echo '{}' 1> settings.json"),
+        ('redirect-fd2-settings',   "echo '{}' 2> settings.json"),
+        ('redirect-fdamp-settings', "echo '{}' &> settings.json"),
+        ('redirect-fd1a-settings',  "echo '{}' 1>> settings.json"),
+        ('redirect-fd2a-settings',  "echo '{}' 2>> settings.json"),
+        ('redirect-fdampa-settings',"echo '{}' &>> settings.json"),
+        ('redirect-fd1-mcp',        "echo '{}' 1> .mcp.json"),
+        ('redirect-fdamp-mcp',      "echo '{}' &> .mcp.json"),
+        # redirect -- no-space fd (shlex splits digit/& from >, _REDIRECT_RE catches it)
+        ('redirect-fd1-nospace',    "echo x 1>settings.json"),
+        ('redirect-fdamp-nospace',  "echo x &>settings.json"),
         # tee
         ('tee-direct',              "cat src.json | tee .mcp.json"),
         ('tee-append',              "echo '{}' | tee -a settings.json"),
@@ -1345,6 +1357,30 @@ class ConfigWriteBypassTests(unittest.TestCase):
             'tool_input': {'command': 'cat .mcp.json'},
         })
         self.assertFalse(denied)
+
+    # ── Known-gap canaries (441eadc2 variant-matrix) ─────────────────────────
+
+    KNOWN_GAPS_R4 = [
+        # >| is split on | by _split_subcommands before tokenization;
+        # the bare > ends up as the last token of piece-1 with no destination.
+        ('gap-noclobber-space',  "echo '{}' >| settings.json"),
+        # word>file: shlex glues the word and > into one token (x>file);
+        # _REDIRECT_RE requires the token to start with > / digit / &.
+        ('gap-nospace-bare',     "echo x>settings.json"),
+        ('gap-nospace-bare-mcp', "echo x>.mcp.json"),
+    ]
+
+    def test_known_gaps_r4_are_accepted(self):
+        """Pin known-gap forms so a future fix is visible as a test CHANGE not a silent pass."""
+        for label, cmd in self.KNOWN_GAPS_R4:
+            with self.subTest(case=label):
+                # These forms are CURRENTLY not blocked (accepted gap).
+                # If this test starts FAILING it means the gap was fixed -- update
+                # the fixture to the BLOCKED list.
+                self.assertFalse(
+                    guard.match_config_write(cmd),
+                    f'gap now BLOCKED (update fixture to BLOCKED list): {cmd!r}',
+                )
 
 
 class CxEscapeCorpusTests(unittest.TestCase):
@@ -2253,6 +2289,24 @@ class SkillBashWriteTests(unittest.TestCase):
         """echo x 1>~/.claude/skills/x/SKILL.md -- fd-qualified redirect (FN dave-id:1308)."""
         self.assertTrue(guard.match_skill_bash_write(
             'echo x 1>~/.claude/skills/x/SKILL.md'))
+
+    # ── Known-gap canaries (441eadc2 variant-matrix) ─────────────────────────
+
+    def test_word_glued_to_redirect_is_known_gap(self):
+        """echo x>~/.claude/skills/x/SKILL.md -- word glued to > with no space.
+
+        shlex tokenizes x>~/.claude/... as ONE token starting with 'x', which
+        _REDIRECT_RE (^(?:\\d+|&)?>>?) does not match (requires digit/&/> at start).
+        Known accepted gap: same class as R4 bare no-space gap.
+        If this test starts FAILING it means the gap was fixed -- move to the BLOCKED list.
+        """
+        self.assertFalse(guard.match_skill_bash_write(
+            'echo x>~/.claude/skills/x/SKILL.md'))
+
+    def test_word_glued_to_append_redirect_is_known_gap(self):
+        """printf x>>~/.claude/skills/x/SKILL.md -- word glued to >> with no space."""
+        self.assertFalse(guard.match_skill_bash_write(
+            'printf x>>~/.claude/skills/x/SKILL.md'))
 
 
 if __name__ == '__main__':

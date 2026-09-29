@@ -1032,15 +1032,22 @@ def match_config_write(command: str) -> bool:
     the per-agent profiles (PR#549 added those; this is the Bash parity fix).
 
     Covered write vectors:
-      - output redirect:  echo '...' > .mcp.json
+      - output redirect:  echo '...' > .mcp.json           (bare >)
+      - output redirect:  echo '...' 1> .mcp.json          (fd-qualified: 1>, 2>, &>)
+      - append redirect:  echo '...' >> settings.json      (bare >>)
+      - append redirect:  echo '...' 1>> settings.json     (fd-qualified: 1>>, 2>>, &>>)
+      - no-space fd:      echo x 1>settings.json           (fd-qualified no-space)
       - tee:              ... | tee .mcp.json
       - sed --in-place:   sed -i 's/x/y/' settings.json
       - cp:               cp src.json .mcp.json
 
     Explicitly NOT covered (the rules guard is defense-in-depth):
       - Python/Node/awk writing the file via in-process I/O (no Bash verb to match)
-      - Redirect written without spaces: echo x>.mcp.json (shlex keeps this as one
-        token; the token-based check misses it, which is an accepted narrow gap)
+      - Redirect no-space bare: echo x>.mcp.json  (shlex glues x and > into one token
+        starting with the word -- _REDIRECT_RE requires the token to start with > / digit
+        / &; accepted narrow gap)
+      - Noclobber-override >|: _split_subcommands breaks on the | in >|, leaving bare >
+        as the last token of piece-1 with no following destination; structural gap
     """
     for piece in _split_subcommands(command):
         tokens = _tokenize(piece)
@@ -1079,11 +1086,17 @@ def match_config_write(command: str) -> bool:
                 if non_flags and _CONFIG_WRITE_FILES_RE.search(non_flags[-1]):
                     return True
 
-        # Redirect: shlex returns '>' / '>>' / '>|' as separate tokens when
-        # space-separated (the common form).  Check the token AFTER the redirect op.
+        # Redirect: use _REDIRECT_RE (same regex as K-1a/R5 skill-bash-write) so that
+        # fd-qualified forms (1>, 2>, &>, 1>>, 2>>, &>>) and no-space fd (1>file)
+        # are caught alongside plain > and >>.
+        # Known gaps: bare no-space (echo x>file) and >| (split on | by
+        # _split_subcommands before tokenization) -- see docstring.
         for i, tok in enumerate(tokens):
-            if tok in ('>', '>>', '>|'):
-                if i + 1 < len(tokens) and _CONFIG_WRITE_FILES_RE.search(tokens[i + 1]):
+            m = _REDIRECT_RE.match(tok)
+            if m:
+                tail = m.group(1)
+                dest = tail if tail else (tokens[i + 1] if i + 1 < len(tokens) else None)
+                if dest and _CONFIG_WRITE_FILES_RE.search(dest):
                     return True
 
     return False
