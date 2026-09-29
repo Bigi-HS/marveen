@@ -1157,7 +1157,7 @@ guard_presence_check() {
   _gpc_restore() {
     mkdir -p "$(dirname "$live")" 2>/dev/null || true
     if cp "$canon" "$live" 2>/dev/null; then
-      python3 -c "import py_compile; py_compile.compile('$live', doraise=True)" 2>/dev/null \
+      python3 -c 'import py_compile,sys; py_compile.compile(sys.argv[1],doraise=True)' "$live" 2>/dev/null \
         && log "guard_presence_check: restore OK (py_compile pass)" \
         || log "guard_presence_check: WARN -- py_compile failed after restore"
     else
