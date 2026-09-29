@@ -9289,6 +9289,7 @@ async function loadTokenUsage() {
   })
   renderTuSummary(summary)
   renderTuLineage(cost.lineage || [], summary)
+  renderTuUnrated(cost.unrated || [])
 
   const agentSelect = document.getElementById('tuAgent')
   if (agentSelect && agentSelect.options.length <= 1) {
@@ -9403,6 +9404,31 @@ function renderTuLineage(lineage, summary) {
         <th style="text-align:right">Munkamenet</th>
         <th style="text-align:right">Hívás</th>
         <th>Arány</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`
+}
+
+function renderTuUnrated(unrated) {
+  const el = document.getElementById('tuUnratedCard')
+  if (!el) return
+  if (!unrated || !unrated.length) {
+    el.hidden = true
+    return
+  }
+  el.hidden = false
+  const rows = unrated.map(u => `<tr>
+    <td>${escapeHtml(u.agent)}</td>
+    <td><code style="font-size:12px">${escapeHtml(u.model || '(ismeretlen)')}</code></td>
+    <td style="text-align:right;font-variant-numeric:tabular-nums">${(u.calls || 0).toLocaleString()}</td>
+    <td style="text-align:right;font-variant-numeric:tabular-nums">${tuFormatTokens(u.totalTokens || 0)}</td>
+  </tr>`).join('')
+  el.innerHTML = `<h3 style="margin:0 0 8px;color:var(--status-waiting)">&#9888; Ismeretlen modellek (árazatlan)</h3>
+    <p style="font-size:13px;color:var(--text-secondary);margin:0 0 12px">Ezeknek a modelleknek nincs ismert ára; tokenjük $0-ként szerepel a költség-összesítőben.</p>
+    <div style="overflow-x:auto"><table class="mem-table" style="width:100%">
+      <thead><tr>
+        <th>Ügynök</th><th>Modell</th>
+        <th style="text-align:right">Hívás</th><th style="text-align:right">Token</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`
