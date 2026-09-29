@@ -66,9 +66,9 @@ for m in pending:
     chunk_size = 990
     for i in range(0, len(full_msg), chunk_size):
         chunk = full_msg[i:i + chunk_size]
-        subprocess.run(['tmux', 'send-keys', '-t', session_name, '-l', chunk],
+        subprocess.run(['tmux', 'send-keys', '-t', f'={session_name}:', '-l', chunk],
                        timeout=5, capture_output=True)
-    subprocess.run(['tmux', 'send-keys', '-t', session_name, 'Enter'],
+    subprocess.run(['tmux', 'send-keys', '-t', f'={session_name}:', 'Enter'],
                    timeout=5, capture_output=True)
     time.sleep(2)
 

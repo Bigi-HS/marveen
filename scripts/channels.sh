@@ -170,20 +170,20 @@ $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
 # 12 sec timeout ket retry-jal, mert WSL/tmux paint slow lehet first-run-on.
 for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
   sleep 1
-  pane=$($TMUX capture-pane -t "$SESSION" -p 2>/dev/null || true)
+  pane=$($TMUX capture-pane -t "=$SESSION:" -p 2>/dev/null || true)
   case "$pane" in
     *"Bypass Permissions mode"*"Yes, I accept"*)
-      $TMUX send-keys -t "$SESSION" "2" Enter
+      $TMUX send-keys -t "=$SESSION:" "2" Enter
       sleep 1
       continue
       ;;
     *"Do you trust the files in this folder?"*)
-      $TMUX send-keys -t "$SESSION" "1" Enter
+      $TMUX send-keys -t "=$SESSION:" "1" Enter
       sleep 1
       continue
       ;;
     *"Welcome to Claude Code"*)
-      $TMUX send-keys -t "$SESSION" Enter
+      $TMUX send-keys -t "=$SESSION:" Enter
       sleep 1
       continue
       ;;
@@ -197,7 +197,7 @@ done
 # longer uses Remote Control.)
 _bot_name="${BOT_NAME:-${MAIN_AGENT_ID:-marveen}}"
 sleep 1
-$TMUX send-keys -t "$SESSION" "/name ${_bot_name}" Enter
+$TMUX send-keys -t "=$SESSION:" "/name ${_bot_name}" Enter
 unset _bot_name
 
 # Reset the keep-alive watchdog baseline so a session that was just restarted
@@ -260,22 +260,22 @@ date +%s > "$INSTALL_DIR/store/.channel-last-respawn"
   # also shows "(disabled)" markers; we only fire on Failed, never on disabled
   # (Enable-only submenu has no Reconnect, the Up+Enter+Enter sequence would
   # land somewhere unsafe).
-  $TMUX send-keys -t "$SESSION" Escape
+  $TMUX send-keys -t "=$SESSION:" Escape
   sleep 1
-  $TMUX send-keys -t "$SESSION" "/mcp" Enter
+  $TMUX send-keys -t "=$SESSION:" "/mcp" Enter
   sleep 3
-  PANE="$($TMUX capture-pane -t "$SESSION" -p 2>/dev/null || true)"
+  PANE="$($TMUX capture-pane -t "=$SESSION:" -p 2>/dev/null || true)"
 
   case "$PANE" in
     *"plugin:telegram@"*"✗ Failed"*|*"plugin:telegram@"*"✗ failed"*)
       echo "$(date '+%Y-%m-%d %H:%M:%S') channels.sh post-init: telegram plugin in ✗ Failed state, firing /mcp Up+Enter+Enter unlock" >> "$INSTALL_DIR/store/channels-failures.log"
-      $TMUX send-keys -t "$SESSION" Up
+      $TMUX send-keys -t "=$SESSION:" Up
       sleep 1
-      $TMUX send-keys -t "$SESSION" Enter
+      $TMUX send-keys -t "=$SESSION:" Enter
       sleep 2
-      $TMUX send-keys -t "$SESSION" Enter
+      $TMUX send-keys -t "=$SESSION:" Enter
       sleep 4
-      $TMUX send-keys -t "$SESSION" Escape
+      $TMUX send-keys -t "=$SESSION:" Escape
       ;;
     *)
       # Plugin is connected/enabled/not-listed, or we couldn't capture. Bail
@@ -283,7 +283,7 @@ date +%s > "$INSTALL_DIR/store/.channel-last-respawn"
       # listing (truly unreachable), the dashboard's channel-monitor will
       # detect down and run its own recovery ladder; we don't second-guess.
       echo "$(date '+%Y-%m-%d %H:%M:%S') channels.sh post-init: no Failed plugin row in /mcp pane, skipping unlock (bun child absent but plugin not failed - check manually)" >> "$INSTALL_DIR/store/channels-failures.log"
-      $TMUX send-keys -t "$SESSION" Escape
+      $TMUX send-keys -t "=$SESSION:" Escape
       ;;
   esac
 ) &

@@ -901,7 +901,7 @@ pane_has_overloaded_error() {
   local session="$1" pane_scroll
   # Capture more lines than pane_is_idle_at_prompt -- the error may appear above
   # the prompt and then the agent dropped straight to ❯.
-  pane_scroll=$("$TMUX_BIN" capture-pane -t "$session" -p 2>/dev/null | tail -20)
+  pane_scroll=$("$TMUX_BIN" capture-pane -t "=$session:" -p 2>/dev/null | tail -20)
   echo "$pane_scroll" | grep -qiE "API Error.*[Oo]verload|[Oo]verload.*API Error| (is|was) (currently )?overloaded"
 }
 
@@ -984,9 +984,9 @@ ensure_idle_nudge_watch() {
     local overloaded_label=""
     pane_has_overloaded_error "$session" && overloaded_label=" [OVERLOADED-IDLE]"
     log "idle-nudge: $agent idle${overloaded_label} ${idle_age}s with open obligation -- sending resume nudge"
-    "$TMUX_BIN" send-keys -t "$session" -l "$IDLE_NUDGE_TEXT"
+    "$TMUX_BIN" send-keys -t "=$session:" -l "$IDLE_NUDGE_TEXT"
     sleep 0.4
-    "$TMUX_BIN" send-keys -t "$session" Enter
+    "$TMUX_BIN" send-keys -t "=$session:" Enter
     rm -f "$idle_since_f"
   done
 }
