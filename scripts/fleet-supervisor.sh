@@ -1135,11 +1135,61 @@ reconcile_agent_creds() {
   done
 }
 
+# guard_presence_check -- OPS-207 (5344f42b): session-independent guard-presence
+# firewall. Runs every tick (60s) regardless of which agent sessions are alive.
+# If .guard/guardrail-permission-rules.py is missing or differs from the canonical
+# scripts/hooks/ copy, restore it silently. This is the minimum recovery that must
+# survive any single agent death.
+#
+# Constraints: idempotent; only restores from the committed canonical source (not
+# a promotion); never modifies scripts/hooks/; no agent session dependency.
+guard_presence_check() {
+  local canon="$INSTALL_DIR/scripts/hooks/guardrail-permission-rules.py"
+  local live="$INSTALL_DIR/.guard/guardrail-permission-rules.py"
+
+  # If the canonical source is itself missing, that is a more serious fleet state;
+  # log at WARN level and return -- tick continues either way.
+  if [ ! -f "$canon" ]; then
+    log "guard_presence_check: WARN canonical $canon missing -- fleet in degraded state, cannot auto-restore"
+    return
+  fi
+
+  _gpc_restore() {
+    mkdir -p "$(dirname "$live")" 2>/dev/null || true
+    if cp "$canon" "$live" 2>/dev/null; then
+      python3 -c "import py_compile; py_compile.compile('$live', doraise=True)" 2>/dev/null \
+        && log "guard_presence_check: restore OK (py_compile pass)" \
+        || log "guard_presence_check: WARN -- py_compile failed after restore"
+    else
+      log "guard_presence_check: WARN -- cp failed, live guard still absent/stale"
+    fi
+  }
+
+  if [ ! -f "$live" ]; then
+    log "guard_presence_check: MISSING $live -- restoring from canonical"
+    _gpc_restore
+    return
+  fi
+
+  local h_canon h_live
+  h_canon=$(sha256sum "$canon" 2>/dev/null | cut -d' ' -f1) || return
+  h_live=$(sha256sum  "$live"  2>/dev/null | cut -d' ' -f1) || return
+  if [ "$h_canon" != "$h_live" ]; then
+    log "guard_presence_check: HASH MISMATCH (live $h_live != canon $h_canon) -- restoring"
+    _gpc_restore
+  fi
+}
+
 tick() {
   [ -n "$TMUX_BIN" ] || { log "tmux not on PATH -- cannot supervise"; return; }
 
   # 0) CREDENTIALS -- keep all agents on the single auto-refreshing main token
   reconcile_agent_creds
+
+  # 0b) GUARD-PRESENCE -- restore .guard/guardrail-permission-rules.py if missing
+  #     or byte-stale. Session-independent firewall against the fleet-freeze pattern
+  #     (OPS-207 / 5344f42b). Must run before any agent launch to ensure hooks fire.
+  guard_presence_check
 
   # 1) DASHBOARD
   settle_check dashboard dash_alive
