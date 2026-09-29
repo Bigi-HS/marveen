@@ -6,6 +6,7 @@ import { atomicWriteFileSync } from './atomic-write.js'
 import { safeJoin } from './sanitize.js'
 import { getDb } from '../db.js'
 import { isAckCapableInRegistry } from './ack-registry.js'
+import { assertKnownProfile } from './profiles.js'
 
 export const AGENTS_BASE_DIR = join(PROJECT_ROOT, 'agents')
 
@@ -529,6 +530,11 @@ export function writeAgentAuthMode(name: string, mode: AuthMode): void {
 }
 
 export function writeAgentSecurityProfile(name: string, profileId: string): void {
+  // SEC-098: fail-LOUD at the write boundary. A securityProfile is only ever
+  // persisted through here, so an unknown profile (typo / removed template) is
+  // rejected before it can silently downgrade the agent to permissive. Throws
+  // BEFORE any fs access, so it never leaves a half-written config.
+  assertKnownProfile(profileId)
   const configPath = join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}
   try { config = JSON.parse(readFileOr(configPath, '{}')) } catch {}

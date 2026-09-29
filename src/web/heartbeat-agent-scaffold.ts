@@ -67,7 +67,12 @@ const CHANNEL_PLUGIN_DISABLES = {
 const HEARTBEAT_AGENT_CONFIG = {
   model: 'claude-haiku-4-5',
   authMode: 'shared' as const,
-  securityProfile: 'standard',
+  // SEC-098: "standard" is NOT a real profile under templates/profiles/, so
+  // loadProfileTemplate silently fell back to the permissive default on every
+  // boot (fail-open, same silent-fallback class as the authMode "oauth" bug
+  // above). "default" is the honest, valid equivalent of the behaviour this
+  // agent already had; a tighter read-oriented profile is a follow-up.
+  securityProfile: 'default',
 }
 
 // The CLAUDE.md prose. Single source of truth for the agent's behaviour
