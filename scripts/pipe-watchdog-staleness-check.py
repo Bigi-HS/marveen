@@ -24,6 +24,9 @@ import argparse
 import glob
 import json
 import os
+import re
+import shlex
+import subprocess
 import sys
 import time
 import urllib.request
@@ -36,6 +39,61 @@ REALERT_SUPPRESS_SECONDS = 23 * 3600    # suppress repeat alert within 23h
 DEFAULT_STATE_FILE = "store/.pipe-watchdog-staleness-state.json"
 DEFAULT_TOKEN = "store/.dashboard-token"
 DEFAULT_FROM = "forge"
+
+# acd7fa13 live re-probe: before firing an AGE-ONLY stale alert (which trusts the
+# possibly-flush-artifact .state.json cache), shell out to the read-only per-agent
+# probe CLI and alert only if it confirms 'dead'. consecutiveDead>=2 bypasses
+# (already live-confirmed); a probe error/timeout FAILS OPEN (never suppress a
+# real outage on our inability to probe).
+PROBE_CLI_REL = "dist/web/per-agent-pipe-probe-cli.js"
+DEFAULT_PROBE_TIMEOUT = 20
+VERDICT_RE = re.compile(r"verdict=(healthy|dead|inconclusive)")
+
+
+def default_probe_command(install_dir: Path) -> str:
+    return f"node {install_dir / PROBE_CLI_REL}"
+
+
+def run_probe(agent: str, probe_command: str, timeout: int) -> str | None:
+    """Shell out to the read-only per-agent liveness probe (agent name appended
+    as the final arg). Returns the verdict ('healthy'|'dead'|'inconclusive') or
+    None on any failure (non-zero exit, timeout, unparseable output) so the
+    caller can FAIL OPEN."""
+    try:
+        argv = shlex.split(probe_command) + [agent]
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    m = VERDICT_RE.search(proc.stdout or "")
+    return m.group(1) if m else None
+
+
+def reprobe_decision(agent: str, consecutive_dead: int, probe_fn) -> tuple[bool, str, str]:
+    """Decide whether an already-STALE agent should still alert after a live
+    re-probe. Returns (keep, entry_annotation, log_line).
+
+    - consecutiveDead>=2 -> bypass the probe (the watchdog's own repeated live
+      probes already confirmed dead) -> keep.
+    - probe verdict 'dead' -> confirmed -> keep.
+    - probe None (error/timeout) -> FAIL OPEN -> keep + annotate '(probe-inconclusive)'.
+    - probe 'healthy'/'inconclusive' -> cache-artifact false STALE -> drop, but LOG
+      (silent-guard-audit: a suppressed alert must never be invisible).
+    """
+    if consecutive_dead >= 2:
+        return (True, "",
+                f"[{agent}] STALE sustained (consecutiveDead={consecutive_dead}) "
+                f"-> alert (probe bypassed)")
+    verdict = probe_fn(agent)
+    if verdict is None:
+        return (True, " (probe-inconclusive)",
+                f"[{agent}] STALE re-probe FAILED -> FAIL-OPEN alert (probe-inconclusive)")
+    if verdict == "dead":
+        return (True, "", f"[{agent}] STALE re-probe=dead -> confirmed, alert")
+    return (False, "",
+            f"[{agent}] STALE re-probe={verdict} -> false-STALE SUPPRESSED (cache-artifact)")
+
 
 # OPS-166 immediate heal webhook (n8n telegram-heal -> dashboard hard-respawn).
 HEAL_WEBHOOK_URL = "http://127.0.0.1:5678/webhook/telegram-heal"
@@ -102,6 +160,13 @@ def main(argv: list[str]) -> int:
     p.add_argument("--stale-minutes", type=int, default=90)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--now-ms", type=int, default=None)
+    p.add_argument("--probe-command", default=None,
+                   help="command that runs the read-only per-agent liveness probe; "
+                        "the agent name is appended as the final arg. Default: "
+                        "node <install>/dist/web/per-agent-pipe-probe-cli.js")
+    p.add_argument("--no-probe", action="store_true",
+                   help="disable the live re-probe (legacy: alert straight off the cache)")
+    p.add_argument("--probe-timeout", type=int, default=DEFAULT_PROBE_TIMEOUT)
     args = p.parse_args(argv)
 
     store_path = Path(args.store)
@@ -119,7 +184,7 @@ def main(argv: list[str]) -> int:
         files.extend(glob.glob(pat))
     files = sorted(set(files))
 
-    stale_agents: list[str] = []
+    stale_records: list[dict] = []
     ok_agents: list[str] = []
     skipped_agents: list[str] = []
     heal_candidates: list[tuple[str, int]] = []  # (agent, consecutiveDead) for OPS-166 webhook
@@ -168,7 +233,10 @@ def main(argv: list[str]) -> int:
 
         age_ms = now_ms - last_healthy
         if consecutive_dead >= 2 or age_ms > stale_threshold_ms:
-            stale_agents.append(f"{agent}(dead={consecutive_dead},age={age_ms//60000}m)")
+            entry = f"{agent}(dead={consecutive_dead},age={age_ms//60000}m)"
+            stale_records.append({
+                "agent": agent, "entry": entry, "consecutive_dead": consecutive_dead,
+            })
             print(f"[{agent}] STALE consecutiveDead={consecutive_dead} age={age_ms//60000}m")
         else:
             ok_agents.append(agent)
@@ -197,16 +265,40 @@ def main(argv: list[str]) -> int:
             # covers recovery, so a webhook miss is logged, not fatal.
             print(f"Heal webhook FAILED for {agent}: {e}", file=sys.stderr)
 
+    # acd7fa13: the live re-probe never shells out on the n8n DEFAULT dry path
+    # (no explicit --probe-command) so that path stays side-effect-free; --no-probe
+    # disables it entirely (legacy escape). Otherwise it runs with the resolved
+    # probe command.
+    probe_active = not args.no_probe and not (args.dry_run and not args.probe_command)
+    probe_command = args.probe_command or default_probe_command(install_dir)
+
     # Stale inter-agent alert (>=2 sustained, or aged past threshold).
-    if stale_agents:
-        to_alert = []
-        for entry in stale_agents:
-            agent = entry.split("(")[0]
+    if stale_records:
+        # 1) 23h re-alert dedup (unchanged).
+        candidates = []
+        for rec in stale_records:
+            agent = rec["agent"]
             last_alert = suppress_state.get(agent, 0)
             if (now_s - last_alert) < REALERT_SUPPRESS_SECONDS:
                 print(f"[{agent}] STALE -> suppressed (alerted {now_s - last_alert}s ago)")
             else:
+                candidates.append(rec)
+
+        # 2) live re-probe: drop cache-artifact false-STALE before alerting.
+        to_alert = []
+        for rec in candidates:
+            agent, entry, cdead = rec["agent"], rec["entry"], rec["consecutive_dead"]
+            if not probe_active:
+                if args.dry_run and not args.no_probe and cdead < 2:
+                    print(f"[{agent}] STALE would re-probe (skipped: dry-run default)")
                 to_alert.append((agent, entry))
+                continue
+            keep, annotation, log_line = reprobe_decision(
+                agent, cdead,
+                lambda a: run_probe(a, probe_command, args.probe_timeout))
+            print(log_line)
+            if keep:
+                to_alert.append((agent, entry + annotation))
 
         if to_alert:
             content = ("Pipe-watchdog STALE: "
