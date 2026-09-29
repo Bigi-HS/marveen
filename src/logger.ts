@@ -15,8 +15,7 @@ import { hostname } from 'node:os'
 // deploy side must rotate with logrotate `copytruncate` (or swap in pino-roll) -- a plain
 // rename would leave this stream writing to the moved inode.
 // Reject LOG_DIR values containing path traversal sequences (card a49270c0, gauge MEDIUM).
-// mkdir:true amplifies the risk: the logger will CREATE the directory, so a traversal
-// sequence injected via env could write server.log to an arbitrary location on the host.
+// mkdir failure is now FATAL (card c57d0fee): silent transport drops are unacceptable.
 function validateLogDir(dir: string): string {
   if (dir.includes('../') || dir.endsWith('..')) {
     throw new Error(`LOG_DIR contains path traversal sequence: ${JSON.stringify(dir)}`)
@@ -24,8 +23,17 @@ function validateLogDir(dir: string): string {
   return dir
 }
 
+function ensureLogDirWritable(dir: string): void {
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch (err) {
+    throw new Error(`LOG_DIR not writable (mkdir failed): ${dir} -- ${String(err)}`)
+  }
+}
+
 export function buildLoggerOptions(env: NodeJS.ProcessEnv = process.env) {
   const logDir = validateLogDir(env.LOG_DIR ?? 'logs')
+  ensureLogDirWritable(logDir)
 
   const terminalTarget =
     env.NODE_ENV !== 'production'
@@ -34,7 +42,7 @@ export function buildLoggerOptions(env: NodeJS.ProcessEnv = process.env) {
 
   const fileTarget = {
     target: 'pino/file',
-    options: { destination: `${logDir}/server.log`, mkdir: true },
+    options: { destination: `${logDir}/server.log` },
   }
 
   return {
