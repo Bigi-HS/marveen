@@ -111,7 +111,7 @@ export const GRADUATION_TABLE: readonly GraduationPolicy[] = [
     fpThreshold: 0.05, // <=5% FP over the window
     windowDays: 14,
     owner: 'gauge',
-    revisitDate: '2026-09-19',
+    revisitDate: '2026-10-10',
     mode: 'log-only',
   },
   {
@@ -120,7 +120,7 @@ export const GRADUATION_TABLE: readonly GraduationPolicy[] = [
     fpThreshold: 0.05, // <=5% FP over the window
     windowDays: 14,
     owner: 'gauge',
-    revisitDate: '2026-09-19',
+    revisitDate: '2026-10-10',
     mode: 'log-only',
   },
   {
@@ -131,7 +131,7 @@ export const GRADUATION_TABLE: readonly GraduationPolicy[] = [
     fpThreshold: 0.1, // <=10% FP over the window
     windowDays: 7,
     owner: 'hibiki',
-    revisitDate: '2026-09-12',
+    revisitDate: '2026-10-03',
     mode: 'log-only',
   },
   {
@@ -140,7 +140,7 @@ export const GRADUATION_TABLE: readonly GraduationPolicy[] = [
     fpThreshold: 0.05, // <=5% FP over the window
     windowDays: 14,
     owner: 'gauge',
-    revisitDate: '2026-09-19',
+    revisitDate: '2026-10-10',
     mode: 'log-only',
   },
 ]
