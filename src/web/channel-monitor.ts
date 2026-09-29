@@ -43,7 +43,11 @@ import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller
 import { probeTelegramConflict } from './channel-conflict-probe.js'
 import { schedulePluginUnlockAfterRespawn } from './channel-plugin-unlock.js'
 import { detectPaneState, decidePaneErrorAlert, detectsUsageLimitMenu, detectsActiveLoginBox, detectsFeedbackModal, decideSustainedPaneAlert, type PaneErrorAlertState, type PaneState, type SustainedPaneAlertState } from '../pane-state.js'
-import { classifyStagedWedgeProbe, pendingAgeMinutes, DEFAULT_STAGED_WEDGE_THRESHOLDS } from './staged-wedge-probe.js'
+import {
+  classifyStagedWedgeProbe, pendingAgeMinutes, DEFAULT_STAGED_WEDGE_THRESHOLDS,
+  decideStagedWedgeEnter, DEFAULT_STAGED_WEDGE_ENTER_THRESHOLDS,
+  type StagedWedgeEnterState,
+} from './staged-wedge-probe.js'
 import {
   decideUsageLimitRecovery,
   DEFAULT_USAGE_LIMIT_WEDGE_THRESHOLDS,
@@ -151,6 +155,7 @@ const CLEAN_LOGIN_WEDGE_RECOVERY_STATE: LoginWedgeRecoveryState = {
 // is confirmed over 2 ticks, send-keys 0 to dismiss. Separate recovery state from
 // the LOG-ONLY alert tracker below.
 const agentSurveyModalRecovery: Map<string, SurveyModalRecoveryState> = new Map()
+const agentStagedWedgeEnter: Map<string, StagedWedgeEnterState> = new Map()
 const CLEAN_SUSTAINED_ALERT_STATE: SustainedPaneAlertState = { firstSeenAt: null, lastAlertAt: null, lastErrorAt: null }
 
 // Session-feedback modal wedge alerting (9644ed7c G6, LOG-ONLY). Same confirm/
@@ -1319,14 +1324,13 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         }
       }
 
-      // Staged-input wedge probe (9644ed7c G5, LOG-ONLY). Classifies each sub-
-      // agent's current wedge state from pane + pending-inbox signals. The two
-      // pure decision cores (classifyStagedWedgeProbe from staged-wedge-probe.ts
-      // and decideWedgeRecovery from wedge-detector.ts) were previously dead code
-      // (no live caller). This block wires classifyStagedWedgeProbe into the per-
-      // agent scan; LOG-ONLY -- the actual recovery actions (send-keys Enter / restart)
-      // are SLICE 2 gated separately. decideWedgeRecovery is wired in a follow-up
-      // PR when the lastOutboundAgeMin + sawAbandonEvent signals are plumbed.
+      // Staged-input wedge probe (9644ed7c G5 SLICE-2, card 4702232f). Classifies
+      // each sub-agent's current wedge state from pane + pending-inbox signals and
+      // sends a recovery Enter when the wedge is confirmed (pane 'typing' + overdue
+      // pending inbox). State is tracked per-agent to enforce a cooldown and attempt
+      // cap, mirroring the stuck-input-watcher.ts decideStuckInputRecovery pattern.
+      // decideWedgeRecovery (full restart, wedge-detector.ts) is wired separately
+      // when lastOutboundAgeMin + sawAbandonEvent signals are plumbed.
       if (!t.isMarveen && t.agentName) {
         const snap = pendingByAgent.get(t.agentName)
         const overdueMin = DEFAULT_STAGED_WEDGE_THRESHOLDS.overdueThresholdMin
@@ -1341,10 +1345,29 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           overdueThresholdMin: overdueMin,
           paneState,
         })
-        if (stagedVerdict === 'staged-wedge') {
+        const prevEnterState = agentStagedWedgeEnter.get(t.agentName) ?? { lastEnterAt: null, attempts: 0 }
+        const enterDecision = decideStagedWedgeEnter(
+          stagedVerdict, prevEnterState, Date.now(), DEFAULT_STAGED_WEDGE_ENTER_THRESHOLDS,
+        )
+        if (enterDecision.next.lastEnterAt === null && enterDecision.next.attempts === 0) {
+          agentStagedWedgeEnter.delete(t.agentName)
+        } else {
+          agentStagedWedgeEnter.set(t.agentName, enterDecision.next)
+        }
+        if (enterDecision.send) {
           logger.warn(
-            { agent: t.agentName, session: t.session, oldestPendingAgeMin, paneState },
-            'Agent staged-input wedge detected: overdue pending inbox + input non-empty (LOG-ONLY -- recovery not wired yet)',
+            { agent: t.agentName, session: t.session, oldestPendingAgeMin, attempt: enterDecision.next.attempts },
+            'staged-input wedge: overdue inbox + parked input confirmed -- sending recovery Enter',
+          )
+          try {
+            execFileSync(TMUX, ['send-keys', '-t', `=${t.session}:`, 'Enter'], { timeout: 5000 })
+          } catch (err) {
+            logger.error({ err, agent: t.agentName, session: t.session }, 'staged-input wedge: failed to send recovery Enter')
+          }
+        } else if (stagedVerdict === 'staged-wedge' && enterDecision.next.attempts >= DEFAULT_STAGED_WEDGE_ENTER_THRESHOLDS.maxAttempts) {
+          logger.warn(
+            { agent: t.agentName, session: t.session, oldestPendingAgeMin },
+            'staged-input wedge: max recovery Enters sent, Enter not fixing it -- giving up (manual intervention needed)',
           )
         } else if (stagedVerdict === 'pending-idle') {
           logger.info(
