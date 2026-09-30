@@ -413,7 +413,10 @@ _init_fresh_start_budget() {
 
 # Consume one start slot. Returns 0 (ok to start), 1 (budget exhausted).
 _consume_fresh_start() {
-  [ "${_FRESH_STARTS_REMAINING:-0}" -gt 0 ] || return 1
+  # Default to MAX when unset: functions called directly (bypassing tick())
+  # work correctly in tests and one-off invocations.
+  : "${_FRESH_STARTS_REMAINING:=$MAX_FRESH_STARTS_PER_TICK}"
+  [ "${_FRESH_STARTS_REMAINING}" -gt 0 ] || return 1
   _FRESH_STARTS_REMAINING=$(( _FRESH_STARTS_REMAINING - 1 ))
 }
 
