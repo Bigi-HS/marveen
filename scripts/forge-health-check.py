@@ -34,6 +34,7 @@ def read_token():
 
 
 def _probe_f1(token):
+    """Probe /api/agents; return parsed agents list on success, raise on failure."""
     req = urllib.request.Request(
         f"{DASHBOARD_URL}/api/agents",
         headers={"Authorization": f"Bearer {token}"},
@@ -41,25 +42,26 @@ def _probe_f1(token):
     resp = urllib.request.urlopen(req, timeout=5)
     if resp.status != 200:
         raise Exception(f"HTTP {resp.status}")
-    json.loads(resp.read())
+    return json.loads(resp.read())
 
 
 def check_f1_server(token):
     """F1: dashboard server up -- GET /api/agents returns 200 + valid JSON.
 
-    One immediate retry after a 2s pause to absorb transient ~2s slow responses.
+    Returns (ok, detail, agents) where agents is the parsed list on success, [] on
+    failure. One immediate retry after a 2s pause to absorb transient ~2s stalls.
     """
     try:
-        _probe_f1(token)
-        return True, "ok"
+        agents = _probe_f1(token)
+        return True, "ok", agents
     except Exception:
         pass
     time.sleep(2)
     try:
-        _probe_f1(token)
-        return True, "ok (retry)"
+        agents = _probe_f1(token)
+        return True, "ok (retry)", agents
     except Exception as exc:
-        return False, str(exc)
+        return False, str(exc), []
 
 
 def check_f2_sessions():
@@ -145,29 +147,20 @@ def main():
 
     failed = []
 
-    ok1, detail1 = check_f1_server(token)
+    ok1, detail1, agents = check_f1_server(token)
     if not ok1:
         failed.append((1, f"server: {detail1}"))
-
-    # Fetch agents list once; reuse for F3.
-    agents = []
-    try:
-        req = urllib.request.Request(
-            f"{DASHBOARD_URL}/api/agents",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        resp = urllib.request.urlopen(req, timeout=5)
-        agents = json.loads(resp.read())
-    except Exception:
-        pass  # F1 already captured this failure if applicable
 
     ok2, detail2 = check_f2_sessions()
     if not ok2:
         failed.append((2, detail2))
 
-    ok3, detail3 = check_f3_channel(token, agents)
-    if not ok3:
-        failed.append((3, detail3))
+    # F3 uses the agents list from F1 -- no second HTTP call.
+    # Skip F3 when F1 failed (server unavailable; channel state indeterminate).
+    if ok1:
+        ok3, detail3 = check_f3_channel(token, agents)
+        if not ok3:
+            failed.append((3, detail3))
 
     ok4, detail4 = check_f4_token()
     if not ok4:
