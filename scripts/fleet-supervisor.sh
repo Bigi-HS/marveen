@@ -1281,7 +1281,12 @@ fleet_wedge_sweep() {
   [ -f "$tok_file" ] || return 0
   local tok
   tok=$(cat "$tok_file" 2>/dev/null) || return 0
-  local payload="{\"from\":\"fleet-supervisor\",\"to\":\"marveen\",\"content\":\"${msg}\"}"
+  # Build JSON via python3 so embedded " in msg cannot produce malformed JSON.
+  local payload
+  payload=$(python3 -c \
+    "import json,sys; m=sys.argv[1]; print(json.dumps({'from':'fleet-supervisor','to':'marveen','content':m}))" \
+    "$msg" 2>/dev/null) || payload=''
+  [ -n "$payload" ] || return 0
   "$CURL" -sf -X POST "http://127.0.0.1:${DASH_PORT:-3420}/api/messages" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $tok" \
