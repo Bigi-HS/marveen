@@ -31,6 +31,8 @@ import urllib.request
 from pathlib import Path
 
 INSTALL_DIR = Path('/home/domin/marveen')
+GITHUB_REPO = 'Bigi-HS/marveen'
+GITHUB_API = 'https://api.github.com'
 BUNDLE_SCRIPT = INSTALL_DIR / 'scripts' / 'pre-gate-bundle.sh'
 DASH_API = 'http://localhost:3420'
 # Token file: try the Buster per-agent token first; operator token as fallback.
@@ -53,6 +55,26 @@ def _token():
                        'agents/buster/store/.dashboard-token or store/.dashboard-token exists.')
 
 
+def _github_token() -> str:
+    creds_path = os.path.expanduser('~/.git-credentials')
+    creds = open(creds_path).read()
+    m = re.search(r'https://[^:]+:([^@]+)@github\.com', creds)
+    if not m:
+        raise RuntimeError('GitHub PAT not found in ~/.git-credentials')
+    return m.group(1)
+
+
+def _github_get(path: str, gh_token: str) -> dict | list:
+    req = urllib.request.Request(
+        f'{GITHUB_API}{path}',
+        headers={'Authorization': f'token {gh_token}',
+                 'Accept': 'application/vnd.github+json',
+                 'User-Agent': 'buster-ci-runner'},
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode())
+
+
 def _api(method: str, path: str, body=None, token: str = '') -> dict:
     url = f'{DASH_API}{path}'
     data = json.dumps(body).encode() if body else None
@@ -67,15 +89,14 @@ def _api(method: str, path: str, body=None, token: str = '') -> dict:
 
 
 def _get_open_prs() -> list:
-    """Return list of open PRs via gh CLI: [{number, headRefOid, baseRefName}]."""
-    result = subprocess.run(
-        ['gh', 'pr', 'list', '--state', 'open',
-         '--json', 'number,headRefOid,baseRefName', '--limit', '30'],
-        capture_output=True, text=True, cwd=str(INSTALL_DIR), timeout=30
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f'gh pr list failed: {result.stderr.strip()}')
-    return json.loads(result.stdout)
+    """Return list of open PRs via GitHub REST API: [{number, headRefOid, baseRefName}]."""
+    prs = _github_get(f'/repos/{GITHUB_REPO}/pulls?state=open&per_page=30', _github_token())
+    return [
+        {'number': pr['number'],
+         'headRefOid': pr['head']['sha'],
+         'baseRefName': pr['base']['ref']}
+        for pr in prs
+    ]
 
 
 def _ci_already_done(pr_number: int, head_sha: str, token: str) -> bool:
@@ -212,16 +233,12 @@ def main():
         return 0  # fail-open: don't crash the heartbeat
 
     if args.pr:
-        # Single-PR mode: get head/base from gh
+        # Single-PR mode: get head/base from GitHub REST API
         try:
-            result = subprocess.run(
-                ['gh', 'pr', 'view', str(args.pr),
-                 '--json', 'number,headRefOid,baseRefName'],
-                capture_output=True, text=True, cwd=str(INSTALL_DIR), timeout=30
-            )
-            pr_info = json.loads(result.stdout)
-            run_pr(pr_info['number'], pr_info['headRefOid'],
-                   pr_info.get('baseRefName', 'develop'), token, args.dry_run)
+            gh_token = _github_token()
+            pr_data = _github_get(f'/repos/{GITHUB_REPO}/pulls/{args.pr}', gh_token)
+            run_pr(pr_data['number'], pr_data['head']['sha'],
+                   pr_data['base'].get('ref', 'develop'), token, args.dry_run)
         except Exception as e:
             print(f'Single-PR mode failed: {e}', file=sys.stderr)
         return 0
