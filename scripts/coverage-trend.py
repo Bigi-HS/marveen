@@ -139,6 +139,15 @@ def cmd_list(args):
         print(f"{r['id']:>4}  {pr:>6}  {(r['branch'] or '-'):<30}  {r['total_pct']:>6.1f}%  {date}")
 
 
+def select_new_low_files(first_files, last_files, threshold=80.0, limit=3):
+    """Return up to `limit` new files (absent from first_files) with coverage below threshold."""
+    return sorted(
+        [(pct, fp) for fp, pct in last_files.items()
+         if fp not in first_files and pct is not None and pct < threshold],
+        key=lambda x: x[0]
+    )[:limit]
+
+
 def cmd_chart(args):
     conn = open_db(Path(args.db))
     rows = conn.execute(
@@ -174,13 +183,7 @@ def cmd_chart(args):
     deltas.sort()
     top_losers = deltas[:5]
 
-    # New files with low coverage (present in last snapshot only, below threshold)
-    NEW_FILE_WARN_THRESHOLD = 80.0
-    new_low = sorted(
-        [(pct, fp) for fp, pct in last_files.items()
-         if fp not in first_files and pct < NEW_FILE_WARN_THRESHOLD],
-        key=lambda x: x[0]
-    )[:3]
+    new_low = select_new_low_files(first_files, last_files)
 
     # SVG
     W, H = 800, 360
@@ -256,10 +259,11 @@ def cmd_chart(args):
 
     # Top losers legend
     legend_y = H - PAD_B + 38
-    lines_svg.append(
-        f'<text x="{PAD_L}" y="{legend_y}" font-size="11" fill="#374151" font-weight="bold">'
-        f'Top losers (first → last):</text>'
-    )
+    if top_losers:
+        lines_svg.append(
+            f'<text x="{PAD_L}" y="{legend_y}" font-size="11" fill="#374151" font-weight="bold">'
+            f'Top losers (first → last):</text>'
+        )
     for idx, (delta, fp) in enumerate(top_losers):
         short = fp if len(fp) <= 55 else "..." + fp[-52:]
         lines_svg.append(
