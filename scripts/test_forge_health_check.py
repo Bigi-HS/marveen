@@ -30,25 +30,25 @@ class TestF1Server(unittest.TestCase):
 
     def test_pass_200_valid_json(self):
         with patch("urllib.request.urlopen", return_value=self._mock_resp()):
-            ok, detail = fhc.check_f1_server("tok")
+            ok, detail, _ = fhc.check_f1_server("tok")
         self.assertTrue(ok)
         self.assertEqual(detail, "ok")
 
     def test_fail_connection_refused(self):
         with patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
-            ok, detail = fhc.check_f1_server("tok")
+            ok, detail, _ = fhc.check_f1_server("tok")
         self.assertFalse(ok)
         self.assertIn("Connection refused", detail)
 
     def test_fail_non_200(self):
         with patch("urllib.request.urlopen", return_value=self._mock_resp(status=503)):
-            ok, detail = fhc.check_f1_server("tok")
+            ok, detail, _ = fhc.check_f1_server("tok")
         self.assertFalse(ok)
         self.assertIn("503", detail)
 
     def test_fail_invalid_json(self):
         with patch("urllib.request.urlopen", return_value=self._mock_resp(body=b"not-json")):
-            ok, detail = fhc.check_f1_server("tok")
+            ok, detail, _ = fhc.check_f1_server("tok")
         self.assertFalse(ok)
 
     def test_retry_succeeds_on_second_attempt(self):
@@ -56,7 +56,7 @@ class TestF1Server(unittest.TestCase):
         ok_resp = self._mock_resp()
         with patch("urllib.request.urlopen", side_effect=[Exception("timeout"), ok_resp]):
             with patch("time.sleep") as mock_sleep:
-                ok, detail = fhc.check_f1_server("tok")
+                ok, detail, _ = fhc.check_f1_server("tok")
         self.assertTrue(ok)
         mock_sleep.assert_called_once_with(2)
 
@@ -64,7 +64,7 @@ class TestF1Server(unittest.TestCase):
         """Both attempts fail -> fail with detail from second attempt."""
         with patch("urllib.request.urlopen", side_effect=[Exception("first"), Exception("second")]):
             with patch("time.sleep"):
-                ok, detail = fhc.check_f1_server("tok")
+                ok, detail, _ = fhc.check_f1_server("tok")
         self.assertFalse(ok)
         self.assertIn("second", detail)
 
@@ -72,7 +72,7 @@ class TestF1Server(unittest.TestCase):
         """Successful first attempt: urlopen called exactly once, no sleep."""
         with patch("urllib.request.urlopen", return_value=self._mock_resp()) as mu:
             with patch("time.sleep") as mock_sleep:
-                ok, _ = fhc.check_f1_server("tok")
+                ok, _, __ = fhc.check_f1_server("tok")
         self.assertTrue(ok)
         self.assertEqual(mu.call_count, 1)
         mock_sleep.assert_not_called()
@@ -82,9 +82,36 @@ class TestF1Server(unittest.TestCase):
         ok_resp = self._mock_resp()
         with patch("urllib.request.urlopen", side_effect=[Exception("blip"), ok_resp]):
             with patch("time.sleep"):
-                ok, detail = fhc.check_f1_server("tok")
+                ok, detail, _ = fhc.check_f1_server("tok")
         self.assertTrue(ok)
         self.assertIn("retry", detail)
+
+    def test_returns_agents_on_success(self):
+        """check_f1_server returns parsed agents list as third element on success."""
+        body = b'[{"name":"forge","channelHealthy":true}]'
+        with patch("urllib.request.urlopen", return_value=self._mock_resp(body=body)):
+            ok, detail, agents = fhc.check_f1_server("tok")
+        self.assertTrue(ok)
+        self.assertEqual(len(agents), 1)
+        self.assertEqual(agents[0]["name"], "forge")
+
+    def test_returns_empty_agents_on_failure(self):
+        """check_f1_server returns empty agents list when both attempts fail."""
+        with patch("urllib.request.urlopen", side_effect=[Exception("t1"), Exception("t2")]):
+            with patch("time.sleep"):
+                ok, detail, agents = fhc.check_f1_server("tok")
+        self.assertFalse(ok)
+        self.assertEqual(agents, [])
+
+    def test_returns_agents_from_retry(self):
+        """Successful retry returns agents parsed from the retry response."""
+        body = b'[{"name":"forge","channelHealthy":true}]'
+        ok_resp = self._mock_resp(body=body)
+        with patch("urllib.request.urlopen", side_effect=[Exception("blip"), ok_resp]):
+            with patch("time.sleep"):
+                ok, detail, agents = fhc.check_f1_server("tok")
+        self.assertTrue(ok)
+        self.assertEqual(agents[0]["name"], "forge")
 
 
 # ── F2: sessions + watchdogs ──────────────────────────────────────────────────
@@ -213,6 +240,67 @@ class TestReadToken(unittest.TestCase):
     def test_returns_none_on_empty(self):
         with patch("builtins.open", mock_open(read_data="   ")):
             self.assertIsNone(fhc.read_token())
+
+
+# ── main(): F3 skip when F1 fails + no second agents fetch ───────────────────
+
+class TestMainF3Behavior(unittest.TestCase):
+    """Integration tests for main() F3 skip-when-F1-fails and single-fetch behavior."""
+
+    def _mock_f1_ok_resp(self, agents_body=b'[{"name":"forge","channelHealthy":true}]'):
+        r = MagicMock()
+        r.status = 200
+        r.read.return_value = agents_body
+        return r
+
+    def test_f3_skipped_when_f1_fails(self):
+        """When F1 fails, F3 is not reported RED (no double-alert for server-down)."""
+        with patch("urllib.request.urlopen", side_effect=Exception("connection refused")):
+            with patch("time.sleep"):
+                with patch.object(fhc, "check_f2_sessions", return_value=(True, "ok")):
+                    with patch.object(fhc, "check_f4_token", return_value=(True, "ok")):
+                        with patch.object(fhc, "read_token", return_value="tok"):
+                            with patch.object(fhc, "send_alert") as mock_alert:
+                                try:
+                                    fhc.main()
+                                except SystemExit:
+                                    pass
+        if mock_alert.called:
+            failed_checks = mock_alert.call_args[0][1]
+            check_nums = [n for n, _ in failed_checks]
+            self.assertNotIn(3, check_nums, "F3 should not fire when F1 is down")
+            self.assertIn(1, check_nums)
+
+    def test_f3_fires_when_channel_unhealthy(self):
+        """When F1 ok but channelHealthy=False, F3 is RED."""
+        body = b'[{"name":"forge","channelHealthy":false}]'
+        ok_resp = self._mock_f1_ok_resp(body)
+        with patch("urllib.request.urlopen", return_value=ok_resp):
+            with patch.object(fhc, "check_f2_sessions", return_value=(True, "ok")):
+                with patch.object(fhc, "check_f4_token", return_value=(True, "ok")):
+                    with patch.object(fhc, "read_token", return_value="tok"):
+                        with patch.object(fhc, "send_alert") as mock_alert:
+                            try:
+                                fhc.main()
+                            except SystemExit:
+                                pass
+        self.assertTrue(mock_alert.called)
+        failed_checks = mock_alert.call_args[0][1]
+        check_nums = [n for n, _ in failed_checks]
+        self.assertIn(3, check_nums)
+
+    def test_main_only_one_agents_http_call(self):
+        """main() makes exactly one /api/agents HTTP call (F1 reused for F3)."""
+        ok_resp = self._mock_f1_ok_resp()
+        with patch("urllib.request.urlopen", return_value=ok_resp) as mu:
+            with patch.object(fhc, "check_f2_sessions", return_value=(True, "ok")):
+                with patch.object(fhc, "check_f4_token", return_value=(True, "ok")):
+                    with patch.object(fhc, "read_token", return_value="tok"):
+                        try:
+                            fhc.main()
+                        except SystemExit:
+                            pass
+        self.assertEqual(mu.call_count, 1, "Only one /api/agents call expected (F1 result reused)")
 
 
 if __name__ == "__main__":
