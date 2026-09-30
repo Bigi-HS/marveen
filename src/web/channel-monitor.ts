@@ -1314,7 +1314,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         if (surveyRecoveryDecision.action === 'dismiss') {
           logger.error(
             { agent: t.agentName, session: t.session, reason: surveyRecoveryDecision.reason },
-            'Survey-modal confirmed (pane + stuck inbox) -- sending keystroke "0" to dismiss',
+            'Survey-modal confirmed (pane detection, 2-tick sustained) -- sending keystroke "0" to dismiss',
           )
           try {
             execFileSync(TMUX, ['send-keys', '-t', `=${t.session}:`, '0'], { timeout: 5000 })
