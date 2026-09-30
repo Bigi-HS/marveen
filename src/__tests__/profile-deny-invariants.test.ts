@@ -51,7 +51,7 @@ describe('profile permissions.deny -- fleet-critical floor (item 2a)', () => {
   it('finds the committed profiles', () => {
     expect(profiles.length).toBeGreaterThanOrEqual(5)
     expect(profiles.map((p) => p.id).sort()).toEqual(
-      ['default', 'developer-junior', 'developer-senior', 'marketer', 'researcher'],
+      ['default', 'developer-junior', 'developer-senior', 'marketer', 'researcher', 'restricted-fallback'],
     )
   })
 

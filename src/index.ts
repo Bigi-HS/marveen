@@ -14,7 +14,7 @@ import { join } from 'node:path'
 import { execFileSync, execSync } from 'node:child_process'
 import type { Server as HttpServer } from 'node:http'
 import { PROJECT_ROOT, STORE_DIR, PID_FILENAME, WEB_PORT, MAIN_AGENT_ID, RESPAWN_ENABLED } from './config.js'
-import { initDatabase, deleteOldMessages, deleteOldGuardEvents } from './db.js'
+import { initDatabase, deleteOldMessages, deleteOldGuardEvents, createAgentMessage } from './db.js'
 import { initCodetreeDatabase } from './web/codetree-db.js'
 import { startMessageRetentionSweep } from './web/message-retention.js'
 import { runTierDemotionSweep } from './noa-memory.js'
@@ -27,7 +27,8 @@ import { logger, logCrashSync } from './logger.js'
 import { startInviteMonitor, stopInviteMonitor } from './web/channel-invites.js'
 import { ensureDiscordChannelGroup } from './web/discord-group-bootstrap.js'
 import { startChannelRequestWatcher, stopChannelRequestWatcher } from './web/channel-request-watcher.js'
-import { AGENTS_BASE_DIR } from './web/agent-config.js'
+import { AGENTS_BASE_DIR, listAgentNames, readAgentSecurityProfile } from './web/agent-config.js'
+import { profileExists } from './web/profiles.js'
 import { syncDeployedTip } from './deployed-tip.js'
 import {
   acquirePortLock,
@@ -416,6 +417,32 @@ const shutdown = (): void => {
   }
 }
 
+// SEC-098 PR-2: boot-time fleet audit of securityProfile values.
+// Iterates every agent-config; any agent with an unknown/invalid profile gets
+// a loud logger.error AND an inter-agent alert to MAIN_AGENT_ID and 'dave'
+// so the misconfiguration surfaces immediately rather than waiting for the
+// next agent restart.
+function runSecurityProfileFleetAudit(): void {
+  const names = listAgentNames()
+  for (const name of names) {
+    const profileId = readAgentSecurityProfile(name)
+    if (!profileExists(profileId)) {
+      logger.error(
+        { agent: name, securityProfile: profileId },
+        `SEC-098 boot-audit: agent "${name}" has invalid securityProfile "${profileId}" -- will get restricted-fallback at next launch. Fix agent-config.json immediately.`,
+      )
+      const alertContent =
+        `SEC-098 boot-audit ALERT: agent "${name}" has invalid securityProfile "${profileId}". ` +
+        `It will get restricted-fallback (strict, deny-all) at next launch. Fix agents/${name}/agent-config.json.`
+      for (const recipient of [MAIN_AGENT_ID, 'dave']) {
+        try {
+          createAgentMessage(MAIN_AGENT_ID, recipient, alertContent, false, 'high')
+        } catch { /* non-fatal: alert failure must not crash the dashboard */ }
+      }
+    }
+  }
+}
+
 async function main(): Promise<void> {
   console.log(BANNER)
 
@@ -564,6 +591,14 @@ async function main(): Promise<void> {
 
   // Slack channel request watcher (audit.jsonl -> pending_channel_requests).
   startChannelRequestWatcher()
+
+  // SEC-098 PR-2: boot-time security profile fleet audit.
+  // Logs an error + sends inter-agent alert for every agent-config whose
+  // securityProfile is unknown (typo, removed profile, corrupt config).
+  // Non-fatal: a bad config does NOT prevent the dashboard from starting --
+  // the offending agent will get restricted-fallback at its next launch, and
+  // the alert routes to the operator for a quick fix.
+  runSecurityProfileFleetAudit()
 
   // Web dashboard
   webServer = startWebServer(WEB_PORT)

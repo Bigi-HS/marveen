@@ -28,6 +28,30 @@ export const HARDCODED_DEFAULT_PROFILE: ProfileTemplate = {
   filesystem: { allow: [], deny: [] },
 }
 
+// SEC-098 PR-2: most-restrictive in-code constant used when an unknown/corrupt
+// securityProfile is encountered at agent launch. Strict mode + deny-all for the
+// main tool types so a misconfigured agent cannot make progress until its profile
+// is corrected. The corresponding templates/profiles/restricted-fallback.json
+// carries the full deny list (incl. UNIVERSAL_DENY entries); this in-code copy
+// is the emergency constant when that file is itself missing or corrupt.
+export const HARDCODED_RESTRICTIVE_PROFILE: ProfileTemplate = {
+  id: 'restricted-fallback',
+  label: 'Korlátozó visszaállás',
+  description: 'Ismeretlen securityProfile esetén alkalmazott legkisebb jogosultságú profil.',
+  permissionMode: 'strict',
+  filesystem: {
+    allow: [],
+    deny: [
+      'Bash(*)', 'Write(*)', 'Edit(*)', 'Read(*)', 'WebFetch(*)', 'WebSearch(*)',
+      'Bash(pkill:*)', 'Bash(killall:*)', 'Bash(npm publish:*)',
+      'Write(**/access.json)', 'Edit(**/access.json)',
+      'Read(**/.dashboard-token)', 'Read(**/.git-credentials)', 'Read(**/.claude.json)',
+      'Write(**/.mcp.json)', 'Edit(**/.mcp.json)',
+      'Write(**/settings.json)', 'Edit(**/settings.json)',
+    ],
+  },
+}
+
 export function listProfileTemplates(): ProfileTemplate[] {
   if (!existsSync(PROFILES_DIR)) return [HARDCODED_DEFAULT_PROFILE]
   const out: ProfileTemplate[] = []
@@ -86,22 +110,31 @@ export function loadProfileTemplate(id: string): ProfileTemplate {
       if (p && p.id) return p
     } catch { /* corrupt file -- fall through to the fail-safe below */ }
   }
-  // SEC-098: an unknown/removed/corrupt profile must NOT fall back SILENTLY to
-  // the permissive default -- that is fail-open (a typo or a removed profile
-  // downgrades the agent to permissive with no signal; found via PR#773 InkWell
-  // "developer-mid"). Log LOUDLY so the operator sees the misconfiguration.
-  // (The runtime fallback still returns the permissive default here so a single
-  // bad config cannot brick a channel-less agent; flipping this to a MOST-
-  // RESTRICTIVE fail-safe profile is the follow-up hardening, gated on every
-  // live agent-config being validated first -- otherwise agents currently
-  // running on an invalid profile would be locked out at their next launch.)
-  if (id !== HARDCODED_DEFAULT_PROFILE.id) {
-    logger.error(
-      { requestedProfile: id, knownProfiles: knownProfileIds() },
-      'securityProfile not found -- falling back to permissive default (FAIL-OPEN; fix the agent-config, SEC-098)',
-    )
+  // SEC-098 PR-2 (fail-SAFE flip): an unknown/removed/corrupt profile now falls
+  // back to HARDCODED_RESTRICTIVE_PROFILE (strict + deny-all) instead of the
+  // permissive default. This means a misconfigured channel-less agent is LOCKED
+  // OUT rather than silently running permissive -- the correct trade-off once
+  // every live agent-config is validated (all configs valid since PR#776+#777+#778).
+  //
+  // Exception: requesting 'default' explicitly still resolves normally (the
+  // default profile is always valid and loading it should never log an error).
+  if (id === HARDCODED_DEFAULT_PROFILE.id) {
+    return loadDefaultProfile()
   }
-  return loadDefaultProfile()
+  logger.error(
+    { requestedProfile: id, knownProfiles: knownProfileIds() },
+    'securityProfile not found -- falling back to restricted-fallback (FAIL-SAFE; fix the agent-config, SEC-098)',
+  )
+  // Try to load restricted-fallback from disk; if that too is missing, use the
+  // in-code constant so the fleet never silently goes permissive.
+  const rfPath = join(PROFILES_DIR, 'restricted-fallback.json')
+  if (existsSync(rfPath)) {
+    try {
+      const rf = JSON.parse(readFileSync(rfPath, 'utf-8')) as ProfileTemplate
+      if (rf && rf.id) return rf
+    } catch { /* fall through to the in-code constant */ }
+  }
+  return HARDCODED_RESTRICTIVE_PROFILE
 }
 
 // Decide whether a launched agent gets --dangerously-skip-permissions. A strict

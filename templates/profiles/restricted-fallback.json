@@ -1,0 +1,29 @@
+{
+  "id": "restricted-fallback",
+  "label": "Korlátozó visszaállás (ismeretlen profil)",
+  "description": "Ismeretlen/sérült securityProfile esetén alkalmazott legkisebb jogosultságú profil. Szigorú mód, minden veszélyes tool explicit tiltva. Átmeneti állapot -- javítsd az agent-config.json securityProfile mezőjét egy érvényes profilra.",
+  "permissionMode": "strict",
+  "filesystem": {
+    "allow": [],
+    "deny": [
+      "Bash(*)",
+      "Write(*)",
+      "Edit(*)",
+      "Read(*)",
+      "WebFetch(*)",
+      "WebSearch(*)",
+      "Bash(pkill:*)",
+      "Bash(killall:*)",
+      "Bash(npm publish:*)",
+      "Write(**/access.json)",
+      "Edit(**/access.json)",
+      "Read(**/.dashboard-token)",
+      "Read(**/.git-credentials)",
+      "Read(**/.claude.json)",
+      "Write(**/.mcp.json)",
+      "Edit(**/.mcp.json)",
+      "Write(**/settings.json)",
+      "Edit(**/settings.json)"
+    ]
+  }
+}
