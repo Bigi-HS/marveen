@@ -1,10 +1,10 @@
 // Survey modal auto-dismiss recovery (fce12f45).
 // When Claude Code's session-feedback modal appears and blocks input, auto-dismiss
-// by sending keystroke '0'. Two-stage gate: pane-present + inbox-stuck confirmation.
+// by sending keystroke '0'. Gate: modal visible for confirmationTicks consecutive ticks.
 
 export interface SurveyModalSignal {
   onFeedbackModal: boolean // Modal visible in pane tail (detectsFeedbackModal)
-  inboxStuck: boolean      // Pending messages >threshold age
+  inboxStuck: boolean      // Pending messages >threshold age (observability only; not gating)
 }
 
 export interface SurveyModalRecoveryState {
@@ -14,12 +14,12 @@ export interface SurveyModalRecoveryState {
 }
 
 export interface SurveyModalRecoveryThresholds {
-  confirmationTicks: number        // Ticks with (modal+stuck) before dismissing (gate threshold)
+  confirmationTicks: number        // Consecutive ticks with modal visible before dismissing
   cooldownMs: number               // Prevent rapid re-dismissal
 }
 
 export const DEFAULT_SURVEY_MODAL_RECOVERY_THRESHOLDS: SurveyModalRecoveryThresholds = {
-  confirmationTicks: 2,      // Modal + stuck confirmed over 2 ticks = gate passes
+  confirmationTicks: 2,      // Modal visible for 2 consecutive ticks = gate passes
   cooldownMs: 5 * 60 * 1000, // 5 min cooldown between dismissals
 }
 
@@ -38,8 +38,8 @@ export interface SurveyModalRecoveryDecision {
 }
 
 // Two-stage gate for survey-modal dismissal:
-// 1. DETECTION: modal visible in pane tail + inbox has pending messages
-// 2. CONFIRMATION: gate triggered only if BOTH conditions persist for confirmationTicks
+// 1. DETECTION: modal visible in pane tail (inbox-stuck not required)
+// 2. CONFIRMATION: gate triggered only if modal persists for confirmationTicks consecutive ticks
 // 3. COOLDOWN: prevent dismissal spam (5 min between dismissals)
 // 4. ACTION: send keystroke '0' to dismiss the modal
 //
@@ -51,8 +51,11 @@ export function decideSurveyModalRecovery(
   now: number,
   thresholds: SurveyModalRecoveryThresholds,
 ): SurveyModalRecoveryDecision {
-  // Gate 1: Both modal AND inbox-stuck must be true to increment detection count
-  const gatePass = signal.onFeedbackModal && signal.inboxStuck
+  // Gate 1: Modal visibility alone is sufficient to increment detection count.
+  // inbox-stuck is logged for observability but no longer gates dismissal:
+  // a modal visible for 2+ consecutive ticks is a blocker regardless of inbox state
+  // (claudia-case: heartbeat-only block with no pending inter-agent messages).
+  const gatePass = signal.onFeedbackModal
   const newConsecutive = gatePass ? state.consecutiveDetections + 1 : 0
 
   // Gate 2: Cooldown check (prevent dismissal spam)
@@ -67,9 +70,6 @@ export function decideSurveyModalRecovery(
   if (!signal.onFeedbackModal) {
     // Modal gone; reset counter
     reason = 'modal not visible'
-  } else if (!signal.inboxStuck) {
-    // Modal present but inbox not stuck (not a blocker by itself)
-    reason = 'modal present but inbox not stuck'
   } else if (cooldownActive) {
     // Gate passed but cooldown active
     reason = `cooldown active (${Math.round((thresholds.cooldownMs - (now - state.lastDismissalTs!)) / 1000)}s remaining)`

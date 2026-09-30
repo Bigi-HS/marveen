@@ -26,11 +26,19 @@ describe('decideSurveyModalRecovery -- two-stage gate', () => {
     expect(d.next.dismissalCount).toBe(1)
   })
 
-  it('FP-guard: modal present but inbox NOT stuck → no dismiss', () => {
+  it('FP-guard: modal present but inbox NOT stuck → gate still passes (inbox not required)', () => {
+    // inbox-stuck is no longer required. A modal visible for 2 consecutive ticks is
+    // sufficient to dismiss (claudia-case: heartbeat-only block, no pending inter-agent msgs).
     const signal: SurveyModalSignal = { onFeedbackModal: true, inboxStuck: false }
-    const d = decideSurveyModalRecovery(signal, CLEAN_SURVEY_MODAL_RECOVERY_STATE, t0, T)
+
+    // Tick 1: gate passes (counter increments), no action yet
+    let d = decideSurveyModalRecovery(signal, CLEAN_SURVEY_MODAL_RECOVERY_STATE, t0, T)
     expect(d.action).toBe('none')
-    expect(d.next.consecutiveDetections).toBe(0) // Counter reset because one gate condition failed
+    expect(d.next.consecutiveDetections).toBe(1) // Counter increments
+
+    // Tick 2: gate passes again, confirmation threshold met → dismiss
+    d = decideSurveyModalRecovery(signal, d.next, t0 + 1000, T)
+    expect(d.action).toBe('dismiss')
   })
 
   it('FP-guard: modal NOT visible → no dismiss', () => {
@@ -110,9 +118,10 @@ describe('decideSurveyModalRecovery -- session tracking', () => {
   })
 
   it('No action does not increment dismissal count', () => {
+    // Modal visible for only 1 tick → pending, count stays 0
     const signal: SurveyModalSignal = { onFeedbackModal: true, inboxStuck: false }
     const d = decideSurveyModalRecovery(signal, CLEAN_SURVEY_MODAL_RECOVERY_STATE, t0, T)
     expect(d.action).toBe('none')
-    expect(d.next.dismissalCount).toBe(0)
+    expect(d.next.dismissalCount).toBe(0) // No dismiss yet (1/2 ticks)
   })
 })
