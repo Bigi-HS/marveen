@@ -251,40 +251,87 @@ describe('AC-3e: resolveKanbanDispatchTarget pure unit tests', () => {
 // AC-4: Auto-archive sweep
 // ---------------------------------------------------------------------------
 
-describe('AC-4: runArchiveSweep', () => {
-  it('archives done cards older than DONE_ARCHIVE_DAYS', () => {
-    const staleTs = Math.floor(Date.now() / 1000) - 8 * 86400
+describe('AC-4 / card 48a92d27: runArchiveSweep', () => {
+  const DAY = 86400
+  const nowSec = () => Math.floor(Date.now() / 1000)
+  // Insert a raw row with explicit age columns (bypasses createCard so we can set
+  // last_moved / updated_at to arbitrary epochs, which the public API stamps to now).
+  const insertRow = (
+    id: string,
+    status: string,
+    opts: { last_moved?: number | null; updated_at: number },
+  ): void => {
     getNoaDb().prepare(
-      `INSERT INTO kanban_cards (id, title, status, priority, sort_order, created_at, updated_at)
-       VALUES ('stale-done', 'Old done card', 'done', 'normal', 1, ?, ?)`
-    ).run(staleTs, staleTs)
+      `INSERT INTO kanban_cards (id, title, status, priority, sort_order, created_at, updated_at, last_moved)
+       VALUES (?, ?, ?, 'normal', 1, ?, ?, ?)`
+    ).run(id, `card ${id}`, status, opts.updated_at, opts.updated_at, opts.last_moved ?? null)
+  }
+
+  it('archives a done card older than the window by last_moved', () => {
+    const old = nowSec() - 31 * DAY
+    insertRow('stale-lm', 'done', { last_moved: old, updated_at: old })
 
     const { archived } = runArchiveSweep()
     expect(archived).toBeGreaterThanOrEqual(1)
-
-    const archivedCards = listArchived()
-    expect(archivedCards.some((c) => c.id === 'stale-done')).toBe(true)
+    expect(listArchived().some((c) => c.id === 'stale-lm')).toBe(true)
   })
 
-  it('does not archive done cards updated recently', () => {
+  // Load-bearing: the ~300 legacy done cards carry NULL last_moved (they predate
+  // the column). Strict `last_moved < cut` would leave them unarchived forever;
+  // the COALESCE(last_moved, updated_at) fallback retires them via updated_at.
+  it('archives a legacy done card with NULL last_moved via the updated_at fallback', () => {
+    const old = nowSec() - 45 * DAY
+    insertRow('stale-null-lm', 'done', { last_moved: null, updated_at: old })
+
+    runArchiveSweep()
+    expect(listArchived().some((c) => c.id === 'stale-null-lm')).toBe(true)
+  })
+
+  // last_moved takes precedence over updated_at: a card that moved to done
+  // recently is kept even if a stale updated_at would otherwise select it.
+  it('keeps a done card whose last_moved is recent despite an old updated_at', () => {
+    insertRow('recent-lm', 'done', { last_moved: nowSec() - 2 * DAY, updated_at: nowSec() - 60 * DAY })
+
+    runArchiveSweep()
+    expect(listArchived().some((c) => c.id === 'recent-lm')).toBe(false)
+  })
+
+  it('does not archive a done card that is within the window', () => {
     const card = createCard({ title: 'Recent done', status: 'done', suppressIntake: true })
-    const { archived } = runArchiveSweep()
-    // The card was just created (now), so it should NOT be archived
-    const archivedCards = listArchived()
-    expect(archivedCards.some((c) => c.id === card.id)).toBe(false)
-    void archived
+    runArchiveSweep()
+    expect(listArchived().some((c) => c.id === card.id)).toBe(false)
   })
 
-  it('is idempotent: re-running produces 0 changes on already-archived cards', () => {
-    const staleTs = Math.floor(Date.now() / 1000) - 8 * 86400
-    getNoaDb().prepare(
-      `INSERT INTO kanban_cards (id, title, status, priority, sort_order, created_at, updated_at)
-       VALUES ('stale-done-2', 'Old done 2', 'done', 'normal', 1, ?, ?)`
-    ).run(staleTs, staleTs)
+  // Only status='done' is ever archived -- an aged card in any other lane stays.
+  it('never archives a non-done card however old', () => {
+    const old = nowSec() - 90 * DAY
+    insertRow('old-waiting', 'waiting', { last_moved: old, updated_at: old })
+    insertRow('old-inprog', 'in_progress', { last_moved: old, updated_at: old })
+
+    runArchiveSweep()
+    const archived = listArchived().map((c) => c.id)
+    expect(archived).not.toContain('old-waiting')
+    expect(archived).not.toContain('old-inprog')
+  })
+
+  it('is idempotent: a re-run archives 0 already-archived cards', () => {
+    const old = nowSec() - 31 * DAY
+    insertRow('stale-idem', 'done', { last_moved: old, updated_at: old })
 
     runArchiveSweep()
     const second = runArchiveSweep()
     expect(second.archived).toBe(0)
+  })
+
+  it('stamps last_moved when archiving (archive is a movement)', () => {
+    const old = nowSec() - 31 * DAY
+    insertRow('stale-stamp', 'done', { last_moved: old, updated_at: old })
+
+    const before = nowSec()
+    runArchiveSweep()
+    const row = getNoaDb().prepare('SELECT archived_at, last_moved FROM kanban_cards WHERE id=?').get('stale-stamp') as { archived_at: number; last_moved: number }
+    expect(row.archived_at).toBeGreaterThanOrEqual(before)
+    expect(row.last_moved).toBeGreaterThanOrEqual(before)
   })
 })
 

@@ -296,7 +296,13 @@ const ALLOWED_TRANSITIONS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ['done',        new Set(['planned'])],
 ])
 
-const DONE_ARCHIVE_DAYS = Number(process.env.DONE_ARCHIVE_DAYS ?? '7')
+// Retention window for the done-card auto-archive sweep (card 48a92d27). A done
+// card older than this is moved out of the active board so it stops bloating the
+// /api/kanban payload (the full-board JSON is serialized on the event loop; a
+// 1.5MB body under WAL contention blocked the loop ~10s and crash-looped the
+// dashboard). 30d keeps recent board history visible while retiring the long tail.
+// Reversible (unarchiveCard) and contract-safe (listCards already filters archived).
+const DONE_ARCHIVE_DAYS = Number(process.env.DONE_ARCHIVE_DAYS ?? '30')
 
 const BUILTIN_COLUMNS = new Set(['planned', 'in_progress', 'waiting', 'done', 'icebox'])
 
@@ -1015,11 +1021,30 @@ export function listComments(cardId: string): KanbanComment[] {
 // Archive sweep (AC-4)
 // ---------------------------------------------------------------------------
 
+/**
+ * Auto-archive done cards older than the retention window (card 48a92d27).
+ *
+ * Age = `COALESCE(last_moved, updated_at)`: last_moved is the accurate
+ * moved-to-done epoch when set, but ~half of the historical done cards predate
+ * the last_moved column (bulk migrations never wrote it) and carry a NULL there.
+ * Strict `last_moved < cut` would leave those ~300 legacy rows unarchived
+ * forever (a near-no-op -7% payload cut); the updated_at fallback retires them
+ * too (-43%). A done card with NULL last_moved has not had a status/assignee
+ * change since the column was added, so its updated_at is a safe age proxy --
+ * a genuinely recent done card always has last_moved set and is kept.
+ *
+ * Idempotent: `archived_at IS NULL OR archived_at = 0` (NOT_ARCHIVED_SQL) means a
+ * re-run touches zero already-archived rows. Reversible via unarchiveCard. This
+ * is both the recurring daily tick AND the one-time backfill -- the first run
+ * after deploy retires the accumulated long tail, every later run trims new
+ * arrivals so the board cannot re-bloat. Only `status='done'` is ever archived.
+ * Archiving counts as a movement, so last_moved is stamped alongside archived_at.
+ */
 export function runArchiveSweep(): { archived: number } {
   const threshold = Math.floor(Date.now() / 1000) - DONE_ARCHIVE_DAYS * 86400
   const result = getNoaDb().prepare(
-    `UPDATE kanban_cards SET archived_at=unixepoch(), updated_at=unixepoch()
-     WHERE status='done' AND archived_at IS NULL AND updated_at < ?`
+    `UPDATE kanban_cards SET archived_at=unixepoch(), updated_at=unixepoch(), last_moved=unixepoch()
+     WHERE status='done' AND (archived_at IS NULL OR archived_at = 0) AND COALESCE(last_moved, updated_at) < ?`
   ).run(threshold)
   return { archived: result.changes }
 }
