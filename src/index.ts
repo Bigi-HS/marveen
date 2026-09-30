@@ -18,6 +18,7 @@ import { initDatabase, deleteOldMessages, deleteOldGuardEvents, createAgentMessa
 import { initCodetreeDatabase } from './web/codetree-db.js'
 import { startMessageRetentionSweep } from './web/message-retention.js'
 import { runTierDemotionSweep } from './noa-memory.js'
+import { runArchiveSweep } from './noa-kanban.js'
 import { runDailyDigest } from './memory.js'
 import { initHeartbeat, stopHeartbeat } from './heartbeat.js'
 import { ensureHeartbeatAgent, HEARTBEAT_AGENT_NAME } from './web/heartbeat-agent-scaffold.js'
@@ -367,6 +368,7 @@ function releaseLock(): void {
 let decayInterval: NodeJS.Timeout | null = null
 let messageRetentionInterval: NodeJS.Timeout | null = null
 let guardEventRetentionInterval: NodeJS.Timeout | null = null
+let archiveSweepInterval: NodeJS.Timeout | null = null
 let digestTimer: NodeJS.Timeout | null = null
 let digestInterval: NodeJS.Timeout | null = null
 let heartbeatStarted = false
@@ -387,6 +389,7 @@ const shutdown = (): void => {
     if (decayInterval) clearInterval(decayInterval)
     if (messageRetentionInterval) clearInterval(messageRetentionInterval)
     if (guardEventRetentionInterval) clearInterval(guardEventRetentionInterval)
+    if (archiveSweepInterval) clearInterval(archiveSweepInterval)
     if (digestTimer) clearTimeout(digestTimer)
     if (digestInterval) clearInterval(digestInterval)
 
@@ -532,6 +535,28 @@ async function main(): Promise<void> {
   pruneGuardEvents()
   guardEventRetentionInterval = setInterval(pruneGuardEvents, 24 * 60 * 60 * 1000)
   logger.info('Guard-event retention sweep beallitva (24 oras)')
+
+  // Done-card auto-archive sweep (card 48a92d27). Without a call site the
+  // runArchiveSweep() function (present since AC-4) never ran, so done cards
+  // accumulated unbounded -- ~650 of them bloated the /api/kanban payload to
+  // 1.5MB, and serializing that on the event loop under WAL contention blocked
+  // the loop ~10s and crash-looped the dashboard. The boot run is the one-time
+  // backfill of the accumulated long tail; the daily interval keeps it trimmed.
+  // Guarded so a sweep error can never abort startup; the interval swallows its
+  // own tick errors via the same wrapper.
+  const runKanbanArchiveSweep = (): void => {
+    try {
+      const { archived } = runArchiveSweep()
+      if (archived > 0) {
+        logger.info({ archived }, 'kanban-archive-sweep: archived aged done cards')
+      }
+    } catch (err) {
+      logger.warn({ err }, 'kanban-archive-sweep: sweep failed (non-fatal)')
+    }
+  }
+  runKanbanArchiveSweep()
+  archiveSweepInterval = setInterval(runKanbanArchiveSweep, 24 * 60 * 60 * 1000)
+  logger.info('Kanban done-archive sweep beallitva (24 oras)')
 
   // Daily digest at 23:00. Timer handles kept so shutdown can drop them.
   function scheduleDailyDigest() {
