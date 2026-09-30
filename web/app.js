@@ -2913,56 +2913,84 @@ function showSmokeTestResult(output) {
   document.getElementById('smokeTestCloseBtn').addEventListener('click', () => overlay.remove())
 }
 
-// Pairing: refresh pending list
+// Pairing: refresh pending list (uses AC-2 /telegram-access endpoint for sub-agents)
 async function refreshPendingPairings() {
   if (!currentAgent) return
   const listEl = document.getElementById('chPendingList')
   try {
-    const res = await fetch(`${channelApiBase()}/pending`)
+    const isMain = currentAgent.name === window._marveen?.mainAgentId
+    const url = isMain
+      ? `${channelApiBase()}/pending`
+      : `/api/agents/${encodeURIComponent(currentAgent.name)}/telegram-access`
+    const res = await fetch(url)
     if (!res.ok) return
-    const pending = await res.json()
+    const data = await res.json()
+    const pending = isMain
+      ? data
+      : Object.entries(data.pending || {}).map(([code, e]) => ({ code, ...e }))
     listEl.innerHTML = ''
     if (pending.length === 0) {
       listEl.innerHTML = '<div style="font-size:12px; color:var(--text-muted); padding:6px 0;">Nincs várakozó párosítás</div>'
       return
     }
+    const now = Date.now()
     for (const p of pending) {
       const item = document.createElement('div')
       item.className = 'tg-pending-item'
-      const created = new Date(p.createdAt).toLocaleString('hu-HU')
+      const expired = p.expiresAt && p.expiresAt < now
+      const expLabel = p.expiresAt
+        ? (expired ? `<span style="color:var(--status-error);font-size:11px">Lejárt</span>` : `<span style="font-size:11px;color:var(--text-muted)">${new Date(p.expiresAt).toLocaleTimeString('hu-HU')}-ig</span>`)
+        : ''
       item.innerHTML = `
-        <div>
+        <div style="flex:1;min-width:0">
           <span class="tg-pending-code">${escapeHtml(p.code)}</span>
           <span class="tg-pending-sender">Sender: ${escapeHtml(p.senderId)}</span>
+          ${expLabel}
         </div>
-        <button class="btn-primary btn-compact" style="padding:5px 12px; font-size:12px; margin:0" data-code="${escapeHtml(p.code)}">Jóváhagyás</button>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button class="btn-primary btn-compact approve-btn" style="padding:5px 10px;font-size:12px;margin:0">Jóváhagyás</button>
+          <button class="btn-secondary btn-compact deny-btn" style="padding:5px 10px;font-size:12px;margin:0">Elutasítás</button>
+        </div>
       `
-      item.querySelector('button').addEventListener('click', async () => {
-        await approvePairing(p.code)
-      })
+      item.querySelector('.approve-btn').addEventListener('click', () => pairingAction('approve', p.code))
+      item.querySelector('.deny-btn').addEventListener('click', () => pairingAction('deny', p.code))
       listEl.appendChild(item)
     }
   } catch { /* ignore */ }
 }
 
-async function approvePairing(code) {
+async function pairingAction(action, code) {
   if (!currentAgent) return
+  const isMain = currentAgent.name === window._marveen?.mainAgentId
   try {
-    const res = await fetch(`${channelApiBase()}/approve`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code }),
-    })
+    let res
+    if (isMain) {
+      res = await fetch(`${channelApiBase()}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code }),
+      })
+    } else {
+      res = await fetch(`/api/agents/${encodeURIComponent(currentAgent.name)}/telegram-access`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, code }),
+      })
+    }
     if (!res.ok) {
       const err = await res.json()
-      throw new Error(err.error || 'Jóváhagyási hiba')
+      throw new Error(err.error || 'Hiba')
     }
-    showToast('Párosítás jóváhagyva!')
+    showToast(action === 'approve' ? 'Párosítás jóváhagyva!' : 'Párosítás elutasítva')
     refreshPendingPairings()
-    refreshAllowedList()
+    if (action === 'approve') refreshAllowedList()
   } catch (err) {
     showToast(`Hiba: ${err.message}`)
   }
+}
+
+async function approvePairing(code) {
+  return pairingAction('approve', code)
 }
 
 document.getElementById('chRefreshPendingBtn').addEventListener('click', refreshPendingPairings)

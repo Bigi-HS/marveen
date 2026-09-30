@@ -220,6 +220,53 @@ function resolveAccessPath(name: string, provider: ChannelProviderType): string 
   return join(dir, 'access.json')
 }
 
+interface PendingEntry {
+  senderId: string
+  chatId: string
+  createdAt: number
+  expiresAt: number
+  replies?: number
+}
+
+export function readTelegramAccessView(accessPath: string): { pending: Record<string, PendingEntry>; allowFrom: string[] } {
+  try {
+    const access = JSON.parse(readFileSync(accessPath, 'utf-8')) as { pending?: Record<string, PendingEntry>; allowFrom?: string[] }
+    return {
+      pending: access.pending ?? {},
+      allowFrom: access.allowFrom ?? [],
+    }
+  } catch {
+    return { pending: {}, allowFrom: [] }
+  }
+}
+
+export function applyTelegramAccessAction(
+  accessPath: string,
+  action: 'approve' | 'deny',
+  code: string,
+): { senderId: string } | null {
+  let access: { pending?: Record<string, PendingEntry>; allowFrom?: string[]; dmPolicy?: string; [k: string]: unknown }
+  try { access = JSON.parse(readFileSync(accessPath, 'utf-8')) } catch { access = {} }
+  const pending = access.pending ?? {}
+  const entry = pending[code]
+  if (!entry) return null
+
+  if (action === 'approve') {
+    access.allowFrom = access.allowFrom ?? []
+    if (!access.allowFrom.includes(entry.senderId)) access.allowFrom.push(entry.senderId)
+    const approvedDir = join(accessPath, '..', 'approved')
+    mkdirSync(approvedDir, { recursive: true })
+    writeFileSync(join(approvedDir, entry.senderId), '')
+  }
+
+  delete pending[code]
+  access.pending = pending
+  // NOTE: dmPolicy is intentionally NOT modified (AC-2 security constraint)
+  mkdirSync(join(accessPath, '..'), { recursive: true })
+  atomicWriteFileSync(accessPath, JSON.stringify(access, null, 2))
+  return { senderId: entry.senderId }
+}
+
 function countPendingPairings(name: string): number {
   const accessPath = resolveAccessPath(name, 'telegram')
   try {
@@ -1044,6 +1091,40 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       json(res, { error: 'Failed to approve pairing' }, 500)
     }
     return true
+  }
+
+  // GET /api/agents/:id/telegram-access   — unified pending+allowFrom view (AC-2, 86e0c042)
+  // PUT /api/agents/:id/telegram-access   — approve/deny a pending pairing code
+  const tgAccessMatch = path.match(/^\/api\/agents\/([^/]+)\/telegram-access$/)
+  if (tgAccessMatch) {
+    const name = decodeURIComponent(tgAccessMatch[1])
+    if (name === MAIN_AGENT_ID) { json(res, { error: 'Not available for main agent' }, 403); return true }
+    if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    const accessPath = resolveAccessPath(name, 'telegram')
+
+    if (method === 'GET') {
+      json(res, readTelegramAccessView(accessPath))
+      return true
+    }
+
+    if (method === 'PUT') {
+      const body = await readBody(req)
+      let parsed: { action?: string; code?: string }
+      try { parsed = JSON.parse(body.toString()) } catch { json(res, { error: 'Invalid JSON' }, 400); return true }
+      const { action, code } = parsed
+      if (!code?.trim()) { json(res, { error: 'code required' }, 400); return true }
+      if (action !== 'approve' && action !== 'deny') { json(res, { error: 'action must be approve or deny' }, 400); return true }
+      try {
+        const result = applyTelegramAccessAction(accessPath, action as 'approve' | 'deny', code.trim())
+        if (!result) { json(res, { error: 'Code not found' }, 404); return true }
+        logger.info({ name, action, code: code.trim(), senderId: result.senderId }, 'Telegram access action applied')
+        json(res, { ok: true, senderId: result.senderId })
+      } catch (err) {
+        logger.error({ err }, 'Failed to apply telegram access action')
+        json(res, { error: 'Failed to apply action' }, 500)
+      }
+      return true
+    }
   }
 
   // GET /api/agents/:name/channels/:provider/allowed (legacy: /telegram/allowed)
