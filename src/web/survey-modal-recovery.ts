@@ -1,10 +1,10 @@
 // Survey modal auto-dismiss recovery (fce12f45).
 // When Claude Code's session-feedback modal appears and blocks input, auto-dismiss
-// by sending keystroke '0'. Two-stage gate: pane-present + inbox-stuck confirmation.
+// by sending keystroke '0'. Gate: modal visible for confirmationTicks consecutive ticks.
 
 export interface SurveyModalSignal {
   onFeedbackModal: boolean // Modal visible in pane tail (detectsFeedbackModal)
-  inboxStuck: boolean      // Pending messages >threshold age
+  inboxStuck: boolean      // Pending messages >threshold age (observability only; not gating)
 }
 
 export interface SurveyModalRecoveryState {
@@ -14,12 +14,12 @@ export interface SurveyModalRecoveryState {
 }
 
 export interface SurveyModalRecoveryThresholds {
-  confirmationTicks: number        // Ticks with (modal+stuck) before dismissing (gate threshold)
+  confirmationTicks: number        // Consecutive ticks with modal visible before dismissing
   cooldownMs: number               // Prevent rapid re-dismissal
 }
 
 export const DEFAULT_SURVEY_MODAL_RECOVERY_THRESHOLDS: SurveyModalRecoveryThresholds = {
-  confirmationTicks: 2,      // Modal + stuck confirmed over 2 ticks = gate passes
+  confirmationTicks: 2,      // Modal visible for 2 consecutive ticks = gate passes
   cooldownMs: 5 * 60 * 1000, // 5 min cooldown between dismissals
 }
 
@@ -38,8 +38,8 @@ export interface SurveyModalRecoveryDecision {
 }
 
 // Two-stage gate for survey-modal dismissal:
-// 1. DETECTION: modal visible in pane tail + inbox has pending messages
-// 2. CONFIRMATION: gate triggered only if BOTH conditions persist for confirmationTicks
+// 1. DETECTION: modal visible in pane tail (inbox-stuck not required)
+// 2. CONFIRMATION: gate triggered only if modal persists for confirmationTicks consecutive ticks
 // 3. COOLDOWN: prevent dismissal spam (5 min between dismissals)
 // 4. ACTION: send keystroke '0' to dismiss the modal
 //

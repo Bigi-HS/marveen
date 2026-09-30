@@ -27,8 +27,8 @@ describe('decideSurveyModalRecovery -- two-stage gate', () => {
   })
 
   it('FP-guard: modal present but inbox NOT stuck → gate still passes (inbox not required)', () => {
-    // fce12f45 design fix: inbox-stuck is no longer required. A modal visible for 2
-    // consecutive ticks is sufficient to dismiss (claudia-case: heartbeat-only block).
+    // inbox-stuck is no longer required. A modal visible for 2 consecutive ticks is
+    // sufficient to dismiss (claudia-case: heartbeat-only block, no pending inter-agent msgs).
     const signal: SurveyModalSignal = { onFeedbackModal: true, inboxStuck: false }
 
     // Tick 1: gate passes (counter increments), no action yet
