@@ -6,8 +6,11 @@ Checks for prompt-injection patterns and enforces the 500-line size cap.
 Outputs findings to stderr; exit 0 always (log-only, not blocking).
 Blocking mode planned post K-0 Boss-GO.
 
-settings.json wiring intentionally deferred: hook is log-only pending K-0 Boss-GO.
-Activation = register in ~/.claude/settings.json after policy ratification.
+Wired (log-only) into .claude/settings.json PostToolUse via a Write|Edit
+matcher (card 1b4a5b99). This registration is marveen CWD-scoped only -- it
+does NOT cover agents that run from their own config dirs; fleet-wide
+coverage is a separate follow-up. Blocking mode stays deferred pending
+K-0 Boss-GO on the skills-supplychain policy.
 
 Hook invocation: called with tool result JSON on stdin.
 Env: TOOL_NAME, TOOL_INPUT_PATH (set by Claude Code hook runtime).
@@ -65,7 +68,8 @@ def audit(path: str) -> list[tuple[str, str, int | str]]:
     """Return list of (severity, name, line_no_or_detail) findings."""
     findings: list[tuple[str, str, int | str]] = []
     try:
-        lines = open(path, encoding='utf-8', errors='replace').readlines()
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            lines = fh.readlines()
     except OSError:
         return []
 
