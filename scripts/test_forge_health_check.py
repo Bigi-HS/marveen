@@ -51,6 +51,41 @@ class TestF1Server(unittest.TestCase):
             ok, detail = fhc.check_f1_server("tok")
         self.assertFalse(ok)
 
+    def test_retry_succeeds_on_second_attempt(self):
+        """Transient failure on first attempt; second attempt OK -> pass."""
+        ok_resp = self._mock_resp()
+        with patch("urllib.request.urlopen", side_effect=[Exception("timeout"), ok_resp]):
+            with patch("time.sleep") as mock_sleep:
+                ok, detail = fhc.check_f1_server("tok")
+        self.assertTrue(ok)
+        mock_sleep.assert_called_once_with(2)
+
+    def test_retry_fails_on_both_attempts(self):
+        """Both attempts fail -> fail with detail from second attempt."""
+        with patch("urllib.request.urlopen", side_effect=[Exception("first"), Exception("second")]):
+            with patch("time.sleep"):
+                ok, detail = fhc.check_f1_server("tok")
+        self.assertFalse(ok)
+        self.assertIn("second", detail)
+
+    def test_no_retry_on_success(self):
+        """Successful first attempt: urlopen called exactly once, no sleep."""
+        with patch("urllib.request.urlopen", return_value=self._mock_resp()) as mu:
+            with patch("time.sleep") as mock_sleep:
+                ok, _ = fhc.check_f1_server("tok")
+        self.assertTrue(ok)
+        self.assertEqual(mu.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    def test_retry_detail_contains_retry_label(self):
+        """Successful retry includes 'retry' in detail string."""
+        ok_resp = self._mock_resp()
+        with patch("urllib.request.urlopen", side_effect=[Exception("blip"), ok_resp]):
+            with patch("time.sleep"):
+                ok, detail = fhc.check_f1_server("tok")
+        self.assertTrue(ok)
+        self.assertIn("retry", detail)
+
 
 # ── F2: sessions + watchdogs ──────────────────────────────────────────────────
 

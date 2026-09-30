@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -32,18 +33,31 @@ def read_token():
         return None
 
 
+def _probe_f1(token):
+    req = urllib.request.Request(
+        f"{DASHBOARD_URL}/api/agents",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    resp = urllib.request.urlopen(req, timeout=5)
+    if resp.status != 200:
+        raise Exception(f"HTTP {resp.status}")
+    json.loads(resp.read())
+
+
 def check_f1_server(token):
-    """F1: dashboard server up -- GET /api/agents returns 200 + valid JSON."""
+    """F1: dashboard server up -- GET /api/agents returns 200 + valid JSON.
+
+    One immediate retry after a 2s pause to absorb transient ~2s slow responses.
+    """
     try:
-        req = urllib.request.Request(
-            f"{DASHBOARD_URL}/api/agents",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        resp = urllib.request.urlopen(req, timeout=5)
-        if resp.status != 200:
-            return False, f"HTTP {resp.status}"
-        json.loads(resp.read())
+        _probe_f1(token)
         return True, "ok"
+    except Exception:
+        pass
+    time.sleep(2)
+    try:
+        _probe_f1(token)
+        return True, "ok (retry)"
     except Exception as exc:
         return False, str(exc)
 
