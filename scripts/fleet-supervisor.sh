@@ -92,6 +92,16 @@ TICK_SECONDS=60
 SETTLE_SECONDS=8            # how long a freshly launched component must survive
 RETRY_BASE_SECONDS=30       # first backoff after a rapid failure
 RETRY_MAX_SECONDS=$((30*60))  # cap: token-exhaustion long-wait
+# WAKE-STORM GUARD (OPS/96ef336a): max new watchdog spawns per tick to prevent
+# thundering-herd load spikes (e.g. 6 sleep-pool agents waking simultaneously).
+# Env-overridable for tests. Default=3: covers an orderly wake-wave without a
+# multi-minute lag for large (14+) always-on pools (most are already running).
+MAX_FRESH_STARTS_PER_TICK="${FLEET_MAX_FRESH_STARTS:-3}"
+# Path to loadavg file and nproc; overridable for tests.
+_FLEET_LOADAVG_FILE="${FLEET_LOADAVG_FILE:-/proc/loadavg}"
+_FLEET_NPROC="${FLEET_NPROC:-$(nproc 2>/dev/null || echo 2)}"
+# Consolidated wedge sweep interval (seconds). Env-overridable for tests.
+FLEET_WEDGE_SWEEP_INTERVAL="${FLEET_WEDGE_SWEEP_INTERVAL:-300}"
 # Hibiki token-free daily push: minimum seconds between push invocations from the
 # tick loop (the push script is itself idempotent; this only bounds how often we
 # spawn python). Matches the old cron cadence. Env-overridable for tests.
@@ -344,6 +354,9 @@ ensure_agent_watchdogs() {
     pgrep -f "scripts/agent-watchdog.sh $n\$" >/dev/null 2>&1 && continue
     if [ -x "$INSTALL_DIR/scripts/agent-watchdog.sh" ]; then
       if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start agent-watchdog.sh $n"; continue; fi
+      # WAKE-STORM GUARD: skip start if system load is too high or tick budget spent.
+      _load_permits_start || { log "agent-watchdog $n: load high, deferring to next tick"; continue; }
+      _consume_fresh_start || { log "agent-watchdog $n: fresh-start cap reached, will retry next tick"; continue; }
       nohup bash "$INSTALL_DIR/scripts/agent-watchdog.sh" "$n" >> "$STORE/${n}-watchdog.log" 2>&1 9>&- &
       disown 2>/dev/null || true
       log "agent-watchdog $n: started"
@@ -389,6 +402,36 @@ is_sleep_eligible() {
   return 1
 }
 
+# --- WAKE-STORM GUARD helpers (OPS/96ef336a) ---------------------------------
+# Per-tick fresh-start budget: reset once at the top of each tick, consumed
+# once per new watchdog spawn. Prevents thundering-herd load spikes when many
+# agents' watchdogs die or wake up simultaneously.
+
+_init_fresh_start_budget() {
+  _FRESH_STARTS_REMAINING="$MAX_FRESH_STARTS_PER_TICK"
+}
+
+# Consume one start slot. Returns 0 (ok to start), 1 (budget exhausted).
+_consume_fresh_start() {
+  [ "${_FRESH_STARTS_REMAINING:-0}" -gt 0 ] || return 1
+  _FRESH_STARTS_REMAINING=$(( _FRESH_STARTS_REMAINING - 1 ))
+}
+
+# Returns 0 (ok to start) when 1-min load < 2*nproc, 1 (too high) otherwise.
+# Reads from $_FLEET_LOADAVG_FILE (overridable for tests); fails OPEN (returns 0)
+# when the file is absent so a missing /proc never blocks all agent starts.
+_load_permits_start() {
+  local lf="${FLEET_LOADAVG_FILE:-$_FLEET_LOADAVG_FILE}"
+  [ -f "$lf" ] || return 0  # fail-open: no loadavg -> always permit
+  local load_raw nproc_count load_scaled threshold
+  load_raw=$(awk '{print $1}' "$lf" 2>/dev/null) || return 0
+  nproc_count="${FLEET_NPROC:-$_FLEET_NPROC}"
+  # Scale to integers (avoid floating-point): load*100 vs 2*nproc*100.
+  load_scaled=$(printf '%.0f' "$(echo "$load_raw * 100" | bc 2>/dev/null || echo 0)")
+  threshold=$(( nproc_count * 200 ))
+  [ "${load_scaled:-0}" -lt "$threshold" ]
+}
+
 # ensure_sleep_agent_watchdogs: start one scripts/sleep-agent-watchdog.sh per
 # eligible agent when the flag is set. Enforces mutual exclusion by first STOPPING
 # any already-running always-on agent-watchdog.sh for the same id (two loops must
@@ -411,6 +454,9 @@ ensure_sleep_agent_watchdogs() {
     pgrep -f "scripts/sleep-agent-watchdog.sh $n\$" >/dev/null 2>&1 && continue
     if [ -x "$INSTALL_DIR/scripts/sleep-agent-watchdog.sh" ]; then
       if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start sleep-agent-watchdog.sh $n"; continue; fi
+      # WAKE-STORM GUARD: sleep->wake starts are the primary thundering-herd risk.
+      _load_permits_start || { log "sleep-agent-watchdog $n: load high, deferring wake to next tick"; continue; }
+      _consume_fresh_start || { log "sleep-agent-watchdog $n: fresh-start cap reached, will retry next tick"; continue; }
       nohup bash "$INSTALL_DIR/scripts/sleep-agent-watchdog.sh" "$n" >> "$STORE/${n}-sleep-watchdog.log" 2>&1 9>&- &
       disown 2>/dev/null || true
       log "sleep-agent-watchdog $n: started"
@@ -428,6 +474,9 @@ ensure_channel_watchdogs() {
     pgrep -f "scripts/${n}-watchdog.sh" >/dev/null 2>&1 && continue
     if [ -x "$INSTALL_DIR/scripts/${n}-watchdog.sh" ]; then
       if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start ${n}-watchdog.sh"; continue; fi
+      # WAKE-STORM GUARD
+      _load_permits_start || { log "${n}-watchdog: load high, deferring to next tick"; continue; }
+      _consume_fresh_start || { log "${n}-watchdog: fresh-start cap reached, will retry next tick"; continue; }
       nohup bash "$INSTALL_DIR/scripts/${n}-watchdog.sh" >> "$STORE/${n}-watchdog.log" 2>&1 9>&- &
       disown 2>/dev/null || true
       log "${n}-watchdog: started"
@@ -1180,8 +1229,71 @@ guard_presence_check() {
   fi
 }
 
+# --- FLEET WEDGE SWEEP (OPS/96ef336a) ----------------------------------------
+# Periodic (~5 min) classification of all known agent sessions.
+# Classifies: dead | wedge-G1(enter-stuck) | wedge-G2(usage-limit) |
+#             wedge-G6(survey) | healthy.
+# Sends ONE marveen inter-agent message when any agent is stuck beyond what the
+# per-agent watchdogs handle automatically. Dead agents are auto-recovered by
+# their watchdogs; only wedge states that need operator action are flagged here.
+#
+# Agent list is env-overridable (FLEET_TEST_SWEEP_AGENTS) so tests can inject a
+# small subset without forking a real tmux.
+fleet_wedge_sweep() {
+  local now throttle_key last
+  now=$(date +%s)
+  throttle_key="$STATE_DIR/fleet-wedge-sweep.last"
+  last=$(cat "$throttle_key" 2>/dev/null || echo 0)
+  [ $(( now - last )) -lt "${FLEET_WEDGE_SWEEP_INTERVAL:-300}" ] && return 0
+  echo "$now" > "$throttle_key"
+
+  local agents="${FLEET_TEST_SWEEP_AGENTS:-gauge quill applegate radar blackbeard morgan roberts kidd rackham bonny avery vane bellamy inkwell forge chad thor claudia bigben hibiki devil-advocate bond scout gyore percy buster blackbart dave}"
+  local dead_list="" wedged_list="" healthy_count=0 n pane_text session
+
+  for n in $agents; do
+    session="agent-$n"
+    if ! session_alive "$session"; then
+      dead_list="$dead_list $n"
+      continue
+    fi
+    pane_text=$("$TMUX_BIN" capture-pane -t "=$session:0.0" -p 2>/dev/null) || { healthy_count=$((healthy_count+1)); continue; }
+    case "$pane_text" in
+      *"Usage limit"*|*"weekly limit"*|*"credit"*|*"budget"*)
+        wedged_list="$wedged_list ${n}:G2" ;;
+      *"Press Enter"*|*"press enter"*)
+        wedged_list="$wedged_list ${n}:G1" ;;
+      *"survey"*|*"Share feedback"*|*"How would you rate"*)
+        wedged_list="$wedged_list ${n}:G6" ;;
+      *)
+        healthy_count=$((healthy_count+1)) ;;
+    esac
+  done
+
+  # Only alert on wedge states (dead = watchdog auto-recovers; no alert needed).
+  [ -z "$wedged_list" ] && return 0
+
+  local msg="fleet-wedge-sweep: wedged:${wedged_list# } dead:${dead_list# } healthy:${healthy_count}"
+  log "$msg"
+
+  # Post via dashboard API if available.
+  [ -n "$CURL" ] || return 0
+  local tok_file="$STORE/.dashboard-token"
+  [ -f "$tok_file" ] || return 0
+  local tok
+  tok=$(cat "$tok_file" 2>/dev/null) || return 0
+  local payload="{\"from\":\"fleet-supervisor\",\"to\":\"marveen\",\"content\":\"${msg}\"}"
+  "$CURL" -sf -X POST "http://127.0.0.1:${DASH_PORT:-3420}/api/messages" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $tok" \
+    -d "$payload" >/dev/null 2>&1 \
+    || log "fleet-wedge-sweep: alert delivery failed (dashboard may be down)"
+}
+
 tick() {
   [ -n "$TMUX_BIN" ] || { log "tmux not on PATH -- cannot supervise"; return; }
+
+  # 0-pre) WAKE-STORM GUARD: reset per-tick fresh-start budget (OPS/96ef336a).
+  _init_fresh_start_budget
 
   # 0) CREDENTIALS -- keep all agents on the single auto-refreshing main token
   reconcile_agent_creds
@@ -1276,6 +1388,9 @@ tick() {
   check_zepp_freshness
   # 17) N8N KANBAN BRIDGE (Windows-side n8n -> WSL2 dashboard API forwarder -- card e4d64187)
   ensure_n8n_kanban_bridge
+  # 18) FLEET WEDGE SWEEP (~5min interval; OPS/96ef336a): classify all agents,
+  #     send one marveen alert if anything is stuck beyond auto-recovery.
+  fleet_wedge_sweep
 }
 
 # --- main ------------------------------------------------------------------
