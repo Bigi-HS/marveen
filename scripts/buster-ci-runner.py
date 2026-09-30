@@ -57,7 +57,8 @@ def _token():
 
 def _github_token() -> str:
     creds_path = os.path.expanduser('~/.git-credentials')
-    creds = open(creds_path).read()
+    with open(creds_path) as fh:
+        creds = fh.read()
     m = re.search(r'https://[^:]+:([^@]+)@github\.com', creds)
     if not m:
         raise RuntimeError('GitHub PAT not found in ~/.git-credentials')
