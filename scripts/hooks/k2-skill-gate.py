@@ -6,6 +6,9 @@ Checks for prompt-injection patterns and enforces the 500-line size cap.
 Outputs findings to stderr; exit 0 always (log-only, not blocking).
 Blocking mode planned post K-0 Boss-GO.
 
+settings.json wiring intentionally deferred: hook is log-only pending K-0 Boss-GO.
+Activation = register in ~/.claude/settings.json after policy ratification.
+
 Hook invocation: called with tool result JSON on stdin.
 Env: TOOL_NAME, TOOL_INPUT_PATH (set by Claude Code hook runtime).
 """
@@ -41,9 +44,11 @@ _PATTERNS = [
         r'\$ARGUMENTS|\$\{ARGUMENTS\}', re.IGNORECASE)),
 ]
 
-# Zero-width / bidi smuggling (Unicode ranges)
-_ZERO_WIDTH_RE = re.compile(
-    r'[​-‏‪-‮﻿]')
+# Zero-width / bidi smuggling -- \uXXXX escapes (re module interprets them in raw strings):
+# U+200B-U+200F: zero-width space through right-to-left mark
+# U+202A-U+202E: bidi embedding/override controls (LRE, RLE, PDF, LRO, RLO)
+# U+FEFF: zero-width no-break space / BOM
+_ZERO_WIDTH_RE = re.compile(r'[\u200b-\u200f\u202a-\u202e\ufeff]')
 
 SIZE_LIMIT = 500  # lines
 
@@ -56,15 +61,15 @@ def _is_skill_file(path: str) -> bool:
             os.path.basename(normalized).upper() == 'SKILL.MD')
 
 
-def audit(path: str) -> list[tuple[str, str, int]]:
-    """Return list of (severity, name, line_no) findings."""
-    findings = []
+def audit(path: str) -> list[tuple[str, str, int | str]]:
+    """Return list of (severity, name, line_no_or_detail) findings."""
+    findings: list[tuple[str, str, int | str]] = []
     try:
         lines = open(path, encoding='utf-8', errors='replace').readlines()
     except OSError:
         return []
 
-    # Size check
+    # Size check (detail is a string, not a line number)
     if len(lines) > SIZE_LIMIT:
         findings.append(('MEDIUM', 'size-limit-exceeded',
                           f'{len(lines)} lines (max {SIZE_LIMIT})'))
