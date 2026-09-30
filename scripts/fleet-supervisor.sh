@@ -1234,11 +1234,14 @@ guard_presence_check() {
 
 # --- FLEET WEDGE SWEEP (OPS/96ef336a) ----------------------------------------
 # Periodic (~5 min) classification of all known agent sessions.
-# Classifies: dead | wedge-G1(enter-stuck) | wedge-G2(usage-limit) |
-#             wedge-G6(survey) | healthy.
+# Classifies: dead | asleep(sleep-eligible, by-design) |
+#             wedge-G1(enter-stuck) | wedge-G2(usage-limit) |
+#             wedge-G6(session-feedback modal) | healthy.
 # Sends ONE marveen inter-agent message when any agent is stuck beyond what the
 # per-agent watchdogs handle automatically. Dead agents are auto-recovered by
-# their watchdogs; only wedge states that need operator action are flagged here.
+# their watchdogs; asleep agents are down by design (sleep-eligible.txt set, 0
+# processes after recycle) -- NOT dead; only wedge states that need operator
+# action are flagged here.
 #
 # Agent list is env-overridable (FLEET_TEST_SWEEP_AGENTS) so tests can inject a
 # small subset without forking a real tmux.
@@ -1251,12 +1254,19 @@ fleet_wedge_sweep() {
   echo "$now" > "$throttle_key"
 
   local agents="${FLEET_TEST_SWEEP_AGENTS:-gauge quill applegate radar blackbeard morgan roberts kidd rackham bonny avery vane bellamy inkwell forge chad thor claudia bigben hibiki devil-advocate bond scout gyore percy buster blackbart dave}"
-  local dead_list="" wedged_list="" healthy_count=0 n pane_text session
+  local dead_list="" asleep_list="" wedged_list="" healthy_count=0 n pane_text session
 
   for n in $agents; do
     session="agent-$n"
     if ! session_alive "$session"; then
-      dead_list="$dead_list $n"
+      # Sleep-eligible agents are down BY DESIGN after recycle (0 processes),
+      # not dead. Classifying them as dead conflates by-design sleep with a
+      # crash and is misleading (card 55219b86, marveen FP dimension 2).
+      if is_sleep_eligible "$n"; then
+        asleep_list="$asleep_list $n"
+      else
+        dead_list="$dead_list $n"
+      fi
       continue
     fi
     pane_text=$("$TMUX_BIN" capture-pane -t "=$session:0.0" -p 2>/dev/null) || { healthy_count=$((healthy_count+1)); continue; }
@@ -1265,7 +1275,12 @@ fleet_wedge_sweep() {
         wedged_list="$wedged_list ${n}:G2" ;;
       *"Press Enter"*|*"press enter"*)
         wedged_list="$wedged_list ${n}:G1" ;;
-      *"survey"*|*"Share feedback"*|*"How would you rate"*)
+      # Session-feedback modal. Match the canonical marker used by the TS
+      # detector (pane-state.ts FEEDBACK_MODAL_RX: "how is claude doing this
+      # session"), NOT a bare *survey* glob -- the latter false-matched the
+      # filename "survey-modal-recovery.js" in an editing agent's pane and
+      # flagged active agents as G6 (card 55219b86, FP dimension 1).
+      *"How is Claude doing this session"*|*"Share feedback"*|*"How would you rate"*)
         wedged_list="$wedged_list ${n}:G6" ;;
       *)
         healthy_count=$((healthy_count+1)) ;;
@@ -1275,7 +1290,7 @@ fleet_wedge_sweep() {
   # Only alert on wedge states (dead = watchdog auto-recovers; no alert needed).
   [ -z "$wedged_list" ] && return 0
 
-  local msg="fleet-wedge-sweep: wedged:${wedged_list# } dead:${dead_list# } healthy:${healthy_count}"
+  local msg="fleet-wedge-sweep: wedged:${wedged_list# } dead:${dead_list# } asleep:${asleep_list# } healthy:${healthy_count}"
   log "$msg"
 
   # Post via dashboard API if available.

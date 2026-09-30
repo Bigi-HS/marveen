@@ -135,9 +135,15 @@ ALERTS_FILE="$TMP/alerts"
 CURL="curl"
 echo "testtoken" > "$TMP/store/.dashboard-token"
 
+PAYLOADS_FILE="$TMP/payloads"
+: > "$PAYLOADS_FILE"
 curl() {
   case "$*" in
-    *"/api/messages"*) echo "ALERT" >> "$ALERTS_FILE" ;;
+    *"/api/messages"*)
+      echo "ALERT" >> "$ALERTS_FILE"
+      # Capture the full arg string so tests can inspect the sweep payload
+      # (wedged/dead/asleep classification lists).
+      printf '%s\n' "$*" >> "$PAYLOADS_FILE" ;;
   esac
   return 0
 }
@@ -145,8 +151,13 @@ curl() {
 tmux() {
   case "$*" in
     "has-session -t =agent-dead-one") return 1 ;;
+    "has-session -t =agent-sleepy")   return 1 ;;
     "has-session -t ="*)              return 0 ;;
     "capture-pane "*"agent-wedged"*)  printf '%s' "Usage limit reached -- weekly limit" ;;
+    "capture-pane "*"agent-surveyer"*) printf '%s' "How is Claude doing this session?" ;;
+    # Active agent EDITING the survey-modal-recovery.js file -- its pane contains
+    # the filename "survey". The old bare *survey* glob false-matched this as G6.
+    "capture-pane "*"agent-editor"*)  printf '%s' "  M src/web/survey-modal-recovery.js  (editing)" ;;
     "capture-pane "*)                 printf '%s' "> healthy pane prompt" ;;
     *) return 1 ;;
   esac
@@ -204,6 +215,62 @@ alert_count=$(count_alerts "ALERT")
 [ "$alert_count" -eq 0 ] \
   && ok "fleet_wedge_sweep: no alert for dead agent (watchdog scope, not sweep)" \
   || bad "fleet_wedge_sweep: unexpected alert for dead agent (got $alert_count)"
+
+# ── FLEET WEDGE SWEEP: G6 canonical-marker + *survey* FP guard (card 55219b86) ─
+
+# G6 fires on the canonical session-feedback marker.
+: > "$ALERTS_FILE"; : > "$PAYLOADS_FILE"
+rm -f "$STATE_DIR/fleet-wedge-sweep.last"
+FLEET_TEST_SWEEP_AGENTS="surveyer"
+fleet_wedge_sweep
+if [ "$(count_alerts "ALERT")" -ge 1 ] && grep -q "surveyer:G6" "$PAYLOADS_FILE"; then
+  ok "fleet_wedge_sweep: G6 fires on canonical 'How is Claude doing this session' marker"
+else
+  bad "fleet_wedge_sweep: G6 did not fire on canonical feedback-modal marker"
+fi
+
+# REGRESSION GUARD: an agent EDITING survey-modal-recovery.js must NOT be G6.
+# The old bare *survey* glob false-matched the filename and flagged active
+# agents (thor/claudia) as wedged. This is the load-bearing assertion for the fix.
+: > "$ALERTS_FILE"; : > "$PAYLOADS_FILE"
+rm -f "$STATE_DIR/fleet-wedge-sweep.last"
+FLEET_TEST_SWEEP_AGENTS="editor"
+fleet_wedge_sweep
+if [ "$(count_alerts "ALERT")" -eq 0 ]; then
+  ok "fleet_wedge_sweep: agent editing survey-modal-recovery.js is NOT G6 (no *survey* FP)"
+else
+  bad "fleet_wedge_sweep: FALSE-POSITIVE -- filename 'survey' flagged as G6"
+fi
+
+# ── FLEET WEDGE SWEEP: asleep vs dead classification (card 55219b86 dim 2) ─────
+
+# Mark 'sleepy' as sleep-eligible; when its session is down it is asleep-by-design,
+# NOT dead. Pair with a wedged agent so the alert (and its payload) is emitted.
+echo "sleepy" > "$TMP/store/sleep-eligible.txt"
+
+: > "$ALERTS_FILE"; : > "$PAYLOADS_FILE"
+rm -f "$STATE_DIR/fleet-wedge-sweep.last"
+FLEET_TEST_SWEEP_AGENTS="surveyer sleepy"
+fleet_wedge_sweep
+# Fields are "dead:<ids> asleep:<ids>" with NO space after the colon
+# (leading space stripped by ${list# }). Use [^ ]* so the negative dead-check
+# does not bleed into the asleep field on the single-line payload.
+if grep -qE "asleep:[^ ]*sleepy" "$PAYLOADS_FILE" && ! grep -qE "dead:[^ ]*sleepy" "$PAYLOADS_FILE"; then
+  ok "fleet_wedge_sweep: sleep-eligible down agent classified asleep, not dead"
+else
+  bad "fleet_wedge_sweep: sleepy not classified asleep (payload: $(cat "$PAYLOADS_FILE"))"
+fi
+
+# A genuinely-down NON-sleep-eligible agent is still dead.
+: > "$ALERTS_FILE"; : > "$PAYLOADS_FILE"
+rm -f "$STATE_DIR/fleet-wedge-sweep.last"
+FLEET_TEST_SWEEP_AGENTS="surveyer dead-one"
+fleet_wedge_sweep
+if grep -qE "dead:[^ ]*dead-one" "$PAYLOADS_FILE" && ! grep -qE "asleep:[^ ]*dead-one" "$PAYLOADS_FILE"; then
+  ok "fleet_wedge_sweep: non-sleep-eligible down agent still classified dead"
+else
+  bad "fleet_wedge_sweep: dead-one misclassified (payload: $(cat "$PAYLOADS_FILE"))"
+fi
 
 # ── results ─────────────────────────────────────────────────────────────────
 MAX_FRESH_STARTS_PER_TICK="${FLEET_MAX_FRESH_STARTS:-3}"  # reset to default
