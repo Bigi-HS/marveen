@@ -250,6 +250,7 @@ export function applyTelegramAccessAction(
   const pending = access.pending ?? {}
   const entry = pending[code]
   if (!entry) return null
+  if (entry.expiresAt && entry.expiresAt < Date.now()) return null
 
   if (action === 'approve') {
     access.allowFrom = access.allowFrom ?? []

@@ -102,6 +102,11 @@ describe('applyTelegramAccessAction — approve', () => {
     writeAccess({ allowFrom: [], pending: {} })
     expect(applyTelegramAccessAction(accessPath, 'approve', 'NOPE')).toBeNull()
   })
+
+  it('returns null for expired code (chad LOW fix)', () => {
+    writeAccess({ allowFrom: [], pending: { EXP: { senderId: 'x', chatId: 'y', createdAt: NOW, expiresAt: PAST } } })
+    expect(applyTelegramAccessAction(accessPath, 'approve', 'EXP')).toBeNull()
+  })
 })
 
 describe('applyTelegramAccessAction — deny', () => {
