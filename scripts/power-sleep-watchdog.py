@@ -24,11 +24,15 @@ def log(msg):
         pass
 
 def get_ac_standbyidle():
-    result = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-Command",
-         "powercfg /query SCHEME_CURRENT SUB_SLEEP STANDBYIDLE"],
-        capture_output=True, text=True, encoding="cp1250", errors="replace", timeout=15
-    )
+    try:
+        result = subprocess.run(
+            [POWERSHELL, "-NoProfile", "-Command",
+             "powercfg /query SCHEME_CURRENT SUB_SLEEP STANDBYIDLE"],
+            capture_output=True, text=True, encoding="cp1250", errors="replace", timeout=15
+        )
+    except subprocess.TimeoutExpired:
+        log("ERROR: powercfg timed out (>15s) -- skipping check")
+        return None
     for line in result.stdout.splitlines():
         if "Current AC Power Setting Index" in line:
             parts = line.strip().split(":", 1)
@@ -71,7 +75,7 @@ def main():
             urllib.request.urlopen(req, timeout=5)
         except Exception as e:
             log(f"WARNING: could not send alert: {e}")
-        sys.exit(1)
+        sys.exit(2)  # exit 2 = drift (distinguishable from exit 1 = error)
 
 if __name__ == "__main__":
     main()
