@@ -2,6 +2,7 @@ import { rotateDashboardToken, rotateSessionSecret } from '../dashboard-auth.js'
 import { logger } from '../../logger.js'
 import { json } from '../http-helpers.js'
 import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
+import { runDbVacuum } from '../../db.js'
 import type { RouteContext } from './types.js'
 
 // Admin endpoints for operating the dashboard at runtime. Every route here is
@@ -71,6 +72,18 @@ export async function tryHandleAdmin(ctx: RouteContext): Promise<boolean> {
     rotateSessionSecret()
     logger.warn('Incident response: dashboard token rotated + all sessions revoked (card 456293c4)')
     json(res, { ok: true, token: fresh })
+    return true
+  }
+
+  // One-shot VACUUM: reclaims freelist pages + enables incremental auto_vacuum
+  // (card 0d88fec1). VACUUM is synchronous and event-loop-blocking; run only
+  // in a low-traffic window (e.g. early morning via this endpoint or the forge
+  // operator). Returns before/after file sizes and duration for observability.
+  if (path === '/api/admin/vacuum' && method === 'POST') {
+    logger.warn('Admin VACUUM initiated (card 0d88fec1)')
+    const result = runDbVacuum()
+    logger.info(result, 'Admin VACUUM complete')
+    json(res, { ok: true, ...result })
     return true
   }
 

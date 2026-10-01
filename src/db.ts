@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3'
 import { join, sep } from 'node:path'
-import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync, realpathSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync, realpathSync, statSync } from 'node:fs'
 import { STORE_DIR, DB_FILENAME, PROJECT_ROOT } from './config.js'
 import { logger } from './logger.js'
 import { emitDashboardEvent, type DashboardEvent } from './event-bus.js'
@@ -1640,5 +1640,47 @@ export function getGuardEventSummary(days = 14): {
   const highSevPassCount = highSevPassRows.reduce((sum, r) => sum + r.count, 0)
   const highSevPass: HighSevPassSummary = { count: highSevPassCount, byPattern: highSevPassRows }
   return { byMechanismVerdict, byPattern, bySender, highSevPass }
+}
+
+// ── Maintenance: VACUUM + incremental auto_vacuum (card 0d88fec1) ────────────
+
+export interface VacuumResult {
+  beforeBytes: number
+  afterBytes: number
+  durationMs: number
+  autoVacuumMode: number
+}
+
+// Switches the DB to incremental auto_vacuum mode and runs a full VACUUM.
+// VACUUM requires exclusive access and blocks the better-sqlite3 event loop
+// for the duration -- run only in a low-traffic window or via the admin API.
+// The one-time cost enables incremental_vacuum (PRAGMA incremental_vacuum)
+// going forward, which is cheap and bounded. Safe to call repeatedly (idempotent).
+export function runDbVacuum(): VacuumResult {
+  const beforeBytes = !db.memory ? (() => { try { return statSync(db.name).size } catch { return 0 } })() : 0
+  const t0 = Date.now()
+  db.pragma('auto_vacuum = INCREMENTAL')
+  db.exec('VACUUM')
+  const durationMs = Date.now() - t0
+  const afterBytes = !db.memory ? (() => { try { return statSync(db.name).size } catch { return 0 } })() : 0
+  const autoVacuumMode = db.pragma('auto_vacuum', { simple: true }) as number
+  return { beforeBytes, afterBytes, durationMs, autoVacuumMode }
+}
+
+// Reclaims up to maxPages free pages from the incremental auto_vacuum freelist.
+// No-op when auto_vacuum != INCREMENTAL. Returns the number of pages reclaimed.
+// Cheap and bounded -- safe to run on a regular interval.
+export function runIncrementalVacuum(maxPages = 500): number {
+  const before = (db.pragma('freelist_count', { simple: true }) as number) ?? 0
+  if (before === 0) return 0
+  db.pragma(`incremental_vacuum(${maxPages})`)
+  const after = (db.pragma('freelist_count', { simple: true }) as number) ?? 0
+  return Math.max(0, before - after)
+}
+
+// Returns the current noa.db main file size in bytes, or null for in-memory DBs.
+export function getDbFileSizeBytes(): number | null {
+  if (db.memory) return null
+  try { return statSync(db.name).size } catch { return null }
 }
 
