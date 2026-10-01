@@ -23,8 +23,11 @@ function snap(over: Partial<ZeppDailySnapshot>): ZeppDailySnapshot {
 }
 
 // --- Real violating fixtures, one per rule, through validateHealthPlausibility ------------------
-// Rule 1: activeKcal 5 at 15,790 steps (live 2026-08-25 loss).
-const KCAL_VIOLATION = snap({ steps: 15790, activity: { activeKcal: 5, distanceM: 12040 } })
+// Rule 1: activeKcal 5 at 15,790 steps (live 2026-08-25 loss). distanceM kept in the
+// recalibrated plausible band (9000/15790 = 0.570 m/step, within [0.25, 0.65]; see
+// recalibration 4a6cb4a 2026-09-25) so ONLY the kcal rule fires -- the per-rule isolation
+// test below depends on distance-steps staying clean for this fixture.
+const KCAL_VIOLATION = snap({ steps: 15790, activity: { activeKcal: 5, distanceM: 9000 } })
 // Rule 2: distance 456m at 15,790 steps (live 2026-08-25 loss).
 const DISTANCE_VIOLATION = snap({ steps: 15790, activity: { activeKcal: 700, distanceM: 456 } })
 // Rule 3: day distance < workout sum (physically impossible).
@@ -63,7 +66,8 @@ describe('applyPlausibilityGate seam: block-mode mark is wired end-to-end (AC-1/
   })
 
   it('a clean snapshot is never blocked, even with every rule in block mode', () => {
-    const clean = snap({ steps: 12000, activity: { activeKcal: 700, distanceM: 8000 } })
+    // 7000/12000 = 0.583 m/step, mid-band of the recalibrated [0.25, 0.65] distance-steps rule.
+    const clean = snap({ steps: 12000, activity: { activeKcal: 700, distanceM: 7000 } })
     const allBlock: PlausibilityModeConfig = Object.fromEntries(
       PLAUSIBILITY_RULE_IDS.map((id) => [id, 'block']),
     )

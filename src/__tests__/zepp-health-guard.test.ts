@@ -135,7 +135,9 @@ describe('checkSnapshot', () => {
 
     it('does NOT raise a suspect alert for a coherent day', () => {
       const alerts = checkSnapshot(
-        snap({ status: 'ok', steps: 13694, activity: { activeKcal: 1011, distanceM: 12040 } }),
+        // 8000/13694 = 0.584 m/step, inside the recalibrated [0.25, 0.65] distance-steps band
+        // (4a6cb4a 2026-09-25); kcal 1011/13694 = 0.074 is inside [0.02, 0.10]. A coherent day.
+        snap({ status: 'ok', steps: 13694, activity: { activeKcal: 1011, distanceM: 8000 } }),
         BASE_NOW_MS,
       )
       expect(alerts.some((a) => a.type === 'suspect')).toBe(false)
