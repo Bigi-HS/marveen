@@ -82,11 +82,15 @@ log() { echo "$*" >> "$LOGFILE"; }
 
 QUEUE_FILE="$TMP/store/forge-escalation-queue.jsonl"
 
+# Helper: reset throttle state so each AC exercises the real forward path.
+reset_throttle() { rm -f "$STATE_DIR/forge-queue-forward.next"; }
+
 # ---------------------------------------------------------------------------
 # AC1: queue has 1 entry + dashboard alive + POST ok -> entry forwarded, queue empty
 # ---------------------------------------------------------------------------
 echo "--- AC1: 1 entry + dash alive + POST ok -> forwarded + queue cleared ---"
 : > "$LOGFILE"
+reset_throttle
 rm -f "$QUEUE_FILE"
 echo '{"ts":"2026-10-01T10:00:00Z","from":"forge","content":"health EXIT:1","type":"alert"}' > "$QUEUE_FILE"
 chmod 0600 "$QUEUE_FILE"
@@ -106,6 +110,7 @@ assert_contains "AC1: forwarded logged" "forge-queue: forwarded" "$LOGFILE"
 # ---------------------------------------------------------------------------
 echo "--- AC2: 1 entry + dash down -> entry stays ---"
 : > "$LOGFILE"
+reset_throttle
 rm -f "$QUEUE_FILE"
 echo '{"ts":"2026-10-01T10:01:00Z","from":"forge","content":"health EXIT:1","type":"alert"}' > "$QUEUE_FILE"
 CURL="$(make_curl_dead)"
@@ -123,6 +128,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "--- AC3: missing queue -> no-op ---"
 : > "$LOGFILE"
+reset_throttle
 rm -f "$QUEUE_FILE"
 CURL="$(make_curl_alive_post_ok)"
 
@@ -137,6 +143,7 @@ pass "AC3: no crash on missing queue"
 # ---------------------------------------------------------------------------
 echo "--- AC4: >50 entries -> cap enforced ---"
 : > "$LOGFILE"
+reset_throttle
 rm -f "$QUEUE_FILE"
 for i in $(seq 1 55); do
     echo "{\"ts\":\"2026-10-01T10:$(printf '%02d' $i):00Z\",\"from\":\"forge\",\"content\":\"alert $i\",\"type\":\"alert\"}" >> "$QUEUE_FILE"
@@ -146,17 +153,17 @@ CURL="$(make_curl_alive_post_ok)"
 
 check_forge_escalation_queue
 
-# After forward queue should be empty (all forwarded), but pre-forward cap = 50
-# We check the log says how many were forwarded and it's <=50
+# Cap is applied before forwarding: at most 50 entries forwarded regardless of input size.
+# Verify via log count (grep for the number in "forwarded N entr*").
 if grep -qF "forge-queue: forwarded" "$LOGFILE"; then
-    forwarded_count=$(grep -oP '\d+ entr' "$LOGFILE" | grep -oP '\d+' | head -1)
-    if [ "${forwarded_count:-0}" -le 50 ] 2>/dev/null; then
-        pass "AC4: at most 50 entries forwarded"
+    forwarded_count=$(grep -oE 'forwarded [0-9]+' "$LOGFILE" | grep -oE '[0-9]+' | head -1)
+    if [ -n "$forwarded_count" ] && [ "$forwarded_count" -le 50 ]; then
+        pass "AC4: at most 50 entries forwarded (got $forwarded_count)"
     else
-        fail "AC4: more than 50 entries forwarded (cap not enforced)"
+        fail "AC4: forwarded_count=$forwarded_count exceeds 50 (cap not enforced)"
     fi
 else
-    pass "AC4: queue processed (cap enforcement assumed by empty queue)"
+    fail "AC4: no forward log line -- cap test did not exercise forward path"
 fi
 
 # ---------------------------------------------------------------------------
@@ -164,6 +171,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "--- AC5: dash alive + POST fail -> entries stay ---"
 : > "$LOGFILE"
+reset_throttle
 rm -f "$QUEUE_FILE"
 echo '{"ts":"2026-10-01T10:02:00Z","from":"forge","content":"deploy verify fail","type":"alert"}' > "$QUEUE_FILE"
 chmod 0600 "$QUEUE_FILE"
@@ -218,9 +226,10 @@ rm -f "$QUEUE_FILE"
 echo '{"ts":"2026-10-01T10:03:00Z","from":"forge","content":"health EXIT:1","type":"alert"}' > "$QUEUE_FILE"
 CURL="$(make_curl_alive_post_ok)"
 
-# Force the next-file to NOW (just ran)
-NEXTF="$TMP/store/forge-queue-forward.next"
-date +%s > "$NEXTF"
+# Force the next-file to NOW (just ran) -- must use STATE_DIR path, not STORE root.
+# STATE_DIR=$STORE/.fleet-supervisor (fleet-supervisor.sh:60); the function reads from there.
+mkdir -p "$STATE_DIR"
+date +%s > "$STATE_DIR/forge-queue-forward.next"
 
 check_forge_escalation_queue
 
