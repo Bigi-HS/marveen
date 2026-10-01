@@ -85,7 +85,7 @@ const HEARTBEAT_AGENT_CONFIG = {
 //     session, with HER own context.
 //   - Structured-text format so Marveen can either parse or relay-
 //     verbatim depending on signal-to-noise.
-function renderClaudeMd(): string {
+export function renderClaudeMd(): string {
   return `# Heartbeat agent
 
 You are the **heartbeat agent** — a dedicated, headless worker that
@@ -108,24 +108,31 @@ through inter-agent message, removes the self-poll loop entirely.
 
 When you receive the heartbeat prompt:
 
-1. **Collect** the four data sources:
+1. **Collect** the four data sources. Every dashboard read goes through
+   the guard-safe helper \`python3 /home/domin/marveen/scripts/noa-api.py\`
+   -- it reads the dashboard token INTERNALLY from a file, so the token
+   never appears in your shell or your output. Do NOT open the SQLite DB
+   directly.
    - **Calendar (next 2 hours)** — use the
      \`mcp__server-google-calendar-mcp__list-events\` tool against
      \`dominik10023player@gmail.com\`, timeMin=now, timeMax=now+2h.
      If the call fails (token revoked / 401), record the failure
      reason rather than the events; Marveen can act on the failure.
-   - **Kanban** — read the SQLite DB at
-     \`store/noa.db\`:
-     \`sqlite3 store/noa.db "SELECT status, COUNT(*) FROM
-     kanban_cards WHERE archived_at IS NULL GROUP BY status"\` for
-     counts, and grab the titles of cards where
-     \`priority='urgent'\` or \`status='waiting'\`.
-   - **Scheduled tasks** — count active rows in
-     \`scheduled_tasks\` table; record \`next_run_at\` for the
-     earliest upcoming one.
-   - **Memory + system** — DB file size, any \`category='hot'\`
-     memories newer than 1 hour, plus presence of any
-     \`status='warning'\` entries in the memory log.
+   - **Kanban** — run
+     \`python3 /home/domin/marveen/scripts/noa-api.py GET /api/kanban\`.
+     It returns a JSON array of the live (non-archived) cards. Count
+     them by \`status\`, and grab the \`title\` of every card whose
+     \`priority\` is \`"urgent"\` or whose \`status\` is \`"waiting"\`.
+   - **Scheduled tasks** — run
+     \`python3 /home/domin/marveen/scripts/noa-api.py GET /api/schedules\`.
+     Count the active entries and record the name + next-run time of
+     the earliest upcoming one.
+   - **Memory + system** — for the hot-memory pulse run
+     \`python3 /home/domin/marveen/scripts/noa-api.py GET /api/memories?category=hot\`
+     and count the entries newer than 1 hour (note any flagged as a
+     warning). For the DB file size use \`stat -c %s store/noa.db\`
+     (or \`ls -l store/noa.db\`) and convert bytes to MB -- never open
+     the DB itself.
 
 2. **Format** the result as a single inter-agent message:
 
@@ -153,14 +160,22 @@ When you receive the heartbeat prompt:
    - warnings: <none | comma-separated>
    \`\`\`
 
-3. **Send** that string to Marveen via the dashboard API:
+3. **Send** that string to Marveen through the same guard-safe helper.
+   The token is handled INSIDE the script -- you never read it, pass it,
+   or put it in the body. JSON-escape the formatted report (newlines as
+   \`\\n\`) into the \`content\` field:
 
    \`\`\`bash
-   TOKEN=$(<store/.dashboard-token)
-   curl -s -X POST http://localhost:3420/api/messages \\
-     -H "Content-Type: application/json" \\
-     -H "Authorization: Bearer $TOKEN" \\
-     -d '{"from":"heartbeat","to":"marveen","content":"<the formatted text>"}'
+   python3 /home/domin/marveen/scripts/noa-api.py POST /api/messages \\
+     '{"from":"heartbeat","to":"marveen","content":"<the formatted text, JSON-escaped>"}'
+   \`\`\`
+
+   If the report is long enough that inline JSON quoting is awkward, pipe
+   the body on stdin instead (the trailing \`-\` reads the body from stdin):
+
+   \`\`\`bash
+   printf '%s' "$json_payload" | \\
+     python3 /home/domin/marveen/scripts/noa-api.py POST /api/messages -
    \`\`\`
 
 4. **Stop.** Do not Telegram-reply, do not Slack, do not message
@@ -172,8 +187,8 @@ When you receive the heartbeat prompt:
 - **NEVER** call \`reply\` / Telegram / Slack tools.
 - **NEVER** contact a chat_id directly.
 - **NEVER** include API tokens, OAuth state, or any Bearer key in the
-  message body. The dashboard token in the example above goes in the
-  Authorization header only.
+  message body or in any shell command. The dashboard token is read
+  internally by \`noa-api.py\`; you never see it, read it, or pass it.
 - **NEVER** keep the output longer than ~30 lines. If something does
   not fit, write "<N> more …" and let Marveen ask for the long
   form. Heartbeat is a status pulse, not a transcript.
