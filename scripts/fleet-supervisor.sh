@@ -379,6 +379,74 @@ check_channelless_inbox_wedge() {
     || log "channelless-inbox-wedge: alert delivery failed (dashboard may be down)"
 }
 
+check_forge_escalation_queue() {
+  # Forward buffered forge alerts to marveen once the dashboard is reachable
+  # (card f1e2417f / OPS-227). Forge writes to the queue when /api/messages
+  # times out; this function flushes it on the next tick where dash_alive().
+  # Only runs when dashboard is alive to avoid the chicken-egg problem.
+  dash_alive || return 0
+
+  local now nextf last
+  now=$(date +%s)
+  nextf="$STATE_DIR/forge-queue-forward.next"
+  last=$(cat "$nextf" 2>/dev/null || echo 0)
+  case "$last" in (*[!0-9]*|'') last=0;; esac
+  [ $(( now - last )) -lt "${FORGE_QUEUE_FORWARD_INTERVAL:-120}" ] && return 0
+  echo "$now" > "$nextf"
+
+  local queue_file="$STORE/forge-escalation-queue.jsonl"
+  [ -f "$queue_file" ] || return 0
+  [ -s "$queue_file" ] || return 0
+
+  [ "$DRY_RUN" -eq 1 ] && return 0
+
+  local tok_file="$STORE/.dashboard-token"
+  [ -f "$tok_file" ] || return 0
+  local tok
+  tok=$(python3 -c "import sys; print(open(sys.argv[1]).read().strip())" "$tok_file" 2>/dev/null) || return 0
+  [ -n "$tok" ] || return 0
+
+  # Cap queue at 50 entries before forwarding (drop oldest).
+  local lines
+  lines=$(wc -l < "$queue_file")
+  if [ "$lines" -gt 50 ]; then
+    local excess=$(( lines - 50 ))
+    local tmp
+    tmp=$(mktemp)
+    tail -n +"$((excess + 1))" "$queue_file" > "$tmp" && mv "$tmp" "$queue_file"
+    chmod 0600 "$queue_file"
+    log "forge-queue: capped from $lines to 50 entries (dropped $excess oldest)"
+  fi
+
+  # Forward each entry as a forge->marveen inter-agent message.
+  local forwarded=0 failed=0
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    local payload
+    payload=$(python3 -c "
+import json, sys
+try:
+    e = json.loads(sys.argv[1])
+    print(json.dumps({'from': 'forge', 'to': 'marveen', 'content': e.get('content', sys.argv[1])}))
+except Exception:
+    print(json.dumps({'from': 'forge', 'to': 'marveen', 'content': sys.argv[1]}))
+" "$entry" 2>/dev/null) || continue
+    "$CURL" -sf -m 5 -X POST "http://127.0.0.1:${DASH_PORT:-3420}/api/messages" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $tok" \
+      -d "$payload" >/dev/null 2>&1 \
+      && forwarded=$(( forwarded + 1 )) \
+      || failed=$(( failed + 1 ))
+  done < "$queue_file"
+
+  if [ "$forwarded" -gt 0 ] && [ "$failed" -eq 0 ]; then
+    log "forge-queue: forwarded $forwarded entr$([ "$forwarded" -eq 1 ] && echo y || echo ies), queue cleared"
+    : > "$queue_file"
+  elif [ "$forwarded" -gt 0 ]; then
+    log "forge-queue: forwarded $forwarded entries, $failed failed (dashboard may be degraded)"
+  fi
+}
+
 # --- launchers -------------------------------------------------------------
 launch_dashboard() {
   # node dist/index.js inside tmux session "<main>", cwd = install dir.
@@ -1499,6 +1567,10 @@ tick() {
   #     G5-equivalent for agents without Telegram channels. Detects idle-at-prompt
   #     + overdue inter-agent inbox (channel-monitor G5 covers channel agents only).
   check_channelless_inbox_wedge
+  # 20) FORGE ESCALATION QUEUE FLUSH (~2min interval; OPS-227 / f1e2417f):
+  #     Forward buffered forge alerts that failed during dashboard downtime.
+  #     Only runs when dash_alive() to avoid chicken-egg delivery failure.
+  check_forge_escalation_queue
 }
 
 # --- main ------------------------------------------------------------------
