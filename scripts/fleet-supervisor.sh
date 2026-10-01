@@ -140,6 +140,14 @@ CLI_VERSION_CHECK_THROTTLE_SECONDS="${CLI_VERSION_CHECK_THROTTLE_SECONDS:-3600}"
 # The script self-throttles per agent (mtime, ~4h) and is idempotent, so this only
 # bounds python spawns -- 30 min keeps a freshly-due cache picked up promptly.
 HOT_CACHE_REFRESH_THROTTLE_SECONDS="${HOT_CACHE_REFRESH_THROTTLE_SECONDS:-1800}"
+# Channel-LESS inbox-wedge scan (card 74655583 / OPS-202): detect agents that are
+# idle at the empty prompt while inter-agent messages pile up undelivered.
+# This is the bash G5-equivalent for channel-LESS agents (rackham/blackbeard/radar/etc.)
+# -- the TypeScript G5 staged-wedge probe in channel-monitor only covers channel agents.
+# Interval env-overridable for tests. Default 120s (check every 2 minutes).
+CHANNELLESS_INBOX_WEDGE_INTERVAL="${CHANNELLESS_INBOX_WEDGE_INTERVAL:-120}"
+# Agent list env-overridable for tests (FLEET_TEST_CHANNELLESS_AGENTS).
+CHANNELLESS_AGENTS_DEFAULT="gauge quill applegate radar blackbeard morgan roberts kidd rackham bonny avery vane bellamy inkwell"
 
 DRY_RUN=0
 ONCE=0
@@ -321,6 +329,54 @@ check_dash_wedge() {
   if ! dash_deep_probe; then
     log "dashboard: WEDGED -- health OK but /api/agents stalled (event-loop may be blocked)"
   fi
+}
+
+check_channelless_inbox_wedge() {
+  # G5-equivalent for channel-LESS agents (OPS-202 / 74655583).
+  # channel-monitor G5 covers agents-with-channels only (isAgentChannelIntentionallyEnabled).
+  # This bash scan fills the gap: for each channel-LESS agent, if its tmux pane is
+  # idle at the empty prompt while inter-agent messages are pending (overdue inbox),
+  # the agent is inbox-stuck -- alive but not processing. Log WEDGED:inbox-stuck.
+  # NO recovery action; LOG-ONLY (same discipline as check_dash_wedge).
+  local now nextf last
+  now=$(date +%s)
+  nextf="$STATE_DIR/channelless-inbox-wedge.next"
+  last=$(cat "$nextf" 2>/dev/null || echo 0); case "$last" in (*[!0-9]*|'') last=0;; esac
+  [ $(( now - last )) -lt "${CHANNELLESS_INBOX_WEDGE_INTERVAL:-120}" ] && return 0
+  echo "$now" > "$nextf"
+
+  [ "$DRY_RUN" -eq 1 ] && return 0   # no DB/pane access in dry-run
+
+  local agents="${FLEET_TEST_CHANNELLESS_AGENTS:-$CHANNELLESS_AGENTS_DEFAULT}"
+  local wedged_list="" n session
+  for n in $agents; do
+    session="agent-$n"
+    session_alive "$session"    || continue   # dead -- watchdog handles restart, not our wedge
+    pane_is_idle_at_prompt "$session" || continue   # working normally
+    agent_has_open_obligation "$n" || continue      # no pending inbox -- legitimately idle
+    wedged_list="$wedged_list ${n}:inbox-stuck"
+  done
+
+  [ -z "$wedged_list" ] && return 0
+
+  local msg="channelless-inbox-wedge: WEDGED ${wedged_list# } (idle pane + overdue inbox; no auto-recovery)"
+  log "$msg"
+
+  # Alert marveen (same pattern as fleet_wedge_sweep).
+  [ -n "$CURL" ] || return 0
+  local tok_file="$STORE/.dashboard-token"
+  [ -f "$tok_file" ] || return 0
+  local tok payload
+  tok=$(cat "$tok_file" 2>/dev/null) || return 0
+  payload=$(python3 -c \
+    "import json,sys; m=sys.argv[1]; print(json.dumps({'from':'fleet-supervisor','to':'marveen','content':m}))" \
+    "$msg" 2>/dev/null) || payload=''
+  [ -n "$payload" ] || return 0
+  "$CURL" -sf -X POST "http://127.0.0.1:${DASH_PORT:-3420}/api/messages" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $tok" \
+    -d "$payload" >/dev/null 2>&1 \
+    || log "channelless-inbox-wedge: alert delivery failed (dashboard may be down)"
 }
 
 # --- launchers -------------------------------------------------------------
@@ -1439,6 +1495,10 @@ tick() {
   # 18) FLEET WEDGE SWEEP (~5min interval; OPS/96ef336a): classify all agents,
   #     send one marveen alert if anything is stuck beyond auto-recovery.
   fleet_wedge_sweep
+  # 19) CHANNEL-LESS INBOX-WEDGE SCAN (~2min interval; OPS-202 / 74655583):
+  #     G5-equivalent for agents without Telegram channels. Detects idle-at-prompt
+  #     + overdue inter-agent inbox (channel-monitor G5 covers channel agents only).
+  check_channelless_inbox_wedge
 }
 
 # --- main ------------------------------------------------------------------
