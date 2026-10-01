@@ -406,19 +406,31 @@ check_forge_escalation_queue() {
   tok=$(python3 -c "import sys; print(open(sys.argv[1]).read().strip())" "$tok_file" 2>/dev/null) || return 0
   [ -n "$tok" ] || return 0
 
-  # Cap queue at 50 entries before forwarding (drop oldest).
+  # Atomically rename queue under forge-alert.sh's lock to close the TOCTOU window
+  # (card c0671f79): the prior ": > $queue_file" ran outside the flock used by
+  # forge-alert.sh, so a concurrent append between read and truncate was silently lost.
+  # Using the same lockfile ($queue_file.lock) and atomic mv makes read+truncate one
+  # operation; any concurrent forge-alert.sh append lands in the fresh queue_file and
+  # is preserved for the next tick.
+  local fwd_file="$queue_file.fwd.$$"
+  (
+      flock -x 8
+      [ -s "$queue_file" ] && mv "$queue_file" "$fwd_file" || true
+  ) 8>>"$queue_file".lock 2>/dev/null
+  [ -f "$fwd_file" ] || return 0
+
+  # Cap fwd_file to 50 entries before forwarding (drop oldest; defense in depth).
   local lines
-  lines=$(wc -l < "$queue_file")
+  lines=$(wc -l < "$fwd_file")
   if [ "$lines" -gt 50 ]; then
     local excess=$(( lines - 50 ))
     local tmp
     tmp=$(mktemp)
-    tail -n +"$((excess + 1))" "$queue_file" > "$tmp" && mv "$tmp" "$queue_file"
-    chmod 0600 "$queue_file"
+    tail -n +"$((excess + 1))" "$fwd_file" > "$tmp" && mv "$tmp" "$fwd_file"
     log "forge-queue: capped from $lines to 50 entries (dropped $excess oldest)"
   fi
 
-  # Forward each entry as a forge->marveen inter-agent message.
+  # Forward each entry from snapshot (lock released; forge-alert.sh can append freely now).
   local forwarded=0 failed=0
   while IFS= read -r entry; do
     [ -z "$entry" ] && continue
@@ -437,13 +449,27 @@ except Exception:
       -d "$payload" >/dev/null 2>&1 \
       && forwarded=$(( forwarded + 1 )) \
       || failed=$(( failed + 1 ))
-  done < "$queue_file"
+  done < "$fwd_file"
 
-  if [ "$forwarded" -gt 0 ] && [ "$failed" -eq 0 ]; then
+  if [ "$failed" -eq 0 ] && [ "$forwarded" -gt 0 ]; then
     log "forge-queue: forwarded $forwarded entr$([ "$forwarded" -eq 1 ] && echo y || echo ies), queue cleared"
-    : > "$queue_file"
-  elif [ "$forwarded" -gt 0 ]; then
-    log "forge-queue: forwarded $forwarded entries, $failed failed (dashboard may be degraded)"
+    rm -f "$fwd_file"
+  else
+    [ "$forwarded" -gt 0 ] && \
+      log "forge-queue: forwarded $forwarded entries, $failed failed (dashboard may be degraded)"
+    # Re-queue for retry on next tick (under lock, with cap to 50).
+    (
+        flock -x 8
+        cat "$fwd_file" >> "$queue_file"
+        lines=$(wc -l < "$queue_file")
+        if [ "$lines" -gt 50 ]; then
+            excess=$(( lines - 50 ))
+            tmp=$(mktemp)
+            tail -n +"$((excess + 1))" "$queue_file" > "$tmp" && mv "$tmp" "$queue_file"
+            chmod 0600 "$queue_file"
+        fi
+    ) 8>>"$queue_file".lock 2>/dev/null
+    rm -f "$fwd_file"
   fi
 }
 
