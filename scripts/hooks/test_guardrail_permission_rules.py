@@ -2309,5 +2309,114 @@ class SkillBashWriteTests(unittest.TestCase):
             'printf x>>~/.claude/skills/x/SKILL.md'))
 
 
+class ReviewerReadonlyWorktreeTests(unittest.TestCase):
+    """Card 53b163ce / ENG-029: reviewer read-only review-worktree lock (B-mechanism).
+
+    While an agent's cwd is inside a review-worktree (a path segment carrying the
+    anchored 'review-wt' marker), Write/Edit must be denied so a reviewer cannot
+    accidentally edit the code under review. Read/Grep/Glob/Bash stay available.
+    The trigger is the harness-set cwd (spoof-resistant for the accidental model).
+    """
+
+    REVIEW_WT = '/home/domin/dave-review-wt-832'
+    ENG_WT = '/home/domin/marveen-wt/eng-x'
+
+    def _write(self, path, cwd=None):
+        p = {'tool_name': 'Write', 'tool_input': {'file_path': path}}
+        if cwd is not None:
+            p['cwd'] = cwd
+        return p
+
+    def _edit(self, path, cwd=None):
+        p = {'tool_name': 'Edit', 'tool_input': {'file_path': path}}
+        if cwd is not None:
+            p['cwd'] = cwd
+        return p
+
+    # ---- match_review_worktree: FN (must detect) ----
+
+    def test_marker_bare_segment_matches(self):
+        self.assertTrue(guard.match_review_worktree('/home/domin/review-wt'))
+
+    def test_marker_with_pr_suffix_matches(self):
+        self.assertTrue(guard.match_review_worktree('/home/domin/dave-review-wt-832/src'))
+
+    def test_marker_agent_prefixed_matches(self):
+        self.assertTrue(guard.match_review_worktree('/home/domin/dave-review-wt'))
+
+    def test_marker_nested_deep_matches(self):
+        self.assertTrue(guard.match_review_worktree('/home/domin/dave-review-wt-832/src/web/zepp'))
+
+    # ---- match_review_worktree: FP (must NOT fire -- anchored marker) ----
+
+    def test_preview_wt_does_not_match(self):
+        """'preview-wt' contains 'review-wt' as a bare substring but the marker is
+        anchored on a segment boundary, so a benign preview worktree is allowed."""
+        self.assertFalse(guard.match_review_worktree('/home/domin/preview-wt/src'))
+
+    def test_overview_wtf_does_not_match(self):
+        self.assertFalse(guard.match_review_worktree('/home/domin/overview-wtf'))
+
+    def test_ordinary_eng_worktree_does_not_match(self):
+        self.assertFalse(guard.match_review_worktree(self.ENG_WT))
+
+    def test_shared_checkout_does_not_match(self):
+        self.assertFalse(guard.match_review_worktree('/home/domin/marveen'))
+
+    # ---- defensive: missing/empty/non-string cwd -> fail open (no block) ----
+
+    def test_none_cwd_does_not_match(self):
+        self.assertFalse(guard.match_review_worktree(None))
+
+    def test_empty_cwd_does_not_match(self):
+        self.assertFalse(guard.match_review_worktree(''))
+
+    def test_non_string_cwd_does_not_match(self):
+        self.assertFalse(guard.match_review_worktree(12345))
+
+    # ---- classify() end-to-end: the opposing combination ----
+
+    def test_classify_blocks_write_in_review_worktree(self):
+        denied, name, _ = guard.classify(
+            self._write('/home/domin/dave-review-wt-832/src/x.ts', cwd=self.REVIEW_WT))
+        self.assertTrue(denied)
+        self.assertEqual(name, 'reviewer-readonly-worktree')
+
+    def test_classify_blocks_edit_in_review_worktree(self):
+        denied, name, _ = guard.classify(
+            self._edit('src/x.ts', cwd=self.REVIEW_WT))
+        self.assertTrue(denied)
+        self.assertEqual(name, 'reviewer-readonly-worktree')
+
+    def test_classify_blocks_write_to_any_target_in_review_worktree(self):
+        """Keyed on cwd, not file_path: even an absolute write elsewhere is denied
+        while the agent sits in the review-worktree (whole checkout is read-only)."""
+        denied, name, _ = guard.classify(
+            self._write('/tmp/scratch.txt', cwd=self.REVIEW_WT))
+        self.assertTrue(denied)
+        self.assertEqual(name, 'reviewer-readonly-worktree')
+
+    def test_classify_allows_write_in_engineer_worktree(self):
+        denied, _, _ = guard.classify(
+            self._write('src/x.ts', cwd=self.ENG_WT))
+        self.assertFalse(denied)
+
+    def test_classify_allows_write_with_no_cwd(self):
+        """Absent cwd -> fail open: the review lock never blocks on a missing signal
+        (the external-dir rule still applies to the path itself)."""
+        denied, _, _ = guard.classify(self._write('src/web/x.ts'))
+        self.assertFalse(denied)
+
+    def test_classify_allows_bash_in_review_worktree(self):
+        """Read/Grep/Glob/Bash stay available in a review-worktree -- only Write/Edit
+        are locked. A benign Bash command there must pass."""
+        denied, _, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'grep -rn foo src'},
+            'cwd': self.REVIEW_WT,
+        })
+        self.assertFalse(denied)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -1294,6 +1294,40 @@ def match_shared_checkout_git_op(command: str, cwd: 'str | None') -> bool:
     return sub in _SHARED_CHECKOUT_GIT_OPS
 
 
+# ── reviewer read-only review-worktree (Write / Edit) ────────────────────────
+# Card 53b163ce / ENG-029 (B-mechanism). Review-independence integrity: a reviewer
+# who checks out a PR to read it must not ACCIDENTALLY edit the code under review.
+# Reviews run in a dedicated review-worktree whose directory name carries the
+# 'review-wt' marker; while the agent's cwd is inside such a worktree, Write/Edit
+# are denied. Read/Grep/Glob/Bash stay available, so the review itself proceeds.
+#
+# THREAT MODEL (Chad security-concurrence 2026-09-01): the ACCIDENTAL reviewer-edit
+# only -- review-independence integrity. NOT adversarial self-approval/self-edit
+# (that is MG-SEC4 / per-agent-token territory: cards b1ce5118 / db9bc192). The
+# trigger is the HARNESS-SET cwd in the PreToolUse payload -- the reviewed content
+# cannot change it, so the signal is spoof-resistant for the accidental model.
+# A review run OUTSIDE a review-worktree is a false-negative BY DESIGN (a process
+# risk, not a breach): no clean, spoof-resistant "currently reviewing" signal
+# exists in the gate architecture (see the card's execution-path map), so the
+# worktree-cwd convention is the agreed minimal fit (dave rec, marveen pick: B).
+#
+# The marker is matched per PATH SEGMENT and anchored on a segment boundary so a
+# benign sibling like 'preview-wt' can never match (detector-glob-mirror lesson):
+# 'review-wt', 'review-wt-832', 'dave-review-wt', 'dave-review-wt-832' all match;
+# 'preview-wt' / 'overview-wtf' do not.
+_REVIEW_WT_SEG_RX = re.compile(r'(?:^|-)review-wt(?:-|$)')
+
+
+def match_review_worktree(cwd: 'str | None') -> bool:
+    """True when the agent cwd sits inside a review-worktree (a path component
+    carrying the anchored 'review-wt' marker). Defensive: a missing/non-string/
+    empty cwd returns False (fail open -- never block on an absent signal)."""
+    if not isinstance(cwd, str) or not cwd.strip():
+        return False
+    segments = [seg for seg in cwd.replace('\\', '/').split('/') if seg]
+    return any(_REVIEW_WT_SEG_RX.search(seg) for seg in segments)
+
+
 # ── rule table & classifier ───────────────────────────────────────────────────
 
 class Rule:
@@ -1415,6 +1449,22 @@ def classify(payload):
                     '(/home/domin/marveen) bypasses the PR gate and is wiped by '
                     'the 08:00 rebuild-pull. Use a worktree + branch + PR instead '
                     '(fleet-pr-merge-gate, git-worktree-manager).')
+    # ENG-029: reviewer read-only lock (B-mechanism). A Write/Edit while the agent
+    # cwd is inside a review-worktree is denied so a reviewer cannot accidentally
+    # edit the code under review. cwd is harness-set (spoof-resistant); see
+    # match_review_worktree. Keyed on cwd, NOT file_path, so the whole review
+    # checkout is read-only regardless of the write target.
+    if tool_name in ('Write', 'Edit'):
+        cwd = payload.get('cwd') if isinstance(payload, dict) else None
+        if match_review_worktree(cwd):
+            return (True,
+                    'reviewer-readonly-worktree',
+                    'Write/Edit while the agent cwd is inside a review-worktree '
+                    '(a path segment carrying the review-wt marker). A reviewer '
+                    'must not edit the code under review -- review is read-only '
+                    '(Read/Grep/Glob/Bash stay available). Make the edit in your '
+                    'engineer worktree, not the review checkout '
+                    '(card 53b163ce / ENG-029, B-mechanism).')
     rule = first_denied_rule(tool_name, inp)
     if rule is None:
         return (False, '', '')
