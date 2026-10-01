@@ -14,7 +14,7 @@ import { join } from 'node:path'
 import { execFileSync, execSync } from 'node:child_process'
 import type { Server as HttpServer } from 'node:http'
 import { PROJECT_ROOT, STORE_DIR, PID_FILENAME, WEB_PORT, MAIN_AGENT_ID, RESPAWN_ENABLED } from './config.js'
-import { initDatabase, deleteOldMessages, deleteOldGuardEvents, createAgentMessage } from './db.js'
+import { initDatabase, deleteOldMessages, deleteOldGuardEvents, pruneTokenUsage, createAgentMessage } from './db.js'
 import { initCodetreeDatabase } from './web/codetree-db.js'
 import { startMessageRetentionSweep } from './web/message-retention.js'
 import { runTierDemotionSweep } from './noa-memory.js'
@@ -368,6 +368,7 @@ function releaseLock(): void {
 let decayInterval: NodeJS.Timeout | null = null
 let messageRetentionInterval: NodeJS.Timeout | null = null
 let guardEventRetentionInterval: NodeJS.Timeout | null = null
+let tokenUsageRetentionInterval: NodeJS.Timeout | null = null
 let archiveSweepInterval: NodeJS.Timeout | null = null
 let digestTimer: NodeJS.Timeout | null = null
 let digestInterval: NodeJS.Timeout | null = null
@@ -389,6 +390,7 @@ const shutdown = (): void => {
     if (decayInterval) clearInterval(decayInterval)
     if (messageRetentionInterval) clearInterval(messageRetentionInterval)
     if (guardEventRetentionInterval) clearInterval(guardEventRetentionInterval)
+    if (tokenUsageRetentionInterval) clearInterval(tokenUsageRetentionInterval)
     if (archiveSweepInterval) clearInterval(archiveSweepInterval)
     if (digestTimer) clearTimeout(digestTimer)
     if (digestInterval) clearInterval(digestInterval)
@@ -535,6 +537,24 @@ async function main(): Promise<void> {
   pruneGuardEvents()
   guardEventRetentionInterval = setInterval(pruneGuardEvents, 24 * 60 * 60 * 1000)
   logger.info('Guard-event retention sweep beallitva (24 oras)')
+
+  // token_usage retention sweep (card a4d7b541). Without a prune the table
+  // accumulates every API call forever; 90-day window covers all analytics
+  // use-cases while bounding growth. Same boot-prune + daily interval pattern
+  // as the guard_events sweep above.
+  const pruneTokenUsageRows = (): void => {
+    try {
+      const removed = pruneTokenUsage(Math.floor(Date.now() / 1000))
+      if (removed > 0) {
+        logger.info({ removed }, 'token-usage-retention: pruned aged token_usage rows')
+      }
+    } catch (err) {
+      logger.warn({ err }, 'token-usage-retention: sweep failed (non-fatal)')
+    }
+  }
+  pruneTokenUsageRows()
+  tokenUsageRetentionInterval = setInterval(pruneTokenUsageRows, 24 * 60 * 60 * 1000)
+  logger.info('Token-usage retention sweep beallitva (24 oras)')
 
   // Done-card auto-archive sweep (card 48a92d27). Without a call site the
   // runArchiveSweep() function (present since AC-4) never ran, so done cards
