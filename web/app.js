@@ -170,6 +170,9 @@ function switchPage(pageId) {
   // Activity page runs a live poll; stop it whenever we navigate away.
   if (pageId !== 'activity') stopActivityPoll()
   if (pageId === 'activity') startActivityPoll()
+  // Claude usage page runs a lightweight countdown re-fetch; stop it on exit.
+  if (pageId !== 'usage') stopUsagePoll()
+  if (pageId === 'usage') loadClaudeUsage()
   if (pageId === 'overview') loadOverview()
   if (pageId === 'kanban') loadKanban()
   if (pageId === 'tasks') loadSchedules()
@@ -10088,6 +10091,135 @@ window.addEventListener('resize', () => {
     if (tuChartState && renderTuTimeline.__lastData) renderTuTimeline(renderTuTimeline.__lastData, renderTuTimeline.__lastAgent)
   }
 })
+
+// ============================================================
+// === Claude Usage panel (card 7fe5662f / DASH-003) ===
+// ============================================================
+// Renders Dominik's OWN claude.ai 5h + weekly limit % from the background
+// refresher's derived endpoint GET /api/usage/current. The credential never
+// reaches the frontend: the endpoint yields only {fiveHour,weekly,stale}; the
+// three 503 reasons (feature-absent / auth-expired / unavailable) each map to a
+// distinct, non-crashing state. A 60s re-fetch keeps the countdown + stale flag
+// fresh while the page is open (the server polls claude.ai every 15 min).
+
+let usageTimer = null
+
+// Each 503 reason -> a user-facing state. feature-absent is the default (no
+// credential provisioned), so an unknown reason degrades to it conservatively.
+const USAGE_REASON_META = {
+  'feature-absent': {
+    title: 'Panel inaktív',
+    msg: 'Nincs beállítva claude.ai session (store/.claude-session hiányzik). A panel rejtve marad, amíg a credential meg nem kerül.',
+    accent: 'var(--text-muted)',
+  },
+  'auth-expired': {
+    title: 'Újra-auth szükséges',
+    msg: 'A claude.ai session lejárt vagy kihívást kapott. Frissítsd a store/.claude-session fájlt a friss claude.ai session-adatokkal.',
+    accent: 'var(--danger)',
+  },
+  'unavailable': {
+    title: 'Ideiglenesen nem elérhető',
+    msg: 'A usage végpont jelenleg nem válaszol. A háttérfrissítő automatikusan újrapróbálja.',
+    accent: 'var(--accent)',
+  },
+}
+
+// Formats a future reset timestamp into a compact Hungarian countdown
+// ("2n 3ó", "3ó 14p", "14p", "most"). Returns '' for a missing/invalid
+// timestamp so the caller hides the countdown rather than render "NaN". Never
+// negative: a past reset clamps to "most". Mirrors formatRelative/formatPendingAge.
+function formatResetCountdown(resetAtIso, nowMs = Date.now()) {
+  if (!resetAtIso) return ''
+  const t = Date.parse(resetAtIso)
+  if (Number.isNaN(t)) return ''
+  const diff = Math.max(0, t - nowMs)
+  const min = Math.floor(diff / 60000)
+  if (min < 1) return 'most'
+  if (min < 60) return `${min}p`
+  const hr = Math.floor(min / 60)
+  const remMin = min % 60
+  if (hr < 24) return remMin ? `${hr}ó ${remMin}p` : `${hr}ó`
+  const day = Math.floor(hr / 24)
+  const remHr = hr % 24
+  return remHr ? `${day}n ${remHr}ó` : `${day}n`
+}
+
+// Threshold color for a usage %: >=90 danger, >=70 warn (accent), else ok
+// (success). Design tokens only, no raw hex.
+function usagePctColor(pct) {
+  if (typeof pct !== 'number' || !isFinite(pct)) return 'var(--text-muted)'
+  if (pct >= 90) return 'var(--danger)'
+  if (pct >= 70) return 'var(--accent)'
+  return 'var(--success)'
+}
+
+function stopUsagePoll() {
+  if (usageTimer) { clearInterval(usageTimer); usageTimer = null }
+}
+
+async function loadClaudeUsage() {
+  await refreshClaudeUsage()
+  stopUsagePoll()
+  usageTimer = setInterval(refreshClaudeUsage, 60000)
+}
+
+async function refreshClaudeUsage() {
+  const stateEl = document.getElementById('usageState')
+  const cardsEl = document.getElementById('usageCards')
+  if (!stateEl || !cardsEl) return
+  let res
+  try {
+    res = await fetch('/api/usage/current', { credentials: 'same-origin' })
+  } catch {
+    renderUsageReason(stateEl, cardsEl, 'unavailable')
+    return
+  }
+  if (res.status === 503) {
+    let reason = 'feature-absent'
+    try { reason = (await res.json()).reason || reason } catch { /* keep default */ }
+    renderUsageReason(stateEl, cardsEl, reason)
+    return
+  }
+  if (!res.ok) { renderUsageReason(stateEl, cardsEl, 'unavailable'); return }
+  let data
+  try { data = await res.json() } catch { renderUsageReason(stateEl, cardsEl, 'unavailable'); return }
+  renderUsage(stateEl, cardsEl, data)
+}
+
+function renderUsageReason(stateEl, cardsEl, reason) {
+  const meta = USAGE_REASON_META[reason] || USAGE_REASON_META['feature-absent']
+  cardsEl.innerHTML = ''
+  stateEl.innerHTML = `
+    <div class="overview-card" style="border-left:3px solid ${meta.accent}">
+      <h3 style="margin:0 0 4px">${escapeHtml(meta.title)}</h3>
+      <p class="subtitle" style="margin:0">${escapeHtml(meta.msg)}</p>
+    </div>`
+}
+
+function renderUsage(stateEl, cardsEl, data) {
+  const windows = [
+    { label: '5 órás ablak', w: data.fiveHour },
+    { label: 'Heti ablak', w: data.weekly },
+  ]
+  stateEl.innerHTML = data.stale
+    ? `<div class="overview-card" style="border-left:3px solid var(--accent);margin-bottom:12px"><p class="subtitle" style="margin:0">Az adat elavult lehet (a frissítés késik). A countdown tájékoztató jellegű.</p></div>`
+    : ''
+  cardsEl.innerHTML = windows.map(({ label, w }) => {
+    if (!w || typeof w.pct !== 'number') return ''
+    const pct = Math.max(0, Math.min(100, Math.round(w.pct)))
+    const color = usagePctColor(pct)
+    const countdown = formatResetCountdown(w.resetAt)
+    return `
+      <div class="overview-stat" style="flex:1 1 240px;min-width:200px">
+        <div class="overview-stat-label">${escapeHtml(label)}</div>
+        <div class="overview-stat-value" style="color:${color};font-variant-numeric:tabular-nums">${pct}%</div>
+        <div style="height:8px;border-radius:4px;background:var(--border);overflow:hidden;margin:6px 0">
+          <div style="height:100%;width:${pct}%;background:${color}"></div>
+        </div>
+        <div class="overview-stat-sub">Reset: ${countdown ? escapeHtml(countdown) : '--'}</div>
+      </div>`
+  }).join('')
+}
 
 // ============================================================
 // Tool-workflow automation candidates (Workflow-jelöltek)
