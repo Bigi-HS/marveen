@@ -299,6 +299,30 @@ dash_alive() {
 }
 session_alive() { [ -n "$TMUX_BIN" ] && "$TMUX_BIN" has-session -t "=$1" 2>/dev/null; }
 
+dash_deep_probe() {
+  # Secondary probe: curl /api/agents with a 3s timeout.
+  # /api/health can respond while the event-loop is blocked (e.g. WAL-lock on
+  # a better-sqlite3 sync query). /api/agents requires a live DB read, so it
+  # stalls when the loop is wedged. Returns 0 if agents responds, 1 if not.
+  [ -n "$CURL" ] || return 1
+  local code
+  code=$("$CURL" -s -m 3 -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:$DASH_PORT/api/agents" 2>/dev/null)
+  [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+check_dash_wedge() {
+  # Detect WEDGED state: health OK but /api/agents stalled (OPS-216 / c9cb3cf0).
+  # False-alive: /api/health is served even when the event-loop is blocked,
+  # so dash_alive() alone cannot distinguish healthy from WAL-wedged. This adds
+  # a secondary probe; if it fails while health passes, the event-loop is stuck.
+  # WEDGED != DEAD: do NOT relaunch (the process is up, just blocked).
+  dash_alive || return 0
+  if ! dash_deep_probe; then
+    log "dashboard: WEDGED -- health OK but /api/agents stalled (event-loop may be blocked)"
+  fi
+}
+
 # --- launchers -------------------------------------------------------------
 launch_dashboard() {
   # node dist/index.js inside tmux session "<main>", cwd = install dir.
@@ -1330,6 +1354,7 @@ tick() {
   settle_check dashboard dash_alive
   if dash_alive; then
     backoff_reset dashboard
+    check_dash_wedge   # secondary probe: WEDGED if health OK but /api/agents stalls (OPS-216)
   elif backoff_blocked dashboard; then
     if session_alive "$DASH_SESSION"; then
       log "dashboard: session up but :$DASH_PORT not responding -- relaunching"
