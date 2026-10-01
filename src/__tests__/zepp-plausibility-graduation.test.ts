@@ -134,7 +134,9 @@ describe('AC-2 block-mode switch (the core acceptance)', () => {
   })
 
   it('a clean snapshot is never blocked, regardless of mode config', () => {
-    const clean = snap({ steps: 10000, activity: { activeKcal: 500, distanceM: 7000 } })
+    // 6000/10000 = 0.600 m/step, inside the recalibrated [0.25, 0.65] distance-steps band
+    // (4a6cb4a 2026-09-25); kcal 500/10000 = 0.05 is inside [0.02, 0.10]. Unambiguously clean.
+    const clean = snap({ steps: 10000, activity: { activeKcal: 500, distanceM: 6000 } })
     const allBlock: PlausibilityModeConfig = {
       'activeKcal-steps': 'block',
       'distance-steps': 'block',
