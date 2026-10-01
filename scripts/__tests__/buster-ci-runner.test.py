@@ -100,10 +100,11 @@ class TestPayloadExtraction(unittest.TestCase):
         with patch.object(sp_module, 'run', side_effect=run_results):
             with patch('tempfile.mkdtemp', return_value='/tmp/fake-wt'):
                 with patch('shutil.rmtree'):
-                    status, payload = mod._run_bundle_in_worktree(
-                        pr_number=42, head_sha='a' * 40,
-                        base_branch='develop', dry_run=False
-                    )
+                    with patch('os.symlink'):
+                        status, payload = mod._run_bundle_in_worktree(
+                            pr_number=42, head_sha='a' * 40,
+                            base_branch='develop', dry_run=False
+                        )
         return status, payload
 
     def test_pass_verdict_gives_pass_status(self):
@@ -156,8 +157,9 @@ class TestPayloadExtraction(unittest.TestCase):
         with patch.object(sp_module, 'run', side_effect=run_results):
             with patch('tempfile.mkdtemp', return_value='/tmp/fake-wt'):
                 with patch('shutil.rmtree'):
-                    status, _ = mod._run_bundle_in_worktree(
-                        42, 'a' * 40, 'develop', False)
+                    with patch('os.symlink'):
+                        status, _ = mod._run_bundle_in_worktree(
+                            42, 'a' * 40, 'develop', False)
         self.assertEqual(status, 'fail')
 
     def test_dry_run_returns_pass_without_running(self):
@@ -171,6 +173,121 @@ class TestPayloadExtraction(unittest.TestCase):
         mock_run.assert_not_called()
         self.assertEqual(status, 'pass')
         self.assertIn('dry-run', payload.get('note', ''))
+
+
+class TestFetchMergeRef(unittest.TestCase):
+    """_fetch_pr_head must use pull/<N>/merge (GitHub merge-ref), not pull/<N>/head.
+
+    refs/pull/N/merge is the GitHub-computed merge commit of the PR onto its base.
+    It is the authoritative ref for CI (what GitHub Actions sees). Using it ensures
+    tsc/tests run on the merged code, matching what /api/gate/check evaluates.
+    Card: ebe474ee diagnosis (Dave msg 18129).
+    """
+
+    def test_fetches_merge_ref_not_head_ref(self):
+        """git fetch must request pull/<N>/merge, not pull/<N>/head."""
+        import subprocess as sp_module
+        mod = _load_runner()
+        with patch.object(sp_module, 'run',
+                return_value=MagicMock(returncode=0)) as mock_run:
+            mod._fetch_pr_head(42, 'a' * 40)
+        call_args = mock_run.call_args[0][0]  # first positional arg = command list
+        fetch_ref = call_args[-1]
+        self.assertEqual(fetch_ref, 'pull/42/merge',
+            f'Expected pull/42/merge but got {fetch_ref!r}')
+
+    def test_fetch_ref_does_not_contain_slash_head(self):
+        """Negative: must NOT fetch pull/<N>/head (the old path)."""
+        import subprocess as sp_module
+        mod = _load_runner()
+        with patch.object(sp_module, 'run',
+                return_value=MagicMock(returncode=0)) as mock_run:
+            mod._fetch_pr_head(99, 'b' * 40)
+        call_args = mock_run.call_args[0][0]
+        fetch_ref = call_args[-1]
+        self.assertNotIn('/head', fetch_ref,
+            f'fetch ref must not end in /head (got {fetch_ref!r})')
+
+
+class TestNodeModulesSymlink(unittest.TestCase):
+    """_run_bundle_in_worktree must symlink INSTALL_DIR/node_modules into the worktree.
+
+    Without the symlink, `npx tsc --noEmit` uses a downloaded/global TypeScript that
+    may differ from the project's pinned version, producing false BLOCK verdicts.
+    Card: ebe474ee diagnosis.
+    """
+
+    def _run_bundle_with_fake(self, mod, bundle_json: dict, returncode: int = 0,
+                               capture_symlink_calls=None):
+        import subprocess as sp_module
+        import json as _json
+
+        run_results = [
+            MagicMock(returncode=0, stdout='', stderr=''),   # worktree add
+            MagicMock(returncode=returncode,
+                      stdout=_json.dumps(bundle_json), stderr=''),  # bundle
+            MagicMock(returncode=0, stdout='', stderr=''),   # worktree remove
+        ]
+
+        symlink_calls = []
+
+        def fake_symlink(src, dst, *a, **kw):
+            symlink_calls.append((src, dst))
+
+        with patch.object(sp_module, 'run', side_effect=run_results):
+            with patch('tempfile.mkdtemp', return_value='/tmp/fake-wt'):
+                with patch('shutil.rmtree'):
+                    with patch('os.symlink', side_effect=fake_symlink):
+                        status, payload = mod._run_bundle_in_worktree(
+                            pr_number=42, head_sha='a' * 40,
+                            base_branch='develop', dry_run=False
+                        )
+
+        if capture_symlink_calls is not None:
+            capture_symlink_calls.extend(symlink_calls)
+        return status, payload, symlink_calls
+
+    def _pass_bundle(self):
+        return {
+            'verdict': 'PASS', 'diff_additions': 0,
+            'checks': [
+                {'name': 'typecheck', 'status': 'PASS', 'detail': ''},
+                {'name': 'tests', 'status': 'PASS', 'detail': ''},
+            ],
+        }
+
+    def test_symlinks_node_modules_into_worktree(self):
+        """A node_modules symlink must be created inside the worktree dir."""
+        mod = _load_runner()
+        _, _, symlink_calls = self._run_bundle_with_fake(mod, self._pass_bundle())
+        # At least one symlink call where the destination ends with node_modules
+        nm_links = [(src, dst) for src, dst in symlink_calls
+                    if dst.endswith('node_modules') or dst.endswith('node_modules/')]
+        self.assertTrue(nm_links,
+            f'No node_modules symlink found in symlink calls: {symlink_calls}')
+
+    def test_symlink_destination_is_inside_worktree(self):
+        """The node_modules symlink destination must be inside /tmp/fake-wt."""
+        mod = _load_runner()
+        _, _, symlink_calls = self._run_bundle_with_fake(mod, self._pass_bundle())
+        nm_links = [(src, dst) for src, dst in symlink_calls if 'node_modules' in dst]
+        self.assertTrue(nm_links)
+        for _, dst in nm_links:
+            self.assertTrue(dst.startswith('/tmp/fake-wt'),
+                f'Symlink dst {dst!r} not inside worktree /tmp/fake-wt')
+
+    def test_symlink_source_is_install_dir_node_modules(self):
+        """The symlink source must be INSTALL_DIR/node_modules."""
+        mod = _load_runner()
+        _, _, symlink_calls = self._run_bundle_with_fake(mod, self._pass_bundle())
+        nm_links = [(src, dst) for src, dst in symlink_calls if 'node_modules' in dst]
+        self.assertTrue(nm_links)
+        for src, _ in nm_links:
+            self.assertIn('node_modules', src)
+            self.assertTrue(
+                src.startswith('/home/domin/marveen') or 'INSTALL_DIR' in src,
+                f'Symlink src {src!r} does not point to INSTALL_DIR/node_modules'
+            )
 
 
 if __name__ == '__main__':

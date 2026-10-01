@@ -115,9 +115,15 @@ def _ci_already_done(pr_number: int, head_sha: str, token: str) -> bool:
 
 
 def _fetch_pr_head(pr_number: int, head_sha: str) -> None:
-    """Fetch the PR's head into the local repo via pull/<N>/head ref."""
+    """Fetch the PR's GitHub merge-ref (pull/<N>/merge) into the local repo.
+
+    refs/pull/N/merge is the GitHub-computed merge commit of the PR onto its base.
+    It matches what GitHub CI evaluates and avoids stale-shared-checkout divergence.
+    Card ebe474ee: using pull/<N>/head against a diverged local develop caused
+    false tsc BLOCK verdicts; pull/<N>/merge is authoritative (Dave msg 18129).
+    """
     subprocess.run(
-        ['git', 'fetch', '--depth=1', 'origin', f'pull/{pr_number}/head'],
+        ['git', 'fetch', '--depth=1', 'origin', f'pull/{pr_number}/merge'],
         cwd=str(INSTALL_DIR), capture_output=True, check=True, timeout=60
     )
 
@@ -134,12 +140,19 @@ def _run_bundle_in_worktree(pr_number: int, head_sha: str, base_branch: str,
     wt_dir = Path(tempfile.mkdtemp(prefix=f'buster-ci-pr{pr_number}-'))
     wt_created = False
     try:
-        # Worktree at the fetched PR head
+        # Worktree at the fetched merge-ref (FETCH_HEAD after _fetch_pr_head)
         subprocess.run(
             ['git', 'worktree', 'add', '--detach', str(wt_dir), 'FETCH_HEAD'],
             cwd=str(INSTALL_DIR), capture_output=True, check=True, timeout=30
         )
         wt_created = True
+
+        # Symlink shared node_modules so `npx tsc` uses the project's pinned
+        # TypeScript version. Without this, npx downloads a mismatched version
+        # that can produce false BLOCK verdicts (card ebe474ee root cause).
+        nm_link = wt_dir / 'node_modules'
+        if not nm_link.exists():
+            os.symlink(str(INSTALL_DIR / 'node_modules'), str(nm_link))
 
         # Run pre-gate-bundle.sh with --json
         result = subprocess.run(
