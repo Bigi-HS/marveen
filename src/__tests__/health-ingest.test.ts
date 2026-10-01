@@ -938,7 +938,9 @@ describe('POST /api/health/ingest', () => {
       const deps = makeDeps({ onPlausibility })
       const { snap } = await handle(deps, {
         token: VALID_TOKEN,
-        body: { date: '2026-08-25', activity: { steps: 13694, active_kcal: 1011, distance_m: 12040 } },
+        // 8000/13694 = 0.584 m/step, inside the recalibrated [0.25, 0.65] distance-steps band
+        // (4a6cb4a 2026-09-25); kcal 1011/13694 = 0.074 inside [0.02, 0.10]. A coherent day.
+        body: { date: '2026-08-25', activity: { steps: 13694, active_kcal: 1011, distance_m: 8000 } },
       })
       expect(onPlausibility).not.toHaveBeenCalled()
       expect(snap?.status).toBe('ok')
@@ -987,7 +989,9 @@ describe('POST /api/health/ingest', () => {
       // First push: full coherent activity day stored.
       await handle(deps, {
         token: VALID_TOKEN,
-        body: { date: '2026-08-25', activity: { steps: 12_000, active_kcal: 800, distance_m: 9_000 } },
+        // 7000m stays plausible for both the first (7000/12000 = 0.583) and the merged
+        // (7000/13000 = 0.538) step counts, inside the recalibrated [0.25, 0.65] band (4a6cb4a).
+        body: { date: '2026-08-25', activity: { steps: 12_000, active_kcal: 800, distance_m: 7_000 } },
       })
       // Second push: steps update, activeKcal is explicitly null -> must NOT clobber stored 800.
       const { snap } = await handle(deps, {
@@ -995,7 +999,7 @@ describe('POST /api/health/ingest', () => {
         body: { date: '2026-08-25', activity: { steps: 13_000, active_kcal: null } },
       })
       expect(snap?.activity?.activeKcal).toBe(800) // null did not wipe the stored value
-      // Merged day is coherent (13k steps, 800 kcal, 9km) -> guard must not have fired.
+      // Merged day is coherent (13k steps, 800 kcal, 7km) -> guard must not have fired.
       expect(onPlausibility).not.toHaveBeenCalled()
     })
 
@@ -1039,7 +1043,8 @@ describe('POST /api/health/ingest', () => {
       const deps = makeDeps({ recordAnomaly })
       await handle(deps, {
         token: VALID_TOKEN,
-        body: { date: '2026-08-26', activity: { steps: 10000, active_kcal: 450, distance_m: 7600 } },
+        // 6000/10000 = 0.600 m/step, inside the recalibrated [0.25, 0.65] band (4a6cb4a); a coherent push.
+        body: { date: '2026-08-26', activity: { steps: 10000, active_kcal: 450, distance_m: 6000 } },
       })
       expect(recordAnomaly).toHaveBeenCalledTimes(1)
       const [, suspect] = recordAnomaly.mock.calls[0]
