@@ -1560,6 +1560,15 @@ export function deleteOldGuardEvents(nowSec: number, retentionSec = GUARD_EVENT_
   return db.prepare('DELETE FROM guard_events WHERE created_at < ?').run(nowSec - retentionSec).changes
 }
 
+// Default retention for token_usage rows (card a4d7b541). Without a prune the
+// table accumulates every API call forever; 90 days covers all analytics
+// windows while bounding growth. timestamp is epoch SECONDS.
+export const TOKEN_USAGE_RETENTION_SEC = 90 * 24 * 60 * 60
+
+export function pruneTokenUsage(nowSec: number, retentionSec: number = TOKEN_USAGE_RETENTION_SEC): number {
+  return db.prepare('DELETE FROM token_usage WHERE timestamp < ?').run(nowSec - retentionSec).changes
+}
+
 export function getGuardEvents(limit = 100, sinceSec?: number): GuardEventRow[] {
   if (sinceSec !== undefined) {
     return db.prepare(
