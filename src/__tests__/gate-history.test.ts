@@ -58,15 +58,25 @@ describe('readGateHistory (db layer)', () => {
     expect(rows).toHaveLength(3)
   })
 
-  it('clamps limit to 1000 (no unbounded reads)', () => {
-    // seed 3 rows; requesting limit=99999 should not crash and return <=1000
-    for (let i = 0; i < 3; i++) {
-      const sha = String(i).repeat(40)
+  it('clamps limit to 1000 -- seeded with 1005 rows so the cap is actually exercised', () => {
+    for (let i = 0; i < 1005; i++) {
+      // sha must be exactly 40 hex chars; pad i left with zeros
+      const sha = String(i).padStart(40, '0')
       insertApproval(db, { pr_number: i + 1, head_sha: sha, reviewer: 'dave', verdict: 'approved', recorded_by: 'dave' }, i)
     }
     const rows = readGateHistory(db, { limit: 99999 })
-    expect(rows.length).toBeLessThanOrEqual(1000)
-    expect(rows).toHaveLength(3) // only 3 exist
+    expect(rows).toHaveLength(1000) // hard cap enforced
+  })
+
+  it('negative limit is clamped to 1 (defense-in-depth: SQLite treats negative LIMIT as unlimited)', () => {
+    // Without Math.max(1,...): Math.min(-5,1000)=-5 -> SQLite LIMIT -5 = no limit -> returns all 10 rows.
+    // With fix: Math.max(1, Math.min(-5,1000))=1 -> LIMIT 1 -> returns exactly 1 row.
+    for (let i = 0; i < 10; i++) {
+      const sha = String(i).padStart(40, '0')
+      insertApproval(db, { pr_number: i + 1, head_sha: sha, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, i)
+    }
+    const rows = readGateHistory(db, { limit: -5 })
+    expect(rows).toHaveLength(1)
   })
 
   it('returns full row shape (all fields present)', () => {
