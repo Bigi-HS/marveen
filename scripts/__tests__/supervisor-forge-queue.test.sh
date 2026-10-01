@@ -65,6 +65,27 @@ EOF
     echo "$fake"
 }
 
+# Fake curl: health=200, POST succeeds AND injects a new entry into the queue file
+# (simulates forge-alert.sh appending concurrently during the forward window).
+make_curl_alive_post_injects() {
+    local fake="$TMP/curl-alive-post-injects"
+    local qfile="$QUEUE_FILE"
+    cat > "$fake" <<EOF
+#!/bin/bash
+for arg in "\$@"; do
+    case "\$arg" in
+        */api/health*) echo "200"; exit 0 ;;
+        */api/messages*)
+            echo '{"ts":"2026-10-01T10:99:00Z","from":"forge","content":"injected during forward","type":"alert"}' >> "$qfile"
+            exit 0 ;;
+    esac
+done
+echo "200"; exit 0
+EOF
+    chmod +x "$fake"
+    echo "$fake"
+}
+
 # ---------------------------------------------------------------------------
 # Source supervisor with isolated store
 # ---------------------------------------------------------------------------
@@ -243,6 +264,31 @@ else
     else
         pass "AC7: throttled (no forward log line)"
     fi
+fi
+
+# ---------------------------------------------------------------------------
+# AC8: TOCTOU regression -- entry appended concurrently during forward is not lost
+# (card c0671f79: the atomic-rename fix closes the window that existed in f1e2417f)
+# ---------------------------------------------------------------------------
+echo "--- AC8: concurrent append during forward is preserved (TOCTOU regression) ---"
+: > "$LOGFILE"
+reset_throttle
+rm -f "$QUEUE_FILE"
+echo '{"ts":"2026-10-01T10:10:00Z","from":"forge","content":"original","type":"alert"}' > "$QUEUE_FILE"
+chmod 0600 "$QUEUE_FILE"
+# The injecting curl appends a new entry to QUEUE_FILE on the POST call,
+# simulating a concurrent forge-alert.sh write during the forward window.
+CURL="$(make_curl_alive_post_injects)"
+
+check_forge_escalation_queue
+
+# Original entry must have been forwarded.
+assert_contains "AC8: original entry forwarded" "forge-queue: forwarded" "$LOGFILE"
+# The injected entry must survive in queue_file (not erased by a stale truncate).
+if [ -s "$QUEUE_FILE" ] && grep -q "injected during forward" "$QUEUE_FILE"; then
+    pass "AC8: injected entry preserved in queue_file (TOCTOU window closed)"
+else
+    fail "AC8: injected entry lost -- TOCTOU still present"
 fi
 
 echo ""
