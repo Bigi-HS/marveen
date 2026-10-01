@@ -57,6 +57,20 @@ def bash(cmd, cwd=None):
     return payload
 
 
+def write(path, cwd=None):
+    payload = {'tool_name': 'Write', 'tool_input': {'file_path': path}}
+    if cwd is not None:
+        payload['cwd'] = cwd
+    return payload
+
+
+def edit(path, cwd=None):
+    payload = {'tool_name': 'Edit', 'tool_input': {'file_path': path}}
+    if cwd is not None:
+        payload['cwd'] = cwd
+    return payload
+
+
 def check(mod, label, payload, expect_denied):
     denied, rule, reason = mod.classify(payload)
     if denied != expect_denied:
@@ -205,15 +219,48 @@ def run_secret_exfil(mod):
     return failures
 
 
+# ── Section 3 data: REVIEWER READ-ONLY review-worktree (card 53b163ce / ENG-029) ──
+# B-mechanism: Write/Edit denied while the agent cwd is inside a review-worktree
+# (a path segment carrying the anchored 'review-wt' marker). Each fixture is a
+# (label, payload, expect_denied). Over-block (an engineer worktree or a benign
+# 'preview-wt' sibling caught) is as much a regression as under-block.
+_REVIEW_WT = '/home/domin/dave-review-wt-832'
+_ENG_WT = '/home/domin/marveen-wt/eng-x'
+
+REVIEW_WT_FIXTURES = [
+    # FN: must BLOCK Write/Edit inside the review-worktree.
+    ('FN write in review-wt', write('src/x.ts', _REVIEW_WT), True),
+    ('FN edit in review-wt', edit('src/x.ts', _REVIEW_WT), True),
+    ('FN write to any target from review-wt cwd', write('/tmp/scratch', _REVIEW_WT), True),
+    ('FN write nested in review-wt', write('x.ts', _REVIEW_WT + '/src/web'), True),
+    # FP: must ALLOW -- engineer work and anchored-marker lookalikes stay open.
+    ('FP write in engineer worktree', write('src/x.ts', _ENG_WT), False),
+    ('FP write in shared checkout cwd', write('src/x.ts', SHARED), False),
+    ('FP preview-wt lookalike is not a review-wt', write('src/x.ts', '/home/domin/preview-wt'), False),
+    ('FP write with no cwd (absent signal fails open)', write('src/web/x.ts'), False),
+    # OPP: Bash stays available inside the review-worktree (read-only != no-op).
+    ('OPP bash grep in review-wt is allowed', bash('grep -rn foo src', _REVIEW_WT), False),
+]
+
+
+def run_review_worktree(mod):
+    """Section 3: reviewer read-only review-worktree lock (card 53b163ce)."""
+    failures = 0
+    for label, payload, expect_denied in REVIEW_WT_FIXTURES:
+        failures += not check(mod, label, payload, expect_denied)
+    return failures
+
+
 def main(target):
     mod = load(target)
-    failures = run_shared_checkout(mod) + run_secret_exfil(mod)
-    total = 13 + len(EXFIL_MUST_ALLOW) + len(EXFIL_MUST_BLOCK)
+    failures = run_shared_checkout(mod) + run_secret_exfil(mod) + run_review_worktree(mod)
+    total = 13 + len(EXFIL_MUST_ALLOW) + len(EXFIL_MUST_BLOCK) + len(REVIEW_WT_FIXTURES)
 
     if failures:
         print(f'\n{failures} adversarial fixture(s) FAILED -- promotion refused.')
         sys.exit(1)
-    print(f'All {total} adversarial fixtures passed (shared-checkout + secret-exfil).')
+    print(f'All {total} adversarial fixtures passed '
+          '(shared-checkout + secret-exfil + reviewer-readonly-worktree).')
     sys.exit(0)
 
 
