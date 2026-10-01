@@ -270,5 +270,72 @@ class MainCliTests(unittest.TestCase):
         self.assertIn("ctl", saved)
 
 
+class DateValidationTests(unittest.TestCase):
+    """Thor ENG-148 hardening: --date must be a strict, real YYYY-MM-DD.
+
+    A malformed value feeds into the daily-{date}.json path. The missing-file
+    branch already safe-fails, but an explicit exit(2) on a malformed --date is
+    clearer than a misleading "Nincs mai Zepp adat" and closes the path-traversal
+    shape at the door. Validation applies ONLY to a user-supplied --date; the
+    default (today) is always valid.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.zepp = os.path.join(self._tmp.name, "zepp")
+        os.makedirs(self.zepp)
+        self.state = os.path.join(self._tmp.name, "hibiki-ctl-atl.json")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_date(self, value):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = rc.main(["--json", "--date", value,
+                            "--zepp-dir", self.zepp, "--state", self.state])
+        return code, err.getvalue()
+
+    def test_path_traversal_rejected(self):
+        code, err = self._run_date("../../etc/passwd")
+        self.assertEqual(code, 2)
+        self.assertIn("Invalid --date", err)
+        self.assertFalse(os.path.exists(self.state), "no state write on invalid date")
+
+    def test_non_date_string_rejected(self):
+        code, err = self._run_date("notadate")
+        self.assertEqual(code, 2)
+        self.assertIn("Invalid --date", err)
+
+    def test_impossible_calendar_date_rejected(self):
+        # regex-shaped but not a real date
+        code, err = self._run_date("2026-13-45")
+        self.assertEqual(code, 2)
+        self.assertIn("Invalid --date", err)
+
+    def test_non_zero_padded_rejected(self):
+        # strict YYYY-MM-DD: single-digit month/day must not slip through
+        code, _ = self._run_date("2026-1-5")
+        self.assertEqual(code, 2)
+
+    def test_empty_string_rejected(self):
+        code, _ = self._run_date("")
+        self.assertEqual(code, 2)
+
+    def test_valid_date_passes_validation(self):
+        # a well-formed date is NOT rejected: it reaches the missing-file branch (exit 1),
+        # proving the validator does not block legitimate input.
+        code, err = self._run_date("2026-09-28")
+        self.assertEqual(code, 1)
+        self.assertIn("Nincs mai Zepp adat: 2026-09-28", err)
+
+    def test_valid_helper_direct(self):
+        self.assertTrue(rc._valid_date("2026-09-28"))
+        self.assertFalse(rc._valid_date("2026-9-28"))
+        self.assertFalse(rc._valid_date("2026-02-30"))
+        self.assertFalse(rc._valid_date("../2026-09-28"))
+        self.assertFalse(rc._valid_date("2026-09-28\n"))
+
+
 if __name__ == "__main__":
     unittest.main()

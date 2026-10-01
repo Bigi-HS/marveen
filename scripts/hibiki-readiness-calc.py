@@ -25,13 +25,33 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ZEPP_DIR = REPO_ROOT / "store" / "zepp"
 DEFAULT_STATE = REPO_ROOT / "store" / "hibiki-ctl-atl.json"
+
+# Strict YYYY-MM-DD shape; the strptime check in _valid_date rejects impossible
+# calendar dates (e.g. 2026-13-45) that the regex alone would admit.
+_DATE_RX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _valid_date(value: str) -> bool:
+    """True only for a strict, real YYYY-MM-DD date string.
+
+    Guards the --date -> daily-{date}.json path: a malformed value (``../``,
+    a non-date, a non-zero-padded or impossible date) is rejected at the door.
+    """
+    if not _DATE_RX.match(value):
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
 
 # Exponential-smoothing time constants (EWMA over daily training load).
 _K_CTL = math.exp(-1 / 42)  # Chronic Training Load, 42-day
@@ -250,6 +270,10 @@ def main(argv) -> int:
     ap.add_argument("--zepp-dir", default=None, help="override Zepp daily dir (default: store/zepp)")
     ap.add_argument("--state", default=None, help="override CTL/ATL state file")
     args = ap.parse_args(argv)
+
+    if args.date is not None and not _valid_date(args.date):
+        print(f"Invalid --date (expected YYYY-MM-DD): {args.date!r}", file=sys.stderr)
+        return 2
 
     target = args.date or date.today().isoformat()
     zepp_dir = args.zepp_dir or str(DEFAULT_ZEPP_DIR)
