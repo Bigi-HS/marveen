@@ -274,3 +274,34 @@ export function readLatestCiRun(db: Database.Database, pr: number, sha: string):
     .get(pr, sha) as GateCiRunRow | undefined
   return row ?? null
 }
+
+// ---- Gate history (card df917696 part c) ----------------------------------
+
+export interface GateHistoryOptions {
+  pr?: number
+  limit?: number
+}
+
+// Read gate approval history, newest-first. Optional pr filter and limit (max 1000).
+// Append-only source table (gate_approvals) -- no prune -- so this is the full audit log.
+export function readGateHistory(
+  db: Database.Database,
+  opts: GateHistoryOptions = {},
+): GateApprovalRow[] {
+  const limit = Math.min(opts.limit ?? 100, 1000)
+  if (opts.pr != null) {
+    return db
+      .prepare(
+        `SELECT id, pr_number, head_sha, reviewer, verdict, recorded_by, recorded_at, note
+           FROM gate_approvals WHERE pr_number = ?
+           ORDER BY recorded_at DESC, id DESC LIMIT ?`,
+      )
+      .all(opts.pr, limit) as GateApprovalRow[]
+  }
+  return db
+    .prepare(
+      `SELECT id, pr_number, head_sha, reviewer, verdict, recorded_by, recorded_at, note
+         FROM gate_approvals ORDER BY recorded_at DESC, id DESC LIMIT ?`,
+    )
+    .all(limit) as GateApprovalRow[]
+}

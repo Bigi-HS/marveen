@@ -36,6 +36,7 @@ import {
   readPrAuthor,
   insertCiRun,
   readLatestCiRun,
+  readGateHistory,
 } from '../gate-db.js'
 import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
 import { fetchPrInfo } from '../github-pr.js'
@@ -296,6 +297,27 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
       return true
     }
     json(res, { consumed: true }, 200)
+    return true
+  }
+
+  // GET /api/gate/history -- audit log of all gate verdicts (card df917696 part c).
+  // Optional ?pr=N to filter by PR; ?limit=N caps results (max 1000, default 100).
+  // Append-only source: no prune on gate_approvals; returns the full audit trail.
+  if (path === '/api/gate/history' && method === 'GET') {
+    const prRaw = url.searchParams.get('pr')
+    const limitRaw = url.searchParams.get('limit')
+    const pr = prRaw != null ? Number(prRaw) : undefined
+    const limit = limitRaw != null ? Number(limitRaw) : undefined
+    if (pr !== undefined && !isPositiveInt(pr)) {
+      json(res, { error: 'pr query parameter must be a positive integer' }, 400)
+      return true
+    }
+    if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+      json(res, { error: 'limit must be a positive integer' }, 400)
+      return true
+    }
+    const rows = readGateHistory(getDb(), { pr, limit })
+    json(res, { rows, count: rows.length })
     return true
   }
 
