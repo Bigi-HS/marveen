@@ -288,7 +288,7 @@ export function readGateHistory(
   db: Database.Database,
   opts: GateHistoryOptions = {},
 ): GateApprovalRow[] {
-  const limit = Math.min(opts.limit ?? 100, 1000)
+  const limit = Math.max(1, Math.min(opts.limit ?? 100, 1000))
   if (opts.pr != null) {
     return db
       .prepare(
