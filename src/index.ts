@@ -14,7 +14,7 @@ import { join } from 'node:path'
 import { execFileSync, execSync } from 'node:child_process'
 import type { Server as HttpServer } from 'node:http'
 import { PROJECT_ROOT, STORE_DIR, PID_FILENAME, WEB_PORT, MAIN_AGENT_ID, RESPAWN_ENABLED } from './config.js'
-import { initDatabase, deleteOldMessages, deleteOldGuardEvents, pruneTokenUsage, createAgentMessage } from './db.js'
+import { initDatabase, deleteOldMessages, deleteOldGuardEvents, pruneTokenUsage, runIncrementalVacuum, getDbFileSizeBytes, createAgentMessage } from './db.js'
 import { initCodetreeDatabase } from './web/codetree-db.js'
 import { startMessageRetentionSweep } from './web/message-retention.js'
 import { runTierDemotionSweep } from './noa-memory.js'
@@ -369,6 +369,7 @@ let decayInterval: NodeJS.Timeout | null = null
 let messageRetentionInterval: NodeJS.Timeout | null = null
 let guardEventRetentionInterval: NodeJS.Timeout | null = null
 let tokenUsageRetentionInterval: NodeJS.Timeout | null = null
+let incrementalVacuumInterval: NodeJS.Timeout | null = null
 let archiveSweepInterval: NodeJS.Timeout | null = null
 let digestTimer: NodeJS.Timeout | null = null
 let digestInterval: NodeJS.Timeout | null = null
@@ -391,6 +392,7 @@ const shutdown = (): void => {
     if (messageRetentionInterval) clearInterval(messageRetentionInterval)
     if (guardEventRetentionInterval) clearInterval(guardEventRetentionInterval)
     if (tokenUsageRetentionInterval) clearInterval(tokenUsageRetentionInterval)
+    if (incrementalVacuumInterval) clearInterval(incrementalVacuumInterval)
     if (archiveSweepInterval) clearInterval(archiveSweepInterval)
     if (digestTimer) clearTimeout(digestTimer)
     if (digestInterval) clearInterval(digestInterval)
@@ -555,6 +557,30 @@ async function main(): Promise<void> {
   pruneTokenUsageRows()
   tokenUsageRetentionInterval = setInterval(pruneTokenUsageRows, 24 * 60 * 60 * 1000)
   logger.info('Token-usage retention sweep beallitva (24 oras)')
+
+  // Nightly incremental VACUUM + DB size monitor (card 0d88fec1). After the
+  // one-time /api/admin/vacuum call enables INCREMENTAL auto_vacuum, this sweep
+  // reclaims up to 500 freed pages (~2MB) per night so the freelist cannot
+  // accumulate again. It is a no-op when auto_vacuum=0 (NONE). The size monitor
+  // logs a warning when the DB file exceeds 150MB so operators know to trigger
+  // the full VACUUM endpoint again.
+  const runDbMaintenance = (): void => {
+    try {
+      const freed = runIncrementalVacuum(500)
+      if (freed > 0) {
+        logger.info({ freed }, 'incremental-vacuum: reclaimed pages')
+      }
+      const sizeBytes = getDbFileSizeBytes()
+      if (sizeBytes !== null && sizeBytes > 150 * 1024 * 1024) {
+        logger.warn({ sizeBytes }, 'noa.db exceeds 150MB threshold -- consider running POST /api/admin/vacuum')
+      }
+    } catch (err) {
+      logger.warn({ err }, 'db-maintenance: incremental vacuum / size check failed (non-fatal)')
+    }
+  }
+  runDbMaintenance()
+  incrementalVacuumInterval = setInterval(runDbMaintenance, 24 * 60 * 60 * 1000)
+  logger.info('DB maintenance sweep beallitva (24 oras)')
 
   // Done-card auto-archive sweep (card 48a92d27). Without a call site the
   // runArchiveSweep() function (present since AC-4) never ran, so done cards
