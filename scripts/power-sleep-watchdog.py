@@ -31,7 +31,7 @@ def get_ac_standbyidle():
     )
     for line in result.stdout.splitlines():
         if "Current AC Power Setting Index" in line:
-            parts = line.strip().split(":")
+            parts = line.strip().split(":", 1)
             if len(parts) == 2:
                 return parts[1].strip()
     return None
