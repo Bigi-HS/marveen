@@ -31,6 +31,16 @@ export default defineConfig({
       // Exclude deploy-time dist backups (store/dist-backup-YYYYMMDD-HHMMSS/):
       // the backup dir contains __tests__ which vitest would otherwise glob.
       'store/dist-backup-*/**',
+      // Repo-ROOT deploy backups in both dash and dot forms
+      // (dist-backup-YYYYMMDD-* and dist.backup-YYYYMMDD-*): each is a full tree
+      // with its own src/__tests__ copy. A full `vitest run` (the buster CI
+      // pre-gate sweep on open PRs) globbed these stale copies and re-ran them
+      // -- including a live-infra-hitting test -- wedging the dashboard event
+      // loop into a relaunch loop (2026-10-02 fleet-wedge incident, card 381d4123;
+      // memory incident-dashboard-wedge-vitest-live-infra-1002). Mirrors the
+      // store/ rule above for the repo root.
+      'dist-backup-*/**',
+      'dist.backup-*/**',
       // Per-agent working dirs vendor skill-pack stub test files under
       // agents/<name>/.claude-config/skills/.../*.test.mjs. They are untracked
       // stubs, not this repo's suite, and only appear after certain scaffolds,
