@@ -81,6 +81,15 @@ resolve_live_db() {
     esac
     case "$candidate" in
       *..*) : ;;                                    # parent-dir traversal -> reject
+      # Frozen legacy split-brain DB -> NEVER selectable, even as an explicit
+      # override (OPS/b7f9792b). The accept-glob below is `"$INSTALL_DIR"/*.db`
+      # and a case-glob `*` matches `/` too, so without this guard an override
+      # like NOA_DB_PATH=store/claudeclaw.db (any depth under the root) would be
+      # accepted and point agent_messages / sg_should_wake reads at the stale
+      # cutover-frozen DB (fail-open to split-brain). Reject by basename at any
+      # depth; falls through to the safe $STORE/noa.db default. See
+      # lesson-shell-case-glob-star-matches-slash-1002.
+      */claudeclaw.db|claudeclaw.db) : ;;
       "$INSTALL_DIR"/*.db) printf '%s' "$candidate"; return 0 ;;
     esac
     # invalid override (bad suffix / outside root) -> fall through to safe default
