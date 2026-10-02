@@ -44,6 +44,24 @@ describe('vault-lint-nightly-full.sh — static assertions (FIX A + wiring)', ()
   it('emits the deterministic daily-log entry from the shell (FIX B)', () => {
     expect(src).toMatch(/\/api\/daily-log/)
   })
+
+  it('registers the cleanup trap BEFORE the mktemp calls (Thor advisory)', () => {
+    const trapIdx = src.indexOf("trap 'rm -f")
+    // match the actual mktemp invocation, not the comment that mentions it
+    const mktempIdx = src.indexOf('$(mktemp')
+    expect(trapIdx).toBeGreaterThan(-1)
+    expect(mktempIdx).toBeGreaterThan(-1)
+    expect(trapIdx).toBeLessThan(mktempIdx)
+  })
+
+  it('hardcodes the dashboard URL to localhost, not env-overridable (Chad advisory)', () => {
+    expect(src).toMatch(/DASH_URL="http:\/\/localhost:3420"/)
+    expect(src).not.toMatch(/DASH_URL="\$\{DASH_URL:-/)
+  })
+
+  it('pins curl against redirects so the Bearer token cannot be bounced off-host (Chad advisory)', () => {
+    expect(src).toMatch(/curl[^\n]*--max-redirs 0/)
+  })
 })
 
 describe('vault-lint-nightly-full.sh — functional run (FIX A + FIX B)', () => {

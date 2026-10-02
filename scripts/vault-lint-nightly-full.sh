@@ -14,13 +14,21 @@ set -e
 
 MARVEEN_DIR="${MARVEEN_DIR:-/home/domin/marveen}"
 SCRIPTS_DIR="$MARVEEN_DIR/scripts"
-DASH_URL="${DASH_URL:-http://localhost:3420}"
+# Dashboard URL hardcoded to localhost: this single-purpose nightly task always
+# talks to the local dashboard, and the Bearer token must never leave it. Not
+# env-overridable, so a compromised env can't redirect the token off-host
+# (token-exfil mitigation, Chad PR#847; mirrors scripts/noa-api.py).
+DASH_URL="http://localhost:3420"
 PROPOSALS_JSON="$MARVEEN_DIR/store/vault-lint-l2-proposals.json"
 
-# FIX A: unique temp files, cleaned up on exit.
+# FIX A: unique temp files, cleaned up on exit. Register the trap with empty
+# vars BEFORE the mktemp calls so a failure of the second mktemp can't leak the
+# first temp file (Thor PR#847 advisory).
+VL2_OUT=""
+VL2_ERR=""
+trap 'rm -f "$VL2_OUT" "$VL2_ERR"' EXIT
 VL2_OUT="$(mktemp "${TMPDIR:-/tmp}/vl2-out.XXXXXX.json")"
 VL2_ERR="$(mktemp "${TMPDIR:-/tmp}/vl2-err.XXXXXX.txt")"
-trap 'rm -f "$VL2_OUT" "$VL2_ERR"' EXIT
 
 echo "=== Nightly vault-lint L2 + TM-1 executor ===" >&2
 
@@ -70,7 +78,7 @@ PY
 )"
   TOKEN="$(cat "$TOKEN_FILE")"
   PAYLOAD="$(python3 -c 'import json,sys; print(json.dumps({"agent_id":"applegate","content":sys.argv[1]}))' "$LOG_LINE")"
-  if curl -s -X POST "$DASH_URL/api/daily-log" \
+  if curl -s --max-redirs 0 -X POST "$DASH_URL/api/daily-log" \
       -H "Authorization: Bearer $TOKEN" \
       -H "Content-Type: application/json" \
       -d "$PAYLOAD" >/dev/null 2>&1; then
