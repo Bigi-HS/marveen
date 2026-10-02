@@ -67,12 +67,13 @@ const CHANNEL_PLUGIN_DISABLES = {
 const HEARTBEAT_AGENT_CONFIG = {
   model: 'claude-haiku-4-5',
   authMode: 'shared' as const,
-  // SEC-098: "standard" is NOT a real profile under templates/profiles/, so
-  // loadProfileTemplate silently fell back to the permissive default on every
-  // boot (fail-open, same silent-fallback class as the authMode "oauth" bug
-  // above). "default" is the honest, valid equivalent of the behaviour this
-  // agent already had; a tighter read-oriented profile is a follow-up.
-  securityProfile: 'default',
+  // SEC-099 (card 213fd3bf): narrowed from the SEC-098 interim "default" to the
+  // least-privilege "heartbeat" profile (Chad sec-GO 2026-10-01). It is strict +
+  // channel-less, so Claude Code actually ENFORCES the allow/deny list (the skip
+  // flag is dropped) -- the heartbeat may only read via the dashboard API +
+  // Calendar list-events, stat/ls for DB size, and read/write its OWN dir.
+  // See templates/profiles/heartbeat.json for the exact allow/deny.
+  securityProfile: 'heartbeat',
 }
 
 // The CLAUDE.md prose. Single source of truth for the agent's behaviour

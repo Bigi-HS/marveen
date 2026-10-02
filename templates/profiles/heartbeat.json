@@ -1,0 +1,41 @@
+{
+  "id": "heartbeat",
+  "label": "Heartbeat",
+  "description": "Least-privilege profil a csendes háttér-heartbeat ágenshez (SEC-099 / card 213fd3bf, PR#777 interim-default szűkítése). A heartbeat csak naptárt/emailt/kanbant olvas a dashboard API-n és a Google Calendar MCP list-events tool-on át, DB-méretet stat/ls-sel ellenőriz, és kizárólag a SAJÁT könyvtárába ír (Chad sec-feltétel 2026-10-01). Strict mód + channel-less => Claude Code valóban enforce-olja az allow/deny listát (nincs --dangerously-skip-permissions). NINCS: Telegram MCP küldés, nyers curl+token, sqlite3, másik ágens store/ olvasása.",
+  "permissionMode": "strict",
+  "filesystem": {
+    "allow": [
+      "Read(${AGENT_DIR}/**)",
+      "Write(${AGENT_DIR}/**)",
+      "Bash(python3 /home/domin/marveen/scripts/noa-api.py:*)",
+      "mcp__server-google-calendar-mcp__list-events",
+      "Bash(stat:*)",
+      "Bash(ls:*)"
+    ],
+    "deny": [
+      "Read(${HOME}/.ssh/**)",
+      "Read(${HOME}/.aws/**)",
+      "Read(${HOME}/.gnupg/**)",
+      "Read(${HOME}/.env)",
+      "Read(**/.env)",
+      "Read(**/.dashboard-token)",
+      "Read(**/.git-credentials)",
+      "Read(**/.claude.json)",
+      "Bash(sudo:*)",
+      "Bash(rm:*)",
+      "Bash(sqlite3:*)",
+      "Bash(curl -X POST:*)",
+      "Bash(git push:*)",
+      "Bash(pkill:*)",
+      "Bash(killall:*)",
+      "Bash(npm publish:*)",
+      "Write(**/access.json)",
+      "Edit(**/access.json)",
+      "Read(**/.mcp.json)",
+      "Write(**/.mcp.json)",
+      "Edit(**/.mcp.json)",
+      "Write(**/settings.json)",
+      "Edit(**/settings.json)"
+    ]
+  }
+}

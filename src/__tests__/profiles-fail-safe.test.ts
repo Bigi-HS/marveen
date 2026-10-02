@@ -16,7 +16,7 @@ import { logger } from '../logger.js'
 // logging. PR-2 (this file's additions): flips the runtime fallback from permissive
 // default to HARDCODED_RESTRICTIVE_PROFILE (strict + deny-all), so a misconfigured
 // channel-less agent is locked out rather than silently running permissive.
-const KNOWN = ['default', 'developer-junior', 'developer-senior', 'marketer', 'researcher', 'restricted-fallback']
+const KNOWN = ['default', 'developer-junior', 'developer-senior', 'heartbeat', 'marketer', 'researcher', 'restricted-fallback']
 
 afterEach(() => {
   vi.restoreAllMocks()
