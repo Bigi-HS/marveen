@@ -192,6 +192,19 @@ CURL="$(command -v curl || true)"
 . "$INSTALL_DIR/scripts/lib/pane-idle.sh" 2>/dev/null \
   || echo "WARN: pane-idle.sh source failed; idle-nudge pane detection degraded" >&2
 
+# sleep-guard.sh provides the canonical wake-obligation predicate sg_should_wake
+# (undelivered msg OR in_progress card OR due task), mirrored by the sleep-mode
+# watchdog. fleet_wedge_sweep uses it so a channel-less sleep-managed agent that
+# is briefly session-alive with a usage-limit/Press-Enter pane but ZERO
+# wake-obligation is not mis-flagged as wedged (card OPS/aec0be4a; same
+# managed-sleep != down fix as OPS-247/0c6f8263 on the deploy-verify path). It
+# defines ONLY pure functions + self-defaulting `: "${SG_*:=...}"` tunables, so
+# sourcing has no side effect; degrade safe if absent (sweep falls back to the
+# pane-only classification, i.e. the pre-aec0be4a behaviour).
+# shellcheck source=scripts/lib/sleep-guard.sh
+. "$INSTALL_DIR/scripts/lib/sleep-guard.sh" 2>/dev/null \
+  || echo "WARN: sleep-guard.sh source failed; wedge-sweep sleep-awareness degraded" >&2
+
 # Write to stderr only. The daemon (fleet-boot.sh) and cron invocations redirect
 # stderr into $LOG, so a single channel avoids the tee+redirect double-logging.
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [fleet-supervisor] $*" >&2; }
@@ -1419,6 +1432,22 @@ guard_presence_check() {
 #
 # Agent list is env-overridable (FLEET_TEST_SWEEP_AGENTS) so tests can inject a
 # small subset without forking a real tmux.
+#
+# wedge_sleep_suppress <agent> <now>: true iff <agent> is a sleep-managed agent
+# that is correctly idle -- sleep-eligible AND has NO wake-obligation (undelivered
+# msg / in_progress card / due task, per sg_should_wake). Such an agent briefly
+# session-alive in its wake-to-check window and showing a usage-limit/Press-Enter
+# pane is EXPECTED, not wedged (card OPS/aec0be4a). Degrade-safe: if sleep-guard.sh
+# did not load (sg_should_wake absent), never suppress -> fall back to flagging,
+# i.e. the pre-aec0be4a behaviour. G6 (feedback modal) is NOT suppressed here --
+# it is owned by b0e189fb/OPS-232.
+wedge_sleep_suppress() {
+  local n="$1" now="$2"
+  command -v sg_should_wake >/dev/null 2>&1 || return 1
+  is_sleep_eligible "$n" || return 1
+  ! sg_should_wake "$(resolve_live_db)" "$n" "$now"
+}
+
 fleet_wedge_sweep() {
   local now throttle_key last
   now=$(date +%s)
@@ -1428,7 +1457,7 @@ fleet_wedge_sweep() {
   echo "$now" > "$throttle_key"
 
   local agents="${FLEET_TEST_SWEEP_AGENTS:-gauge quill applegate radar blackbeard morgan roberts kidd rackham bonny avery vane bellamy inkwell forge chad thor claudia bigben hibiki devil-advocate bond scout gyore percy buster blackbart dave}"
-  local dead_list="" asleep_list="" wedged_list="" healthy_count=0 n pane_text session
+  local dead_list="" asleep_list="" wedged_list="" napping_list="" healthy_count=0 n pane_text session
 
   for n in $agents; do
     session="agent-$n"
@@ -1446,9 +1475,11 @@ fleet_wedge_sweep() {
     pane_text=$("$TMUX_BIN" capture-pane -t "=$session:0.0" -p 2>/dev/null) || { healthy_count=$((healthy_count+1)); continue; }
     case "$pane_text" in
       *"Usage limit"*|*"weekly limit"*|*"credit"*|*"budget"*)
-        wedged_list="$wedged_list ${n}:G2" ;;
+        if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
+        else wedged_list="$wedged_list ${n}:G2"; fi ;;
       *"Press Enter"*|*"press enter"*)
-        wedged_list="$wedged_list ${n}:G1" ;;
+        if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
+        else wedged_list="$wedged_list ${n}:G1"; fi ;;
       # Session-feedback modal. Match the canonical marker used by the TS
       # detector (pane-state.ts FEEDBACK_MODAL_RX: "how is claude doing this
       # session"), NOT a bare *survey* glob -- the latter false-matched the
@@ -1464,7 +1495,7 @@ fleet_wedge_sweep() {
   # Only alert on wedge states (dead = watchdog auto-recovers; no alert needed).
   [ -z "$wedged_list" ] && return 0
 
-  local msg="fleet-wedge-sweep: wedged:${wedged_list# } dead:${dead_list# } asleep:${asleep_list# } healthy:${healthy_count}"
+  local msg="fleet-wedge-sweep: wedged:${wedged_list# } napping:${napping_list# } dead:${dead_list# } asleep:${asleep_list# } healthy:${healthy_count}"
   log "$msg"
 
   # Post via dashboard API if available.
