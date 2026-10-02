@@ -5,6 +5,7 @@ import type { DeployVerifyDeps } from '../web/deploy-verify.js'
 afterEach(() => __resetDeployVerifyDeps())
 
 // Fully-healthy fleet baseline -- every check passes.
+// Sleep-mode OFF by default so the baseline matches the pre-sleep-aware behaviour.
 const healthy: DeployVerifyDeps = {
   isSessionAlive: () => true,
   isPgrepMatch: () => true,
@@ -14,6 +15,10 @@ const healthy: DeployVerifyDeps = {
   getChannelProvider: () => 'telegram',
   getVaultSecret: () => 'TOKEN_CONTENT',
   isDbAccessible: () => true,
+  isSleepModeEnabled: () => false,
+  getSleepEligible: () => [],
+  isSleepWatchdogRunning: () => true,
+  hasWakeObligation: () => false,
 }
 
 describe('runDeployVerify', () => {
@@ -143,9 +148,113 @@ describe('runDeployVerify', () => {
       getChannelProvider: () => 'telegram',
       getVaultSecret: () => null,
       isDbAccessible: () => false,
+      isSleepModeEnabled: () => false,
+      getSleepEligible: () => [],
+      isSleepWatchdogRunning: () => false,
+      hasWakeObligation: () => false,
     })
     const r = runDeployVerify()
     expect(r.pass).toBe(false)
     expect(r.score).toBe(0)
+  })
+
+  // --- Sleep-mode aware F2 (card 0c6f8263) ---------------------------------
+  // A sleep-eligible agent (card AGENT-a2b05be5) intentionally has NO tmux
+  // session while asleep. It must NOT count as DOWN unless it has an unmet
+  // wake-obligation (undelivered msg / in_progress card / due task) and still
+  // has no session. The sleep watchdog is what wakes it, so its absence while
+  // asleep means unmanaged sleep (nothing will wake it) -> that IS down.
+  describe('F2 sleep-mode awareness', () => {
+    it('PASSES when a sleep-eligible agent is correctly asleep (no session, no obligation, watchdog up)', () => {
+      // The 2026-10-02 03:1x false-alarm: applegate/bellamy/quill/radar/vane asleep, 0 obligation.
+      __setDeployVerifyDeps({
+        ...healthy,
+        listAgents: () => ['dave', 'vane'],
+        isSessionAlive: (name) => name !== 'agent-vane', // vane asleep
+        isSleepModeEnabled: () => true,
+        getSleepEligible: () => ['vane'],
+        isSleepWatchdogRunning: (name) => name === 'vane',
+        hasWakeObligation: () => false,
+      })
+      const r = runDeployVerify()
+      expect(r.checks.F2.pass).toBe(true)
+      expect(r.pass).toBe(true)
+    })
+
+    it('reports managed-asleep agents in the detail when F2 passes', () => {
+      __setDeployVerifyDeps({
+        ...healthy,
+        listAgents: () => ['dave', 'vane'],
+        isSessionAlive: (name) => name !== 'agent-vane',
+        isSleepModeEnabled: () => true,
+        getSleepEligible: () => ['vane'],
+        isSleepWatchdogRunning: () => true,
+        hasWakeObligation: () => false,
+      })
+      const r = runDeployVerify()
+      expect(r.checks.F2.pass).toBe(true)
+      expect(r.checks.F2.detail).toMatch(/vane/)
+      expect(r.checks.F2.detail).toMatch(/asleep/i)
+    })
+
+    it('FAILS when an asleep agent has an unmet wake-obligation but no session', () => {
+      __setDeployVerifyDeps({
+        ...healthy,
+        listAgents: () => ['dave', 'vane'],
+        isSessionAlive: (name) => name !== 'agent-vane',
+        isSleepModeEnabled: () => true,
+        getSleepEligible: () => ['vane'],
+        isSleepWatchdogRunning: () => true,
+        hasWakeObligation: (name) => name === 'vane', // should be awake, isn't
+      })
+      const r = runDeployVerify()
+      expect(r.checks.F2.pass).toBe(false)
+      expect(r.checks.F2.detail).toMatch(/vane/)
+      expect(r.checks.F2.detail).toMatch(/obligation/i)
+    })
+
+    it('FAILS when a sleep-eligible agent is session-less AND its sleep watchdog is down (unmanaged)', () => {
+      __setDeployVerifyDeps({
+        ...healthy,
+        listAgents: () => ['dave', 'vane'],
+        isSessionAlive: (name) => name !== 'agent-vane',
+        isSleepModeEnabled: () => true,
+        getSleepEligible: () => ['vane'],
+        isSleepWatchdogRunning: () => false, // nothing will wake it
+        hasWakeObligation: () => false,
+      })
+      const r = runDeployVerify()
+      expect(r.checks.F2.pass).toBe(false)
+      expect(r.checks.F2.detail).toMatch(/vane/)
+      expect(r.checks.F2.detail).toMatch(/unmanaged/i)
+    })
+
+    it('FAILS for a session-less agent that is NOT on the sleep-eligible roster (real down)', () => {
+      __setDeployVerifyDeps({
+        ...healthy,
+        listAgents: () => ['dave', 'thor'],
+        isSessionAlive: (name) => name !== 'agent-thor',
+        isSleepModeEnabled: () => true,
+        getSleepEligible: () => ['vane'], // thor not eligible
+        hasWakeObligation: () => false,
+      })
+      const r = runDeployVerify()
+      expect(r.checks.F2.pass).toBe(false)
+      expect(r.checks.F2.detail).toMatch(/agent-thor/)
+    })
+
+    it('FAILS for a roster agent when sleep-mode is OFF (roster only honoured under sleep-mode)', () => {
+      __setDeployVerifyDeps({
+        ...healthy,
+        listAgents: () => ['dave', 'vane'],
+        isSessionAlive: (name) => name !== 'agent-vane',
+        isSleepModeEnabled: () => false, // mode off -> roster ignored
+        getSleepEligible: () => ['vane'],
+        hasWakeObligation: () => false,
+      })
+      const r = runDeployVerify()
+      expect(r.checks.F2.pass).toBe(false)
+      expect(r.checks.F2.detail).toMatch(/agent-vane/)
+    })
   })
 })
