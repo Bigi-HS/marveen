@@ -16,6 +16,8 @@
 // Injectable deps so unit tests run without tmux/pgrep/DB.
 
 import { execFileSync } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { getDb } from '../db.js'
 import { listAgentNames, readAgentChannelProviderSafe } from './agent-config.js'
 import {
@@ -24,10 +26,14 @@ import {
   agentHasChannel,
   agentSessionName,
 } from './agent-process.js'
-import { MAIN_AGENT_ID } from '../config.js'
+import { MAIN_AGENT_ID, PROJECT_ROOT, STORE_DIR } from '../config.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { channelEnvVaultId } from './channel-token-durability.js'
 import { getSecret } from './vault.js'
+
+// Mirror of sleep-guard.sh SG_BOOT_LEAD_SECONDS: a scheduled task due within this
+// many seconds is a wake-obligation (so a sleeper is launched ahead of it).
+const SLEEP_BOOT_LEAD_SECONDS = 150
 
 export interface VerifyCheck {
   pass: boolean
@@ -51,6 +57,13 @@ export interface DeployVerifyDeps {
   getChannelProvider: (name: string) => string | null
   getVaultSecret: (id: string) => string | null
   isDbAccessible: () => boolean
+  // Sleep-mode awareness (card 0c6f8263). A sleep-eligible agent (AGENT-a2b05be5)
+  // intentionally has no tmux session while asleep -- it is NOT down unless it
+  // owes work (a wake-obligation) while still having no session.
+  isSleepModeEnabled: () => boolean
+  getSleepEligible: () => string[]
+  isSleepWatchdogRunning: (name: string) => boolean
+  hasWakeObligation: (name: string) => boolean
 }
 
 // Key watchdog pgrep patterns -- checked as a minimum baseline.
@@ -79,6 +92,59 @@ function dbAccessible(): boolean {
   }
 }
 
+// Sleep-mode is active when the fleet-wide flag file is present.
+function sleepModeEnabled(): boolean {
+  return existsSync(join(STORE_DIR, 'agent-sleep-mode.enabled'))
+}
+
+// Sleep-eligible roster: an operator override (store/sleep-eligible.txt) takes
+// precedence over the shipped default (scripts/sleep-eligible.default.txt).
+// One id per line; '#' comments and blank lines ignored.
+function readSleepEligible(): string[] {
+  const override = join(STORE_DIR, 'sleep-eligible.txt')
+  const dflt = join(PROJECT_ROOT, 'scripts', 'sleep-eligible.default.txt')
+  const path = existsSync(override) ? override : dflt
+  try {
+    return readFileSync(path, 'utf8')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.startsWith('#'))
+  } catch {
+    return []
+  }
+}
+
+// The on-demand sleep watchdog (scripts/sleep-agent-watchdog.sh <name>) is what
+// wakes a sleeper on a real trigger. Its presence proves managed sleep.
+function sleepWatchdogRunning(name: string): boolean {
+  return pgrepMatch(`sleep-agent-watchdog.sh ${name}`)
+}
+
+// Mirror of sleep-guard.sh sg_should_wake: an asleep agent owes work iff it has
+// an undelivered inter-agent message, an in_progress card, or a scheduled task
+// due within the boot-lead window.
+function hasWakeObligation(name: string): boolean {
+  try {
+    const db = getDb()
+    const now = Math.floor(Date.now() / 1000)
+    const msg = db
+      .prepare('SELECT COUNT(*) AS n FROM agent_messages WHERE to_agent=? AND delivered_at IS NULL')
+      .get(name) as { n: number }
+    if (msg.n > 0) return true
+    const card = db
+      .prepare("SELECT COUNT(*) AS n FROM kanban_cards WHERE assignee=? AND status='in_progress'")
+      .get(name) as { n: number }
+    if (card.n > 0) return true
+    const task = db
+      .prepare("SELECT COUNT(*) AS n FROM scheduled_tasks WHERE agent=? AND status='active' AND next_run<=?")
+      .get(name, now + SLEEP_BOOT_LEAD_SECONDS) as { n: number }
+    if (task.n > 0) return true
+    return false
+  } catch {
+    return false
+  }
+}
+
 const realDeps: DeployVerifyDeps = {
   isSessionAlive: isTmuxSessionAlive,
   isPgrepMatch: pgrepMatch,
@@ -91,6 +157,10 @@ const realDeps: DeployVerifyDeps = {
   },
   getVaultSecret: getSecret,
   isDbAccessible: dbAccessible,
+  isSleepModeEnabled: sleepModeEnabled,
+  getSleepEligible: readSleepEligible,
+  isSleepWatchdogRunning: sleepWatchdogRunning,
+  hasWakeObligation: hasWakeObligation,
 }
 
 // Seam for tests.
@@ -115,15 +185,34 @@ function checkF1(deps: DeployVerifyDeps): VerifyCheck {
 // F2 -- sessions + watchdogs.
 function checkF2(deps: DeployVerifyDeps): VerifyCheck {
   const missing: string[] = []
+  const asleep: string[] = []
 
   // Main orchestrator sessions.
   for (const s of [MAIN_AGENT_ID, MAIN_CHANNELS_SESSION]) {
     if (!deps.isSessionAlive(s)) missing.push(`session:${s}`)
   }
 
-  // Agent sessions.
+  // Sleep-mode aware agent sessions (card 0c6f8263). When sleep-mode is on, a
+  // session-less agent on the eligible roster is a VALID (asleep) state, not a
+  // down -- unless it owes work, or nothing is watching to wake it.
+  const sleepModeOn = deps.isSleepModeEnabled()
+  const eligible = sleepModeOn ? new Set(deps.getSleepEligible()) : new Set<string>()
   for (const name of deps.listAgents()) {
-    if (!deps.isSessionAlive(agentSessionName(name))) missing.push(`session:agent-${name}`)
+    if (deps.isSessionAlive(agentSessionName(name))) continue
+    if (eligible.has(name)) {
+      if (deps.hasWakeObligation(name)) {
+        // Should be awake (unmet wake-obligation) but has no session -> down.
+        missing.push(`asleep-with-obligation:${name}`)
+      } else if (!deps.isSleepWatchdogRunning(name)) {
+        // Idle with no obligation, but no sleep watchdog -> nothing will wake it.
+        missing.push(`sleep-unmanaged:${name}`)
+      } else {
+        // Correctly asleep + managed + no obligation -> OK.
+        asleep.push(name)
+      }
+      continue
+    }
+    missing.push(`session:agent-${name}`)
   }
 
   // Key watchdog processes.
@@ -132,10 +221,13 @@ function checkF2(deps: DeployVerifyDeps): VerifyCheck {
   }
 
   const pass = missing.length === 0
+  const asleepNote = asleep.length > 0 ? ` (${asleep.length} asleep/managed: ${asleep.join(', ')})` : ''
   return {
     pass,
     label: 'Sessions + watchdogs',
-    detail: pass ? 'All sessions alive; all watchdogs running' : `Missing: ${missing.join(', ')}`,
+    detail: pass
+      ? `All sessions alive; all watchdogs running${asleepNote}`
+      : `Missing: ${missing.join(', ')}${asleepNote}`,
   }
 }
 

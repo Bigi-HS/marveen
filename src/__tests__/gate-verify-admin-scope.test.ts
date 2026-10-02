@@ -16,6 +16,10 @@ const HEALTHY_DEPS: DeployVerifyDeps = {
   getChannelProvider: () => null,
   getVaultSecret: () => 'TOKEN',
   isDbAccessible: () => true,
+  isSleepModeEnabled: () => false,
+  getSleepEligible: () => [],
+  isSleepWatchdogRunning: () => true,
+  hasWakeObligation: () => false,
 }
 
 function makeCtx(identity: { agentId: string; scopes: string[]; source: 'operator' | 'agent' } | undefined) {
