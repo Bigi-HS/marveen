@@ -180,7 +180,7 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     const name = safeScheduleName(scheduleUpdateMatch[1])
     if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
     const dir = join(SCHEDULED_TASKS_DIR, name)
-    if (!existsSync(dir)) { json(res, { error: 'Schedule not found' }, 404); return true }
+    const hasDir = existsSync(dir)
 
     let body: Buffer
     try {
@@ -214,6 +214,24 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       ...(data.type !== undefined ? { type: data.type as 'task' | 'heartbeat' } : {}),
       ...(data.enabled !== undefined ? { status: (data.enabled ? 'active' : 'paused') as 'active' | 'paused' } : {}),
     }
+
+    // noa.db-only task (file-dir hand-deleted but the row survived active -- the
+    // power-sleep-watchdog EXIT:2 case): manage the row directly instead of
+    // 404ing (card 5010afbd). There is no file to write.
+    if (!hasDir) {
+      const dbTask = getTask(name)
+      if (!dbTask || dbTask.status === 'deleted') { json(res, { error: 'Schedule not found' }, 404); return true }
+      try {
+        updateTask(name, noaPatch)
+      } catch (err) {
+        if (err instanceof TaskNotFoundError) { json(res, { error: 'Schedule not found' }, 404); return true }
+        throw err
+      }
+      logger.info({ name }, 'Scheduled task updated (noa.db-only, no file-dir)')
+      json(res, { ok: true })
+      return true
+    }
+
     try {
       updateTask(name, noaPatch)
     } catch (err) {
@@ -246,7 +264,15 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     const name = safeScheduleName(scheduleUpdateMatch[1])
     if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
     const dir = join(SCHEDULED_TASKS_DIR, name)
-    if (!existsSync(dir)) { json(res, { error: 'Schedule not found' }, 404); return true }
+    if (!existsSync(dir)) {
+      // noa.db-only task: soft-delete the row instead of 404ing (card 5010afbd).
+      const dbTask = getTask(name)
+      if (!dbTask || dbTask.status === 'deleted') { json(res, { error: 'Schedule not found' }, 404); return true }
+      removeTaskFromNoa(name)
+      logger.info({ name }, 'Scheduled task deleted (noa.db-only, no file-dir)')
+      json(res, { ok: true })
+      return true
+    }
     removeTaskFromNoa(name)  // tolerant: no-op if not yet in noa.db
     rmSync(dir, { recursive: true, force: true })
     logger.info({ name }, 'Scheduled task deleted')
@@ -259,7 +285,17 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     const name = safeScheduleName(scheduleToggleMatch[1])
     if (!name) { json(res, { error: 'Schedule not found' }, 404); return true }
     const dir = join(SCHEDULED_TASKS_DIR, name)
-    if (!existsSync(dir)) { json(res, { error: 'Schedule not found' }, 404); return true }
+    if (!existsSync(dir)) {
+      // noa.db-only task: flip the row's status from its own current state
+      // instead of 404ing (card 5010afbd).
+      const dbTask = getTask(name)
+      if (!dbTask || dbTask.status === 'deleted') { json(res, { error: 'Schedule not found' }, 404); return true }
+      const newEnabled = dbTask.status !== 'active'
+      updateTask(name, { status: newEnabled ? 'active' : 'paused' })
+      logger.info({ name, enabled: newEnabled }, 'Scheduled task toggled (noa.db-only, no file-dir)')
+      json(res, { ok: true, enabled: newEnabled })
+      return true
+    }
 
     const configPath = join(dir, 'task-config.json')
     let config: Record<string, unknown> = {}
