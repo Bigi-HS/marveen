@@ -131,6 +131,21 @@ check_listener_drop() {
     fi
   fi
 
+  # Third gate: verify the bun bot process is actually dead.
+  # A stale gauge + active marveen keepalive means Dominik is messaging *some*
+  # agent, but not necessarily gyore. gyore is a researcher -- it can go hours
+  # without a direct DM while the rest of the fleet is busy. Only declare a
+  # listener drop if the bun bot process itself is gone.
+  local pid_file="$STATE/bot.pid"
+  if [ -f "$pid_file" ]; then
+    local bot_pid
+    bot_pid=$(cat "$pid_file" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$bot_pid" ] && [ "$bot_pid" -gt 1 ] 2>/dev/null && kill -0 "$bot_pid" 2>/dev/null; then
+      log "check_listener_drop: gauge stale ${age}s, marveen keepalive fresh, but bot pid ${bot_pid} alive -- idle period, no action"
+      return 0
+    fi
+  fi
+
   log "LISTENER-DROP: gauge stale ${age}s, marveen keepalive fresh -- $SESSION listener appears dead"
   return 1
 }
