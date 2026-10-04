@@ -143,7 +143,15 @@ def main():
     try:
         send(token, message)
     except Exception as exc:  # noqa: BLE001 -- degrade safe
-        print("n8n-alert-sentinel-notify: Telegram send failed: %r" % exc, file=sys.stderr)
+        # NEVER %r/str(exc): an HTTPError/URLError stringifies the request URL,
+        # which carries the bot token in the path (/bot<token>/sendMessage) ->
+        # token leak to stderr (chad advisory, PR#851). Log type + HTTP status only.
+        status = getattr(exc, "code", None)
+        print(
+            "n8n-alert-sentinel-notify: Telegram send failed: %s%s"
+            % (type(exc).__name__, " (HTTP %s)" % status if status else ""),
+            file=sys.stderr,
+        )
     return 0
 
 

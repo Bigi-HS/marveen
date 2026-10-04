@@ -112,6 +112,34 @@ rc = mod.main()
 check(rc == 0 and len(sent) == 0, "(l) main: malformed output -> no send, returns 0")
 
 
+# ---- send failure must NOT leak the token to stderr (chad advisory, PR#851) ----
+import contextlib  # noqa: E402 -- test-local, after the module is loaded
+import io  # noqa: E402
+
+SECRET = "123456:AA-SECRET-BOT-TOKEN"
+
+
+def raising_send(tok, text):
+    # Mimic an HTTPError/URLError whose text embeds the request URL (token in path).
+    exc = RuntimeError("HTTP Error 401 for https://api.telegram.org/bot%s/sendMessage" % SECRET)
+    exc.code = 401
+    raise exc
+
+
+mod.run_sentinel = lambda: FINDINGS_JSON
+mod.read_token = lambda: SECRET
+mod.send = raising_send
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    rc = mod.main()
+captured = err.getvalue()
+check(rc == 0, "(m) main: send failure -> still returns 0")
+check(SECRET not in captured,
+      "(n) main: send-failure stderr does NOT leak the bot token")
+check("RuntimeError" in captured and "401" in captured,
+      "(o) main: send-failure stderr still reports exception type + HTTP status")
+
+
 print("")
 print("%d passed, %d failed" % (PASS, FAIL))
 raise SystemExit(1 if FAIL else 0)
