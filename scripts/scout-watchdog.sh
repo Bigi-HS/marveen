@@ -19,6 +19,12 @@ MAX_PER_HOUR=8
 
 log() { echo "$(date -Is) $*" >> "$LOG"; }
 
+# wd_under_cap_file (relaunch-rate cap) lives in the shared lib; scout-watchdog
+# was missing this source line, so the cap-check errored ("command not found"),
+# the if-guard always fell to the else branch, and scout could NEVER be relaunched
+# (permanent 600s back-off). Mirrors dave-watchdog.sh.
+. "$(dirname "$0")/lib/watchdog-common.sh" || { log "FATAL: watchdog-common.sh source failed"; exit 1; }
+
 read_model() {
   local model
   model="$(python3 -c "import json,sys
