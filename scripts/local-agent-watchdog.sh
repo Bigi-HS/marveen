@@ -46,6 +46,11 @@ log() { echo "$(date -Is) $*" >> "$LOG"; }
 
 # shellcheck disable=SC1091
 . "$ROOT/scripts/lib/ollama-local-guard.sh"
+# wd_under_cap_file / wd_under_cap_stamp (relaunch-rate cap) live in the shared
+# lib; without this source the cap-check errors ("command not found") and the
+# rate limit is silently disabled (relaunch thrash). Mirrors scout/dave-watchdog.
+# shellcheck disable=SC1091
+. "$ROOT/scripts/lib/watchdog-common.sh" || { log "FATAL: watchdog-common.sh source failed"; exit 1; }
 
 # Fetch the agent's contextPercent from the dashboard. Prints a number (0 if the
 # API is unreachable or the agent is absent) so olg_should_restart can decide.
