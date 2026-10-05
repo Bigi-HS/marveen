@@ -1,4 +1,12 @@
 {
   "model": "claude-haiku-4-5-20251001",
-  "securityProfile": "standard"
+  "securityProfile": "default",
+  "team": {
+    "role": "member",
+    "reportsTo": "dave",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": []
+  },
+  "displayName": "Buster"
 }
