@@ -1492,6 +1492,82 @@ wedge_sleep_suppress() {
   ! sg_should_wake "$(resolve_live_db)" "$n" "$now"
 }
 
+# g6_inbox_draining <agent>: returns 0 (true) if the agent has delivered inter-agent
+# messages recently, which proves it is draining its queue and healthy (b0e189fb).
+# Used as an effect-corroboration safety gate before escalating a G6 flag: if the
+# agent IS processing, suppress the flag even on a confirmed 2nd strike (the survey
+# modal is transient/noise, not a real wedge). Fail-open: if the DB is unreachable
+# or the query fails, return 1 so the 2-strike verdict is not suppressed silently.
+g6_inbox_draining() {
+  local n="$1" db recent
+  db=$(resolve_live_db 2>/dev/null) || return 1
+  [ -f "$db" ] || return 1
+  recent=$(python3 -c "
+import sqlite3, sys, time
+try:
+    db = sqlite3.connect('$db')
+    since = int(time.time()) - ${FLEET_WEDGE_SWEEP_INTERVAL:-300}
+    row = db.execute(
+        \"SELECT COUNT(*) FROM agent_messages WHERE to_agent=? AND delivered_at > ?\",
+        ('$n', since)).fetchone()
+    print(row[0] if row else 0)
+    db.close()
+except Exception:
+    print(0)
+" 2>/dev/null) || return 1
+  [ "${recent:-0}" -gt 0 ]
+}
+
+# g6_apply_2strike <agent> <now>
+# 2-strike persistence + TOCTOU-guarded auto-dismiss for the CC session-feedback
+# modal (b0e189fb + e167dd08). Communicates result via _G6_RESULT (caller reads):
+#   first_strike : 1st detection recorded; no flag yet
+#   suppressed   : 2nd strike but inbox is draining (agent healthy); no flag
+#   dismissed    : 2nd strike confirmed, modal re-verified, send-keys 0 sent
+#   toctou       : 2nd strike but modal cleared before re-verify; no send, no flag
+# Side-effects: may write/remove $STATE_DIR/g6-strike-<n>, may call send-keys.
+_G6_RESULT=""
+g6_apply_2strike() {
+  local _n="$1" _now="$2"
+  local _strikef="$STATE_DIR/g6-strike-$_n" _strike_ts _reverify
+  _G6_RESULT=""
+  if [ ! -f "$_strikef" ]; then
+    printf '%s\n' "$_now" > "$_strikef"
+    _G6_RESULT="first_strike"
+    return 0
+  fi
+  _strike_ts=$(cat "$_strikef" 2>/dev/null || echo 0)
+  case "$_strike_ts" in (*[!0-9]*|'') _strike_ts=0;; esac
+  if [ $(( _now - _strike_ts )) -gt "${G6_STRIKE_WINDOW:-600}" ]; then
+    # Strike file is stale (outside window): reset to first strike.
+    printf '%s\n' "$_now" > "$_strikef"
+    _G6_RESULT="first_strike"
+    return 0
+  fi
+  # Second+ consecutive strike within window.
+  rm -f "$_strikef"
+  if g6_inbox_draining "$_n"; then
+    # Agent is actively draining its inbox: healthy despite modal, suppress.
+    _G6_RESULT="suppressed"
+    return 0
+  fi
+  # Confirmed 2nd strike: re-verify before sending to guard against TOCTOU
+  # (modal may self-clear between classification and this action; a blind '0'
+  # would land in the agent's live prompt if the TUI already dismissed it).
+  _reverify=$("$TMUX_BIN" capture-pane -t "=agent-$_n:0.0" -p 2>/dev/null) || _reverify=""
+  case "$_reverify" in
+    *"How is Claude doing this session"*|*"Share feedback"*|*"How would you rate"*)
+      # Modal confirmed: dismiss (static '0' key -- no dynamic content, safe).
+      "$TMUX_BIN" send-keys -t "=agent-$_n:0.0" '0'
+      log "G6 auto-dismiss: sent 0 to agent-$_n (confirmed)"
+      _G6_RESULT="dismissed" ;;
+    *)
+      # Modal cleared between capture and re-verify: skip, no send.
+      log "G6 auto-dismiss: modal cleared in agent-$_n (TOCTOU guard)"
+      _G6_RESULT="toctou" ;;
+  esac
+}
+
 fleet_wedge_sweep() {
   local now throttle_key last
   now=$(date +%s)
@@ -1501,7 +1577,7 @@ fleet_wedge_sweep() {
   echo "$now" > "$throttle_key"
 
   local agents="${FLEET_TEST_SWEEP_AGENTS:-gauge quill applegate radar blackbeard morgan roberts kidd rackham bonny avery vane bellamy inkwell forge chad thor claudia bigben hibiki devil-advocate bond scout gyore percy buster blackbart dave}"
-  local dead_list="" asleep_list="" wedged_list="" napping_list="" healthy_count=0 n session
+  local dead_list="" asleep_list="" wedged_list="" dismissed_list="" napping_list="" healthy_count=0 n session
 
   # --- Phase 1: classify liveness; collect pane captures for alive sessions ---
   local sweep_tmp live_agents=""
@@ -1568,24 +1644,32 @@ except Exception:
     local _agent _state
     while IFS=: read -r _agent _state; do
       [ -z "$_agent" ] && continue
+      # Roster-guard: reject path-like or blank tokens (defensive, b0e189fb).
+      case "$_agent" in */*|*' '*) continue ;; esac
       case "$_state" in
         limit)
           if wedge_sleep_suppress "$_agent" "$now"; then napping_list="$napping_list $_agent"
           else wedged_list="$wedged_list ${_agent}:G2"; fi ;;
-        survey) wedged_list="$wedged_list ${_agent}:G6" ;;
+        survey)
+          # 2-strike persistence + TOCTOU-guarded auto-dismiss (b0e189fb / e167dd08).
+          g6_apply_2strike "$_agent" "$now"
+          case "$_G6_RESULT" in dismissed) dismissed_list="$dismissed_list ${_agent}:G6" ;; esac ;;
         enter)
           if wedge_sleep_suppress "$_agent" "$now"; then napping_list="$napping_list $_agent"
           else wedged_list="$wedged_list ${_agent}:G1"; fi ;;
         # login (G3/OAuth re-auth box) is detected by the CLI but NOT wired to a
         # wedge class here -- wiring would be scope-expansion beyond c72ec834.
         # TODO(ba53fdee follow-up): when G3 recovery is ready, map login -> G3.
-        *) healthy_count=$((healthy_count+1)) ;;
+        *) healthy_count=$((healthy_count+1))
+           rm -f "$STATE_DIR/g6-strike-$_agent" ;;  # reset G6 strike on healthy pane
       esac
     done <<< "$state_map"
   else
     # Degraded fallback: node CLI unavailable -- bare-substring on saved panes.
     local _pane_text
     for n in $live_agents; do
+      # Roster-guard: reject path-like tokens (defensive, b0e189fb).
+      case "$n" in */*|*' '*) continue ;; esac
       _pane_text=$(cat "$sweep_tmp/$n" 2>/dev/null) || continue
       case "$_pane_text" in
         *"Usage limit"*|*"weekly limit"*|*"credit"*|*"budget"*)
@@ -1595,16 +1679,19 @@ except Exception:
           if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
           else wedged_list="$wedged_list ${n}:G1"; fi ;;
         *"How is Claude doing this session"*|*"Share feedback"*|*"How would you rate"*)
-          wedged_list="$wedged_list ${n}:G6" ;;
-        *) healthy_count=$((healthy_count+1)) ;;
+          # 2-strike persistence + TOCTOU-guarded auto-dismiss (b0e189fb / e167dd08).
+          g6_apply_2strike "$n" "$now"
+          case "$_G6_RESULT" in dismissed) dismissed_list="$dismissed_list ${n}:G6" ;; esac ;;
+        *) healthy_count=$((healthy_count+1))
+           rm -f "$STATE_DIR/g6-strike-$n" ;;  # reset G6 strike on healthy pane
       esac
     done
   fi
 
-  # Only alert on wedge states (dead = watchdog auto-recovers; no alert needed).
-  [ -z "$wedged_list" ] && return 0
+  # Only alert on wedge states or auto-dismissals (dead = watchdog auto-recovers).
+  [ -z "$wedged_list" ] && [ -z "$dismissed_list" ] && return 0
 
-  local msg="fleet-wedge-sweep: wedged:${wedged_list# } napping:${napping_list# } dead:${dead_list# } asleep:${asleep_list# } healthy:${healthy_count}"
+  local msg="fleet-wedge-sweep: wedged:${wedged_list# } dismissed:${dismissed_list# } napping:${napping_list# } dead:${dead_list# } asleep:${asleep_list# } healthy:${healthy_count}"
   log "$msg"
 
   # Post via dashboard API if available.

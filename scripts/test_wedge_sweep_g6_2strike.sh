@@ -1,0 +1,276 @@
+#!/bin/bash
+# c12-equivalent logic harness for fleet_wedge_sweep() G6 2-strike persistence
+# + auto-dismiss wiring (cards b0e189fb / OPS-232 + e167dd08).
+#
+# Current code: survey pane -> immediate G6 flag (no persistence, no dismiss).
+# After fix:
+#   - 1st G6 detection  : record $STATE_DIR/g6-strike-<n>, no flag
+#   - 2nd consecutive   : inbox drain check -> if backed-up + modal re-confirmed -> send-keys 0 + dismissed
+#   - non-consecutive   : healthy pane between strikes resets the counter
+#   - inbox draining    : suppress on 2nd strike (agent healthy despite modal)
+#   - stale strike file : treated as 1st strike (window exceeded)
+#   - auto-dismiss TOCTOU: re-verify before send-keys; skip if modal already cleared
+set -u
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PASS=0; FAIL=0
+ok()  { PASS=$((PASS+1)); printf 'PASS  %s\n' "$1"; }
+bad() { FAIL=$((FAIL+1)); printf 'FAIL  %s\n' "$1"; }
+
+# Source the REAL supervisor (--dry-run returns before running the daemon).
+source "$ROOT/scripts/fleet-supervisor.sh" --dry-run >/dev/null 2>&1
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/store/.fleet-supervisor"
+# INSTALL_DIR=$TMP -> classify_cli path absent -> degraded fallback (bare-substring)
+INSTALL_DIR="$TMP"; STORE="$TMP/store"; STATE_DIR="$TMP/store/.fleet-supervisor"
+DRY_RUN=0
+CURL=""                   # no alert delivery (avoids real network)
+TMUX_BIN=mock_tmux
+
+SEND_KEYS_FILE="$TMP/sendkeys"
+
+RF="$TMP/sweeplog"
+log() { printf '%s\n' "$*" >> "$RF"; }
+
+session_alive()    { return 0; }
+is_sleep_eligible(){ return 1; }
+resolve_live_db()  { printf '%s' "$TMP/noa.db"; }
+
+# g6_inbox_draining mock: MOCK_DRAINING=1 -> agent is draining (healthy).
+MOCK_DRAINING=0
+g6_inbox_draining() { [ "$MOCK_DRAINING" = "1" ]; }
+
+# Pane text: stored per agent in $TMP/pane-<name> for fine-grained control.
+SURVEY_TEXT="$(printf 'How is Claude doing this session?\nShare feedback\n')"
+IDLE_TEXT="$(printf 'normal idle\n> ')"
+
+pane_survey()  { printf '%s\n' "$SURVEY_TEXT" > "$TMP/pane-$1"; }
+pane_healthy() { printf '%s\n' "$IDLE_TEXT"   > "$TMP/pane-$1"; }
+
+mock_tmux() {
+  # Extract agent name from '=agent-<n>:0.0' positional arg (must iterate "$@",
+  # not parse "$*" -- ${*#...} strips per-arg and rejoins, so the prefix-strip
+  # leaves ALL positional params not just the matching one).
+  local _n="" _arg
+  for _arg in "$@"; do
+    case "$_arg" in =agent-*) _n="${_arg#=agent-}"; _n="${_n%%:*}" ;; esac
+  done
+  case "$1" in
+    has-session) return 0 ;;
+    capture-pane)
+      local _pf="$TMP/pane-${_n:-_none}"
+      [ -f "$_pf" ] && cat "$_pf" || printf '%s\n' "$IDLE_TEXT" ;;
+    send-keys)
+      # File-based counter (survives subshell, lesson from 66ee9265).
+      printf '%s\n' "$*" >> "$SEND_KEYS_FILE" ;;
+    *) return 0 ;;
+  esac
+}
+
+run_sweep() {
+  : > "$RF"
+  rm -f "$STATE_DIR/fleet-wedge-sweep.last"
+  fleet_wedge_sweep
+}
+summary()       { tr '\n' ' ' < "$RF"; }
+sk_count()      { [ -f "$SEND_KEYS_FILE" ] && wc -l < "$SEND_KEYS_FILE" || echo 0; }
+
+# ==========================================================================
+# (g) First G6 detection: NOT flagged, strike file created
+# ==========================================================================
+export FLEET_TEST_SWEEP_AGENTS="g6alpha"
+pane_survey g6alpha
+: > "$SEND_KEYS_FILE"
+run_sweep
+S="$(summary)"
+
+case "$S" in
+  *"g6alpha:G6"*) bad "(g1) 1st G6 strike should NOT be flagged yet (got: $S)" ;;
+  *)              ok  "(g1) 1st G6 strike: no flag" ;;
+esac
+if [ -f "$STATE_DIR/g6-strike-g6alpha" ]; then
+  ok  "(g2) 1st G6 strike: state file created"
+else
+  bad "(g2) 1st G6 strike: state file NOT created"
+fi
+SK=$(sk_count)
+[ "$SK" -eq 0 ] && ok "(g3) 1st G6 strike: no send-keys called" || bad "(g3) 1st G6 strike: spurious send-keys (got: $SK)"
+
+# ==========================================================================
+# (h) Second consecutive G6 + inbox NOT draining: auto-dismiss + dismissed list
+# ==========================================================================
+: > "$SEND_KEYS_FILE"
+run_sweep
+S="$(summary)"
+
+case "$S" in
+  # Check dismissed FIRST: "dismissed:g6alpha:G6" also contains "g6alpha:G6"
+  # as a substring; dismissed must win over the raw-G6-wedge pattern.
+  *"dismissed:"*"g6alpha:G6"*) ok "(h1) 2nd strike: appears in dismissed list" ;;
+  *"wedged:"*"g6alpha:G6"*) bad "(h1) 2nd strike should be dismissed, not raw wedged (got: $S)" ;;
+  *) bad "(h1) 2nd strike: g6alpha missing from summary (got: $S)" ;;
+esac
+SK=$(sk_count)
+[ "$SK" -gt 0 ] && ok "(h2) 2nd strike: send-keys 0 called ($SK)" || bad "(h2) 2nd strike: send-keys NOT called"
+[ ! -f "$STATE_DIR/g6-strike-g6alpha" ] && ok "(h3) 2nd strike: strike file cleaned up" || bad "(h3) 2nd strike: strike file should be removed"
+
+# ==========================================================================
+# (i) G6 -> healthy pane -> G6 again: counter reset, 3rd detection = 1st strike
+# ==========================================================================
+# Set pane to healthy first (clears strike).
+pane_healthy g6alpha
+run_sweep
+[ ! -f "$STATE_DIR/g6-strike-g6alpha" ] && ok "(i1) healthy pane: strike file removed" || bad "(i1) healthy pane: strike file should be gone"
+
+# Now G6 again -> must be 1st strike (NOT flagged).
+pane_survey g6alpha
+: > "$SEND_KEYS_FILE"
+run_sweep
+S="$(summary)"
+case "$S" in
+  *"g6alpha:G6"*|*"dismissed:"*"g6alpha"*) bad "(i2) re-detected G6 after clear: should be 1st strike again (got: $S)" ;;
+  *) ok "(i2) re-detected G6 after clear: 1st strike, no flag" ;;
+esac
+SK=$(sk_count)
+[ "$SK" -eq 0 ] && ok "(i3) no send-keys on re-1st strike" || bad "(i3) send-keys on re-1st strike (got: $SK)"
+
+# ==========================================================================
+# (j) Second strike but inbox draining: suppress, no send-keys
+# ==========================================================================
+# Ensure strike file exists from the previous test (it was 1st strike above).
+[ -f "$STATE_DIR/g6-strike-g6alpha" ] || printf '%s\n' "$(( $(date +%s) - 10 ))" > "$STATE_DIR/g6-strike-g6alpha"
+MOCK_DRAINING=1
+: > "$SEND_KEYS_FILE"
+run_sweep
+S="$(summary)"
+MOCK_DRAINING=0
+
+case "$S" in
+  *"g6alpha"*) bad "(j1) 2nd strike + draining: should be suppressed (got: $S)" ;;
+  *)           ok  "(j1) 2nd strike + inbox draining: suppressed (no flag)" ;;
+esac
+SK=$(sk_count)
+[ "$SK" -eq 0 ] && ok "(j2) 2nd strike + draining: no send-keys" || bad "(j2) 2nd strike + draining: spurious send-keys (got: $SK)"
+# Strike file should be cleared (we don't want it to re-check indefinitely).
+[ ! -f "$STATE_DIR/g6-strike-g6alpha" ] && ok "(j3) 2nd strike + draining: strike file cleared" || bad "(j3) 2nd strike + draining: strike file should be removed"
+
+# ==========================================================================
+# (k) Stale strike file (older than G6_STRIKE_WINDOW): reset to 1st strike
+# ==========================================================================
+export G6_STRIKE_WINDOW=5   # 5 second window for test speed
+# Write a strike file that is older than the window.
+printf '%s\n' "$(( $(date +%s) - 20 ))" > "$STATE_DIR/g6-strike-g6alpha"
+pane_survey g6alpha
+: > "$SEND_KEYS_FILE"
+run_sweep
+S="$(summary)"
+
+case "$S" in
+  *"g6alpha:G6"*|*"dismissed:"*"g6alpha"*) bad "(k1) stale strike: should reset to 1st strike, not flag (got: $S)" ;;
+  *)                                        ok  "(k1) stale strike: reset to 1st strike, no flag" ;;
+esac
+SK=$(sk_count)
+[ "$SK" -eq 0 ] && ok "(k2) stale strike: no send-keys" || bad "(k2) stale strike: spurious send-keys"
+[ -f "$STATE_DIR/g6-strike-g6alpha" ] && ok "(k3) stale strike: new strike file written" || bad "(k3) stale strike: strike file not reset"
+unset G6_STRIKE_WINDOW
+
+# ==========================================================================
+# (l) Auto-dismiss TOCTOU guard: modal clears between snapshot and re-verify
+# ==========================================================================
+# Setup: strike file from (k) re-detection (1st new strike).
+[ -f "$STATE_DIR/g6-strike-g6alpha" ] || printf '%s\n' "$(( $(date +%s) - 10 ))" > "$STATE_DIR/g6-strike-g6alpha"
+# Now change pane to HEALTHY BEFORE the 2nd sweep (simulates modal self-clearing).
+# When fleet_wedge_sweep re-captures for classification, pane is still survey
+# (Phase 1 reads from the saved files in sweep_tmp which were captured at sweep start).
+# But the re-verify call (TOCTOU guard) reads the pane AGAIN in Phase 3.
+# We simulate TOCTOU: Phase 1 capture = survey (pane file), re-verify = healthy.
+# To do this: set pane to healthy NOW (re-verify in Phase 3 will see healthy).
+# The Phase 1 capture already happened with the stale pane text.
+# But we can't split Phase 1 vs Phase 3 in the same run_sweep call.
+# Workaround: use a secondary pane file only for re-verify. We override mock_tmux
+# to return survey for Phase 1 (capture-pane in the sweep loop) and healthy for
+# Phase 3 re-verify (a 2nd capture-pane call to the same agent).
+#
+# Implementation: track call count per agent in $TMP/cap-count-<n>.
+TOCTOU_AGENT="toctou"
+pane_survey "$TOCTOU_AGENT"
+printf '%s\n' "$(( $(date +%s) - 10 ))" > "$STATE_DIR/g6-strike-$TOCTOU_AGENT"
+: > "$SEND_KEYS_FILE"
+export FLEET_TEST_SWEEP_AGENTS="$TOCTOU_AGENT"
+
+# Override mock_tmux to return survey on 1st capture, healthy on 2nd (TOCTOU sim).
+# Must iterate "$@" for correct agent-name extraction (see main mock_tmux comment).
+mock_tmux() {
+  local _n="" _arg
+  for _arg in "$@"; do
+    case "$_arg" in =agent-*) _n="${_arg#=agent-}"; _n="${_n%%:*}" ;; esac
+  done
+  case "$1" in
+    has-session) return 0 ;;
+    capture-pane)
+      local _cf="$TMP/cap-count-${_n:-_none}"
+      local _count
+      _count=$(cat "$_cf" 2>/dev/null || echo 0); _count=$(( _count + 1 ))
+      printf '%s\n' "$_count" > "$_cf"
+      if [ "$_count" -le 1 ]; then
+        # 1st capture (Phase 1 classification): modal present
+        printf '%s\n' "$SURVEY_TEXT"
+      else
+        # 2nd capture (Phase 3 re-verify): modal already cleared
+        printf '%s\n' "$IDLE_TEXT"
+      fi ;;
+    send-keys)
+      printf '%s\n' "$*" >> "$SEND_KEYS_FILE" ;;
+    *) return 0 ;;
+  esac
+}
+
+run_sweep
+S="$(summary)"
+SK=$(sk_count)
+
+case "$S" in
+  *"$TOCTOU_AGENT:G6"*) bad "(l1) TOCTOU: should not add to wedged list (got: $S)" ;;
+  *"dismissed:"*"$TOCTOU_AGENT"*) bad "(l1) TOCTOU: should not be dismissed when modal cleared (got: $S)" ;;
+  *) ok "(l1) TOCTOU guard: modal cleared -> no flag, no send" ;;
+esac
+[ "$SK" -eq 0 ] && ok "(l2) TOCTOU guard: no send-keys when modal cleared" || bad "(l2) TOCTOU guard: send-keys sent to cleared modal (DANGEROUS; got: $SK)"
+# A "cleared" log line should be present.
+case "$(summary)" in
+  *"TOCTOU guard"*) ok "(l3) TOCTOU guard: log entry present" ;;
+  *) bad "(l3) TOCTOU guard: no TOCTOU log entry (got: $(summary))" ;;
+esac
+
+# Restore plain mock_tmux for remaining tests.
+mock_tmux() {
+  local _n="" _arg
+  for _arg in "$@"; do
+    case "$_arg" in =agent-*) _n="${_arg#=agent-}"; _n="${_n%%:*}" ;; esac
+  done
+  case "$1" in
+    has-session) return 0 ;;
+    capture-pane)
+      local _pf="$TMP/pane-${_n:-_none}"
+      [ -f "$_pf" ] && cat "$_pf" || printf '%s\n' "$IDLE_TEXT" ;;
+    send-keys)
+      printf '%s\n' "$*" >> "$SEND_KEYS_FILE" ;;
+    *) return 0 ;;
+  esac
+}
+
+# ==========================================================================
+# (m) Roster guard: path-like token does not escape into wedged/dismissed
+# ==========================================================================
+# Note: no pane_survey for path-like names (file write would require mkdir).
+# The mock returns idle text by default; the roster guard should reject the
+# token before it reaches the wedge classifier.
+export FLEET_TEST_SWEEP_AGENTS="scripts/fleet-supervisor.sh"
+run_sweep
+S="$(summary)"
+case "$S" in
+  *"scripts/fleet-supervisor.sh"*) bad "(m) path-like token should be rejected (got: $S)" ;;
+  *) ok "(m) roster guard: path-like token rejected" ;;
+esac
+
+printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

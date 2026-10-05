@@ -99,10 +99,12 @@ case "$S" in *"sleepenter:G1"*) bad "(d) sleep+enter+no-obl should NOT be wedged
 case "$S" in *"plainenter:G1"*) ok "(e) non-sleep+enter still flagged G1" ;;
              *) bad "(e) plainenter should be wedged G1 (got: $S)" ;; esac
 
-# (f) G6 is UNTOUCHED by sleep-awareness (b0e189fb/OPS-232 owns it): a sleep
-#     agent showing the feedback modal is STILL flagged G6.
-case "$S" in *"sleepg6:G6"*) ok "(f) G6 untouched: sleep agent still flagged G6" ;;
-             *) bad "(f) sleepg6 should stay wedged G6 (got: $S)" ;; esac
+# (f) G6 2-strike (b0e189fb): 1st detection in this single sweep -> NOT flagged yet.
+#     Sleep-awareness does not apply to G6 (aec0be4a), but b0e189fb adds 2-strike
+#     persistence: a first-time G6 pane must NOT produce a wedge flag. The detailed
+#     multi-sweep 2-strike logic is covered in test_wedge_sweep_g6_2strike.sh.
+case "$S" in *"sleepg6:G6"*) bad "(f) G6 first strike should NOT be flagged yet (got: $S)" ;;
+             *) ok "(f) G6 first strike: no flag (b0e189fb 2-strike pending)" ;; esac
 
 # --- Pure-sleeper-only sweep: the ONLY would-be-flag is a suppressed sleeper ->
 #     no wedge -> function returns silently, NO alert/summary logged (quiet). ---
