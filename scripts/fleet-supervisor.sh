@@ -1469,6 +1469,11 @@ guard_presence_check() {
 # processes after recycle) -- NOT dead; only wedge states that need operator
 # action are flagged here.
 #
+# Pane classification is delegated to dist/pane-classify-cli.js (card c72ec834)
+# which wraps the canonical tail-scoped detectors from pane-state.ts (same
+# source of truth as sleep-agent-watchdog). ONE node spawn per sweep (batch
+# mode) avoids N cold-starts. Falls back to bare-substring on missing CLI.
+#
 # Agent list is env-overridable (FLEET_TEST_SWEEP_AGENTS) so tests can inject a
 # small subset without forking a real tmux.
 #
@@ -1496,8 +1501,15 @@ fleet_wedge_sweep() {
   echo "$now" > "$throttle_key"
 
   local agents="${FLEET_TEST_SWEEP_AGENTS:-gauge quill applegate radar blackbeard morgan roberts kidd rackham bonny avery vane bellamy inkwell forge chad thor claudia bigben hibiki devil-advocate bond scout gyore percy buster blackbart dave}"
-  local dead_list="" asleep_list="" wedged_list="" napping_list="" healthy_count=0 n pane_text session
+  local dead_list="" asleep_list="" wedged_list="" napping_list="" healthy_count=0 n session
 
+  # --- Phase 1: classify liveness; collect pane captures for alive sessions ---
+  local sweep_tmp live_agents=""
+  sweep_tmp=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$sweep_tmp'" RETURN
+
+  local pane_text
   for n in $agents; do
     session="agent-$n"
     if ! session_alive "$session"; then
@@ -1512,24 +1524,80 @@ fleet_wedge_sweep() {
       continue
     fi
     pane_text=$("$TMUX_BIN" capture-pane -t "=$session:0.0" -p 2>/dev/null) || { healthy_count=$((healthy_count+1)); continue; }
-    case "$pane_text" in
-      *"Usage limit"*|*"weekly limit"*|*"credit"*|*"budget"*)
-        if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
-        else wedged_list="$wedged_list ${n}:G2"; fi ;;
-      *"Press Enter"*|*"press enter"*)
-        if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
-        else wedged_list="$wedged_list ${n}:G1"; fi ;;
-      # Session-feedback modal. Match the canonical marker used by the TS
-      # detector (pane-state.ts FEEDBACK_MODAL_RX: "how is claude doing this
-      # session"), NOT a bare *survey* glob -- the latter false-matched the
-      # filename "survey-modal-recovery.js" in an editing agent's pane and
-      # flagged active agents as G6 (card 55219b86, FP dimension 1).
-      *"How is Claude doing this session"*|*"Share feedback"*|*"How would you rate"*)
-        wedged_list="$wedged_list ${n}:G6" ;;
-      *)
-        healthy_count=$((healthy_count+1)) ;;
-    esac
+    printf '%s' "$pane_text" > "$sweep_tmp/$n"
+    live_agents="$live_agents $n"
   done
+
+  # --- Phase 2: batch classify (single node spawn) ---
+  local state_map="" classify_cli="$INSTALL_DIR/dist/pane-classify-cli.js"
+  if [ -n "$live_agents" ] && [ -n "$NODE" ] && [ -f "$classify_cli" ]; then
+    local _batch_json
+    # Step 2a: build JSON {agent: pane_text} from temp files.
+    _batch_json=$(python3 -c "
+import sys, json, os
+pane_dir = sys.argv[1]
+agents = sys.argv[2:]
+batch = {}
+for a in agents:
+    try:
+        with open(os.path.join(pane_dir, a), errors='replace') as f:
+            batch[a] = f.read()
+    except Exception:
+        batch[a] = ''
+sys.stdout.write(json.dumps(batch))
+" "$sweep_tmp" $live_agents 2>/dev/null) || true
+    # Step 2b: classify via node CLI (batch) + parse result into agent:state lines.
+    if [ -n "$_batch_json" ]; then
+      state_map=$(printf '%s' "$_batch_json" \
+        | "$NODE" "$classify_cli" 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    r = json.load(sys.stdin)
+    for a, s in r.items(): print(str(a) + ':' + str(s))
+except Exception:
+    pass
+" 2>/dev/null) || true
+    fi
+  fi
+
+  # --- Phase 3: apply wedge logic ---
+  if [ -n "$state_map" ]; then
+    local _agent _state
+    while IFS=: read -r _agent _state; do
+      [ -z "$_agent" ] && continue
+      case "$_state" in
+        limit)
+          if wedge_sleep_suppress "$_agent" "$now"; then napping_list="$napping_list $_agent"
+          else wedged_list="$wedged_list ${_agent}:G2"; fi ;;
+        survey) wedged_list="$wedged_list ${_agent}:G6" ;;
+        enter)
+          if wedge_sleep_suppress "$_agent" "$now"; then napping_list="$napping_list $_agent"
+          else wedged_list="$wedged_list ${_agent}:G1"; fi ;;
+        # login (G3/OAuth re-auth box) is detected by the CLI but NOT wired to a
+        # wedge class here -- wiring would be scope-expansion beyond c72ec834.
+        # TODO(ba53fdee follow-up): when G3 recovery is ready, map login -> G3.
+        *) healthy_count=$((healthy_count+1)) ;;
+      esac
+    done <<< "$state_map"
+  else
+    # Degraded fallback: node CLI unavailable -- bare-substring on saved panes.
+    local _pane_text
+    for n in $live_agents; do
+      _pane_text=$(cat "$sweep_tmp/$n" 2>/dev/null) || continue
+      case "$_pane_text" in
+        *"Usage limit"*|*"weekly limit"*|*"credit"*|*"budget"*)
+          if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
+          else wedged_list="$wedged_list ${n}:G2"; fi ;;
+        *"Press Enter"*|*"press enter"*)
+          if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
+          else wedged_list="$wedged_list ${n}:G1"; fi ;;
+        *"How is Claude doing this session"*|*"Share feedback"*|*"How would you rate"*)
+          wedged_list="$wedged_list ${n}:G6" ;;
+        *) healthy_count=$((healthy_count+1)) ;;
+      esac
+    done
+  fi
 
   # Only alert on wedge states (dead = watchdog auto-recovers; no alert needed).
   [ -z "$wedged_list" ] && return 0
