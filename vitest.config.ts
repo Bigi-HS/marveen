@@ -7,6 +7,18 @@ export default defineConfig({
       reporter: ['json'],
       reportsDirectory: 'coverage',
     },
+    // ALLOWLIST (root-cause fix for the recurring stray-dir glob class).
+    // The real suite lives entirely under src/ (src/__tests__/** plus a few
+    // co-located tests like src/web/routes/metrics.test.ts). Every runaway-
+    // failure incident below came from a NEW out-of-tree dir that the denylist
+    // didn't yet cover: .claude/worktrees, .worktrees, marveen-wt, dist-backup-*,
+    // dist.backup-*, store/dist-backup-*, agents/**, and most recently an
+    // un-gitignored deploy stray `dist-staged-mixed-*` (card 585da3ce: 276 stray
+    // test copies -> 3420 vitest failures). Pinning `include` to src/** terminates
+    // the entire class: any future stray tree outside src/ is ignored by default,
+    // no new exclude entry required. The exclude list below is kept as defense-in-
+    // depth but is now redundant for out-of-tree strays.
+    include: ['src/**/*.test.{ts,tsx,mjs}'],
     exclude: [
       // Default vitest excludes
       '**/node_modules/**',
