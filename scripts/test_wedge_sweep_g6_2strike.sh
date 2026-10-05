@@ -306,13 +306,12 @@ esac
 export FLEET_TEST_SWEEP_AGENTS="g6alpha"
 
 # ==========================================================================
-# (o) g6_inbox_draining argv hardening: single-quote agent name safe
+# (o) g6_inbox_draining argv hardening: REAL function with single-quote name
 # ==========================================================================
-# Old code: python3 -c "... ('$n', since) ..." -- if $n contains a single quote
-# this becomes Python syntax error (e.g. ('test'agent', ...) ).
-# New code: AGENT_ID="$n" python3 -c "... os.environ.get('AGENT_ID', '') ..."
-# Test: run the new Python block with a single-quote in the agent name;
-# verify no SyntaxError or other Python error in stderr.
+# Calls the production g6_inbox_draining (not the suite-level mock) with an
+# agent name containing a single quote.  Old code ('$n' interpolation) produces
+# a Python SyntaxError; new code (AGENT_ID env-var) must return cleanly.
+# Pattern: lesson-gate-verify-test-exercises-branch (PR#831).
 python3 -c "
 import sqlite3
 c = sqlite3.connect('$TMP/noa.db')
@@ -321,28 +320,27 @@ c.commit()
 c.close()
 " 2>/dev/null
 
+# Re-source to get the production g6_inbox_draining, overriding suite-level mock.
+unset -f g6_inbox_draining 2>/dev/null
+source "$ROOT/scripts/fleet-supervisor.sh" --dry-run >/dev/null 2>&1
+resolve_live_db() { printf '%s' "$TMP/noa.db"; }
+
 _o1_err_file="$TMP/o1_err"
-AGENT_ID="test'agent" python3 -c "
-import sqlite3, time, os, sys
-try:
-    agent_id = os.environ.get('AGENT_ID', '')
-    db = sqlite3.connect('$TMP/noa.db')
-    row = db.execute(
-        \"SELECT COUNT(*) FROM agent_messages WHERE to_agent=? AND delivered_at > ?\",
-        (agent_id, 0)).fetchone()
-    print(row[0] if row else 0)
-    db.close()
-except Exception as e:
-    print('ERR:' + str(e), file=sys.stderr)
-    print(0)
-" 2>"$_o1_err_file" >/dev/null
+g6_inbox_draining "test'agent" 2>"$_o1_err_file"; _o1_st=$?
 _o1_err=$(cat "$_o1_err_file" 2>/dev/null)
+
 case "$_o1_err" in
   *SyntaxError*|*Error*|*error*)
-    bad "(o1) argv hardening: Python error with single-quote agent name (err: $_o1_err)" ;;
+    bad "(o1) argv hardening: Python error in real g6_inbox_draining (err: $_o1_err)" ;;
   *)
-    ok "(o1) argv hardening: AGENT_ID env-var is injection-safe (no Python error)" ;;
+    ok "(o1) argv hardening: real g6_inbox_draining safe with single-quote agent name" ;;
 esac
+[ "$_o1_st" -eq 1 ] \
+  && ok "(o2) argv hardening: fail-open return (no msgs, not crash)" \
+  || bad "(o2) argv hardening: unexpected exit $_o1_st (expected 1 = no recent msgs)"
+
+# Restore suite mock.
+g6_inbox_draining() { [ "$MOCK_DRAINING" = "1" ]; }
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
