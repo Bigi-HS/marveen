@@ -166,6 +166,42 @@ fi
 echo
 
 # ---------------------------------------------------------------------------
+# Step 3b: Agent-config sync gate (W3/ce001e4d config-landmine fix)
+# Must run BEFORE the git reset --hard in Step 4. Ensures that
+# agents/*/agent-config.json live on origin/develop so the reset never
+# clobbers local model-tier overrides (e.g. sonnet->opus regression).
+# ---------------------------------------------------------------------------
+step "3b. Agent-config sync gate (W3/ce001e4d)"
+if [ ! -f "$SCRIPT_DIR/commit-agent-configs.sh" ]; then
+  abort "scripts/commit-agent-configs.sh missing -- W3 gate cannot run. Ensure PR#862 is deployed."
+fi
+bash "$SCRIPT_DIR/commit-agent-configs.sh" \
+  || abort "commit-agent-configs.sh failed -- cannot continue deploy"
+# If commit-agent-configs.sh created a new commit (local develop ahead of remote),
+# push it so the subsequent reset --hard origin/develop does not clobber it.
+unpushed=$(git -C "$REPO" log --oneline "origin/develop..HEAD" -- "agents/" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$unpushed" -gt 0 ]; then
+  echo "  $unpushed unpushed agent-config commit(s) -- pushing to origin/develop ..."
+  git -C "$REPO" push origin HEAD:develop \
+    || abort "failed to push agent-config commits to origin/develop (gate BLOCK). Fix network/perms or commit manually before deploying."
+  echo "  Refreshing target SHA after config push ..."
+  git -C "$REPO" fetch origin develop --quiet
+  target_sha=$(git -C "$REPO" rev-parse origin/develop)
+  echo "  target SHA updated: ${target_sha:0:8}"
+fi
+# Gate: verify no drift between live disk configs and the deploy target.
+# Any remaining diff means a config change exists on disk that is NOT in the
+# target ref -- the reset would silently clobber it.
+config_drift=$(git -C "$REPO" diff "$target_sha" -- "agents/" 2>/dev/null | grep "^[-+]" | grep -v "^[-+][-+][-+]" | head -20)
+if [ -n "$config_drift" ]; then
+  echo "  Agent-config drift detected (disk vs ${target_sha:0:8}):"
+  echo "$config_drift" | sed 's/^/    /'
+  abort "agent-config gate BLOCK: disk configs differ from deploy target. Run commit-agent-configs.sh manually, verify, and re-run deploy."
+fi
+pass "agent-config sync gate: all configs in sync with ${target_sha:0:8}"
+echo
+
+# ---------------------------------------------------------------------------
 # Step 4: Build from target ref
 # ---------------------------------------------------------------------------
 step "4. Build from $TARGET (${target_sha:0:8})"
@@ -422,6 +458,32 @@ pass "planned-restart.marker removed"
 bash "$SCRIPT_DIR/update-deployed-tip.sh" "$target_sha" \
   || warn "update-deployed-tip.sh failed -- run manually: bash scripts/update-deployed-tip.sh ${target_sha:0:8}"
 pass "deployed-tip updated to ${target_sha:0:8}"
+echo
+
+# ---------------------------------------------------------------------------
+# Step 11b: Daemon freshness check (W3/ce001e4d)
+# fleet-supervisor.sh reads itself at startup (bash process, not per-tick).
+# If the daemon predates this deploy, it runs the old script version until
+# restarted -- silent regressions after a fleet-supervisor.sh change.
+# Warn (do not abort) since the dashboard itself is verified; Forge restarts
+# the supervisor in the post-deploy coordination window.
+# lesson: lesson-daemon-restart-after-sh-fix-1005
+# ---------------------------------------------------------------------------
+step "11b. Daemon freshness check (fleet-supervisor.sh)"
+fs_pid=$(pgrep -f "fleet-supervisor.sh" 2>/dev/null | head -1 || true)
+if [ -n "$fs_pid" ]; then
+  # etimes = elapsed seconds since process start (POSIX, works on Linux)
+  age_s=$(ps -o etimes= -p "$fs_pid" 2>/dev/null | tr -d ' ' || echo 0)
+  case "$age_s" in (*[!0-9]*|'') age_s=0 ;; esac
+  age_h=$(( age_s / 3600 ))
+  if [ "$age_h" -gt 1 ]; then
+    warn "fleet-supervisor.sh (PID $fs_pid) is ~${age_h}h old -- started before this deploy. The running daemon uses the pre-deploy script version. Forge should restart it in the post-deploy coordination window."
+  else
+    pass "fleet-supervisor.sh (PID $fs_pid) is fresh (~${age_h}h) -- within this deploy window"
+  fi
+else
+  warn "fleet-supervisor.sh daemon not found -- not running or detached"
+fi
 echo
 
 # ---------------------------------------------------------------------------
