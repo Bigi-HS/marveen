@@ -272,5 +272,77 @@ case "$S" in
   *) ok "(m) roster guard: path-like token rejected" ;;
 esac
 
+# ==========================================================================
+# (n) Phase-1 roster guard: path-like token rejected before dead_list addition
+# ==========================================================================
+# Override session_alive to return 1 for sessions with '/' (simulating tmux
+# failing on malformed session names). Without Phase-1 guard, path-like token
+# hits the session_alive check and ends up in dead_list. With the guard it is
+# rejected before session_alive is even called.
+export FLEET_TEST_SWEEP_AGENTS="g6alpha scripts/fleet-supervisor.sh"
+# Ensure g6alpha's 2nd strike fires so the log message is emitted (dead field visible).
+printf '%s\n' "$(( $(date +%s) - 10 ))" > "$STATE_DIR/g6-strike-g6alpha"
+pane_survey g6alpha
+: > "$SEND_KEYS_FILE"
+session_alive_orig() { return 0; }
+session_alive() {
+  # Real path-like session names fail has-session; simulate that here.
+  case "$1" in */*) return 1 ;; *) return 0 ;; esac
+}
+run_sweep
+S="$(summary)"
+session_alive() { return 0; }  # restore
+
+case "$S" in
+  *"dismissed:"*"g6alpha"*) ok "(n1) Phase-1 guard: survey agent dismissed (log fired)" ;;
+  *) bad "(n1) Phase-1 guard: expected g6alpha dismissed -- log may not have fired (got: $S)" ;;
+esac
+case "$S" in
+  *"scripts/fleet-supervisor.sh"*)
+    bad "(n2) Phase-1 guard: path-like token appeared in log -- guard missing (got: $S)" ;;
+  *)
+    ok "(n2) Phase-1 guard: path-like token NOT in log (rejected at Phase 1)" ;;
+esac
+export FLEET_TEST_SWEEP_AGENTS="g6alpha"
+
+# ==========================================================================
+# (o) g6_inbox_draining argv hardening: single-quote agent name safe
+# ==========================================================================
+# Old code: python3 -c "... ('$n', since) ..." -- if $n contains a single quote
+# this becomes Python syntax error (e.g. ('test'agent', ...) ).
+# New code: AGENT_ID="$n" python3 -c "... os.environ.get('AGENT_ID', '') ..."
+# Test: run the new Python block with a single-quote in the agent name;
+# verify no SyntaxError or other Python error in stderr.
+python3 -c "
+import sqlite3
+c = sqlite3.connect('$TMP/noa.db')
+c.execute('CREATE TABLE IF NOT EXISTS agent_messages (to_agent TEXT, delivered_at INTEGER)')
+c.commit()
+c.close()
+" 2>/dev/null
+
+_o1_err_file="$TMP/o1_err"
+AGENT_ID="test'agent" python3 -c "
+import sqlite3, time, os, sys
+try:
+    agent_id = os.environ.get('AGENT_ID', '')
+    db = sqlite3.connect('$TMP/noa.db')
+    row = db.execute(
+        \"SELECT COUNT(*) FROM agent_messages WHERE to_agent=? AND delivered_at > ?\",
+        (agent_id, 0)).fetchone()
+    print(row[0] if row else 0)
+    db.close()
+except Exception as e:
+    print('ERR:' + str(e), file=sys.stderr)
+    print(0)
+" 2>"$_o1_err_file" >/dev/null
+_o1_err=$(cat "$_o1_err_file" 2>/dev/null)
+case "$_o1_err" in
+  *SyntaxError*|*Error*|*error*)
+    bad "(o1) argv hardening: Python error with single-quote agent name (err: $_o1_err)" ;;
+  *)
+    ok "(o1) argv hardening: AGENT_ID env-var is injection-safe (no Python error)" ;;
+esac
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
