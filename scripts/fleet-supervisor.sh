@@ -376,6 +376,7 @@ check_channelless_inbox_wedge() {
     session_alive "$session"    || continue   # dead -- watchdog handles restart, not our wedge
     pane_is_idle_at_prompt "$session" || continue   # working normally
     agent_has_open_obligation "$n" || continue      # no pending inbox -- legitimately idle
+    is_agent_budget_paused "$n" && continue         # quota-limited by design, not stuck
     wedged_list="$wedged_list ${n}:inbox-stuck"
   done
 
@@ -1153,6 +1154,28 @@ pane_has_overloaded_error() {
   echo "$pane_scroll" | grep -qiE "API Error.*[Oo]verload|[Oo]verload.*API Error| (is|was) (currently )?overloaded"
 }
 
+# Returns 0 (true) when the agent has an active budget-pause marker
+# (store/.$agent-budget-pause, written by opus-burn-monitor). An agent in
+# budget-pause is silenced by design -- its inbox may accumulate but it is NOT
+# stuck; callers skip obligation checks that would nudge or flag it as wedged.
+# Fail-safe: missing / unreadable / expired marker -> NOT paused (never silence
+# from uncertainty, same principle as the TS isBudgetPauseMarkerActive).
+is_agent_budget_paused() {
+  local agent="$1"
+  # Slug guard: [a-z0-9-]+ only (mirrors TS AGENT_SLUG_RE in opus-burn-monitor.ts).
+  # Blocks path traversal when constructing the marker path.
+  [[ "$agent" =~ ^[a-z0-9-]+$ ]] || return 1
+  local marker="$STORE/.$agent-budget-pause"
+  [ -f "$marker" ] || return 1
+  python3 -c "
+import json, sys, time
+try:
+    with open(sys.argv[1]) as f: m = json.load(f)
+    sys.exit(0 if time.time() * 1000 < m.get('expiresAt', 0) else 1)
+except Exception: sys.exit(1)
+" "$marker" 2>/dev/null
+}
+
 # Returns 0 (true) when agent has at least one open obligation: a delivered/
 # pending agent_messages row to this agent with no completed_at, within the
 # IDLE_NUDGE_LOOKBACK_SECONDS window.
@@ -1210,6 +1233,12 @@ ensure_idle_nudge_watch() {
 
     # Idle pane: only nudge if there is an open obligation
     if ! agent_has_open_obligation "$agent"; then
+      rm -f "$STATE_DIR/idle-since-$agent"
+      continue
+    fi
+
+    # Budget-paused: agent is silenced by design, not stuck -- skip nudge
+    if is_agent_budget_paused "$agent"; then
       rm -f "$STATE_DIR/idle-since-$agent"
       continue
     fi

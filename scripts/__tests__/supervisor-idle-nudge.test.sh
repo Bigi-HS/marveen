@@ -192,6 +192,49 @@ assert_overloaded "AF3: benign Claude mention + real API Error -> true" 0 "Earli
 Now: API Error: Overloaded (529)
 ❯ "
 
+# --- is_agent_budget_paused: pure-function unit tests (1ec8b68f-maradék) ----
+# The budget-pause marker is written by opus-burn-monitor to
+# $STORE/.$agent-budget-pause. is_agent_budget_paused reads it and checks
+# expiresAt > now_ms. This guard prevents idle-nudge and channelless-inbox-wedge
+# from firing at agents silenced by design (weekly budget exhausted).
+
+bp_write() {
+  # $1=agent $2=expiresAt_offset_ms (relative to now; negative = already expired)
+  python3 - "$STORE" "$1" "$2" <<'PY'
+import json, os, sys, time
+store, agent, offset = sys.argv[1], sys.argv[2], int(sys.argv[3])
+marker = {"expiresAt": int(time.time() * 1000) + offset, "weekStartMs": 0, "triggeredAtPct": 100}
+with open(os.path.join(store, f".{agent}-budget-pause"), "w") as f:
+    json.dump(marker, f)
+PY
+}
+
+# ADV-BP1: active marker (expiresAt in future) -> paused
+rm -f "$STORE/.testagent-budget-pause"
+bp_write "testagent" 86400000
+is_agent_budget_paused "testagent"; assert_eq "ADV-BP1: active marker -> paused (rc=0)" 0 "$?"
+
+# ADV-BP2: expired marker (expiresAt in past) -> NOT paused
+rm -f "$STORE/.testagent-budget-pause"
+bp_write "testagent" -1
+is_agent_budget_paused "testagent"; assert_eq "ADV-BP2: expired marker -> not paused (rc=1)" 1 "$?"
+
+# ADV-BP3: no marker file -> NOT paused (fail-safe: never silence from uncertainty)
+rm -f "$STORE/.testagent-budget-pause"
+is_agent_budget_paused "testagent"; assert_eq "ADV-BP3: no marker -> not paused (rc=1)" 1 "$?"
+
+# ADV-BP4: corrupt/invalid JSON -> NOT paused (fail-safe)
+echo "not-json" > "$STORE/.testagent-budget-pause"
+is_agent_budget_paused "testagent"; assert_eq "ADV-BP4: corrupt JSON -> not paused (rc=1)" 1 "$?"
+
+# ADV-BP5: path traversal attempt -> rejected by slug guard -> NOT paused
+rm -f "$STORE/.testagent-budget-pause"
+bp_write "testagent" 86400000
+is_agent_budget_paused "../testagent"; assert_eq "ADV-BP5: path traversal slug -> not paused (rc=1)" 1 "$?"
+is_agent_budget_paused "test_agent"; assert_eq "ADV-BP5b: underscore slug -> not paused (rc=1)" 1 "$?"
+
+rm -f "$STORE/.testagent-budget-pause"
+
 # --- TOTAL -------------------------------------------------------------------
 echo ""
 if [ "$FAIL" -eq 0 ]; then

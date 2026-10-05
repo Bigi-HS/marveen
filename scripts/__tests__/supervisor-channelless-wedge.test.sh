@@ -138,5 +138,61 @@ assert_not_contains "AC7: no WEDGED when throttled" "WEDGED" "$LOGFILE"
 export CHANNELLESS_INBOX_WEDGE_INTERVAL=0
 rm -f "$STATE_DIR/channelless-inbox-wedge.next"
 
+# ---------------------------------------------------------------------------
+# AC8: idle pane + overdue inbox + active budget-pause marker -> NOT WEDGED
+# (1ec8b68f-maradék: quota-paused pre-flag guard)
+# An agent that hit its weekly token budget is silenced by design, not stuck.
+# Its inbox can accumulate but it legitimately cannot process until reset.
+# ---------------------------------------------------------------------------
+echo "--- AC8: budget-paused agent -> no WEDGED (quota-limited by design) ---"
+: > "$LOGFILE"
+export FLEET_TEST_CHANNELLESS_AGENTS="rackham"
+
+# Write an active budget-pause marker (expiresAt 24h in the future)
+python3 - "$STORE" <<'PY'
+import json, os, sys, time
+store = sys.argv[1]
+marker = {"expiresAt": int(time.time() * 1000) + 86400000, "weekStartMs": 0, "triggeredAtPct": 100}
+with open(os.path.join(store, ".rackham-budget-pause"), "w") as f:
+    json.dump(marker, f)
+PY
+
+session_alive()             { return 0; }
+pane_is_idle_at_prompt()    { return 0; }
+agent_has_open_obligation() { return 0; }   # has pending messages
+
+check_channelless_inbox_wedge
+assert_not_contains "AC8: budget-paused -> no WEDGED" "WEDGED" "$LOGFILE"
+
+# Cleanup
+rm -f "$STORE/.rackham-budget-pause"
+export FLEET_TEST_CHANNELLESS_AGENTS="rackham blackbeard radar"
+
+# ---------------------------------------------------------------------------
+# AC9: expired budget-pause marker -> still WEDGED (expired = no longer paused)
+# ---------------------------------------------------------------------------
+echo "--- AC9: expired budget-pause marker -> WEDGED (expired, not paused) ---"
+: > "$LOGFILE"
+export FLEET_TEST_CHANNELLESS_AGENTS="rackham"
+
+python3 - "$STORE" <<'PY'
+import json, os, sys, time
+store = sys.argv[1]
+# expiresAt in the past (1ms ago)
+marker = {"expiresAt": int(time.time() * 1000) - 1, "weekStartMs": 0, "triggeredAtPct": 100}
+with open(os.path.join(store, ".rackham-budget-pause"), "w") as f:
+    json.dump(marker, f)
+PY
+
+session_alive()             { return 0; }
+pane_is_idle_at_prompt()    { return 0; }
+agent_has_open_obligation() { return 0; }
+
+check_channelless_inbox_wedge
+assert_contains "AC9: expired budget-pause -> still WEDGED" "WEDGED" "$LOGFILE"
+
+rm -f "$STORE/.rackham-budget-pause"
+export FLEET_TEST_CHANNELLESS_AGENTS="rackham blackbeard radar"
+
 echo ""
 if [ "$FAIL" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$FAIL FAILED"; exit 1; fi
