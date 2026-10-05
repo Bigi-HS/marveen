@@ -46,6 +46,7 @@ import { tryHandleAgentActions } from './web/routes/agent-actions.js'
 import { tryHandleAgentTaskState } from './web/routes/agent-taskstate.js'
 import { tryHandleAgentCheckpoint } from './web/routes/agent-checkpoint.js'
 import { applyCheckpointMigrations } from './web/agent-checkpoint.js'
+import { startWalMaintenance } from './noa-db.js'
 import { tryHandleShutdownMarker } from './web/routes/shutdown-marker.js'
 import { sweepOrphanTaskStates } from './web/agent-taskstate.js'
 import { tryHandleDailyLog } from './web/routes/daily-log.js'
@@ -477,6 +478,10 @@ export function startWebServer(port = 3420): http.Server {
   compactDeliverySentinelsOnBoot()
   const sentinelMaintenanceInterval = startDeliverySentinelMaintenance()
   logger.info('Delivery sentinel maintenance started (60min rotation)')
+  // df9d4686: periodic TRUNCATE checkpoint so the noa.db -wal file cannot stay
+  // stuck at a historical peak (health-check / CI timeout FPs). Unref'd + fail-open.
+  startWalMaintenance()
+  logger.info('WAL checkpoint maintenance started (15min TRUNCATE, df9d4686)')
   // Boot timestamp for delivery-ack-cli escalation boot-grace (card 4beb20b7).
   try {
     writeFileSync(SERVER_BOOT_AT_PATH, String(Date.now()))
