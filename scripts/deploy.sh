@@ -184,6 +184,16 @@ if [ "$ISOLATED" -eq 1 ]; then
   [ -f "$WT_PATH/dist/index.js" ] || abort "build succeeded but dist/index.js missing in worktree"
   pass "isolated worktree build complete: $WT_PATH"
 else
+  # F5 gate: agent-config drift check (W3/ce001e4d landmine guard).
+  # git reset --hard $TARGET would clobber uncommitted agent-config.json files,
+  # reverting model-tier overrides (e.g. sonnet->opus). Block hard if any drift.
+  config_drift=$(git -C "$REPO" diff -- 'agents/*/agent-config.json' 2>/dev/null)
+  if [ -n "$config_drift" ]; then
+    fail "agent-config drift detected -- uncommitted agents/*/agent-config.json changes would be lost by reset:"
+    git -C "$REPO" diff --stat -- 'agents/*/agent-config.json' | sed 's/^/    /'
+    abort "Run: bash scripts/commit-agent-configs.sh && git push origin develop, then re-run deploy. (F5/W3/ce001e4d)"
+  fi
+  pass "F5: no agent-config drift"
   # Stash check: any uncommitted operational drift in src/scripts that is not
   # in origin/develop? If so, warn -- a blind reset would wipe it.
   dirty=$(git -C "$REPO" status --porcelain scripts/ 2>/dev/null | grep -v "^??" | head -5)
