@@ -173,7 +173,7 @@ echo
 # ---------------------------------------------------------------------------
 step "3b. Agent-config sync gate (W3/ce001e4d)"
 if [ ! -f "$SCRIPT_DIR/commit-agent-configs.sh" ]; then
-  abort "scripts/commit-agent-configs.sh missing -- W3 gate cannot run. Ensure PR#862 is deployed."
+  abort "scripts/commit-agent-configs.sh missing -- W3 gate cannot run. Ensure PR#863 is deployed."
 fi
 bash "$SCRIPT_DIR/commit-agent-configs.sh" \
   || abort "commit-agent-configs.sh failed -- cannot continue deploy"
