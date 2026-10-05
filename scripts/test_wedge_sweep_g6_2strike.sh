@@ -272,5 +272,75 @@ case "$S" in
   *) ok "(m) roster guard: path-like token rejected" ;;
 esac
 
+# ==========================================================================
+# (n) Phase-1 roster guard: path-like token rejected before dead_list addition
+# ==========================================================================
+# Override session_alive to return 1 for sessions with '/' (simulating tmux
+# failing on malformed session names). Without Phase-1 guard, path-like token
+# hits the session_alive check and ends up in dead_list. With the guard it is
+# rejected before session_alive is even called.
+export FLEET_TEST_SWEEP_AGENTS="g6alpha scripts/fleet-supervisor.sh"
+# Ensure g6alpha's 2nd strike fires so the log message is emitted (dead field visible).
+printf '%s\n' "$(( $(date +%s) - 10 ))" > "$STATE_DIR/g6-strike-g6alpha"
+pane_survey g6alpha
+: > "$SEND_KEYS_FILE"
+session_alive_orig() { return 0; }
+session_alive() {
+  # Real path-like session names fail has-session; simulate that here.
+  case "$1" in */*) return 1 ;; *) return 0 ;; esac
+}
+run_sweep
+S="$(summary)"
+session_alive() { return 0; }  # restore
+
+case "$S" in
+  *"dismissed:"*"g6alpha"*) ok "(n1) Phase-1 guard: survey agent dismissed (log fired)" ;;
+  *) bad "(n1) Phase-1 guard: expected g6alpha dismissed -- log may not have fired (got: $S)" ;;
+esac
+case "$S" in
+  *"scripts/fleet-supervisor.sh"*)
+    bad "(n2) Phase-1 guard: path-like token appeared in log -- guard missing (got: $S)" ;;
+  *)
+    ok "(n2) Phase-1 guard: path-like token NOT in log (rejected at Phase 1)" ;;
+esac
+export FLEET_TEST_SWEEP_AGENTS="g6alpha"
+
+# ==========================================================================
+# (o) g6_inbox_draining argv hardening: REAL function with single-quote name
+# ==========================================================================
+# Calls the production g6_inbox_draining (not the suite-level mock) with an
+# agent name containing a single quote.  Old code ('$n' interpolation) produces
+# a Python SyntaxError; new code (AGENT_ID env-var) must return cleanly.
+# Pattern: lesson-gate-verify-test-exercises-branch (PR#831).
+python3 -c "
+import sqlite3
+c = sqlite3.connect('$TMP/noa.db')
+c.execute('CREATE TABLE IF NOT EXISTS agent_messages (to_agent TEXT, delivered_at INTEGER)')
+c.commit()
+c.close()
+" 2>/dev/null
+
+# Re-source to get the production g6_inbox_draining, overriding suite-level mock.
+unset -f g6_inbox_draining 2>/dev/null
+source "$ROOT/scripts/fleet-supervisor.sh" --dry-run >/dev/null 2>&1
+resolve_live_db() { printf '%s' "$TMP/noa.db"; }
+
+_o1_err_file="$TMP/o1_err"
+g6_inbox_draining "test'agent" 2>"$_o1_err_file"; _o1_st=$?
+_o1_err=$(cat "$_o1_err_file" 2>/dev/null)
+
+case "$_o1_err" in
+  *SyntaxError*|*Error*|*error*)
+    bad "(o1) argv hardening: Python error in real g6_inbox_draining (err: $_o1_err)" ;;
+  *)
+    ok "(o1) argv hardening: real g6_inbox_draining safe with single-quote agent name" ;;
+esac
+[ "$_o1_st" -eq 1 ] \
+  && ok "(o2) argv hardening: fail-open return (no msgs, not crash)" \
+  || bad "(o2) argv hardening: unexpected exit $_o1_st (expected 1 = no recent msgs)"
+
+# Restore suite mock.
+g6_inbox_draining() { [ "$MOCK_DRAINING" = "1" ]; }
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

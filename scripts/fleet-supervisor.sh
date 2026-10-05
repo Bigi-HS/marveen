@@ -1502,14 +1502,15 @@ g6_inbox_draining() {
   local n="$1" db recent
   db=$(resolve_live_db 2>/dev/null) || return 1
   [ -f "$db" ] || return 1
-  recent=$(python3 -c "
-import sqlite3, sys, time
+  recent=$(AGENT_ID="$n" python3 -c "
+import sqlite3, sys, time, os
 try:
+    agent_id = os.environ.get('AGENT_ID', '')
     db = sqlite3.connect('$db')
     since = int(time.time()) - ${FLEET_WEDGE_SWEEP_INTERVAL:-300}
     row = db.execute(
         \"SELECT COUNT(*) FROM agent_messages WHERE to_agent=? AND delivered_at > ?\",
-        ('$n', since)).fetchone()
+        (agent_id, since)).fetchone()
     print(row[0] if row else 0)
     db.close()
 except Exception:
@@ -1589,6 +1590,8 @@ fleet_wedge_sweep() {
 
   local pane_text
   for n in $agents; do
+    # Roster-guard: reject path-like or blank tokens before any processing (7da7e487).
+    case "$n" in */*|*' '*) continue ;; esac
     session="agent-$n"
     if ! session_alive "$session"; then
       # Sleep-eligible agents are down BY DESIGN after recycle (0 processes),
