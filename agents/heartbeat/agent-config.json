@@ -1,6 +1,5 @@
 {
   "model": "claude-haiku-4-5",
   "authMode": "shared",
-  "securityProfile": "default",
-  "displayName": "Heartbeat"
+  "securityProfile": "default"
 }
