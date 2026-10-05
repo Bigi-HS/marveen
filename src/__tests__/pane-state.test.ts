@@ -5,6 +5,7 @@ import {
   detectsUsageLimitMenu,
   detectsActiveLoginBox,
   detectsFeedbackModal,
+  detectsEnterStuck,
   detectsStalledIdle,
   isReadyForPrompt,
   isActivelyWorking,
@@ -2582,5 +2583,41 @@ describe('session-feedback modal detector (9644ed7c G6)', () => {
 
   it('returns false on empty pane', () => {
     expect(detectsFeedbackModal('')).toBe(false)
+  })
+})
+
+// ── detectsEnterStuck (N1: ENTER_STUCK_RX single-source, card 66ee9265) ───────
+
+describe('detectsEnterStuck', () => {
+  const TAIL_LINES = 10
+  const SCROLLBACK = Array.from({ length: TAIL_LINES + 2 }, (_, i) => `line ${i}`).join('\n')
+
+  it('detects "Press Enter" in last 10 lines', () => {
+    expect(detectsEnterStuck('Some output\nPress Enter to continue')).toBe(true)
+  })
+
+  it('is case-insensitive ("press enter")', () => {
+    expect(detectsEnterStuck('Some output\npress enter to continue')).toBe(true)
+  })
+
+  it('ADV-E1 (FP-guard): "Press Enter" beyond tail-10 -> false', () => {
+    // Dismissed prompt scrolled off; must not keep firing.
+    const lines = [
+      'Press Enter',
+      ...Array.from({ length: TAIL_LINES + 1 }, (_, i) => `filler ${i}`),
+    ]
+    expect(detectsEnterStuck(lines.join('\n'))).toBe(false)
+  })
+
+  it('ADV-E2 (bypass): adversarial -- "PRESS ENTER" all-caps in tail -> true', () => {
+    expect(detectsEnterStuck('PRESS ENTER\n')).toBe(true)
+  })
+
+  it('returns false on empty pane', () => {
+    expect(detectsEnterStuck('')).toBe(false)
+  })
+
+  it('returns false when phrase is absent', () => {
+    expect(detectsEnterStuck(SCROLLBACK + '\nidle pane')).toBe(false)
   })
 })

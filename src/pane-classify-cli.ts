@@ -19,23 +19,16 @@
  *
  * card c72ec834
  */
-import { detectsUsageLimitMenu, detectsFeedbackModal, detectsActiveLoginBox, detectPaneState } from './pane-state.js'
+import { detectsUsageLimitMenu, detectsFeedbackModal, detectsActiveLoginBox, detectsEnterStuck, detectPaneState } from './pane-state.js'
 
 export type PaneClassifyState = 'limit' | 'survey' | 'enter' | 'login' | 'idle' | 'busy' | 'unknown'
-
-// Press-Enter stuck detection. No dedicated TS fn in pane-state.ts yet -- this
-// file is the canonical source. Tail-scoped (same depth as survey) so a
-// dismissed "Press Enter" prompt that scrolled off does not keep firing.
-const ENTER_TAIL_LINES = 10
-const ENTER_STUCK_RX = /press enter/i
 
 export function classifyPane(pane: string, nowMs?: number): PaneClassifyState {
   try {
     if (!pane || !pane.trim()) return 'unknown'
     if (detectsUsageLimitMenu(pane, nowMs)) return 'limit'
     if (detectsFeedbackModal(pane)) return 'survey'
-    const tail = pane.split('\n').slice(-ENTER_TAIL_LINES).join('\n')
-    if (ENTER_STUCK_RX.test(tail)) return 'enter'
+    if (detectsEnterStuck(pane)) return 'enter'
     if (detectsActiveLoginBox(pane)) return 'login'
     const ps = detectPaneState(pane, nowMs !== undefined ? { nowMs } : {})
     if (ps === 'idle') return 'idle'

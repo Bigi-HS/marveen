@@ -1505,7 +1505,9 @@ fleet_wedge_sweep() {
 
   # --- Phase 1: classify liveness; collect pane captures for alive sessions ---
   local sweep_tmp live_agents=""
-  sweep_tmp=$(mktemp -d)
+  # Fail-closed: if mktemp -d fails (e.g. /tmp full) abort rather than writing
+  # pane captures to paths under filesystem root (card 66ee9265 N2).
+  sweep_tmp=$(mktemp -d) || { log "fleet_wedge_sweep: mktemp -d failed, aborting sweep"; return 1; }
   # shellcheck disable=SC2064
   trap "rm -rf '$sweep_tmp'" RETURN
 

@@ -151,6 +151,25 @@ const LIMIT_MENU_OPTION_RX = /stop and wait for limit to reset/i
 const LIMIT_RESET_TIME_RX = /resets?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)/i
 const LIMIT_MENU_TAIL_LINES = 18
 
+// Press-Enter stuck detection (G1, card 66ee9265).
+// Claude Code sometimes renders "Press Enter to continue" or "press enter"
+// after a permission prompt or interactive step. When present in the visible
+// tail the agent is blocked waiting for Enter; the scheduler must not inject
+// another prompt. Scoped to the last ENTER_STUCK_TAIL_LINES (same depth as
+// FEEDBACK_MODAL_TAIL_LINES) so a dismissed prompt that scrolled off does not
+// keep firing.
+// Mirrors the ENTER_STUCK_RX previously defined in pane-classify-cli.ts --
+// moved here to make this the single invariant source (card 66ee9265 N1).
+const ENTER_STUCK_TAIL_LINES = 10
+const ENTER_STUCK_RX = /press enter/i
+
+// Detect a "Press Enter" stuck state in the visible pane tail.
+export function detectsEnterStuck(pane: string): boolean {
+  if (!pane) return false
+  const tail = pane.split('\n').slice(-ENTER_STUCK_TAIL_LINES).join('\n')
+  return ENTER_STUCK_RX.test(tail)
+}
+
 // Session-feedback modal detection (9644ed7c G6).
 // Claude Code occasionally overlays a "How is Claude doing this session?
 // (optional)" rating modal above the input box (agent-process.ts
