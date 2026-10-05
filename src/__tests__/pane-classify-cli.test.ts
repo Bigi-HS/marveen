@@ -115,6 +115,23 @@ describe('G3 login detection', () => {
     const scrollback = Array.from({ length: 5 }, (_, i) => `Line ${i}`).join('\n')
     expect(classifyPane(scrollback + '\n' + LOGIN_BOX_TAIL)).toBe<PaneClassifyState>('login')
   })
+
+  it('ADV-G3-1: login chrome in scrollback only (>10 lines above tail) -> NOT login (FP fix)', () => {
+    // Login box scrolled away (agent resumed): chrome in first lines,
+    // then 20 output lines push it out of LOGIN_BOX_TAIL_LINES(10).
+    const lines = [
+      ...LOGIN_BOX_TAIL.split('\n'),
+      ...Array.from({ length: 20 }, (_, i) => `Output line ${i}`),
+      IDLE_FOOTER,
+    ]
+    expect(classifyPane(lines.join('\n'))).not.toBe<PaneClassifyState>('login')
+  })
+
+  it('ADV-G3-2: ESC marker without PASTE_RX -> NOT login (partial-chrome FP)', () => {
+    // Only one of the two required markers present (AND gate in detectsActiveLoginBox).
+    const pane = 'Some content\nEsc to cancel\nMore output\n' + IDLE_FOOTER
+    expect(classifyPane(pane)).not.toBe<PaneClassifyState>('login')
+  })
 })
 
 // ── Priority ordering ────────────────────────────────────────────────────────

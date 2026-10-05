@@ -1574,6 +1574,9 @@ except Exception:
         enter)
           if wedge_sleep_suppress "$_agent" "$now"; then napping_list="$napping_list $_agent"
           else wedged_list="$wedged_list ${_agent}:G1"; fi ;;
+        # login (G3/OAuth re-auth box) is detected by the CLI but NOT wired to a
+        # wedge class here -- wiring would be scope-expansion beyond c72ec834.
+        # TODO(ba53fdee follow-up): when G3 recovery is ready, map login -> G3.
         *) healthy_count=$((healthy_count+1)) ;;
       esac
     done <<< "$state_map"

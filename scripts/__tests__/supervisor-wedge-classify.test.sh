@@ -243,6 +243,44 @@ grep -qF "testD:G6" "$LOGFILE" \
   && fail "INT-4: survey scrolled away -> NOT G6 (was flagged G6)" \
   || pass "INT-4: survey scrolled away -> NOT G6"
 
+# INT-5: login chrome in scrollback only -> NOT G3 (no wedge flag)
+echo "--- INT-5: login chrome scrolled away -> NOT G3 ---"
+: > "$LOGFILE"
+export FLEET_TEST_SWEEP_AGENTS="testE"
+{
+  echo "Esc to cancel"
+  echo "Paste code here:"
+  for i in $(seq 1 20); do echo "Output line $i"; done
+  echo "? for shortcuts"
+} > "$FAKE_PANE_DIR/testE"
+
+fleet_wedge_sweep
+# G3 is not wired to a wedge class (login -> * healthy by-design; TODO: wire as G3 when scoped).
+# Verify no G3 flag appears (not a regression from scope-expansion).
+grep -qF "testE:G3" "$LOGFILE" \
+  && fail "INT-5: login chrome in scrollback -> NOT G3 (was flagged G3)" \
+  || pass "INT-5: login chrome in scrollback -> NOT G3 (healthy as expected)"
+
+# INT-6 (optional): degraded fallback when NODE is unavailable
+echo "--- INT-6: NODE unavailable -> degraded bare-substring fallback ---"
+: > "$LOGFILE"
+export FLEET_TEST_SWEEP_AGENTS="testF"
+{
+  echo "Stop and wait for limit to reset"
+} > "$FAKE_PANE_DIR/testF"
+
+_saved_node="$NODE"
+NODE="/nonexistent-node"
+fleet_wedge_sweep
+NODE="$_saved_node"
+# Fallback bare-substring: "Stop and wait for limit to reset" matches *"Usage limit"*? No.
+# But it would match the fallback pattern ONLY if one of the bare-substring patterns is present.
+# "Stop and wait for limit to reset" does NOT contain "Usage limit"/"weekly limit"/"credit"/"budget".
+# So fallback returns healthy. Verify no false G2 (degrade-safe).
+grep -qF "testF:G2" "$LOGFILE" \
+  && fail "INT-6: degraded fallback no false G2 (was flagged)" \
+  || pass "INT-6: degraded fallback: no G2 for STRONG-only pattern (fallback safe)"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "Results: $FAIL failure(s)"
