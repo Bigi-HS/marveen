@@ -1167,7 +1167,8 @@ try:
     since = int(time.time()) - $IDLE_NUDGE_LOOKBACK_SECONDS
     row = db.execute(\"\"\"SELECT COUNT(*) FROM agent_messages
         WHERE to_agent=? AND status IN ('delivered','pending')
-        AND completed_at IS NULL AND created_at > ?\"\"\", ('$agent', since)).fetchone()
+        AND completed_at IS NULL AND created_at > ?
+        AND (status='pending' OR ack_expected!=0)\"\"\", ('$agent', since)).fetchone()
     print(row[0] if row else 0)
     db.close()
 except Exception:

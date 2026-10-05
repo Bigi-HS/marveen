@@ -68,23 +68,23 @@ FROZEN="$STORE/claudeclaw.db"
 now=$(date +%s)
 
 seed_db() {
-  # $1=path $2=to_agent $3=status $4=created_at
-  python3 - "$1" "$2" "$3" "$4" <<'PY'
+  # $1=path $2=to_agent $3=status $4=created_at [$5=ack_expected, default 1]
+  python3 - "$1" "$2" "$3" "$4" "${5:-1}" <<'PY'
 import sqlite3, sys
-path, to_agent, status, created = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+path, to_agent, status, created, ack_exp = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
 con = sqlite3.connect(path)
 con.execute("""CREATE TABLE IF NOT EXISTS agent_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT, to_agent TEXT, status TEXT,
-    completed_at INTEGER, created_at INTEGER)""")
-con.execute("INSERT INTO agent_messages (to_agent, status, completed_at, created_at) VALUES (?,?,NULL,?)",
-            (to_agent, status, created))
+    completed_at INTEGER, created_at INTEGER, ack_expected INTEGER NOT NULL DEFAULT 1)""")
+con.execute("INSERT INTO agent_messages (to_agent, status, completed_at, created_at, ack_expected) VALUES (?,?,NULL,?,?)",
+            (to_agent, status, created, ack_exp))
 con.commit(); con.close()
 PY
 }
 
 # Open obligation lives in the LIVE db -> function must see it.
 rm -f "$LIVE" "$FROZEN"
-seed_db "$LIVE" "testagent" "delivered" "$now"
+seed_db "$LIVE" "testagent" "delivered" "$now" 1
 agent_has_open_obligation "testagent"; assert_eq "open obligation in live noa.db -> detected" 0 "$?"
 
 # Obligation ONLY in the frozen legacy, live db empty -> function must NOT see it
@@ -102,8 +102,40 @@ agent_has_open_obligation "testagent"; assert_eq "open obligation only in frozen
 
 # Stale obligation outside the lookback window -> not counted.
 rm -f "$LIVE" "$FROZEN"
-seed_db "$LIVE" "testagent" "delivered" "$(( now - IDLE_NUDGE_LOOKBACK_SECONDS - 100 ))"
+seed_db "$LIVE" "testagent" "delivered" "$(( now - IDLE_NUDGE_LOOKBACK_SECONDS - 100 ))" 1
 agent_has_open_obligation "testagent"; assert_eq "obligation older than lookback -> not detected" 1 "$?"
+
+# --- adversarial FYI fixtures (ebf08fe1): delivered + ack_expected=0 must NOT count ----
+# Root-incident: bigben 30+ Continue-loop because two FYI messages (ack_expected=0)
+# with completed_at=NULL were treated as open obligations. The fix narrows the query
+# to status='pending' OR ack_expected!=0 so FYI never blocks idle detection.
+
+# ADV-1: delivered FYI (ack_expected=0) -> NOT an obligation (was the FP root cause)
+rm -f "$LIVE"
+seed_db "$LIVE" "testagent" "delivered" "$now" 0
+agent_has_open_obligation "testagent"; assert_eq "ADV-1: delivered FYI (ack_expected=0) -> not an obligation" 1 "$?"
+
+# ADV-2: pending message with ack_expected=0 -> IS an obligation (undelivered always blocks)
+rm -f "$LIVE"
+seed_db "$LIVE" "testagent" "pending" "$now" 0
+agent_has_open_obligation "testagent"; assert_eq "ADV-2: pending + ack_expected=0 -> still an obligation (undelivered)" 0 "$?"
+
+# ADV-3: delivered + ack_expected=1 -> IS an obligation (sender expects action)
+rm -f "$LIVE"
+seed_db "$LIVE" "testagent" "delivered" "$now" 1
+agent_has_open_obligation "testagent"; assert_eq "ADV-3: delivered + ack_expected=1 -> obligation" 0 "$?"
+
+# ADV-4: mix of FYI (ack_expected=0) + actionable (ack_expected=1) -> detected (at least one real)
+rm -f "$LIVE"
+seed_db "$LIVE" "testagent" "delivered" "$now" 0   # FYI -- must not count
+seed_db "$LIVE" "testagent" "delivered" "$now" 1   # actionable -- must count
+agent_has_open_obligation "testagent"; assert_eq "ADV-4: mixed FYI+actionable -> obligation (actionable present)" 0 "$?"
+
+# ADV-5: only FYIs -> NOT an obligation (whole-inbox-is-FYI scenario)
+rm -f "$LIVE"
+seed_db "$LIVE" "testagent" "delivered" "$now" 0
+seed_db "$LIVE" "testagent" "delivered" "$now" 0
+agent_has_open_obligation "testagent"; assert_eq "ADV-5: two FYI messages only -> not an obligation" 1 "$?"
 
 # --- TOTAL -------------------------------------------------------------------
 echo ""
