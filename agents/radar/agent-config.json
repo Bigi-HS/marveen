@@ -1,5 +1,5 @@
 {
-  "model": "claude-opus-4-8",
+  "model": "claude-sonnet-4-6",
   "securityProfile": "researcher",
   "displayName": "Grace",
   "claudeConfigDir": "/home/domin/marveen/agents/radar/.claude-config",
