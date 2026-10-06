@@ -104,6 +104,45 @@ strike_clear agent_none "$STATE_DIR" 2>/dev/null
 ok "(c3) strike_clear: no-op on missing files (no error)"
 
 # ==========================================================================
+# SEC-106 -- strike_gate / strike_clear agent-name validation (path-traversal)
+# ==========================================================================
+# A rejected name must (1) return 1, (2) create NO strike file anywhere under
+# TMP (non-vacuous: an UNGUARDED first-strike WOULD create one, possibly via
+# `../` escape outside STATE_DIR), and (3) delete no file outside STATE_DIR.
+# The strike_clear canary targets the EXACT traversal path `strike-../<name>`
+# resolves to: $STATE_DIR/strike-../sec106-canary -> $TMP/strike-sec106-canary.
+for bad_name in "../sec106-canary" "a/b" "" "a b" ".." "a;rm" 'a$(id)'; do
+  before=$(find "$TMP" -name 'strike-*' 2>/dev/null | wc -l)
+  strike_gate "$bad_name" "$STATE_DIR" 60 2>/dev/null
+  R=$?
+  after=$(find "$TMP" -name 'strike-*' 2>/dev/null | wc -l)
+  [ "$R" -ne 0 ] && [ "$after" -eq "$before" ] \
+    && ok "(e:gate) strike_gate rejects '$bad_name' (returns 1, no file created)" \
+    || bad "(e:gate) strike_gate should reject '$bad_name' (got R=$R, files $before->$after)"
+
+  # strike_clear canary: file at the resolved traversal target must survive.
+  CANARY="$TMP/strike-sec106-canary"
+  printf 'keep\n' > "$CANARY"
+  strike_clear "$bad_name" "$STATE_DIR" 2>/dev/null
+  R=$?
+  [ "$R" -ne 0 ] && [ -f "$CANARY" ] \
+    && ok "(e:clear) strike_clear rejects '$bad_name' (returns 1, canary survives)" \
+    || bad "(e:clear) strike_clear should reject '$bad_name' (got R=$R, canary present=$([ -f "$CANARY" ] && echo y || echo n))"
+  rm -f "$CANARY"
+done
+
+# Valid names with hyphen/underscore/digits/mixed-case must be accepted.
+for good_name in "agent-1" "agent_2" "Dave" "ABC123"; do
+  rm -f "$STATE_DIR/strike-$good_name" "$STATE_DIR/strike-latch-$good_name"
+  strike_gate "$good_name" "$STATE_DIR" 60
+  R=$?
+  [ "$R" -ne 0 ] && [ -f "$STATE_DIR/strike-$good_name" ] \
+    && ok "(e:ok) strike_gate accepts valid '$good_name'" \
+    || bad "(e:ok) strike_gate should accept valid '$good_name' (got $R)"
+  strike_clear "$good_name" "$STATE_DIR"
+done
+
+# ==========================================================================
 # effect_drain_check -- draining: recent delivered message present
 # ==========================================================================
 DB="$TMP/noa.db"

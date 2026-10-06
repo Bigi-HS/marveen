@@ -23,6 +23,23 @@ _dc_log() {
   fi
 }
 
+# _dc_valid_agent <agent> -- SEC-106 path-traversal / injection guard.
+#
+# strike_gate() and strike_clear() build file paths as "$state_dir/strike-$agent";
+# an agent name containing a path separator, "..", whitespace or a shell
+# metacharacter could escape state_dir or corrupt a path. Allowlist only
+# [A-Za-z0-9_-] (mirrors the TS AGENT_NAME_RE /^[a-z0-9_-]+$/i) -- an allowlist,
+# not a denylist, so a newly-invented bad character cannot slip through.
+# Returns 0 for a valid name, 1 (and logs) for an invalid one.
+_dc_valid_agent() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_-]*)
+      _dc_log "detector-common: invalid agent name '$1'"
+      return 1 ;;
+  esac
+  return 0
+}
+
 # instrument_check <probe_fn> <healthy_agent> <bad_fixture>
 #
 # Dual-arm calibration gate. Must be called before any detector escalates.
@@ -59,6 +76,7 @@ instrument_check() {
 # Returns: 0 = confirmed (2nd strike within window), 1 = first strike or suppressed
 strike_gate() {
   local agent="$1" state_dir="$2"
+  _dc_valid_agent "$agent" || return 1
   local window="${3:-${STRIKE_WINDOW:-600}}"
   local latch_window="${4:-${STRIKE_LATCH_WINDOW:-$window}}"
   local strikef="$state_dir/strike-$agent"
@@ -100,6 +118,7 @@ strike_gate() {
 # Remove strike and latch files for agent (call when agent is observed healthy).
 strike_clear() {
   local agent="$1" state_dir="$2"
+  _dc_valid_agent "$agent" || return 1
   rm -f "$state_dir/strike-$agent" "$state_dir/strike-latch-$agent"
 }
 

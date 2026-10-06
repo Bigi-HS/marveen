@@ -137,6 +137,63 @@ describe('strikeClear', () => {
 })
 
 // ---------------------------------------------------------------------------
+// SEC-106: agent-name validation / path-traversal guard
+// strikeGate and strikeClear build file paths from `agent`; a name containing
+// a path separator or traversal segment could escape stateDir. Reject with a
+// throw (allowlist: ^[a-z0-9_-]+$ case-insensitive).
+// ---------------------------------------------------------------------------
+describe('SEC-106 agent-name validation', () => {
+  const MALICIOUS = [
+    '../evil',
+    '../../etc/passwd',
+    'a/b',
+    'a\\b',
+    'a b',
+    '',
+    '.',
+    '..',
+    'a;rm -rf',
+    'a$(whoami)',
+    'a\n b',
+  ]
+
+  for (const name of MALICIOUS) {
+    it(`strikeGate rejects malicious agent name ${JSON.stringify(name)}`, () => {
+      expect(() => strikeGate(name, tmp, 60)).toThrow(/invalid agent name/)
+      // No strike file must be created anywhere inside stateDir for a rejected name.
+      expect(existsSync(join(tmp, `strike-${name}`))).toBe(false)
+    })
+
+    it(`strikeClear rejects malicious agent name ${JSON.stringify(name)}`, () => {
+      expect(() => strikeClear(name, tmp)).toThrow(/invalid agent name/)
+    })
+  }
+
+  it('does not delete a file outside stateDir via traversal', () => {
+    // A sibling file next to stateDir must survive a traversal attempt.
+    const sibling = join(tmp, '..', `sec106-canary-${Math.random().toString(36).slice(2)}`)
+    writeFileSync(sibling, 'keep')
+    try {
+      // `strike-../<canary>` would resolve to the sibling if unguarded.
+      const evil = `../${sibling.split('/').pop()}`
+      expect(() => strikeClear(evil, join(tmp, 'state-sub'))).toThrow(/invalid agent name/)
+      expect(existsSync(sibling)).toBe(true)
+    } finally {
+      rmSync(sibling, { force: true })
+    }
+  })
+
+  for (const name of ['agent-1', 'agent_2', 'Dave', 'marveen', 'ABC123']) {
+    it(`accepts valid agent name ${JSON.stringify(name)}`, () => {
+      expect(() => strikeGate(name, tmp, 60)).not.toThrow()
+      expect(existsSync(join(tmp, `strike-${name}`))).toBe(true)
+      expect(() => strikeClear(name, tmp)).not.toThrow()
+      expect(existsSync(join(tmp, `strike-${name}`))).toBe(false)
+    })
+  }
+})
+
+// ---------------------------------------------------------------------------
 // effectDrainCheck (ARM-B proof: positive-control test is mandatory by design)
 // ---------------------------------------------------------------------------
 describe('effectDrainCheck', () => {
