@@ -1,9 +1,36 @@
 #!/bin/bash
-# Tests for listener-drop detection (card 4a2683e6).
+# DoD migration for the gyore listener-drop detector (card 4a2683e6; DoD-migration
+# OPS-272 / 8e124447 slice-2). check_listener_drop() decides whether Gyore's
+# Telegram channel listener has silently dropped and the watchdog must kill +
+# relaunch the session.
 #
-# Covers check_listener_drop() cross-reference logic (gauge stale + marveen
-# keepalive cross-check to prevent quiet-period false positives), gauge-writer
-# hook, integration kill+notify, and div-by-zero guard.
+# It is an ENFORCEMENT detector (a false positive = a spurious session kill), so
+# the three suppression gates are load-bearing and each has its own FP class:
+#   gate 1 -- gauge freshness: a fresh gauge (< LISTENER_STALE_SECONDS) is never a drop.
+#   gate 2 -- marveen cross-ref: if marveen's inbound keepalive is ALSO stale, the
+#             whole fleet is quiet (no Boss messages arrived), not a Gyore drop.
+#   gate 3 -- bot.pid liveness: a stale gauge + fresh marveen only means Boss is
+#             messaging *some* agent; Gyore is a low-traffic researcher that can go
+#             hours without a direct DM. Only declare a drop if the bun bot PROCESS
+#             is actually gone (OPS/322a8a3f, lesson-proxy-signal-liveness-fp-
+#             low-traffic-agent-1004: gyore flapped ~5min using marveen-keepalive
+#             as a fleet-alive proxy).
+#
+# This harness SOURCES the real check_listener_drop from gyore-watchdog.sh (via
+# GYORE_WATCHDOG_SOURCE_ONLY=1) instead of mirroring an inline copy -- the previous
+# version tested a hand-copied function that had already drifted (it never grew the
+# gate-3 bot.pid check, so the shipped FP fix had ZERO coverage). Sourcing the real
+# function is the fix for lesson c813ad2 (exercise the real detector, not a copy).
+#
+# 4-item detector DoD (detector-dod-gate skill):
+#   (a) positive-control -- every healthy shape (fresh gauge / quiet period / bot
+#       alive) returns 0, no kill.
+#   (b) bypass-fixture   -- proxy-signal low-traffic FP class: stale gauge + marveen
+#       fresh + bot.pid ALIVE -> 0 (the OPS/322a8a3f / lesson-1004 regression).
+#   (c) fail-direction   -- a genuinely dead listener (stale gauge + marveen fresh +
+#       bot dead/missing) IS flagged -> 1.
+#   (d) tail-scope       -- the detector's window is LISTENER_STALE_SECONDS (mtime
+#       staleness); it scans no scrollback. Boundary fixtures lock it.
 #
 # Run: bash scripts/__tests__/channel-listener-drop.test.sh
 set -u
@@ -17,130 +44,148 @@ pass() { echo "  PASS: $1"; }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 assert_eq() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected '$2', got '$3')"; fi; }
 
-# --- Mirror the watchdog's check_listener_drop logic (with cross-reference) --
-LOG="$TMP/watchdog.log"
-log() { echo "$(date -Is) $*" >> "$LOG"; }
+# --- Source the REAL check_listener_drop (not a copy) -----------------------
+# The sourcing guard defines the functions and returns before the daemon loop.
+export GYORE_WATCHDOG_LOG="$TMP/watchdog.log"
+export GYORE_WATCHDOG_SOURCE_ONLY=1
+# shellcheck source=/dev/null
+source "$INSTALL_DIR/scripts/gyore-watchdog.sh"
+if ! type check_listener_drop >/dev/null 2>&1; then
+  echo "FATAL: check_listener_drop not defined after sourcing gyore-watchdog.sh"
+  exit 1
+fi
+SESSION="agent-gyore-test"
+LISTENER_STALE_SECONDS=3600
 
-# make_check_listener_drop <gauge_file> <stale_seconds> <marveen_keepalive_file_or_none>
-make_check_listener_drop() {
-  local state_file="$1"
-  local stale_seconds="$2"
-  local ka_file="${3:-}"    # empty = no file (skip cross-reference)
-  LISTENER_STATE_FILE="$state_file"
-  LISTENER_STALE_SECONDS="$stale_seconds"
-  MARVEEN_KEEPALIVE_FILE="$ka_file"
-  SESSION="agent-gyore-test"
-  check_listener_drop() {
-    [ -f "$LISTENER_STATE_FILE" ] || return 0
-    local mtime now age
-    mtime=$(stat -c %Y "$LISTENER_STATE_FILE" 2>/dev/null || echo 0)
-    now=$(date +%s)
-    age=$(( now - mtime ))
-    [ "$age" -ge "$LISTENER_STALE_SECONDS" ] || return 0
-
-    # Cross-check marveen keepalive before declaring drop.
-    if [ -n "$MARVEEN_KEEPALIVE_FILE" ] && [ -f "$MARVEEN_KEEPALIVE_FILE" ]; then
-      local ka_mtime ka_age
-      ka_mtime=$(stat -c %Y "$MARVEEN_KEEPALIVE_FILE" 2>/dev/null || echo 0)
-      ka_age=$(( now - ka_mtime ))
-      if [ "$ka_age" -ge "$LISTENER_STALE_SECONDS" ]; then
-        log "check_listener_drop: gauge stale ${age}s but marveen keepalive also stale ${ka_age}s -- quiet period, no action"
-        return 0
-      fi
-    fi
-
-    log "LISTENER-DROP: gauge stale ${age}s, marveen keepalive fresh (or absent) -- $SESSION listener appears dead"
-    return 1
-  }
-}
+# A guaranteed-alive pid: this test shell's own pid ($$ is always alive and > 1).
+# Using $$ avoids a long-lived background job, which is fragile under command-
+# substitution subshells and job control.
+ALIVE_PID=$$
+# A guaranteed-dead pid: spawn, kill, reap -> kill -0 now fails.
+sleep 60 & DEAD_PID=$!; kill "$DEAD_PID" 2>/dev/null; wait "$DEAD_PID" 2>/dev/null
 
 now=$(date +%s)
-stale=$(( now - 7200 ))          # 2 hours ago -> beyond 3600s threshold
-borderline=$(( now - 3540 ))     # 59 min ago -> just under 3600s threshold
-fresh=$(( now - 300 ))           # 5 min ago -> healthy
+stale=$(( now - 7200 ))        # 2 h ago -> beyond 3600s threshold
+borderline=$(( now - 3540 ))   # 59 min ago -> just under threshold
+fresh=$(( now - 300 ))         # 5 min ago -> healthy
+
+# scenario <gauge_age|none> <marveen: fresh|stale|exact|none> <botpid: alive|dead|missing|garbage|one>
+# Sets the globals the real check_listener_drop reads, then the caller invokes it.
+scenario() {
+  local gage="$1" mka="$2" bot="$3"
+
+  if [ "$gage" = "none" ]; then
+    LISTENER_STATE_FILE="$TMP/gauge-absent.json"; rm -f "$LISTENER_STATE_FILE"
+  else
+    LISTENER_STATE_FILE="$TMP/gauge.json"; echo '{"connected":true}' > "$LISTENER_STATE_FILE"
+    touch -d "@$gage" "$LISTENER_STATE_FILE"
+  fi
+
+  case "$mka" in
+    none)  MARVEEN_KEEPALIVE_FILE="$TMP/ka-absent"; rm -f "$MARVEEN_KEEPALIVE_FILE" ;;
+    fresh) MARVEEN_KEEPALIVE_FILE="$TMP/ka"; touch -d "@$fresh" "$MARVEEN_KEEPALIVE_FILE" ;;
+    stale) MARVEEN_KEEPALIVE_FILE="$TMP/ka"; touch -d "@$stale" "$MARVEEN_KEEPALIVE_FILE" ;;
+    exact) MARVEEN_KEEPALIVE_FILE="$TMP/ka"; touch -d "@$(( now - 3600 ))" "$MARVEEN_KEEPALIVE_FILE" ;;
+  esac
+
+  STATE="$TMP/state"; mkdir -p "$STATE"
+  local pf="$STATE/bot.pid"
+  case "$bot" in
+    alive)   echo "$ALIVE_PID" > "$pf" ;;
+    dead)    echo "$DEAD_PID"  > "$pf" ;;
+    missing) rm -f "$pf" ;;
+    garbage) echo "not-a-pid" > "$pf" ;;
+    one)     echo "1"         > "$pf" ;;
+  esac
+}
+run() { check_listener_drop; echo $?; }
 
 # ============================================================
-echo "=== check_listener_drop: basic staleness ---"
+echo "=== (d) tail-scope: LISTENER_STALE_SECONDS freshness window ==="
+# gate 1. The detector's entire notion of "how far back" is the gauge mtime vs the
+# staleness window -- no scrollback scan. These boundary cases lock that window.
 
-# FIXTURE 1: no state file (no baseline) -> 0 (no action)
-GAUGE="$TMP/.agent-channel-nofile.json"
-rm -f "$GAUGE"
-make_check_listener_drop "$GAUGE" 3600 ""
-check_listener_drop
-assert_eq "F1: no state file -> 0 (OK, no baseline)" "0" "$?"
+scenario none none missing
+assert_eq "(a/d) no gauge file -> 0 (no baseline, never fires)"            "0" "$(run)"
 
-# FIXTURE 2: fresh gauge (5 min) -> 0
-GAUGE="$TMP/.agent-channel-fresh.json"
-echo '{"connected":true}' > "$GAUGE"
-touch -d "@$fresh" "$GAUGE"
-make_check_listener_drop "$GAUGE" 3600 ""
-check_listener_drop
-assert_eq "F2: fresh gauge -> 0 (OK)" "0" "$?"
+scenario "$fresh" fresh alive
+assert_eq "(a/d) fresh gauge (5min) -> 0 (inside window, OK)"              "0" "$(run)"
 
-# FIXTURE 3: borderline (59 min, threshold 60 min) -> 0
-GAUGE="$TMP/.agent-channel-border.json"
-echo '{"connected":true}' > "$GAUGE"
-touch -d "@$borderline" "$GAUGE"
-make_check_listener_drop "$GAUGE" 3600 ""
-check_listener_drop
-assert_eq "F3: borderline (59min < 60min threshold) -> 0 (OK)" "0" "$?"
+scenario "$borderline" fresh missing
+assert_eq "(a/d) borderline 59min < 60min window -> 0 (not yet stale)"     "0" "$(run)"
 
-# FIXTURE 4: exactly at threshold (3600s) -> 1 (drop, no keepalive cross-ref)
-GAUGE="$TMP/.agent-channel-exact.json"
-echo '{"connected":true}' > "$GAUGE"
-exact=$(( now - 3600 ))
-touch -d "@$exact" "$GAUGE"
-make_check_listener_drop "$GAUGE" 3600 ""
-check_listener_drop
-assert_eq "F4: exactly at threshold (no keepalive file) -> 1 (DROP)" "1" "$?"
+scenario "$(( now - 3600 ))" fresh missing
+assert_eq "(c/d) exactly at 3600s window + marveen fresh + no bot -> 1 (DROP)" "1" "$(run)"
 
 # ============================================================
-echo "=== check_listener_drop: cross-reference (quiet-period false-positive fix) ==="
+echo "=== (a) positive-control: marveen cross-ref quiet-period (gate 2) ==="
 
-MARVEEN_KA="$TMP/.channel-keepalive"
+# bot=DEAD here on purpose: gate 2 (quiet period) must return 0 BEFORE reaching the
+# gate-3 bot.pid check. If gate 2 were removed, these would fall through to gate 3
+# and -- with a dead bot -- flip to 1, so the rc itself proves gate 2 (not just the log).
+scenario "$stale" stale dead
+assert_eq "(a) stale gauge + marveen ALSO stale -> 0 (fleet quiet, no kill)" "0" "$(run)"
 
-# FIXTURE 5: stale gauge + marveen ALSO stale -> quiet period, return 0 (FALSE-POSITIVE PREV.)
-GAUGE="$TMP/.agent-channel-quiet.json"
-echo '{"connected":true}' > "$GAUGE"
-touch -d "@$stale" "$GAUGE"
-touch -d "@$stale" "$MARVEEN_KA"   # marveen also stale: fleet-wide quiet
-make_check_listener_drop "$GAUGE" 3600 "$MARVEEN_KA"
-check_listener_drop
-assert_eq "F5: stale gauge + marveen stale -> 0 (quiet period, no kill)" "0" "$?"
-QUIET_LOG=$(grep -c "quiet period" "$LOG" 2>/dev/null || echo 0)
-if [ "$QUIET_LOG" -gt 0 ]; then pass "F5: quiet-period logged"; else fail "F5: quiet-period NOT logged"; fi
+scenario "$stale" exact dead
+assert_eq "(a) stale gauge + marveen exactly at threshold -> 0 (quiet)"     "0" "$(run)"
 
-# FIXTURE 6: stale gauge + marveen FRESH -> real drop, return 1
-GAUGE="$TMP/.agent-channel-realdrop.json"
-echo '{"connected":true}' > "$GAUGE"
-touch -d "@$stale" "$GAUGE"
-touch -d "@$fresh" "$MARVEEN_KA"   # marveen active: Boss is sending, Gyore deaf
-make_check_listener_drop "$GAUGE" 3600 "$MARVEEN_KA"
-check_listener_drop
-assert_eq "F6: stale gauge + marveen fresh -> 1 (REAL DROP)" "1" "$?"
-DROP_LOG=$(grep -c "LISTENER-DROP" "$LOG" 2>/dev/null || echo 0)
-if [ "$DROP_LOG" -gt 0 ]; then pass "F6: LISTENER-DROP logged"; else fail "F6: LISTENER-DROP NOT logged"; fi
+if grep -q "quiet period" "$GYORE_WATCHDOG_LOG" 2>/dev/null; then
+  pass "(a) quiet-period path logged"
+else
+  fail "(a) quiet-period path NOT logged"
+fi
 
-# FIXTURE 7: adversarial: stale gauge + no marveen keepalive file -> 1 (conservative: fire)
-# Rationale: if we can't cross-check, assume drop (errs toward recovery, not missed drops).
-GAUGE="$TMP/.agent-channel-noka.json"
-echo '{"connected":true}' > "$GAUGE"
-touch -d "@$stale" "$GAUGE"
-rm -f "$TMP/.channel-keepalive-missing"
-make_check_listener_drop "$GAUGE" 3600 "$TMP/.channel-keepalive-missing"
-check_listener_drop
-assert_eq "F7: stale gauge + no marveen keepalive file -> 1 (DROP, conservative)" "1" "$?"
+# ============================================================
+echo "=== (b) bypass-fixture: bot.pid liveness gate 3 (proxy-signal FP) ==="
+# THE documented FP class -- OPS/322a8a3f / lesson-proxy-signal-liveness-fp-low-
+# traffic-agent-1004. A stale gauge + fresh marveen is NOT enough: Gyore is a
+# low-traffic researcher. Only a dead bot process is a real drop.
 
-# FIXTURE 8: stale gauge + marveen at EXACTLY threshold -> quiet period, return 0
-# (boundary: if ka_age == LISTENER_STALE_SECONDS, it's also stale -> quiet)
-GAUGE="$TMP/.agent-channel-exact-ka.json"
-echo '{"connected":true}' > "$GAUGE"
-touch -d "@$stale" "$GAUGE"
-exact_ka=$(( now - 3600 ))
-touch -d "@$exact_ka" "$MARVEEN_KA"
-make_check_listener_drop "$GAUGE" 3600 "$MARVEEN_KA"
-check_listener_drop
-assert_eq "F8: stale gauge + marveen exactly at threshold -> 0 (quiet period)" "0" "$?"
+scenario "$stale" fresh alive
+assert_eq "(b) stale gauge + marveen fresh + bot.pid ALIVE -> 0 (idle, NOT a drop)" "0" "$(run)"
+
+if grep -q "bot pid .* alive -- idle period" "$GYORE_WATCHDOG_LOG" 2>/dev/null; then
+  pass "(b) idle-period (bot-alive) suppression logged"
+else
+  fail "(b) idle-period (bot-alive) suppression NOT logged"
+fi
+
+scenario "$stale" fresh garbage
+assert_eq "(b-edge) non-numeric bot.pid -> 1 (bogus pid must NOT suppress a drop)" "1" "$(run)"
+
+scenario "$stale" fresh one
+assert_eq "(b-edge) bot.pid=1 (init, not our bot) -> 1 (DROP)"               "1" "$(run)"
+
+# ============================================================
+echo "=== (c) fail-direction: genuine listener drop IS flagged ==="
+
+scenario "$stale" fresh dead
+assert_eq "(c) stale gauge + marveen fresh + bot.pid DEAD -> 1 (REAL DROP)" "1" "$(run)"
+
+scenario "$stale" fresh missing
+assert_eq "(c) stale gauge + marveen fresh + no bot.pid file -> 1 (can't confirm alive, DROP)" "1" "$(run)"
+
+scenario "$stale" none dead
+assert_eq "(c) stale gauge + no marveen file + bot dead -> 1 (conservative DROP)" "1" "$(run)"
+
+if grep -q "LISTENER-DROP" "$GYORE_WATCHDOG_LOG" 2>/dev/null; then
+  pass "(c) LISTENER-DROP logged on a real drop"
+else
+  fail "(c) LISTENER-DROP NOT logged"
+fi
+
+# ============================================================
+echo "=== opposing-pair: bot alive vs bot dead, else identical (selective) ==="
+# Same stale gauge, same fresh marveen -- only the bot liveness differs. Proves the
+# trigger is SELECTIVE on gate 3, not firing on the shared stale+fresh prefix.
+
+scenario "$stale" fresh alive; alive_r="$(run)"
+scenario "$stale" fresh dead;  dead_r="$(run)"
+if [ "$alive_r" = "0" ] && [ "$dead_r" = "1" ]; then
+  pass "(opposing) bot alive -> 0, bot dead -> 1 (selective on gate 3)"
+else
+  fail "(opposing) expected alive=0/dead=1, got alive=$alive_r/dead=$dead_r"
+fi
 
 # ============================================================
 echo "=== gauge-writer hook (channel-listener-gauge-write.py) ==="
@@ -149,128 +194,80 @@ GAUGE_METRICS_DIR="$TMP/metrics-test"
 mkdir -p "$GAUGE_METRICS_DIR"
 GAUGE_FILE="$GAUGE_METRICS_DIR/.agent-channel-testenv.json"
 
-# FIXTURE 9: gauge writer creates file with correct fields
 CHANNEL_GAUGE_METRICS_DIR="$GAUGE_METRICS_DIR" \
   CLAUDE_CONFIG_DIR="$TMP/agents/testenv/.claude-config" \
   python3 "$INSTALL_DIR/scripts/hooks/channel-listener-gauge-write.py" 2>/dev/null
 if [ -f "$GAUGE_FILE" ]; then
   connected=$(python3 -c "import json; d=json.load(open('$GAUGE_FILE')); print(d.get('connected'))" 2>/dev/null)
-  assert_eq "F9: gauge writer: connected=True" "True" "$connected"
+  assert_eq "hook: connected=True" "True" "$connected"
   agent_id=$(python3 -c "import json; d=json.load(open('$GAUGE_FILE')); print(d.get('agent_id'))" 2>/dev/null)
-  assert_eq "F9: gauge writer: agent_id=testenv" "testenv" "$agent_id"
+  assert_eq "hook: agent_id=testenv" "testenv" "$agent_id"
   ts=$(python3 -c "import json,time; d=json.load(open('$GAUGE_FILE')); print('ok' if abs(d.get('last_event_ts',0)-time.time())<5 else 'stale')" 2>/dev/null)
-  assert_eq "F9: gauge writer: last_event_ts within 5s of now" "ok" "$ts"
-  pass "F9: gauge file created"
+  assert_eq "hook: last_event_ts within 5s of now" "ok" "$ts"
+  pass "hook: gauge file created"
 else
-  fail "F9: gauge file NOT created at $GAUGE_FILE"
+  fail "hook: gauge file NOT created at $GAUGE_FILE"
 fi
 
-# FIXTURE 10: event_count increments on successive calls
 count1=$(python3 -c "import json; d=json.load(open('$GAUGE_FILE')); print(d.get('event_count',0))" 2>/dev/null)
 CHANNEL_GAUGE_METRICS_DIR="$GAUGE_METRICS_DIR" \
   CLAUDE_CONFIG_DIR="$TMP/agents/testenv/.claude-config" \
   python3 "$INSTALL_DIR/scripts/hooks/channel-listener-gauge-write.py" 2>/dev/null
 count2=$(python3 -c "import json; d=json.load(open('$GAUGE_FILE')); print(d.get('event_count',0))" 2>/dev/null)
-if [ "$count2" -gt "$count1" ] 2>/dev/null; then pass "F10: event_count increments"; else fail "F10: event_count did NOT increment ($count1 -> $count2)"; fi
+if [ "$count2" -gt "$count1" ] 2>/dev/null; then pass "hook: event_count increments"; else fail "hook: event_count did NOT increment ($count1 -> $count2)"; fi
 
-# FIXTURE 11: CWD fallback for agent_id
 rm -f "$GAUGE_FILE"
 mkdir -p "$TMP/agents/testenv"
 (cd "$TMP/agents/testenv" && unset CLAUDE_CONFIG_DIR && CHANNEL_GAUGE_METRICS_DIR="$GAUGE_METRICS_DIR" \
   python3 "$INSTALL_DIR/scripts/hooks/channel-listener-gauge-write.py" 2>/dev/null)
 if [ -f "$GAUGE_FILE" ]; then
   agent_id=$(python3 -c "import json; d=json.load(open('$GAUGE_FILE')); print(d.get('agent_id'))" 2>/dev/null)
-  assert_eq "F11: agent_id from CWD fallback" "testenv" "$agent_id"
+  assert_eq "hook: agent_id from CWD fallback" "testenv" "$agent_id"
 else
-  fail "F11: gauge file NOT created via CWD fallback"
+  fail "hook: gauge file NOT created via CWD fallback"
 fi
 
-# FIXTURE 12: non-fatal when dir is unwritable
 chmod 000 "$GAUGE_METRICS_DIR" 2>/dev/null || true
 CHANNEL_GAUGE_METRICS_DIR="$GAUGE_METRICS_DIR" \
   CLAUDE_CONFIG_DIR="$TMP/agents/testenv/.claude-config" \
   python3 "$INSTALL_DIR/scripts/hooks/channel-listener-gauge-write.py" 2>/dev/null
 EXITCODE=$?
 chmod 755 "$GAUGE_METRICS_DIR" 2>/dev/null || true
-assert_eq "F12: gauge writer exits 0 even when dir is unwritable" "0" "$EXITCODE"
+assert_eq "hook: exits 0 even when dir is unwritable" "0" "$EXITCODE"
 
 # ============================================================
 echo "=== LISTENER_CHECK_TICKS=0 div-by-zero guard ==="
-
-# FIXTURE 13: main-loop tick guard -- LISTENER_CHECK_TICKS=0 must never trigger
-# (the guard is `[ TICKS -gt 0 ] && [ tick % TICKS -eq 0 ]`; we verify it's safe)
-TICKS=0
-TICK=5
-result=0
-if [ "${TICKS:-20}" -gt 0 ] && [ $(( TICK % TICKS )) -eq 0 ] 2>/dev/null; then
-  result=1
-fi
-assert_eq "F13: LISTENER_CHECK_TICKS=0 -> check never fires (div-by-zero safe)" "0" "$result"
+TICKS=0; TICK=5; result=0
+if [ "${TICKS:-20}" -gt 0 ] && [ $(( TICK % TICKS )) -eq 0 ] 2>/dev/null; then result=1; fi
+assert_eq "tick-guard: LISTENER_CHECK_TICKS=0 -> check never fires (div-by-zero safe)" "0" "$result"
 
 # ============================================================
-echo "=== Integration: stale+marveen-fresh -> kill + notify ==="
-
+echo "=== Integration: real drop -> kill + notify; suppressed -> no kill ==="
 KILL_LOG="$TMP/kill.log"; : > "$KILL_LOG"
 NOTIFY_LOG="$TMP/notify.log"; : > "$NOTIFY_LOG"
-
-GAUGE="$TMP/.agent-channel-integ.json"
-echo '{"connected":true}' > "$GAUGE"
-touch -d "@$stale" "$GAUGE"
-KA="$TMP/.marveen-ka-integ"
-touch -d "@$fresh" "$KA"   # marveen fresh -> real drop
-make_check_listener_drop "$GAUGE" 3600 "$KA"
-
 declare -a STAMPS=()
 MAX_PER_HOUR=8
 under_cap() {
-  local now2; now2=$(date +%s)
-  local kept=(); local s
+  local now2; now2=$(date +%s); local kept=(); local s
   for s in "${STAMPS[@]}"; do [ $((now2 - s)) -lt 3600 ] && kept+=("$s"); done
-  STAMPS=("${kept[@]}")
-  [ "${#STAMPS[@]}" -lt "$MAX_PER_HOUR" ]
+  STAMPS=("${kept[@]}"); [ "${#STAMPS[@]}" -lt "$MAX_PER_HOUR" ]
 }
-notify_marveen() { echo "notify: $1" >> "$NOTIFY_LOG"; }
+notify_marveen() { echo "notify: $1" >> "$NOTIFY_LOG"; }   # override the real network call
 kill_session() { echo "kill: $1" >> "$KILL_LOG"; }
 
+# Real drop: stale gauge + marveen fresh + bot dead.
+scenario "$stale" fresh dead
 if ! check_listener_drop; then
-  if under_cap; then
-    kill_session "agent-gyore-test"
-    STAMPS+=("$(date +%s)")
-    notify_marveen "gyore listener-drop auto-recovery: relaunched fresh"
-  fi
+  if under_cap; then kill_session "$SESSION"; STAMPS+=("$(date +%s)"); notify_marveen "listener-drop auto-recovery"; fi
 fi
+if grep -q "kill:"   "$KILL_LOG";   then pass "integ: real drop -> kill called";   else fail "integ: real drop -> kill NOT called";   fi
+if grep -q "notify:" "$NOTIFY_LOG"; then pass "integ: real drop -> marveen notified"; else fail "integ: real drop -> marveen NOT notified"; fi
 
-if grep -q "kill:" "$KILL_LOG"; then pass "F14: stale+marveen-fresh -> kill called"; else fail "F14: stale+marveen-fresh -> kill NOT called"; fi
-if grep -q "notify:" "$NOTIFY_LOG"; then pass "F14: stale+marveen-fresh -> marveen notified"; else fail "F14: stale+marveen-fresh -> marveen NOT notified"; fi
-
-# Quiet period: no kill
+# Suppressed (bot alive): no kill.
 : > "$KILL_LOG"; : > "$NOTIFY_LOG"
-GAUGE="$TMP/.agent-channel-integ2.json"
-echo '{"connected":true}' > "$GAUGE"
-touch -d "@$stale" "$GAUGE"
-KA2="$TMP/.marveen-ka-quiet"
-touch -d "@$stale" "$KA2"   # marveen also stale -> quiet period
-make_check_listener_drop "$GAUGE" 3600 "$KA2"
-
-if check_listener_drop; then
-  pass "F15: quiet-period -> check returns 0 (no kill)"
-else
-  kill_session "agent-gyore-test"
-  fail "F15: quiet-period -> kill WAS called (spurious)"
-fi
-if ! grep -q "kill:" "$KILL_LOG"; then pass "F15: quiet-period -> kill NOT in log"; else fail "F15: quiet-period -> kill IN log (false positive)"; fi
-
-# Fresh gauge: no kill
-: > "$KILL_LOG"; : > "$NOTIFY_LOG"
-GAUGE="$TMP/.agent-channel-integ3.json"
-echo '{"connected":true}' > "$GAUGE"
-touch -d "@$fresh" "$GAUGE"
-KA3="$TMP/.marveen-ka-fresh"
-touch -d "@$fresh" "$KA3"
-make_check_listener_drop "$GAUGE" 3600 "$KA3"
-
-check_listener_drop
-assert_eq "F16: fresh gauge -> 0 (no kill, regardless of marveen)" "0" "$?"
+scenario "$stale" fresh alive
+if check_listener_drop; then pass "integ: bot-alive -> returns 0 (no kill)"; else kill_session "$SESSION"; fail "integ: bot-alive -> spurious kill"; fi
+if ! grep -q "kill:" "$KILL_LOG"; then pass "integ: bot-alive -> kill NOT in log"; else fail "integ: bot-alive -> kill IN log (false positive)"; fi
 
 # ============================================================
 echo ""
