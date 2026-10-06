@@ -18,6 +18,34 @@
 // The module has ZERO imports so it is trivially unit-testable against
 // captured pane fixtures. The I/O (capture-pane + double-sample) lives
 // in src/web.ts alongside the rest of the scheduler.
+//
+// ── Detector-DoD compliance (OPS-272 slice-3 audit, 2026-10-06) ───────────────
+// Every exported detect* function below satisfies the 4-item detector DoD
+// (detector-dod-gate skill). This family was built IN-sprint already compliant,
+// so this slice is an AUDIT-pass that FORMALIZES the contract, not a migration.
+// Each detector's fixtures live in src/__tests__/pane-state.test.ts; because the
+// test imports the REAL exports (no inline copy), there is no copy-drift class
+// here -- unlike the bash supervisor/watchdog detectors (lesson c813ad2). The
+// four DoD items per detector:
+//   (a) positive-control: a healthy/idle pane returns false (NOT flagged).
+//   (b) FP-bypass fixture: the trigger text in scrollback/prose/scrolled-off or
+//       a dismissed earlier prompt stays BELOW the tail window -> no fire.
+//   (c) fail-direction: a genuinely bad pane returns true (DOES flag).
+//   (d) tail-scope: a named *_TAIL_LINES constant bounds the scanned tail.
+//
+//   detector                 | tail-scope const           | test describe block
+//   -------------------------|----------------------------|---------------------------
+//   detectsEnterStuck        | ENTER_STUCK_TAIL_LINES=10   | 'detectsEnterStuck'
+//   detectsFeedbackModal     | FEEDBACK_MODAL_TAIL_LINES=10| 'session-feedback modal detector (9644ed7c G6)'
+//   detectsThinkingBlockError| ERROR_LIVE_TAIL_LINES=20    | 'detectsThinkingBlockError'
+//   detectsUsageLimitMenu    | LIMIT_MENU_TAIL_LINES=18    | 'usage/session-limit menu ...' + 'truncated-viewport ...' + 'over-block guard ...'
+//   detectsActiveLoginBox    | LOGIN_BOX_TAIL_LINES=10     | 'active OAuth login-box detector (ba53fdee G3)'
+//   detectsStalledIdle       | delegates (orchestrator)    | 'detectsStalledIdle (card 845750ad ...)'
+//   detectPaneState          | per sub-detector (tiered)   | 'detectPaneState'
+//
+// detectsStalledIdle / detectPaneState declare no own *_TAIL_LINES: they are
+// orchestrators that delegate tail-scoping to the single-purpose detectors they
+// compose. Keep this table in sync when adding or renaming a detector.
 
 export type PaneState = 'idle' | 'busy' | 'typing' | 'unknown' | 'error'
 
