@@ -19,6 +19,24 @@
 // pending inbox and NO recent outbound is a crashed/idle agent, which is normal
 // watchdog territory, NOT this wedge -- restarting it here would be redundant at
 // best and could interrupt a legitimate long-running turn at worst.
+//
+// ── Detector-DoD compliance (OPS-272 slice-4 audit, 2026-10-06) ───────────────
+// The detector (decideWedgeRecovery) is 4/4 DoD-compliant; this is an AUDIT-pass
+// annotation, not a migration. Proof in src/__tests__/wedge-detector.test.ts:
+//   (a) positive-control: 'does NOT recover a healthy agent with a draining/empty
+//       inbox, and resets state'.
+//   (b) FP-bypass: the 'false-positive guards (must NOT restart a healthy agent)'
+//       block -- 'merely-busy agent: pending but below the overdue threshold',
+//       'dead/idle agent: overdue inbox but NO recent outbound', 'outbound is
+//       stale', plus the cooldown no-thrash guard.
+//   (c) fail-direction: the 'fires on a true wedge (false-negative guard)' block
+//       -- 'recovers when the inbox is overdue and the agent is still emitting
+//       outbound'.
+//   (d) tail-scope / bounds: DEFAULT_WEDGE_THRESHOLDS (overdueMins 40,
+//       outboundRecentMins 60, cooldownMs, maxRecoveries 3, maxEscalations 2) --
+//       every bound is a named constant and boundary-tested (exactly-at-overdue /
+//       exactly-at-recent / escalation caps). The decision reads injected scalar
+//       signals, never a scrollback, so there is no unbounded scan.
 
 /**
  * A snapshot of one agent's wedge-relevant state, computed by the host loop from

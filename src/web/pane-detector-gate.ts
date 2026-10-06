@@ -22,6 +22,24 @@
 // baseline to current. Only a passed smoke (human/c12) re-enables it; otherwise
 // a CLI drift that breaks the detector would be hidden, which is worse than the
 // old hardcoded baseline constant.
+//
+// ── Detector-DoD compliance (OPS-272 slice-4 audit, 2026-10-06) ───────────────
+// The detector (paneDetectorGateStatus) is DoD-compliant; this is an AUDIT-pass
+// annotation, not a migration. Proof in src/__tests__/pane-detector-gate.test.ts:
+//   (a) positive-control: 'is trusted when no CLI drift is flagged'.
+//   (b) FP-bypass: 'trims whitespace on both sides' (a whitespace-only delta is
+//       not a real drift) + 'is trusted again once the smoke passed for exactly
+//       the drifted version' / 'stays down if the smoke passed for a DIFFERENT
+//       version' (a stale/mismatched smoke must NOT bypass the gate).
+//   (c) fail-direction: 'is NOT trusted when drift is flagged and the smoke has
+//       not re-validated it'.
+//   (d) tail-scope: N/A BY CONSTRUCTION. This is a scalar trust-gate -- it
+//       compares two single-line version strings (readTrimmedOrNull of the
+//       mismatch + smoke-passed files), not a log tail / scrollback, so there is
+//       no unbounded scan to bound. This is the skill's accepted "documented
+//       default / explicit decision" form of (d). The one-alert-per-version dedup
+//       (alertedMismatchVersions) is bounded by the count of distinct CLI
+//       releases seen this process lifetime (monotonic, tiny), not a scan window.
 
 import { readFileSync, rmSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
