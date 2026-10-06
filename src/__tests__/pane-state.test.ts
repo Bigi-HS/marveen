@@ -2621,3 +2621,49 @@ describe('detectsEnterStuck', () => {
     expect(detectsEnterStuck(SCROLLBACK + '\nidle pane')).toBe(false)
   })
 })
+
+// ── Detector-DoD compliance manifest (OPS-272 slice-3 audit) ──────────────────
+// Keeps the DoD-compliance table in the pane-state.ts module header honest: the
+// per-detector describe blocks above own the behavioral DoD (a/b/c/d), but a
+// detector that is RENAMED or REMOVED would silently orphan the audit table
+// (the drift class this whole sprint exists to kill). This manifest fails the
+// build if the documented roster changes without the table being updated, and
+// asserts the universal positive-control floor (empty pane never flags) that
+// every detector must honor.
+describe('detector-DoD compliance manifest (OPS-272)', () => {
+  // The 7 exported detectors covered by the pane-state.ts DoD audit table.
+  const SINGLE_PURPOSE = {
+    detectsEnterStuck,
+    detectsFeedbackModal,
+    detectsThinkingBlockError,
+    detectsUsageLimitMenu,
+    detectsActiveLoginBox,
+  } as const
+  const ORCHESTRATORS = { detectsStalledIdle, detectPaneState } as const
+
+  it('the documented detector roster is exactly these 7 (update the audit table if this changes)', () => {
+    const roster = [...Object.keys(SINGLE_PURPOSE), ...Object.keys(ORCHESTRATORS)].sort()
+    expect(roster).toEqual([
+      'detectPaneState',
+      'detectsActiveLoginBox',
+      'detectsEnterStuck',
+      'detectsFeedbackModal',
+      'detectsStalledIdle',
+      'detectsThinkingBlockError',
+      'detectsUsageLimitMenu',
+    ])
+  })
+
+  it('every documented detector is an exported function', () => {
+    for (const [name, fn] of Object.entries({ ...SINGLE_PURPOSE, ...ORCHESTRATORS })) {
+      expect(typeof fn, `${name} must be an exported function`).toBe('function')
+    }
+  })
+
+  it('positive-control floor: every single-purpose detector returns false on an empty pane', () => {
+    for (const [name, fn] of Object.entries(SINGLE_PURPOSE)) {
+      // detectsUsageLimitMenu takes an optional nowMs; empty pane short-circuits before it is read.
+      expect(fn(''), `${name}('') must not flag`).toBe(false)
+    }
+  })
+})
