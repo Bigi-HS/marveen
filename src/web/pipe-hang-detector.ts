@@ -13,6 +13,20 @@
 // and, on a 'hung' verdict, drives /mcp recovery (attemptChannelMcpReconnect) --
 // the same recovery the rest of the fleet uses. Pure functions are exported and
 // unit-tested; the only IO is reading the agent's latest session transcript.
+//
+// ── Detector-DoD compliance (OPS-272 slice-4 audit, 2026-10-06) ───────────────
+// The detector (classifyMcpCall) is 4/4 DoD-compliant; this is an AUDIT-pass
+// annotation, not a migration. Proof in src/__tests__/pipe-hang-detector.test.ts:
+//   (a) positive-control: 'returns none when the agent made no Telegram-MCP call'
+//       + 'returns ok when the latest call has a matching tool_result (resolved)'.
+//   (b) FP-bypass (in-flight-not-hung): 'returns ok when the call is in-flight but
+//       YOUNGER than the threshold' -- an unresolved-but-young call must NOT /mcp.
+//   (c) fail-direction: 'returns hung when an unresolved call is at/over the
+//       threshold'.
+//   (d) tail-scope: the age bound is the injected `hangThresholdMs` parameter; the
+//       scan is further bounded to the LATEST call only ('judges only the LATEST
+//       call: an old resolved call does not mask a new hung one'), so stale
+//       resolved history cannot keep firing.
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
