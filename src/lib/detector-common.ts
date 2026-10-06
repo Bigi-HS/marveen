@@ -7,6 +7,22 @@ export interface Logger {
   info(obj: Record<string, unknown>, msg: string): void
 }
 
+// SEC-106 path-traversal / injection guard.
+//
+// strikeGate() and strikeClear() build file paths as `strike-${agent}`; a name
+// containing a path separator or ".." could escape stateDir (path.join
+// normalizes "../" segments, so `strike-../../x` resolves outside stateDir).
+// Allowlist only [A-Za-z0-9_-] (mirrors the bash _dc_valid_agent) and throw on
+// violation -- an invalid agent name is a programming error or an attack, not a
+// recoverable control-flow state, so it must fail loud rather than silently.
+const AGENT_NAME_RE = /^[a-z0-9_-]+$/i
+
+function assertValidAgent(agent: string): void {
+  if (typeof agent !== 'string' || !AGENT_NAME_RE.test(agent)) {
+    throw new Error(`detector-common: invalid agent name: ${JSON.stringify(agent)}`)
+  }
+}
+
 // instrumentCheck -- dual-arm calibration gate (W1/c2f7904b design contract)
 //
 // ARM-A (negative / FP-guard): probe must NOT fire on a confirmed-healthy agent.
@@ -47,6 +63,7 @@ export function strikeGate(
   windowSeconds = 600,
   latchWindowSeconds?: number,
 ): boolean {
+  assertValidAgent(agent)
   const latchWindow = latchWindowSeconds ?? windowSeconds
   const strikeFile = join(stateDir, `strike-${agent}`)
   const latchFile = join(stateDir, `strike-latch-${agent}`)
@@ -78,6 +95,7 @@ export function strikeGate(
 
 // strikeClear -- remove strike and latch files (call when agent observed healthy)
 export function strikeClear(agent: string, stateDir: string): void {
+  assertValidAgent(agent)
   rmSync(join(stateDir, `strike-${agent}`), { force: true })
   rmSync(join(stateDir, `strike-latch-${agent}`), { force: true })
 }
