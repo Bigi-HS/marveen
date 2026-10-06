@@ -21,7 +21,7 @@ AGENT_DIR=/home/domin/marveen/agents/gyore
 CFG="$AGENT_DIR/.claude-config"
 STATE="$AGENT_DIR/.claude/channels/telegram"
 ACONF="$AGENT_DIR/agent-config.json"
-LOG=/home/domin/marveen/store/gyore-watchdog.log
+LOG="${GYORE_WATCHDOG_LOG:-/home/domin/marveen/store/gyore-watchdog.log}"
 COOLDOWN=60
 MAX_PER_HOUR=8
 
@@ -39,7 +39,7 @@ log() { echo "$(date -Is) $*" >> "$LOG"; }
 
 # Shared watchdog helpers (card 0b282eb0 A1). F1: fail CLOSED -- if the lib is
 # missing/broken, exit rather than silently degrade to a false-healthy loop.
-. "$(dirname "$0")/lib/watchdog-common.sh" || { log "FATAL: watchdog-common.sh source failed"; exit 1; }
+. "$(dirname "${BASH_SOURCE[0]}")/lib/watchdog-common.sh" || { log "FATAL: watchdog-common.sh source failed"; exit 1; }
 WD_LOG_FILE="$LOG"
 
 # read_model: thin wrapper over the shared wd_read_model (keeps the call sites
@@ -70,8 +70,6 @@ launch() {
   done
   log "WARN: $SESSION did not reach channel-listening within 20s"
 }
-
-log "gyore-watchdog started (pid $$)"
 
 # Relaunch-rate cap: file-backed sliding 1h window (0b282eb0 Phase-3).
 STAMP_FILE="/tmp/wd-stamps-gyore"
@@ -149,6 +147,14 @@ check_listener_drop() {
   log "LISTENER-DROP: gauge stale ${age}s, marveen keepalive fresh -- $SESSION listener appears dead"
   return 1
 }
+
+# Sourcing guard: let the DoD test (scripts/__tests__/channel-listener-drop.test.sh)
+# load the REAL check_listener_drop / notify_marveen above without starting the
+# daemon loop -- mirrors the fleet-supervisor.sh --dry-run early-return so the test
+# exercises the shipped detector, not a drifting inline copy (lesson c813ad2).
+if [ "${GYORE_WATCHDOG_SOURCE_ONLY:-0}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
+
+log "gyore-watchdog started (pid $$)"
 
 _tick=0
 while true; do
