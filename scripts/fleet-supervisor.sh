@@ -353,6 +353,24 @@ check_dash_wedge() {
   fi
 }
 
+_channelless_agent_wedged() {
+  # Per-agent decision seam for check_channelless_inbox_wedge (card OPS-272 /
+  # 8e124447, W1 DoD migration). Extracted so the detector's combinational logic
+  # is unit-testable with the signal helpers mocked (scripts/test_channelless_inbox_wedge.sh).
+  # Guard order preserves the original short-circuit: cheap liveness checks before
+  # the DB obligation query. Returns 0 (wedged) only when the agent is alive + idle
+  # at the prompt + has an overdue unacked inbox + is NOT budget-paused.
+  # Tail-scope: the "overdue inbox" signal is itself bounded to the
+  # IDLE_NUDGE_LOOKBACK_SECONDS window inside agent_has_open_obligation; this
+  # decision scans no pane scrollback.
+  local n="$1" session="agent-$1"
+  session_alive "$session"          || return 1   # dead -- watchdog restarts, not our wedge
+  pane_is_idle_at_prompt "$session" || return 1   # working normally
+  agent_has_open_obligation "$n"    || return 1   # no pending inbox -- legitimately idle
+  is_agent_budget_paused "$n"       && return 1   # quota-limited by design, not stuck
+  return 0
+}
+
 check_channelless_inbox_wedge() {
   # G5-equivalent for channel-LESS agents (OPS-202 / 74655583).
   # channel-monitor G5 covers agents-with-channels only (isAgentChannelIntentionallyEnabled).
@@ -370,14 +388,9 @@ check_channelless_inbox_wedge() {
   [ "$DRY_RUN" -eq 1 ] && return 0   # no DB/pane access in dry-run
 
   local agents="${FLEET_TEST_CHANNELLESS_AGENTS:-$CHANNELLESS_AGENTS_DEFAULT}"
-  local wedged_list="" n session
+  local wedged_list="" n
   for n in $agents; do
-    session="agent-$n"
-    session_alive "$session"    || continue   # dead -- watchdog handles restart, not our wedge
-    pane_is_idle_at_prompt "$session" || continue   # working normally
-    agent_has_open_obligation "$n" || continue      # no pending inbox -- legitimately idle
-    is_agent_budget_paused "$n" && continue         # quota-limited by design, not stuck
-    wedged_list="$wedged_list ${n}:inbox-stuck"
+    _channelless_agent_wedged "$n" && wedged_list="$wedged_list ${n}:inbox-stuck"
   done
 
   [ -z "$wedged_list" ] && return 0
