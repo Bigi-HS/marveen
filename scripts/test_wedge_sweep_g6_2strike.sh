@@ -392,6 +392,54 @@ export DETECTOR_COMMON_ENABLED=1
 export FLEET_TEST_SWEEP_AGENTS="g6alpha"
 
 # ==========================================================================
+# (r) Behavior-parity across the flag: the SAME existing fixtures must yield the
+# SAME verdict under ENABLED=1 (helper path) AND ENABLED=0 (inline path). This is
+# the behavior-preserving proof the migration owes -- without it the default-0
+# green would exercise only the inline arm and be vacuous for the helper
+# (lesson-gate-verify-test-exercises-branch). The parity set uses only the
+# flag-independent core decisions (1st strike silent / 2nd strike dismiss once /
+# healthy reset); the latch divergence is covered separately in (p).
+# Proof-of-non-vacuity: neutralizing strike_gate makes the flag=1 pass flip (the
+# 2nd-strike dismiss never fires on the helper path). Run externally in the PR.
+# ==========================================================================
+parity_run() {  # <flag> ; emits r-labelled asserts for that flag value
+  local _flag="$1" _a="parity$1"
+  export DETECTOR_COMMON_ENABLED="$_flag"
+  rm -f "$STATE_DIR/strike-g6-$_a" "$STATE_DIR/strike-latch-g6-$_a" "$STATE_DIR/g6-strike-$_a"
+  export FLEET_TEST_SWEEP_AGENTS="$_a"
+  pane_survey "$_a"
+
+  : > "$SEND_KEYS_FILE"
+  run_sweep                      # 1st strike: silent
+  case "$(summary)" in
+    *"$_a:G6"*) bad "(r-f$_flag-1) 1st strike must NOT flag" ;;
+    *)          ok  "(r-f$_flag-1) flag=$_flag 1st strike silent" ;;
+  esac
+  [ "$(sk_count)" -eq 0 ] && ok "(r-f$_flag-2) flag=$_flag 1st strike no send-keys" \
+    || bad "(r-f$_flag-2) flag=$_flag spurious send-keys on 1st strike"
+
+  run_sweep                      # 2nd strike: dismiss exactly once
+  case "$(summary)" in
+    *"dismissed:"*"$_a:G6"*) ok "(r-f$_flag-3) flag=$_flag 2nd strike dismissed" ;;
+    *) bad "(r-f$_flag-3) flag=$_flag 2nd strike should dismiss (got: $(summary))" ;;
+  esac
+  [ "$(sk_count)" -eq 1 ] && ok "(r-f$_flag-4) flag=$_flag exactly one send-keys" \
+    || bad "(r-f$_flag-4) flag=$_flag expected 1 send-keys, got $(sk_count)"
+
+  pane_healthy "$_a"
+  run_sweep                      # healthy: strike state cleared (either filename)
+  if [ ! -f "$STATE_DIR/strike-g6-$_a" ] && [ ! -f "$STATE_DIR/g6-strike-$_a" ]; then
+    ok "(r-f$_flag-5) flag=$_flag healthy pane clears strike state"
+  else
+    bad "(r-f$_flag-5) flag=$_flag strike state not cleared on healthy pane"
+  fi
+}
+parity_run 1   # helper path
+parity_run 0   # inline path -- identical verdicts = behavior-preserving
+export DETECTOR_COMMON_ENABLED=1
+export FLEET_TEST_SWEEP_AGENTS="g6alpha"
+
+# ==========================================================================
 # (o) g6_inbox_draining argv hardening: REAL function with single-quote name
 # ==========================================================================
 # Calls the production g6_inbox_draining (not the suite-level mock) with an
