@@ -118,18 +118,23 @@ else
   bad "flag=1 G2: MISS -- active usage-limit not flagged"
 fi
 
-# (c) FP-catch G1: stale 'Press Enter' beyond last-10 -> NOT flagged.
-sweep_one g1stale
+# (c) FP-catch G1: stale 'Press Enter' beyond last-10 -> NOT flagged even across
+#     TWO sweeps. Two sweeps PROVE tail-scope (not merely 2-strike silence): a
+#     broken tail would detect the marker and confirm on sweep 2.
+rm -f "$STATE_DIR/strike-g1-g1stale" "$STATE_DIR/strike-latch-g1-g1stale"
+sweep_one g1stale; sweep_one g1stale
 if ! flagged "g1stale:G1"; then
-  ok "flag=1 G1: stale 'Press Enter' beyond last-10 NOT flagged (tail-scope closes stale-scrollback FP)"
+  ok "flag=1 G1: stale 'Press Enter' beyond last-10 NOT flagged across 2 sweeps (tail-scope)"
 else
   bad "flag=1 G1: FALSE-POSITIVE -- stale-scrollback 'Press Enter' flagged G1"
 fi
 
-# (d) fail-direction G1: active 'Press Enter' within last-10 -> flagged.
-sweep_one g1live
+# (d) fail-direction G1: active 'Press Enter' within last-10 -> flagged after the
+#     confirmed 2nd strike (within-tail marker reaches the detector; G1 is 2-strike).
+rm -f "$STATE_DIR/strike-g1-g1live" "$STATE_DIR/strike-latch-g1-g1live"
+sweep_one g1live; sweep_one g1live
 if flagged "g1live:G1"; then
-  ok "flag=1 G1: active 'Press Enter' within last-10 IS flagged (fail-direction)"
+  ok "flag=1 G1: active 'Press Enter' within last-10 IS flagged after 2nd strike (fail-direction)"
 else
   bad "flag=1 G1: MISS -- active press-enter not flagged"
 fi
@@ -152,6 +157,75 @@ if flagged "g1stale:G1"; then
   ok "flag=0 G1: stale 'Press Enter' STILL flagged (inert == pre-S2-develop)"
 else
   bad "flag=0 G1: inert preservation broken -- flag=0 changed behaviour"
+fi
+
+export DETECTOR_COMMON_ENABLED=1
+echo ""
+
+echo "=== S2 increment 2: G1 2-strike (transient-flash) + G2 no-strike proof ==="
+# Per the per-arm mapping: G1's transient-flash FP needs strike_gate (2-strike);
+# G2's root is tail-scope (above), so G2 must NOT gain a strike gate.
+clear_g1() { rm -f "$STATE_DIR/strike-g1-$1" "$STATE_DIR/strike-latch-g1-$1"; }
+
+# Active "Press Enter" within the tail -> the detector sees it every sweep.
+pane_set g1flash "$(pane_banner_then_filler 'Press Enter to continue' 3)"
+
+# ---- flag=1: 2-strike persistence (transient-flash FP) ----------------------
+export DETECTOR_COMMON_ENABLED=1
+
+# (g) 1st strike is SILENT (a one-sweep flash must not flag).
+clear_g1 g1flash
+sweep_one g1flash
+if ! flagged "g1flash:G1"; then
+  ok "flag=1 G1: 1st strike silent (transient-flash not flagged on one sweep)"
+else
+  bad "flag=1 G1: 1st strike flagged -- no 2-strike persistence"
+fi
+
+# (h) 2nd consecutive strike within window -> flag.
+sweep_one g1flash
+if flagged "g1flash:G1"; then
+  ok "flag=1 G1: 2nd consecutive strike flags (confirmed transient->persistent)"
+else
+  bad "flag=1 G1: 2nd strike did not flag -- persistence broken"
+fi
+
+# (i) healthy-reset: a healthy pane BETWEEN strikes clears the counter, so the
+#     next enter is a fresh 1st strike (enforces CONSECUTIVE strikes).
+clear_g1 g1flash
+sweep_one g1flash                 # strike 1 (silent)
+pane_set g1flash "$(pane_banner_then_filler 'ok' 3)"   # healthy (no enter marker)
+sweep_one g1flash                 # healthy -> must clear g1 strike
+pane_set g1flash "$(pane_banner_then_filler 'Press Enter to continue' 3)"  # enter again
+sweep_one g1flash                 # should be a FRESH 1st strike -> silent
+if ! flagged "g1flash:G1"; then
+  ok "flag=1 G1: healthy pane between strikes resets -> next enter is 1st strike (silent)"
+else
+  bad "flag=1 G1: non-consecutive strikes falsely confirmed (healthy-reset missing)"
+fi
+
+# ---- flag=0: G1 immediate flag (inert == pre-S2) ----------------------------
+export DETECTOR_COMMON_ENABLED=0
+clear_g1 g1flash
+pane_set g1flash "$(pane_banner_then_filler 'Press Enter to continue' 3)"
+sweep_one g1flash
+if flagged "g1flash:G1"; then
+  ok "flag=0 G1: immediate flag on 1st sweep (inert == pre-S2-develop)"
+else
+  bad "flag=0 G1: inert preservation broken -- flag=0 added 2-strike"
+fi
+
+# ---- G2 must NOT have gained a strike gate (mapping: G2 root = tail-scope) ---
+export DETECTOR_COMMON_ENABLED=1
+# Active usage-limit within the tail -> must flag on the VERY FIRST sweep even at
+# flag=1 (proves G2 is immediate, not 2-strike).
+rm -f "$STATE_DIR/strike-g2-g2now" "$STATE_DIR/strike-latch-g2-g2now"
+pane_set g2now "$(pane_banner_then_filler 'Usage limit reached -- weekly limit' 5)"
+sweep_one g2now
+if flagged "g2now:G2"; then
+  ok "flag=1 G2: active usage-limit flags on 1st sweep (G2 is immediate, NOT 2-strike)"
+else
+  bad "flag=1 G2: usage-limit NOT flagged on 1st sweep -- G2 wrongly gained a strike gate"
 fi
 
 export DETECTOR_COMMON_ENABLED=1
