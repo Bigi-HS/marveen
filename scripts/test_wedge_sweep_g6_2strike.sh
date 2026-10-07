@@ -4,7 +4,7 @@
 #
 # Current code: survey pane -> immediate G6 flag (no persistence, no dismiss).
 # After fix:
-#   - 1st G6 detection  : record $STATE_DIR/g6-strike-<n>, no flag
+#   - 1st G6 detection  : record $STATE_DIR/strike-g6-<n>, no flag
 #   - 2nd consecutive   : inbox drain check -> if backed-up + modal re-confirmed -> send-keys 0 + dismissed
 #   - non-consecutive   : healthy pane between strikes resets the counter
 #   - inbox draining    : suppress on 2nd strike (agent healthy despite modal)
@@ -26,6 +26,11 @@ INSTALL_DIR="$TMP"; STORE="$TMP/store"; STATE_DIR="$TMP/store/.fleet-supervisor"
 DRY_RUN=0
 CURL=""                   # no alert delivery (avoids real network)
 TMUX_BIN=mock_tmux
+# Exercise the ACTIVATED detector-common path (card 9644ed7c). The migration ships
+# inert behind this flag; cases (g)-(p) assert the flag=1 shared-helper behaviour
+# (strike-g6-<n> filenames, confirmed-latch). Case (q) flips it to 0 to prove the
+# inert default preserves the exact legacy inline behaviour.
+export DETECTOR_COMMON_ENABLED=1
 
 SEND_KEYS_FILE="$TMP/sendkeys"
 
@@ -88,7 +93,7 @@ case "$S" in
   *"g6alpha:G6"*) bad "(g1) 1st G6 strike should NOT be flagged yet (got: $S)" ;;
   *)              ok  "(g1) 1st G6 strike: no flag" ;;
 esac
-if [ -f "$STATE_DIR/g6-strike-g6alpha" ]; then
+if [ -f "$STATE_DIR/strike-g6-g6alpha" ]; then
   ok  "(g2) 1st G6 strike: state file created"
 else
   bad "(g2) 1st G6 strike: state file NOT created"
@@ -112,7 +117,7 @@ case "$S" in
 esac
 SK=$(sk_count)
 [ "$SK" -gt 0 ] && ok "(h2) 2nd strike: send-keys 0 called ($SK)" || bad "(h2) 2nd strike: send-keys NOT called"
-[ ! -f "$STATE_DIR/g6-strike-g6alpha" ] && ok "(h3) 2nd strike: strike file cleaned up" || bad "(h3) 2nd strike: strike file should be removed"
+[ ! -f "$STATE_DIR/strike-g6-g6alpha" ] && ok "(h3) 2nd strike: strike file cleaned up" || bad "(h3) 2nd strike: strike file should be removed"
 
 # ==========================================================================
 # (i) G6 -> healthy pane -> G6 again: counter reset, 3rd detection = 1st strike
@@ -120,7 +125,7 @@ SK=$(sk_count)
 # Set pane to healthy first (clears strike).
 pane_healthy g6alpha
 run_sweep
-[ ! -f "$STATE_DIR/g6-strike-g6alpha" ] && ok "(i1) healthy pane: strike file removed" || bad "(i1) healthy pane: strike file should be gone"
+[ ! -f "$STATE_DIR/strike-g6-g6alpha" ] && ok "(i1) healthy pane: strike file removed" || bad "(i1) healthy pane: strike file should be gone"
 
 # Now G6 again -> must be 1st strike (NOT flagged).
 pane_survey g6alpha
@@ -138,7 +143,7 @@ SK=$(sk_count)
 # (j) Second strike but inbox draining: suppress, no send-keys
 # ==========================================================================
 # Ensure strike file exists from the previous test (it was 1st strike above).
-[ -f "$STATE_DIR/g6-strike-g6alpha" ] || printf '%s\n' "$(( $(date +%s) - 10 ))" > "$STATE_DIR/g6-strike-g6alpha"
+[ -f "$STATE_DIR/strike-g6-g6alpha" ] || printf '%s\n' "$(( $(date +%s) - 10 ))" > "$STATE_DIR/strike-g6-g6alpha"
 MOCK_DRAINING=1
 : > "$SEND_KEYS_FILE"
 run_sweep
@@ -152,14 +157,18 @@ esac
 SK=$(sk_count)
 [ "$SK" -eq 0 ] && ok "(j2) 2nd strike + draining: no send-keys" || bad "(j2) 2nd strike + draining: spurious send-keys (got: $SK)"
 # Strike file should be cleared (we don't want it to re-check indefinitely).
-[ ! -f "$STATE_DIR/g6-strike-g6alpha" ] && ok "(j3) 2nd strike + draining: strike file cleared" || bad "(j3) 2nd strike + draining: strike file should be removed"
+[ ! -f "$STATE_DIR/strike-g6-g6alpha" ] && ok "(j3) 2nd strike + draining: strike file cleared" || bad "(j3) 2nd strike + draining: strike file should be removed"
 
 # ==========================================================================
 # (k) Stale strike file (older than G6_STRIKE_WINDOW): reset to 1st strike
 # ==========================================================================
 export G6_STRIKE_WINDOW=5   # 5 second window for test speed
+# Clear the confirmed-latch left by (j)'s 2nd-strike confirm, otherwise the latch
+# (default latch_window == strike window) would suppress this sweep and the
+# stale-strike RESET branch would never be exercised (latch takes precedence).
+rm -f "$STATE_DIR/strike-latch-g6-g6alpha"
 # Write a strike file that is older than the window.
-printf '%s\n' "$(( $(date +%s) - 20 ))" > "$STATE_DIR/g6-strike-g6alpha"
+printf '%s\n' "$(( $(date +%s) - 20 ))" > "$STATE_DIR/strike-g6-g6alpha"
 pane_survey g6alpha
 : > "$SEND_KEYS_FILE"
 run_sweep
@@ -171,14 +180,14 @@ case "$S" in
 esac
 SK=$(sk_count)
 [ "$SK" -eq 0 ] && ok "(k2) stale strike: no send-keys" || bad "(k2) stale strike: spurious send-keys"
-[ -f "$STATE_DIR/g6-strike-g6alpha" ] && ok "(k3) stale strike: new strike file written" || bad "(k3) stale strike: strike file not reset"
+[ -f "$STATE_DIR/strike-g6-g6alpha" ] && ok "(k3) stale strike: new strike file written" || bad "(k3) stale strike: strike file not reset"
 unset G6_STRIKE_WINDOW
 
 # ==========================================================================
 # (l) Auto-dismiss TOCTOU guard: modal clears between snapshot and re-verify
 # ==========================================================================
 # Setup: strike file from (k) re-detection (1st new strike).
-[ -f "$STATE_DIR/g6-strike-g6alpha" ] || printf '%s\n' "$(( $(date +%s) - 10 ))" > "$STATE_DIR/g6-strike-g6alpha"
+[ -f "$STATE_DIR/strike-g6-g6alpha" ] || printf '%s\n' "$(( $(date +%s) - 10 ))" > "$STATE_DIR/strike-g6-g6alpha"
 # Now change pane to HEALTHY BEFORE the 2nd sweep (simulates modal self-clearing).
 # When fleet_wedge_sweep re-captures for classification, pane is still survey
 # (Phase 1 reads from the saved files in sweep_tmp which were captured at sweep start).
@@ -194,7 +203,7 @@ unset G6_STRIKE_WINDOW
 # Implementation: track call count per agent in $TMP/cap-count-<n>.
 TOCTOU_AGENT="toctou"
 pane_survey "$TOCTOU_AGENT"
-printf '%s\n' "$(( $(date +%s) - 10 ))" > "$STATE_DIR/g6-strike-$TOCTOU_AGENT"
+printf '%s\n' "$(( $(date +%s) - 10 ))" > "$STATE_DIR/strike-g6-$TOCTOU_AGENT"
 : > "$SEND_KEYS_FILE"
 export FLEET_TEST_SWEEP_AGENTS="$TOCTOU_AGENT"
 
@@ -281,7 +290,7 @@ esac
 # rejected before session_alive is even called.
 export FLEET_TEST_SWEEP_AGENTS="g6alpha scripts/fleet-supervisor.sh"
 # Ensure g6alpha's 2nd strike fires so the log message is emitted (dead field visible).
-printf '%s\n' "$(( $(date +%s) - 10 ))" > "$STATE_DIR/g6-strike-g6alpha"
+printf '%s\n' "$(( $(date +%s) - 10 ))" > "$STATE_DIR/strike-g6-g6alpha"
 pane_survey g6alpha
 : > "$SEND_KEYS_FILE"
 session_alive_orig() { return 0; }
@@ -303,6 +312,83 @@ case "$S" in
   *)
     ok "(n2) Phase-1 guard: path-like token NOT in log (rejected at Phase 1)" ;;
 esac
+export FLEET_TEST_SWEEP_AGENTS="g6alpha"
+
+# ==========================================================================
+# (p) Confirmed-latch anti-flap: after a 2nd-strike dismiss, a modal that keeps
+# reappearing every turn must NOT drive a fresh confirm->dismiss cycle for the
+# whole latch window. This is the detector-common migration's value-add over the
+# old inline 2-strike (no latch -> re-dismisses every other sweep).
+# Four sweeps are required to exercise the latch: the confirm REMOVES the strike
+# file, so sweep3 is a first-strike either way -- only sweep4 would re-confirm
+# WITHOUT the latch. Proof-of-non-vacuity: latch_window=0 makes sweep4 re-dismiss
+# (SK=2) -> (p3)+(p4) flip.
+# NOTE: must run BEFORE (o) -- (o) re-sources the supervisor, which clobbers the
+# test's log() override (summary would then read empty).
+# ==========================================================================
+export FLEET_TEST_SWEEP_AGENTS="g6latch"
+MOCK_DRAINING=0
+rm -f "$STATE_DIR/strike-g6-g6latch" "$STATE_DIR/strike-latch-g6-g6latch"
+pane_survey g6latch
+: > "$SEND_KEYS_FILE"
+
+run_sweep   # sweep1: 1st strike, no flag/send
+run_sweep   # sweep2: 2nd strike confirmed -> dismiss (send-keys #1), latch written
+S="$(summary)"
+case "$S" in
+  *"dismissed:"*"g6latch:G6"*) ok "(p1) 2nd strike dismissed (baseline for latch)" ;;
+  *) bad "(p1) expected g6latch dismissed on 2nd strike (got: $S)" ;;
+esac
+[ -f "$STATE_DIR/strike-latch-g6-g6latch" ] \
+  && ok "(p2) confirmed-latch written after dismiss" \
+  || bad "(p2) latch file not written after confirmed dismiss"
+
+run_sweep   # sweep3: latch active -> suppressed (no strike re-armed)
+run_sweep   # sweep4: WITH latch still suppressed (SK stays 1); WITHOUT latch this
+            #         would be a 2nd strike -> re-dismiss (SK=2)
+S="$(summary)"
+SK=$(sk_count)
+case "$S" in
+  *"g6latch:G6"*) bad "(p3) latch window: re-detected modal should NOT re-flag (got: $S)" ;;
+  *)             ok  "(p3) latch window: re-detected modal suppressed, no re-flag" ;;
+esac
+[ "$SK" -eq 1 ] \
+  && ok "(p4) latch anti-flap: exactly ONE send-keys across 4 sweeps (no re-dismiss)" \
+  || bad "(p4) latch anti-flap: expected 1 send-keys, got $SK (latch not suppressing re-dismiss)"
+export FLEET_TEST_SWEEP_AGENTS="g6alpha"
+
+# ==========================================================================
+# (q) Inert default: DETECTOR_COMMON_ENABLED=0 must preserve the EXACT legacy
+# inline behaviour -- legacy strike filename (g6-strike-<n>, NOT strike-g6-<n>),
+# NO confirmed-latch, and the 2nd-strike auto-dismiss still fires. This is the
+# ship-inert guarantee: deploy changes nothing until the canary flip.
+# Proof-of-non-vacuity: if the code ignored the flag and always used the shared
+# helper, (q1) [legacy name used] + (q3) [no latch] would flip.
+# ==========================================================================
+export DETECTOR_COMMON_ENABLED=0
+export FLEET_TEST_SWEEP_AGENTS="g6inert"
+MOCK_DRAINING=0
+rm -f "$STATE_DIR/strike-g6-g6inert" "$STATE_DIR/strike-latch-g6-g6inert" "$STATE_DIR/g6-strike-g6inert"
+pane_survey g6inert
+: > "$SEND_KEYS_FILE"
+
+run_sweep   # sweep1: 1st strike -> legacy inline path
+if [ -f "$STATE_DIR/g6-strike-g6inert" ] && [ ! -f "$STATE_DIR/strike-g6-g6inert" ]; then
+  ok "(q1) inert default: legacy strike filename used (flag gates the migration)"
+else
+  bad "(q1) inert default: expected legacy g6-strike-g6inert, shared name must be absent"
+fi
+
+run_sweep   # sweep2: 2nd strike -> dismiss (legacy behaviour preserved)
+S="$(summary)"
+case "$S" in
+  *"dismissed:"*"g6inert:G6"*) ok "(q2) inert default: 2nd-strike auto-dismiss still fires" ;;
+  *) bad "(q2) inert default: 2nd-strike dismiss missing (got: $S)" ;;
+esac
+[ ! -f "$STATE_DIR/strike-latch-g6-g6inert" ] \
+  && ok "(q3) inert default: NO confirmed-latch written (legacy has no latch)" \
+  || bad "(q3) inert default: latch file written under flag=0 (should be legacy, no latch)"
+export DETECTOR_COMMON_ENABLED=1
 export FLEET_TEST_SWEEP_AGENTS="g6alpha"
 
 # ==========================================================================
