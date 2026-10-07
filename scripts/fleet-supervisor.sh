@@ -1568,7 +1568,16 @@ g6_strike_clear() {
   if [ "${DETECTOR_COMMON_ENABLED:-0}" = "1" ] && command -v strike_clear >/dev/null 2>&1; then
     strike_clear "g6-$1" "$STATE_DIR"
   else
-    rm -f "$STATE_DIR/g6-strike-$1"
+    # chad S1 hardening (card 9644ed7c S2 AC): validate the agent token before the
+    # legacy rm -- defense-in-depth atop the Phase-3 roster-guard that already
+    # rejects traversal tokens. Byte-identical for any valid agent name (the only
+    # tokens that reach here); if detector-common did not load, fall back to the
+    # original unguarded rm so flag=0 behaviour is unchanged.
+    if command -v _dc_valid_agent >/dev/null 2>&1; then
+      _dc_valid_agent "$1" && rm -f "$STATE_DIR/g6-strike-$1"
+    else
+      rm -f "$STATE_DIR/g6-strike-$1"
+    fi
   fi
 }
 
@@ -1640,6 +1649,35 @@ g6_apply_2strike() {
       log "G6 auto-dismiss: modal cleared in agent-$_n (TOCTOU guard)"
       _G6_RESULT="toctou" ;;
   esac
+}
+
+# wedge_arm_2strike <class> <agent>
+# 2-strike persistence for a wedge arm WITHOUT any recovery side-effect (unlike
+# g6_apply_2strike, which also sends keys). Returns 0 (flag) ONLY on a confirmed
+# 2nd consecutive strike within the window; non-0 (silent) on the 1st strike.
+# Used by G1 (card 9644ed7c S2): the per-arm FP mapping identified G1's remaining
+# FP as transient-flash (a "Press Enter" that self-clears on the next sweep), which
+# a single-observation flag mis-reports; 2-strike is the correct primitive. G2 does
+# NOT use this (its root is stale-scrollback -> tail-scope, handled separately).
+# flag=0 / detector-common absent -> return 0 (immediate flag = exact pre-S2
+# behaviour), so the migration ships inert behind DETECTOR_COMMON_ENABLED.
+wedge_arm_2strike() {
+  local _class="$1" _n="$2"
+  if [ "${DETECTOR_COMMON_ENABLED:-0}" = "1" ] && command -v strike_gate >/dev/null 2>&1; then
+    strike_gate "${_class}-${_n}" "$STATE_DIR" "${WEDGE_STRIKE_WINDOW:-600}"
+    return $?
+  fi
+  return 0
+}
+
+# wedge_arm_strike_clear <class> <agent>: reset an arm's strike/latch when the pane
+# is observed healthy, so strikes must be CONSECUTIVE (two non-adjacent flashes do
+# not falsely confirm). No-op under flag=0 / detector-common absent (that path never
+# writes an arm strike file).
+wedge_arm_strike_clear() {
+  if [ "${DETECTOR_COMMON_ENABLED:-0}" = "1" ] && command -v strike_clear >/dev/null 2>&1; then
+    strike_clear "$1-$2" "$STATE_DIR"
+  fi
 }
 
 fleet_wedge_sweep() {
@@ -1732,35 +1770,47 @@ except Exception:
           case "$_G6_RESULT" in dismissed) dismissed_list="$dismissed_list ${_agent}:G6" ;; esac ;;
         enter)
           if wedge_sleep_suppress "$_agent" "$now"; then napping_list="$napping_list $_agent"
-          else wedged_list="$wedged_list ${_agent}:G1"; fi ;;
+          elif wedge_arm_2strike g1 "$_agent"; then wedged_list="$wedged_list ${_agent}:G1"; fi ;;
         # login (G3/OAuth re-auth box) is detected by the CLI but NOT wired to a
         # wedge class here -- wiring would be scope-expansion beyond c72ec834.
         # TODO(ba53fdee follow-up): when G3 recovery is ready, map login -> G3.
         *) healthy_count=$((healthy_count+1))
-           g6_strike_clear "$_agent" ;;  # reset G6 strike on healthy pane
+           g6_strike_clear "$_agent"              # reset G6 strike on healthy pane
+           wedge_arm_strike_clear g1 "$_agent" ;; # reset G1 strike (consecutive-strike)
       esac
     done <<< "$state_map"
   else
     # Degraded fallback: node CLI unavailable -- bare-substring on saved panes.
-    local _pane_text
+    local _pane_text _g2_scan _g1_scan
     for n in $live_agents; do
       # Roster-guard: reject path-like tokens (defensive, b0e189fb).
       case "$n" in */*|*' '*) continue ;; esac
       _pane_text=$(cat "$sweep_tmp/$n" 2>/dev/null) || continue
-      case "$_pane_text" in
-        *"Usage limit"*|*"weekly limit"*|*"credit"*|*"budget"*)
-          if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
-          else wedged_list="$wedged_list ${n}:G2"; fi ;;
-        *"Press Enter"*|*"press enter"*)
-          if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
-          else wedged_list="$wedged_list ${n}:G1"; fi ;;
-        *"How is Claude doing this session"*|*"Share feedback"*|*"How would you rate"*)
-          # 2-strike persistence + TOCTOU-guarded auto-dismiss (b0e189fb / e167dd08).
-          g6_apply_2strike "$n" "$now"
-          case "$_G6_RESULT" in dismissed) dismissed_list="$dismissed_list ${n}:G6" ;; esac ;;
-        *) healthy_count=$((healthy_count+1))
-           g6_strike_clear "$n" ;;  # reset G6 strike on healthy pane
-      esac
+      # Tail-scope the G2/G1 arms to mirror the Phase-2 classifier (G2=18, G1=10)
+      # when detector-common is enabled: a marker that scrolled above the tail is
+      # stale-scrollback, not an active wedge (card 9644ed7c S2, FP root per per-arm
+      # mapping). flag=0 keeps the exact pre-S2 full-pane match (deploy-neutral; one
+      # canary flip activates it with the rest of the migrated family).
+      _g2_scan="$_pane_text"; _g1_scan="$_pane_text"
+      if [ "${DETECTOR_COMMON_ENABLED:-0}" = "1" ]; then
+        _g2_scan=$(printf '%s\n' "$_pane_text" | tail -n "${G2_TAIL_LINES:-18}")
+        _g1_scan=$(printf '%s\n' "$_pane_text" | tail -n "${G1_TAIL_LINES:-10}")
+      fi
+      if case "$_g2_scan" in *"Usage limit"*|*"weekly limit"*|*"credit"*|*"budget"*) true ;; *) false ;; esac; then
+        if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
+        else wedged_list="$wedged_list ${n}:G2"; fi
+      elif case "$_g1_scan" in *"Press Enter"*|*"press enter"*) true ;; *) false ;; esac; then
+        if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
+        elif wedge_arm_2strike g1 "$n"; then wedged_list="$wedged_list ${n}:G1"; fi
+      elif case "$_pane_text" in *"How is Claude doing this session"*|*"Share feedback"*|*"How would you rate"*) true ;; *) false ;; esac; then
+        # 2-strike persistence + TOCTOU-guarded auto-dismiss (b0e189fb / e167dd08).
+        g6_apply_2strike "$n" "$now"
+        case "$_G6_RESULT" in dismissed) dismissed_list="$dismissed_list ${n}:G6" ;; esac
+      else
+        healthy_count=$((healthy_count+1))
+        g6_strike_clear "$n"              # reset G6 strike on healthy pane
+        wedge_arm_strike_clear g1 "$n"    # reset G1 strike (consecutive-strike)
+      fi
     done
   fi
 
