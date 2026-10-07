@@ -14,11 +14,24 @@
 #     the fallback AND add strike_gate 2-strike, behind DETECTOR_COMMON_ENABLED.
 #
 # Every flag=1 behaviour is gated on DETECTOR_COMMON_ENABLED so the migration
-# ships INERT (flag=0 = exact pre-S2 immediate-flag). The tail-scope of the
-# degraded fallback is NOT flag-gated: it is a pure FP-fix that mirrors the
-# already-shipped Phase-2 behaviour and is behaviour-preserving for any pane whose
-# marker is within the tail (the only behaviour it changes is dropping a
-# stale-scrollback FP, which Phase-2 already drops).
+# ships INERT: flag=0 == pre-S2-develop BYTE-IDENTICAL. This INCLUDES the degraded
+# fallback tail-scope -- it is flag-gated like every other S2 change (code:
+# fleet-supervisor.sh gates `_g2_scan`/`_g1_scan = tail ...` behind the flag; under
+# flag=0 the fallback matches the FULL pane and still flags a stale banner, proved
+# by the flag=0 inert cases below). The tail-scope must NOT leak into flag=0, else
+# the slice is no longer deploy-neutral and the one-canary-flip-at-S5-end rollout
+# breaks. (marveen invariant-preservation refinement, 2026-10-07.)
+#
+# Degraded-fallback depth = TAIL-ONLY (no staleness-guard), by necessity: the
+# Phase-2 staleness-guard (limitResetTimeIsStale, src/pane-state.ts) parses the
+# reset-time out of the banner in the node classifier, which is ABSENT on this
+# degraded bash path. So the fallback mirrors Phase-2's tail-scope but not its
+# staleness-reset check. RESIDUAL FP: a stale banner that scrolls INTO the last
+# 18/10 lines would still flag (the tail window alone does not defend against a
+# freshly-scrolled stale banner). Acceptable for the degraded path (the node CLI
+# is present on the live host, so this path is the rare fallback); a bash-side
+# staleness-guard is a possible future card. (marveen fallback-depth refinement,
+# 2026-10-07.)
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PASS=0; FAIL=0
