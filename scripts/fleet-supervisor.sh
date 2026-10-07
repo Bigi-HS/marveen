@@ -1680,6 +1680,53 @@ wedge_arm_strike_clear() {
   fi
 }
 
+# g1_apply_send_enter <agent>
+# G1 enter-stuck RECOVERY (card 9644ed7c S3) -- the first new-live-effect slice.
+# Detection is IDENTICAL to S2 (wedge_arm_2strike g1): returns 0 to flag :G1 on a
+# confirmed 2nd strike (or immediately at flag=0), non-0 (silent) on the 1st strike.
+# S3 ADDS a real `send-keys Enter` recovery as a side-effect on the confirmed path,
+# gated by three guards so it is safe on a live agent:
+#   (a) confirmed 2-strike  [wedge_arm_2strike, above]  -- persistent, not a flash
+#   (c) effect_drain_check  -- an actively inbox-draining agent is not stuck -> suppress
+#   (b) TOCTOU re-verify    -- re-capture; if 'Press Enter' is GONE, ABORT (the agent
+#                              self-resolved; never inject Enter into a live prompt)
+# The send is a NEW LIVE EFFECT: it fires ONLY under DETECTOR_COMMON_ENABLED=1
+# (flag=0 = detect-only = exact pre-S3 behaviour; flag=1 activates only at the
+# family-end canary flip). The :G1 detection flag is byte-identical to S2 in EVERY
+# case -- S3 adds the recovery side-effect, not a detection change. 'Press Enter' is
+# Claude Code's own continuation prompt, where Enter is the mode-correct safe key;
+# the marker-present re-verify (b) confirms that mode before sending (SUBMIT-vs-CLEAR).
+_G1_RESULT=""
+g1_apply_send_enter() {
+  local _n="$1" _reverify _rc
+  _G1_RESULT=""
+  wedge_arm_2strike g1 "$_n"; _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    _G1_RESULT="first_strike"
+    return "$_rc"                 # silent (flag=1 1st strike) -- not flagged, no send
+  fi
+  _G1_RESULT="flagged"
+  # Recovery only under flag=1; flag=0 keeps the exact pre-S3 detect-only behaviour.
+  [ "${DETECTOR_COMMON_ENABLED:-0}" = "1" ] || return 0
+  # (c) drain-suppress: an actively inbox-draining agent is not actually stuck.
+  if command -v effect_drain_check >/dev/null 2>&1 && effect_drain_check "$_n"; then
+    _G1_RESULT="drain_suppress"
+    return 0
+  fi
+  # (b) TOCTOU re-verify directly before the send.
+  _reverify=$("$TMUX_BIN" capture-pane -t "=agent-$_n:0.0" -p 2>/dev/null) || _reverify=""
+  case "$_reverify" in
+    *"Press Enter"*|*"press enter"*)
+      "$TMUX_BIN" send-keys -t "=agent-$_n:0.0" Enter
+      log "G1 auto-recover: sent Enter to agent-$_n (confirmed enter-stuck)"
+      _G1_RESULT="sent_enter" ;;
+    *)
+      log "G1 auto-recover: enter-prompt cleared in agent-$_n (TOCTOU guard)"
+      _G1_RESULT="toctou" ;;
+  esac
+  return 0
+}
+
 fleet_wedge_sweep() {
   local now throttle_key last
   now=$(date +%s)
@@ -1769,8 +1816,11 @@ except Exception:
           g6_apply_2strike "$_agent" "$now"
           case "$_G6_RESULT" in dismissed) dismissed_list="$dismissed_list ${_agent}:G6" ;; esac ;;
         enter)
+          # 2-strike detection (S2) + TOCTOU/drain-guarded send-Enter recovery (S3,
+          # flag=1 only). g1_apply_send_enter returns the SAME flag semantics as
+          # wedge_arm_2strike, so detection is byte-identical to S2.
           if wedge_sleep_suppress "$_agent" "$now"; then napping_list="$napping_list $_agent"
-          elif wedge_arm_2strike g1 "$_agent"; then wedged_list="$wedged_list ${_agent}:G1"; fi ;;
+          elif g1_apply_send_enter "$_agent"; then wedged_list="$wedged_list ${_agent}:G1"; fi ;;
         # login (G3/OAuth re-auth box) is detected by the CLI but NOT wired to a
         # wedge class here -- wiring would be scope-expansion beyond c72ec834.
         # TODO(ba53fdee follow-up): when G3 recovery is ready, map login -> G3.
@@ -1801,7 +1851,7 @@ except Exception:
         else wedged_list="$wedged_list ${n}:G2"; fi
       elif case "$_g1_scan" in *"Press Enter"*|*"press enter"*) true ;; *) false ;; esac; then
         if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
-        elif wedge_arm_2strike g1 "$n"; then wedged_list="$wedged_list ${n}:G1"; fi
+        elif g1_apply_send_enter "$n"; then wedged_list="$wedged_list ${n}:G1"; fi
       elif case "$_pane_text" in *"How is Claude doing this session"*|*"Share feedback"*|*"How would you rate"*) true ;; *) false ;; esac; then
         # 2-strike persistence + TOCTOU-guarded auto-dismiss (b0e189fb / e167dd08).
         g6_apply_2strike "$n" "$now"
