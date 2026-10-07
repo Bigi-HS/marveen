@@ -214,6 +214,21 @@ CURL="$(command -v curl || true)"
 . "$INSTALL_DIR/scripts/lib/sleep-guard.sh" 2>/dev/null \
   || echo "WARN: sleep-guard.sh source failed; wedge-sweep sleep-awareness degraded" >&2
 
+# detector-common.sh provides the shared wedge-detector primitives (W1/c2f7904b):
+# strike_gate (2-strike + confirmed-latch), strike_clear, effect_drain_check and
+# the dual-arm instrument_check. fleet_wedge_sweep's G6 arm is migrated onto these
+# (card 9644ed7c) behind DETECTOR_COMMON_ENABLED (ships INERT: flag=0 keeps the
+# legacy inline behaviour, one canary flip activates the migrated family) so every
+# detector arm shares ONE audited persistence + effect-corroboration implementation
+# instead of per-arm inline copies. The primitives
+# call a caller-provided log() (late-bound via command -v, so sourcing before
+# log() is defined below is safe) and effect_drain_check() uses resolve_live_db()
+# from this scope. Degrade-safe: on a source failure the G6 arm falls back to its
+# inline 2-strike path (command -v strike_gate guards every call site).
+# shellcheck source=lib/detector-common.sh
+. "$INSTALL_DIR/lib/detector-common.sh" 2>/dev/null \
+  || echo "WARN: detector-common.sh source failed; shared detector primitives unavailable" >&2
+
 # Write to stderr only. The daemon (fleet-boot.sh) and cron invocations redirect
 # stderr into $LOG, so a single channel avoids the tee+redirect double-logging.
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [fleet-supervisor] $*" >&2; }
@@ -1511,8 +1526,21 @@ wedge_sleep_suppress() {
 # agent IS processing, suppress the flag even on a confirmed 2nd strike (the survey
 # modal is transient/noise, not a real wedge). Fail-open: if the DB is unreachable
 # or the query fails, return 1 so the 2-strike verdict is not suppressed silently.
+#
+# Card 9644ed7c migrates this onto the shared effect_drain_check primitive, BUT
+# behind DETECTOR_COMMON_ENABLED so the migration ships inert (flag=0 keeps the
+# legacy inline query = exact pre-migration behaviour; flag=1 routes to the shared,
+# argv-hardened primitive in lib/detector-common.sh). One canary flip activates the
+# whole migrated detector-common family (see g6_apply_2strike). Fail-open both ways:
+# DB unreachable / primitive absent -> return 1 (not-draining), so a real wedge is
+# never silently suppressed.
 g6_inbox_draining() {
-  local n="$1" db recent
+  local n="$1" recent db
+  if [ "${DETECTOR_COMMON_ENABLED:-0}" = "1" ] && command -v effect_drain_check >/dev/null 2>&1; then
+    effect_drain_check "$n"
+    return $?
+  fi
+  # Legacy inline path (flag=0 / detector-common absent).
   db=$(resolve_live_db 2>/dev/null) || return 1
   [ -f "$db" ] || return 1
   recent=$(AGENT_ID="$n" python3 -c "
@@ -1532,42 +1560,74 @@ except Exception:
   [ "${recent:-0}" -gt 0 ]
 }
 
+# g6_strike_clear <agent>: reset the G6 strike/latch state for an agent observed
+# healthy. Uses the shared strike_clear primitive (removes strike-g6-<n> + its
+# latch) when detector-common is present; degrades to removing the legacy inline
+# strike file otherwise.
+g6_strike_clear() {
+  if [ "${DETECTOR_COMMON_ENABLED:-0}" = "1" ] && command -v strike_clear >/dev/null 2>&1; then
+    strike_clear "g6-$1" "$STATE_DIR"
+  else
+    rm -f "$STATE_DIR/g6-strike-$1"
+  fi
+}
+
 # g6_apply_2strike <agent> <now>
 # 2-strike persistence + TOCTOU-guarded auto-dismiss for the CC session-feedback
-# modal (b0e189fb + e167dd08). Communicates result via _G6_RESULT (caller reads):
-#   first_strike : 1st detection recorded; no flag yet
+# modal (b0e189fb + e167dd08, migrated to detector-common in 9644ed7c).
+# Communicates result via _G6_RESULT (caller reads):
+#   first_strike : 1st detection (or latch-suppressed re-detection); no flag yet
 #   suppressed   : 2nd strike but inbox is draining (agent healthy); no flag
 #   dismissed    : 2nd strike confirmed, modal re-verified, send-keys 0 sent
 #   toctou       : 2nd strike but modal cleared before re-verify; no send, no flag
-# Side-effects: may write/remove $STATE_DIR/g6-strike-<n>, may call send-keys.
+# Persistence is the shared strike_gate (2-strike + confirmed-latch so a modal
+# that self-clears next turn never reaches 2, and a just-dismissed modal does not
+# re-trigger a second send-keys within the latch window), used ONLY when
+# DETECTOR_COMMON_ENABLED=1. The migration ships inert: flag=0 (default) keeps the
+# inline 2-strike (no latch) = the exact pre-migration behaviour, so deploy changes
+# nothing and a single canary flip activates the migrated family. Side-effects: may
+# write/remove strike/latch files under $STATE_DIR, may call send-keys.
 _G6_RESULT=""
 g6_apply_2strike() {
-  local _n="$1" _now="$2"
-  local _strikef="$STATE_DIR/g6-strike-$_n" _strike_ts _reverify
+  local _n="$1" _now="$2" _reverify _confirmed=1
   _G6_RESULT=""
-  if [ ! -f "$_strikef" ]; then
-    printf '%s\n' "$_now" > "$_strikef"
+  if [ "${DETECTOR_COMMON_ENABLED:-0}" = "1" ] && command -v strike_gate >/dev/null 2>&1; then
+    # Shared 2-strike + confirmed-latch. Class-scope the key as "g6-<n>" so sibling
+    # detector arms never collide on one agent's strike file. strike_gate returns 0
+    # only on a confirmed 2nd strike within the window.
+    if strike_gate "g6-$_n" "$STATE_DIR" "${G6_STRIKE_WINDOW:-600}"; then
+      _confirmed=0
+    fi
+  else
+    # Inert default (flag=0) / degrade-safe (detector-common absent): inline 2-strike
+    # (no latch) -- the exact pre-migration behaviour.
+    local _strikef="$STATE_DIR/g6-strike-$_n" _strike_ts
+    if [ ! -f "$_strikef" ]; then
+      printf '%s\n' "$_now" > "$_strikef"
+    else
+      _strike_ts=$(cat "$_strikef" 2>/dev/null || echo 0)
+      case "$_strike_ts" in (*[!0-9]*|'') _strike_ts=0;; esac
+      if [ $(( _now - _strike_ts )) -gt "${G6_STRIKE_WINDOW:-600}" ]; then
+        printf '%s\n' "$_now" > "$_strikef"   # stale: reset to first strike
+      else
+        rm -f "$_strikef"
+        _confirmed=0
+      fi
+    fi
+  fi
+  if [ "$_confirmed" -ne 0 ]; then
     _G6_RESULT="first_strike"
     return 0
   fi
-  _strike_ts=$(cat "$_strikef" 2>/dev/null || echo 0)
-  case "$_strike_ts" in (*[!0-9]*|'') _strike_ts=0;; esac
-  if [ $(( _now - _strike_ts )) -gt "${G6_STRIKE_WINDOW:-600}" ]; then
-    # Strike file is stale (outside window): reset to first strike.
-    printf '%s\n' "$_now" > "$_strikef"
-    _G6_RESULT="first_strike"
-    return 0
-  fi
-  # Second+ consecutive strike within window.
-  rm -f "$_strikef"
+  # Confirmed 2nd strike.
   if g6_inbox_draining "$_n"; then
     # Agent is actively draining its inbox: healthy despite modal, suppress.
     _G6_RESULT="suppressed"
     return 0
   fi
-  # Confirmed 2nd strike: re-verify before sending to guard against TOCTOU
-  # (modal may self-clear between classification and this action; a blind '0'
-  # would land in the agent's live prompt if the TUI already dismissed it).
+  # Re-verify before sending to guard against TOCTOU (modal may self-clear between
+  # classification and this action; a blind '0' would land in the agent's live
+  # prompt if the TUI already dismissed it).
   _reverify=$("$TMUX_BIN" capture-pane -t "=agent-$_n:0.0" -p 2>/dev/null) || _reverify=""
   case "$_reverify" in
     *"How is Claude doing this session"*|*"Share feedback"*|*"How would you rate"*)
@@ -1677,7 +1737,7 @@ except Exception:
         # wedge class here -- wiring would be scope-expansion beyond c72ec834.
         # TODO(ba53fdee follow-up): when G3 recovery is ready, map login -> G3.
         *) healthy_count=$((healthy_count+1))
-           rm -f "$STATE_DIR/g6-strike-$_agent" ;;  # reset G6 strike on healthy pane
+           g6_strike_clear "$_agent" ;;  # reset G6 strike on healthy pane
       esac
     done <<< "$state_map"
   else
@@ -1699,7 +1759,7 @@ except Exception:
           g6_apply_2strike "$n" "$now"
           case "$_G6_RESULT" in dismissed) dismissed_list="$dismissed_list ${n}:G6" ;; esac ;;
         *) healthy_count=$((healthy_count+1))
-           rm -f "$STATE_DIR/g6-strike-$n" ;;  # reset G6 strike on healthy pane
+           g6_strike_clear "$n" ;;  # reset G6 strike on healthy pane
       esac
     done
   fi
