@@ -170,6 +170,21 @@ else bad "(d1) flag=0: NOT flagged (detection regressed)"; fi
 [ "$(sk_count)" -eq 0 ] && ok "(d2) flag=0 DEPLOY-NEUTRAL: NO send-keys (recovery inert)" \
   || bad "(d2) flag=0: send-keys fired at flag=0 -- NOT deploy-neutral ($(sk))"
 
+# (e) GUARD (c) drain-suppress: flag=1, confirmed 2nd strike, marker present, but the
+#     agent is actively draining its inbox -> NOT stuck -> suppress the send. Still
+#     flagged :G1 (detection over-reports safely; the dangerous ACTION is suppressed).
+export DETECTOR_COMMON_ENABLED=1
+g1_strike_reset; : > "$SEND_KEYS_FILE"; MOCK_DRAINING=1
+pane_enter g1d
+export FLEET_TEST_SWEEP_AGENTS="g1d"
+run_sweep    # 1st strike
+run_sweep    # 2nd strike confirmed, but draining -> suppress
+if flagged "g1d:G1"; then ok "(e1) drain-suppress: still flagged :G1 (safe over-report)"
+else bad "(e1) drain-suppress: NOT flagged"; fi
+[ "$(sk_count)" -eq 0 ] && ok "(e2) drain-suppress: NO send-keys (draining agent not injected)" \
+  || bad "(e2) drain-suppress: send fired to a draining agent ($(sk))"
+MOCK_DRAINING=0
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
