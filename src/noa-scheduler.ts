@@ -19,7 +19,7 @@ import { toPendingRetryView, shouldRetryNow } from './pending-retries.js'
 import { sendPendingRetryAlert } from './web/pending-retry-alert.js'
 import { sweepStuckTasks } from './web/stuck-task-sentinel.js'
 import { resolveFromPath } from './platform.js'
-import { isBudgetPauseMarkerActive } from './web/opus-burn-monitor.js'
+import { isBudgetPauseMarkerActive, readBudgetPauseMarker } from './web/opus-burn-monitor.js'
 
 // Lazy tmux path -- resolved on first use so module load never throws if tmux absent in test env
 let _tmux: string | null = null
@@ -464,6 +464,23 @@ export function buildScheduledTaskPrompt(task: ScheduledTask, agentName: string)
 // tasks return 'parked' instead (idempotent -- safe to retry).
 type FireResult = 'fired' | 'busy' | 'missing' | 'error' | 'parked' | 'unknown' | 'budget-paused'
 
+// Budget-pause escalation dedup (card 85b54ebc / OPS-257).
+// A budget-paused agent re-trips the skip on EVERY sweep tick for the whole pause
+// week -- without a guard that is one WARN per tick, so the real signal drowns and
+// ops silences it. Key the escalation on the pause-window identity (agent +
+// weekStartMs, immutable per pause episode) so it fires exactly ONCE per window.
+// This is the tail-scope: the escalation window IS the pause episode. The set is
+// process-scoped on purpose -- a scheduler restart re-escalates once per still-paused
+// agent, which is desirable (it re-surfaces an unresolved pause after a redeploy).
+// Extends the 3e5c2914 "never silent on the scheduler path" rule to the pause branch,
+// which was the one remaining silent skip (3 nightly DREAM runs lost unnoticed).
+const budgetPauseEscalated = new Set<string>()
+
+// Test seam: reset the process-scoped escalation dedup between cases.
+export function __resetBudgetPauseEscalationDedup(): void {
+  budgetPauseEscalated.clear()
+}
+
 // Snapshot the live tmux session names once. Resolved at the top of a sweep tick
 // and shared across every attemptFireTask call so we spawn `tmux list-sessions`
 // once per tick instead of once per due task. A session that dies mid-tick still
@@ -784,6 +801,24 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb(), nowMsOverride?:
       // (weekly rollover). last_result records the reason for visibility.
       rollForwardFired(task, nowMs, nowS, db)
       db.prepare(`UPDATE scheduled_tasks SET last_result = 'budget-paused' WHERE id = ?`).run(task.id)
+      // Escalate the FIRST skip of each pause window. The skip itself is correct, but
+      // leaving it silent is exactly how 3 nightly DREAM runs were lost unnoticed
+      // (card 85b54ebc / OPS-257). Dedup on the pause window (agent + weekStartMs) so
+      // the sweep emits ONE operator WARN per window instead of one per tick.
+      const marker = readBudgetPauseMarker(agentName, nowMs)
+      const windowKey = `${agentName}:${marker?.weekStartMs ?? 'unknown'}`
+      if (!budgetPauseEscalated.has(windowKey)) {
+        budgetPauseEscalated.add(windowKey)
+        logger.warn(
+          {
+            task: task.id,
+            agent: agentName,
+            weekStartMs: marker?.weekStartMs ?? null,
+            pauseExpiresAt: marker?.expiresAt ?? null,
+          },
+          'scheduler: agent budget-paused, task skipped for the pause window -- operator escalation, next_run rolled forward',
+        )
+      }
     } else if (result === 'busy' || result === 'parked') {
       // Same handling, distinct reason: 'parked' names a send that was
       // written but never submitted, so the retry queue records WHY the

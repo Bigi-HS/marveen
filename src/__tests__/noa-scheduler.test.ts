@@ -41,7 +41,19 @@ vi.mock('../web/stuck-task-sentinel.js', () => ({
 
 vi.mock('../web/opus-burn-monitor.js', () => ({
   isBudgetPauseMarkerActive: vi.fn().mockReturnValue(false),
+  readBudgetPauseMarker: vi.fn().mockReturnValue(null),
 }))
+
+// Replace only the `logger` export so the budget-pause escalation (a logger.warn,
+// mirroring the 3e5c2914 'unknown' escalation) is assertable; keep the other exports
+// real so the module graph is unchanged. Card 85b54ebc / OPS-257.
+vi.mock('../logger.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../logger.js')>()
+  return {
+    ...actual,
+    logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+  }
+})
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
@@ -72,13 +84,15 @@ const {
   InvalidAgentError,
   TaskNotFoundError,
   MAX_SCHEDULED_TASK_PROMPT_LEN,
+  __resetBudgetPauseEscalationDedup,
 } = await import('../noa-scheduler.js')
 
 const { isSessionReadyForPrompt, sendPromptToSession, capturePane } = await import('../web/agent-process.js')
 const { detectPaneState } = await import('../pane-state.js')
 const { sendPendingRetryAlert } = await import('../web/pending-retry-alert.js')
 const { sweepStuckTasks } = await import('../web/stuck-task-sentinel.js')
-const { isBudgetPauseMarkerActive } = await import('../web/opus-burn-monitor.js')
+const { isBudgetPauseMarkerActive, readBudgetPauseMarker } = await import('../web/opus-burn-monitor.js')
+const { logger } = await import('../logger.js')
 
 // ---------------------------------------------------------------------------
 // DB setup
@@ -1273,5 +1287,135 @@ describe('runSweepTick -- budget-pause gate (card cfcdc941)', () => {
     expect(getTask('bp-test-paused-2', getNoaDb())!.last_result).toBe('budget-paused')
     // Verify the gate was called with the correct agent name
     expect(vi.mocked(isBudgetPauseMarkerActive)).toHaveBeenCalledWith(AGENT, expect.any(Number))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Budget-pause escalation (card 85b54ebc / OPS-257)
+//
+// A budget-paused agent re-trips the skip on EVERY sweep tick for the whole pause
+// week. The skip used to be fully silent (only a per-tick logger.info), so 3 nightly
+// DREAM runs were lost unnoticed. This block pins the escalation contract, mirroring
+// the 3e5c2914 "never silent on the scheduler path" rule.
+//
+// DoD (detector-dod-gate):
+//  (a) positive-control  -> escalates NOT fired for a healthy (unpaused) agent
+//  (b) FP-bypass (self-spam per tick) -> deduped to ONCE per pause window, not per tick
+//  (c) fail-direction    -> a genuinely paused agent DOES escalate (once)
+//  (d) tail-scope        -> the window is the pause episode, keyed on weekStartMs
+//                           (immutable per episode); a NEW window re-escalates
+// ---------------------------------------------------------------------------
+describe('runSweepTick -- budget-pause escalation (card 85b54ebc / OPS-257)', () => {
+  const AGENT = 'marveen'
+  const WEEK_A = 1_790_000_000_000 // arbitrary epoch-ms week boundary
+  const WEEK_B = WEEK_A + 7 * 24 * 3600 * 1000 // the following week
+  const MARKER_A = { expiresAt: WEEK_A + 7 * 24 * 3600 * 1000, weekStartMs: WEEK_A, triggeredAtPct: 92 }
+  const MARKER_B = { expiresAt: WEEK_B + 7 * 24 * 3600 * 1000, weekStartMs: WEEK_B, triggeredAtPct: 95 }
+
+  beforeEach(() => {
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+    vi.mocked(sendPromptToSession).mockReset()
+    vi.mocked(isBudgetPauseMarkerActive).mockReturnValue(false)
+    vi.mocked(readBudgetPauseMarker).mockReturnValue(null)
+    vi.mocked(logger.warn).mockReset()
+    __resetBudgetPauseEscalationDedup()
+  })
+
+  function seedDueTask(id: string, agent = AGENT) {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    db.prepare(`
+      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES (?, ?, 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?)
+    `).run(id, agent, nowS - 10, nowS - 100)
+  }
+
+  // Count ONLY budget-pause escalation warns (the file emits other warns, e.g. 'missing').
+  function escalationWarnCount(): number {
+    return vi
+      .mocked(logger.warn)
+      .mock.calls.filter(
+        (c) => typeof c[1] === 'string' && c[1].includes('budget-paused') && c[1].includes('operator escalation'),
+      ).length
+  }
+
+  it('[positive-control] does NOT escalate for a healthy (unpaused) agent', () => {
+    vi.mocked(isBudgetPauseMarkerActive).mockReturnValue(false)
+    vi.mocked(readBudgetPauseMarker).mockReturnValue(MARKER_A)
+    seedDueTask('esc-unpaused')
+
+    runSweepTick(60000, getNoaDb())
+
+    expect(vi.mocked(sendPromptToSession)).toHaveBeenCalledOnce()
+    expect(escalationWarnCount()).toBe(0)
+  })
+
+  it('[fail-direction] escalates once when the agent is budget-paused', () => {
+    vi.mocked(isBudgetPauseMarkerActive).mockReturnValue(true)
+    vi.mocked(readBudgetPauseMarker).mockReturnValue(MARKER_A)
+    seedDueTask('esc-paused')
+
+    runSweepTick(60000, getNoaDb())
+
+    expect(vi.mocked(sendPromptToSession)).not.toHaveBeenCalled()
+    expect(escalationWarnCount()).toBe(1)
+    // the escalation payload carries the window identity for the operator
+    const call = vi
+      .mocked(logger.warn)
+      .mock.calls.find((c) => typeof c[1] === 'string' && c[1].includes('budget-paused'))!
+    expect((call[0] as Record<string, unknown>).agent).toBe(AGENT)
+    expect((call[0] as Record<string, unknown>).weekStartMs).toBe(WEEK_A)
+  })
+
+  it('[FP-bypass: per-window self-spam] escalates ONCE across successive due-events in the same pause window', () => {
+    vi.mocked(isBudgetPauseMarkerActive).mockReturnValue(true)
+    vi.mocked(readBudgetPauseMarker).mockReturnValue(MARKER_A)
+    const db = getNoaDb()
+    seedDueTask('esc-dedup')
+
+    // After each skip, the sweep rolls next_run forward (so it is not perpetually due),
+    // so a bare re-sweep would find nothing. Re-arm the task between sweeps to simulate
+    // the SAME task coming due again on the next day of the SAME pause week -- that is
+    // the real spam vector the window-dedup must suppress (one WARN/week, not one/day).
+    function rearm() {
+      const nowS = Math.floor(Date.now() / 1000)
+      db.prepare(`UPDATE scheduled_tasks SET next_run = ?, last_run = ? WHERE id = 'esc-dedup'`).run(nowS - 10, nowS - 100)
+    }
+    runSweepTick(60000, db) // day 1 of the pause window
+    rearm()
+    runSweepTick(60000, db) // day 2, same window (weekStartMs unchanged)
+    rearm()
+    runSweepTick(60000, db) // day 3, same window
+
+    expect(escalationWarnCount()).toBe(1)
+  })
+
+  it('[tail-scope: new window] re-escalates when the pause advances to a new window', () => {
+    vi.mocked(isBudgetPauseMarkerActive).mockReturnValue(true)
+
+    vi.mocked(readBudgetPauseMarker).mockReturnValue(MARKER_A)
+    seedDueTask('esc-win-a')
+    runSweepTick(60000, getNoaDb())
+    expect(escalationWarnCount()).toBe(1)
+
+    // A fresh pause episode the following week -> escalate again.
+    vi.mocked(readBudgetPauseMarker).mockReturnValue(MARKER_B)
+    seedDueTask('esc-win-b')
+    runSweepTick(60000, getNoaDb())
+    expect(escalationWarnCount()).toBe(2)
+  })
+
+  it('[per-agent window] two tasks for the same paused agent escalate once for the window', () => {
+    vi.mocked(isBudgetPauseMarkerActive).mockReturnValue(true)
+    vi.mocked(readBudgetPauseMarker).mockReturnValue(MARKER_A)
+    seedDueTask('esc-multi-1')
+    seedDueTask('esc-multi-2')
+
+    runSweepTick(60000, getNoaDb())
+
+    // Both tasks skipped, but the condition (agent paused this week) is one signal.
+    expect(getTask('esc-multi-1', getNoaDb())!.last_result).toBe('budget-paused')
+    expect(getTask('esc-multi-2', getNoaDb())!.last_result).toBe('budget-paused')
+    expect(escalationWarnCount()).toBe(1)
   })
 })
