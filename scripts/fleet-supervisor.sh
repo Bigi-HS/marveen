@@ -1742,25 +1742,35 @@ except Exception:
     done <<< "$state_map"
   else
     # Degraded fallback: node CLI unavailable -- bare-substring on saved panes.
-    local _pane_text
+    local _pane_text _g2_scan _g1_scan
     for n in $live_agents; do
       # Roster-guard: reject path-like tokens (defensive, b0e189fb).
       case "$n" in */*|*' '*) continue ;; esac
       _pane_text=$(cat "$sweep_tmp/$n" 2>/dev/null) || continue
-      case "$_pane_text" in
-        *"Usage limit"*|*"weekly limit"*|*"credit"*|*"budget"*)
-          if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
-          else wedged_list="$wedged_list ${n}:G2"; fi ;;
-        *"Press Enter"*|*"press enter"*)
-          if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
-          else wedged_list="$wedged_list ${n}:G1"; fi ;;
-        *"How is Claude doing this session"*|*"Share feedback"*|*"How would you rate"*)
-          # 2-strike persistence + TOCTOU-guarded auto-dismiss (b0e189fb / e167dd08).
-          g6_apply_2strike "$n" "$now"
-          case "$_G6_RESULT" in dismissed) dismissed_list="$dismissed_list ${n}:G6" ;; esac ;;
-        *) healthy_count=$((healthy_count+1))
-           g6_strike_clear "$n" ;;  # reset G6 strike on healthy pane
-      esac
+      # Tail-scope the G2/G1 arms to mirror the Phase-2 classifier (G2=18, G1=10)
+      # when detector-common is enabled: a marker that scrolled above the tail is
+      # stale-scrollback, not an active wedge (card 9644ed7c S2, FP root per per-arm
+      # mapping). flag=0 keeps the exact pre-S2 full-pane match (deploy-neutral; one
+      # canary flip activates it with the rest of the migrated family).
+      _g2_scan="$_pane_text"; _g1_scan="$_pane_text"
+      if [ "${DETECTOR_COMMON_ENABLED:-0}" = "1" ]; then
+        _g2_scan=$(printf '%s\n' "$_pane_text" | tail -n "${G2_TAIL_LINES:-18}")
+        _g1_scan=$(printf '%s\n' "$_pane_text" | tail -n "${G1_TAIL_LINES:-10}")
+      fi
+      if case "$_g2_scan" in *"Usage limit"*|*"weekly limit"*|*"credit"*|*"budget"*) true ;; *) false ;; esac; then
+        if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
+        else wedged_list="$wedged_list ${n}:G2"; fi
+      elif case "$_g1_scan" in *"Press Enter"*|*"press enter"*) true ;; *) false ;; esac; then
+        if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
+        else wedged_list="$wedged_list ${n}:G1"; fi
+      elif case "$_pane_text" in *"How is Claude doing this session"*|*"Share feedback"*|*"How would you rate"*) true ;; *) false ;; esac; then
+        # 2-strike persistence + TOCTOU-guarded auto-dismiss (b0e189fb / e167dd08).
+        g6_apply_2strike "$n" "$now"
+        case "$_G6_RESULT" in dismissed) dismissed_list="$dismissed_list ${n}:G6" ;; esac
+      else
+        healthy_count=$((healthy_count+1))
+        g6_strike_clear "$n"   # reset G6 strike on healthy pane
+      fi
     done
   fi
 
