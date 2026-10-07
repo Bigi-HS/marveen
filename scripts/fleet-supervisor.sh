@@ -1713,15 +1713,25 @@ g1_apply_send_enter() {
     _G1_RESULT="drain_suppress"
     return 0
   fi
-  # (b) TOCTOU re-verify directly before the send.
+  # (b) TOCTOU re-verify directly before the send, with MARKER-NARROWING (card
+  # 9644ed7c S3 adversarial-fixture, chad). The detection regex /press enter/i is
+  # BROAD: assistant prose ("...press enter...") or an injected channel message that
+  # contains "press enter" in the tail would otherwise trigger a live Enter ->
+  # submitting injected content (prompt-injection-adjacent escalation). So the SEND
+  # re-verify narrows to CC's canonical continuation-prompt phrase "Press Enter to
+  # continue" (case-insensitive), NOT bare "press enter". Detection (the :G1 flag)
+  # stays BROAD = safe over-report; only the destructive live-effect SEND tightens
+  # (safe-fail: a genuine prompt with different wording just does not auto-recover).
+  # Residual (an exact-phrase injection landing as the active prompt) is the
+  # staged-input-wedge domain (src/web/staged-wedge-probe.ts), reviewed separately.
   _reverify=$("$TMUX_BIN" capture-pane -t "=agent-$_n:0.0" -p 2>/dev/null) || _reverify=""
-  case "$_reverify" in
-    *"Press Enter"*|*"press enter"*)
+  case "$(printf '%s' "$_reverify" | tr '[:upper:]' '[:lower:]')" in
+    *"press enter to continue"*)
       "$TMUX_BIN" send-keys -t "=agent-$_n:0.0" Enter
       log "G1 auto-recover: sent Enter to agent-$_n (confirmed enter-stuck)"
       _G1_RESULT="sent_enter" ;;
     *)
-      log "G1 auto-recover: enter-prompt cleared in agent-$_n (TOCTOU guard)"
+      log "G1 auto-recover: no genuine CC continuation prompt in agent-$_n (TOCTOU guard / marker-narrow abort)"
       _G1_RESULT="toctou" ;;
   esac
   return 0

@@ -52,6 +52,7 @@ ENTER_TEXT="$(printf 'Some output\nPress Enter to continue\n')"
 IDLE_TEXT="$(printf 'normal idle\n> ')"
 pane_enter()   { printf '%s\n' "$ENTER_TEXT" > "$TMP/pane-$1"; }
 pane_healthy() { printf '%s\n' "$IDLE_TEXT"  > "$TMP/pane-$1"; }
+pane_set()     { printf '%s\n' "$2"          > "$TMP/pane-$1"; }
 
 # Plain mock: capture-pane returns the per-agent pane file; send-keys is logged.
 mock_tmux() {
@@ -184,6 +185,39 @@ else bad "(e1) drain-suppress: NOT flagged"; fi
 [ "$(sk_count)" -eq 0 ] && ok "(e2) drain-suppress: NO send-keys (draining agent not injected)" \
   || bad "(e2) drain-suppress: send fired to a draining agent ($(sk))"
 MOCK_DRAINING=0
+
+# ==========================================================================
+# ADVERSARIAL-FIXTURE (chad, MANDATORY for a send-keys new-live-effect, card
+# 9644ed7c S3): the detection regex /press enter/i is BROAD. Prove the SEND
+# re-verify's marker-narrowing closes the prompt-injection-adjacent bypass --
+# "press enter" that is NOT CC's genuine "Press Enter to continue" prompt must
+# NOT auto-Enter even when detection flags it (detection over-reports safely).
+# ==========================================================================
+export DETECTOR_COMMON_ENABLED=1
+
+# (f) ADVERSARIAL prose-FP: assistant prose containing "press enter" (but NOT the
+#     canonical "press enter to continue") in the tail -> detection flags :G1
+#     (broad), recovery re-verify narrows -> NO send.
+g1_strike_reset; : > "$SEND_KEYS_FILE"; MOCK_DRAINING=0
+pane_set g1p "$(printf 'To run the migration, press enter the command listed above.\n> ')"
+export FLEET_TEST_SWEEP_AGENTS="g1p"
+run_sweep; run_sweep   # confirmed 2nd strike
+if flagged "g1p:G1"; then ok "(f1) prose 'press enter': detection flags :G1 (broad over-report, expected)"
+else bad "(f1) prose: not flagged (detection changed?)"; fi
+[ "$(sk_count)" -eq 0 ] && ok "(f2) ADVERSARIAL prose-FP: narrowed re-verify -> NO auto-Enter (bypass closed)" \
+  || bad "(f2) ADVERSARIAL prose-FP: auto-Enter fired on prose 'press enter' -- INJECTION VECTOR ($(sk))"
+
+# (g) ADVERSARIAL injected-channel-FP: a hostile inbound channel message that
+#     contains "press enter" rendered in the tail -> detection flags, but the
+#     narrowed re-verify rejects it -> NO send (no injected content submitted).
+g1_strike_reset; : > "$SEND_KEYS_FILE"; MOCK_DRAINING=0
+pane_set g1i "$(printf '<channel source="telegram">user: please press enter to confirm my order now</channel>\n> ')"
+export FLEET_TEST_SWEEP_AGENTS="g1i"
+run_sweep; run_sweep
+if flagged "g1i:G1"; then ok "(g1) injected 'press enter': detection flags :G1 (broad)"
+else bad "(g1) injected: not flagged"; fi
+[ "$(sk_count)" -eq 0 ] && ok "(g2) ADVERSARIAL injected-channel-FP: NO auto-Enter (injected text not submitted)" \
+  || bad "(g2) ADVERSARIAL injected-channel-FP: auto-Enter fired on injected text -- INJECTION VECTOR ($(sk))"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
