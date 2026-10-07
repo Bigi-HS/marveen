@@ -216,18 +216,41 @@ alert_count=$(count_alerts "ALERT")
   && ok "fleet_wedge_sweep: no alert for dead agent (watchdog scope, not sweep)" \
   || bad "fleet_wedge_sweep: unexpected alert for dead agent (got $alert_count)"
 
-# ── FLEET WEDGE SWEEP: G6 canonical-marker + *survey* FP guard (card 55219b86) ─
+# ── FLEET WEDGE SWEEP: G6 2-strike contract + *survey* FP guard (55219b86, b0e189fb) ─
 
-# G6 fires on the canonical session-feedback marker.
+# AUTHORITATIVE G6 CONTRACT (b0e189fb, migrated to detector-common in 9644ed7c S1):
+# the canonical session-feedback marker is NOT an immediate flag -- it needs a
+# confirmed 2nd consecutive strike within the window before auto-dismiss. A single
+# sweep is the 1st strike (silent, no flag); the 2nd sweep confirms -> send-keys 0 +
+# dismissed:<agent>:G6. Pre-b0e189fb this asserted single-sweep immediate fire and
+# has been red ever since; re-contracted here to the 2-strike behaviour that is now
+# live under both flag=0 (inline) and flag=1 (shared strike_gate). This also removes
+# the latent ordering-coupling where the asleep/dead tests below depended on
+# surveyer always flagging (see their stateless G2 partner).
+_surv_clear() { rm -f "$STATE_DIR/g6-strike-surveyer" "$STATE_DIR/strike-g6-surveyer" "$STATE_DIR/strike-latch-g6-surveyer"; }
+
+# Strike 1: silent (no flag, no payload).
+: > "$ALERTS_FILE"; : > "$PAYLOADS_FILE"
+rm -f "$STATE_DIR/fleet-wedge-sweep.last"; _surv_clear
+FLEET_TEST_SWEEP_AGENTS="surveyer"
+fleet_wedge_sweep
+if [ "$(count_alerts "ALERT")" -eq 0 ] && ! grep -q "surveyer:G6" "$PAYLOADS_FILE"; then
+  ok "fleet_wedge_sweep: G6 1st strike on canonical marker is silent (2-strike contract)"
+else
+  bad "fleet_wedge_sweep: G6 fired on 1st strike -- immediate-fire regression (payload: $(cat "$PAYLOADS_FILE"))"
+fi
+
+# Strike 2 (consecutive, within window): confirmed -> auto-dismiss, surveyer:G6 in payload.
 : > "$ALERTS_FILE"; : > "$PAYLOADS_FILE"
 rm -f "$STATE_DIR/fleet-wedge-sweep.last"
 FLEET_TEST_SWEEP_AGENTS="surveyer"
 fleet_wedge_sweep
 if [ "$(count_alerts "ALERT")" -ge 1 ] && grep -q "surveyer:G6" "$PAYLOADS_FILE"; then
-  ok "fleet_wedge_sweep: G6 fires on canonical 'How is Claude doing this session' marker"
+  ok "fleet_wedge_sweep: G6 2nd strike confirms -> auto-dismiss (surveyer:G6 in payload)"
 else
-  bad "fleet_wedge_sweep: G6 did not fire on canonical feedback-modal marker"
+  bad "fleet_wedge_sweep: G6 did not dismiss on confirmed 2nd strike (payload: $(cat "$PAYLOADS_FILE"))"
 fi
+_surv_clear   # leave no strike state for the sections below
 
 # REGRESSION GUARD: an agent EDITING survey-modal-recovery.js must NOT be G6.
 # The old bare *survey* glob false-matched the filename and flagged active
@@ -245,12 +268,14 @@ fi
 # ── FLEET WEDGE SWEEP: asleep vs dead classification (card 55219b86 dim 2) ─────
 
 # Mark 'sleepy' as sleep-eligible; when its session is down it is asleep-by-design,
-# NOT dead. Pair with a wedged agent so the alert (and its payload) is emitted.
+# NOT dead. Pair with the 'wedged' G2 agent (usage-limit = STATELESS immediate flag)
+# so a payload is reliably emitted regardless of G6 strike state. (Was 'surveyer',
+# whose G6 flag now depends on 2-strike history -- a latent ordering-coupling.)
 echo "sleepy" > "$TMP/store/sleep-eligible.txt"
 
 : > "$ALERTS_FILE"; : > "$PAYLOADS_FILE"
 rm -f "$STATE_DIR/fleet-wedge-sweep.last"
-FLEET_TEST_SWEEP_AGENTS="surveyer sleepy"
+FLEET_TEST_SWEEP_AGENTS="wedged sleepy"
 fleet_wedge_sweep
 # Fields are "dead:<ids> asleep:<ids>" with NO space after the colon
 # (leading space stripped by ${list# }). Use [^ ]* so the negative dead-check
@@ -264,7 +289,7 @@ fi
 # A genuinely-down NON-sleep-eligible agent is still dead.
 : > "$ALERTS_FILE"; : > "$PAYLOADS_FILE"
 rm -f "$STATE_DIR/fleet-wedge-sweep.last"
-FLEET_TEST_SWEEP_AGENTS="surveyer dead-one"
+FLEET_TEST_SWEEP_AGENTS="wedged dead-one"
 fleet_wedge_sweep
 if grep -qE "dead:[^ ]*dead-one" "$PAYLOADS_FILE" && ! grep -qE "asleep:[^ ]*dead-one" "$PAYLOADS_FILE"; then
   ok "fleet_wedge_sweep: non-sleep-eligible down agent still classified dead"
