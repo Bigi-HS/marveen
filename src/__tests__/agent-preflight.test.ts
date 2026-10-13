@@ -115,7 +115,10 @@ describe('agent-preflight -- source contracts', () => {
 describe('startAgentProcess -- preflight wiring', () => {
   it('runs preflight and aborts the launch on a not-ok result', () => {
     const idx = PROCESS_SRC.indexOf('export function startAgentProcess')
-    const slice = PROCESS_SRC.slice(idx, idx + 900)
+    // Window covers the function's early guard block: isAgentRunning, dir check,
+    // the planning-freeze gate (added 2026-10-13, ~700 chars of comment+code),
+    // then the preflight. Sized to keep the preflight an EARLY guard, not buried.
+    const slice = PROCESS_SRC.slice(idx, idx + 1600)
     expect(slice).toMatch(/runPreflight\(name\)/)
     expect(slice).toMatch(/if \(!preflight\.ok\)/)
     expect(slice).toMatch(/preflight failed/)

@@ -76,6 +76,7 @@ import { shouldAutoRestartDownAgent, parseEtimeToSeconds } from './agent-restart
 // module so the standalone channel-coordinator reuses the exact same probe.
 import { getClaudePidForSession, hasChannelPluginAlive } from '../channel-coordinator/liveness.js'
 import { getDesiredAgents } from './agent-desired-state.js'
+import { freezeBlocks } from './planning-freeze.js'
 
 const TMUX = resolveFromPath('tmux')
 const CLAUDE = resolveFromPath('claude')
@@ -1481,7 +1482,12 @@ async function reconcileDesiredAgents(): Promise<void> {
   if (reconcileBurstInProgress) return
   const desired = getDesiredAgents()
   if (desired.size === 0) return
-  const down = [...desired].filter((name) => !isAgentRunning(name))
+  // Planning-freeze: skip agents the freeze blocks BEFORE attempting a start.
+  // The startAgentProcess chokepoint would refuse them anyway, but pre-filtering
+  // here avoids the misleading "Reconcile start failed" error log and the wasted
+  // stagger wait. This is the path that caused the ~17s freeze leak (the server
+  // resurrecting the full roster), so it carries the primary skip-log.
+  const down = [...desired].filter((name) => !isAgentRunning(name) && !freezeBlocks(name))
   if (down.length === 0) return
   reconcileBurstInProgress = true
   try {

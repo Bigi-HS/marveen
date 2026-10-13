@@ -23,6 +23,7 @@ import { backupChannelEnv, restoreChannelEnv } from './channel-token-durability.
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { runPreflight, logPreflightFindings, summarizePreflightErrors } from './agent-preflight.js'
 import { provisionAgentToken } from './agent-token-provision.js'
+import { freezeBlocks } from './planning-freeze.js'
 import { getDb } from '../db.js'
 
 const TMUX = resolveFromPath('tmux')
@@ -189,11 +190,22 @@ export function isAgentChannelIntentionallyEnabled(name: string): boolean {
   return false
 }
 
-export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}): { ok: boolean; pid?: number; error?: string } {
+export function startAgentProcess(name: string, opts: { fresh?: boolean; force?: boolean } = {}): { ok: boolean; pid?: number; error?: string } {
   if (isAgentRunning(name)) return { ok: false, error: 'Agent is already running' }
 
   const dir = agentDir(name)
   if (!existsSync(dir)) return { ok: false, error: 'Agent not found' }
+
+  // Planning-freeze gate (durable server-side fix, lesson
+  // planning-freeze-server-respawn-leak). This is the server's SINGLE
+  // persistent-agent spawn chokepoint, so gating it here makes EVERY automatic
+  // self-heal path (reconcileDesiredAgents + channel-monitor recovery respawns)
+  // honor the same freeze contract as the shell supervisor -- without this the
+  // freeze leaked and killed agents came back in ~17s. Explicit operator/infra
+  // launches pass { force: true } to bypass. Fail-safe: flag absent => allow.
+  if (!opts.force && freezeBlocks(name)) {
+    return { ok: false, error: 'blocked by planning-freeze' }
+  }
 
   // A2 preflight: fail fast with a clear message on the known launch footguns
   // (missing binary, bad model id, symlinked config-dir .claude.json) instead
@@ -494,7 +506,7 @@ export function getAgentProcessInfo(name: string): { running: boolean; session?:
   }
 }
 
-export function restartAgentProcess(name: string, opts: { fresh?: boolean } = {}): { ok: boolean; pid?: number; error?: string } {
+export function restartAgentProcess(name: string, opts: { fresh?: boolean; force?: boolean } = {}): { ok: boolean; pid?: number; error?: string } {
   if (isAgentRunning(name)) {
     const stopResult = stopAgentProcess(name)
     if (!stopResult.ok) return { ok: false, error: stopResult.error || 'Failed to stop running agent before restart' }
