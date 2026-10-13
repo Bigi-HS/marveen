@@ -639,7 +639,9 @@ async function main(): Promise<void> {
   if (RESPAWN_ENABLED) {
     ensureHeartbeatAgent()
     logger.info({ agent: HEARTBEAT_AGENT_NAME }, 'Heartbeat agent scaffold ensured (channel-less, dashboard-hidden)')
-    const heartbeatStart = startAgentProcess(HEARTBEAT_AGENT_NAME)
+    // Infra agent (channel-less heartbeat keep-alive): always runs, never gated
+    // by the planning-freeze -- mirrors the shell keeping infra watchdogs up.
+    const heartbeatStart = startAgentProcess(HEARTBEAT_AGENT_NAME, { force: true })
     if (heartbeatStart.ok) {
       logger.info({ agent: HEARTBEAT_AGENT_NAME }, 'Heartbeat agent started')
     } else if (heartbeatStart.error === 'Agent is already running') {
