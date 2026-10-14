@@ -122,7 +122,7 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
 
   CHAN_DIR="$AGENT_DIR/.claude/channels/telegram"
   BOT_TOKEN=$(grep "TELEGRAM_BOT_TOKEN" "$CHAN_DIR/.env" 2>/dev/null | cut -d= -f2- | head -1)
-  MODEL=$(python3 -c "import json; d=json.load(open('$AGENT_DIR/agent-config.json')); print(d.get('model','claude-haiku-4-5-20251001'))" 2>/dev/null || echo "claude-haiku-4-5-20251001")
+  MODEL=$(python3 -c "import json; d=json.load(open('$AGENT_DIR/agent-config.json')); print(d.get('model','claude-haiku-5-5'))" 2>/dev/null || echo "claude-haiku-5-5")
 
   if [ -z "$BOT_TOKEN" ]; then
     echo "$(timestamp) [watchdog] $AGENT_ID: no bot token, skipping" >> "$LOG"
