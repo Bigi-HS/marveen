@@ -2,7 +2,7 @@
 //
 // The coordinator is a SEPARATE process from the dashboard, so it cannot share
 // the dashboard's better-sqlite3 singleton (src/db.ts). It opens its OWN handle
-// to the same store/claudeclaw.db file. That is safe because the DB runs in WAL
+// to the same store/noa.db file. That is safe because the DB runs in WAL
 // mode (a writer never blocks readers, and two processes can write to a WAL DB
 // as long as each sets busy_timeout). We assert busy_timeout=5000 on our handle
 // because db.ts does not set it -- without it a concurrent dashboard write would

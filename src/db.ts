@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3'
-import { join, sep } from 'node:path'
+import { join, sep, basename } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync, realpathSync, statSync } from 'node:fs'
 import { STORE_DIR, DB_FILENAME, PROJECT_ROOT } from './config.js'
 import { logger } from './logger.js'
@@ -41,7 +41,7 @@ function emitOrDefer(event: DashboardEvent): void {
 //       journal) -- they were created during the pragma call at umask.
 //       This path also fixes older installs whose files sit at 0o644.
 // Exported for tests: lets db.test.ts verify the 0o644 -> 0o600 narrowing on a
-// throwaway temp file without touching the live vault (store/claudeclaw.db).
+// throwaway temp file without touching the live vault (store/noa.db).
 export function tightenDbPermissions(dbPath: string): void {
   const sidecars = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, `${dbPath}-journal`]
   for (const path of sidecars) {
@@ -53,7 +53,7 @@ export function tightenDbPermissions(dbPath: string): void {
 }
 
 // dbPathOverride is for tests: pass ':memory:' (or a temp path) to open an
-// isolated database instead of the real store/claudeclaw.db. The file-precreate
+// isolated database instead of the real store/noa.db. The file-precreate
 // (openSync 'wx') and tightenDbPermissions steps are SKIPPED for an override --
 // they only make sense for a real on-disk store file, and ':memory:' has no path
 // to chmod. This keeps tests idempotent and stops them polluting the prod DB.
@@ -66,7 +66,7 @@ export function initDatabase(dbPathOverride?: string): void {
   if (db) {
     try { db.close() } catch { /* already closed */ }
   }
-  // The live DB path is store/claudeclaw.db unless NOA_DB_PATH points elsewhere
+  // The live DB path is store/noa.db (DB_FILENAME). NOA_DB_PATH can override it
   // (the noa.db cutover switch, card 88849f24). resolveNoaDbPath enforces a .db
   // suffix + project-root containment (rejects ../ escapes and out-of-root
   // absolutes); for an existing target we additionally realpath-check to defeat
@@ -74,6 +74,13 @@ export function initDatabase(dbPathOverride?: string): void {
   const dbPath = useOverride
     ? dbPathOverride!
     : resolveNoaDbPath(process.env['NOA_DB_PATH'], PROJECT_ROOT, join(STORE_DIR, DB_FILENAME))
+  // Guard: claudeclaw.db is the retired legacy vault (ENG-024). Reject it before
+  // any file is touched so a stale NOA_DB_PATH misconfiguration fails loudly.
+  if (!useOverride && basename(dbPath).toLowerCase() === 'claudeclaw.db') {
+    throw new Error(
+      'claudeclaw.db is retired (ENG-024). Unset NOA_DB_PATH to use the default store/noa.db.'
+    )
+  }
   if (!useOverride && process.env['NOA_DB_PATH']?.trim() && existsSync(dbPath)) {
     const realDb = realpathSync(dbPath)
     const realRoot = realpathSync(PROJECT_ROOT)
