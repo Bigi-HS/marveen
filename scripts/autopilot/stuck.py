@@ -94,7 +94,9 @@ def eval_tick(state: dict, card_moved: bool, session: str, n: int = DEFAULT_N_TI
     state = dict(state)
     if card_moved:
         state["ticks_since_card_move"] = 0
-        # A real move also clears a slow-divergence stuck; the fast-loop flag stands.
+        # A real move resets the slow-divergence counter; the persistent `stuck`
+        # flag (read by the STUCK-GATE) clears only via an explicit `reset`
+        # (fail-closed, sticky-until-reset -- the safe direction).
     else:
         state["ticks_since_card_move"] = int(state.get("ticks_since_card_move", 0)) + 1
     stuck = state["ticks_since_card_move"] >= n

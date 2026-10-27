@@ -19,6 +19,11 @@ import sys, json, time, re, urllib.request
 STALE_DAYS = float(sys.argv[1]) if len(sys.argv) > 1 else 3.0
 OPEN = {"planned", "in_progress", "waiting"}
 # Grep the WHOLE description for any parked/awaiting/blocked marker.
+# NOTE: this is the human-readable sweep's broad heuristic (includes TG\d). The
+# AUTOPILOT idle-gate uses a DIFFERENT, deliberately narrower regex in
+# scripts/autopilot/classify.py (AWAITING_RE) -- it drops TG\d because a bare
+# historical TG-reference was false-parking cards -> false-idle (Thor PR#882 FLAG-2).
+# Do NOT "re-sync" these two regexes; the divergence is intentional.
 PARKED_RE = re.compile(
     r"awaiting|do-?not-?nudge|parked|Boss-?oldali|Boss-?GO|vak[aá]ci|nyaral[aá]s|"
     r"visszat[eé]r|OAuth-consent|unblock|TG\d|deploy-gated|awaiting-dominik",
