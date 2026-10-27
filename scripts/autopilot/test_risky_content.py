@@ -68,6 +68,22 @@ class ObfuscationBypass(unittest.TestCase):
         # Fully accented Hungarian still normalizes to the stem.
         self.assertTrue(is_risky_instruction("PUBLIKÁLD ki azonnal")[0])
 
+    def test_mixed_separator_bypass(self):
+        # REGRESSION (lesson-verify-normalization-fix-against-live-input-1027):
+        # normalize() drops inter-letter separators but keeps word-spaces, so the
+        # hyphen-spelled "merge-to-main" stem was DEAD and mixed separators slipped
+        # through BOTH spellings. Falsifying assertions on the DANGEROUS side: every
+        # separator variant of a risky multiword instruction MUST be caught.
+        for variant in (
+            "merge-to-main",    # the registered hyphen stem -- was a dead miss
+            "merge to-main",    # mixed: space then hyphen -- bypassed both spellings
+            "merge-to main",    # mixed: hyphen then space
+            "m e r g e t o m a i n",  # per-letter spacing
+        ):
+            self.assertTrue(
+                is_risky_instruction(variant)[0], f"BYPASS not caught: {variant!r}"
+            )
+
 
 class BenignNegatives(unittest.TestCase):
     """Non-risky nudges MUST pass (false-positive control). These are the SAFE
