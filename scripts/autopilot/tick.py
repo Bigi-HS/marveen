@@ -61,12 +61,23 @@ def main() -> int:
     agent, session = args.agent, args.session
 
     # --- STUCK-GATE (section 4). Persistent flag survives restart (INV6). ---
-    stuck = _run_json([PY, os.path.join(HERE, "stuck.py"), "status", "--agent", agent], {})
-    if stuck.get("stuck"):
+    # Thor PR#882 FLAG-1 (live-proven bypass): a genuine subprocess failure must
+    # NOT read as "not stuck". An ABSENT state file is legitimate (stuck.py status
+    # exits 0 printing "{}"); only a true failure (non-zero/timeout/bad-JSON) yields
+    # the sentinel, and THAT fails CLOSED -- the safety gate halts rather than let a
+    # possibly-stuck agent keep burning tokens (INV5, enforcement-not-convention).
+    stuck = _run_json([PY, os.path.join(HERE, "stuck.py"), "status", "--agent", agent],
+                      {"_unreadable": True})
+    if stuck.get("stuck") or stuck.get("_unreadable"):
         print(f"=== AUTOPILOT TICK [{agent}] :: STUCK-GATE TRIPPED (EXIT 1) ===")
-        print(f"stuck=true reason={stuck.get('stuck_reason')} "
-              f"ping_boss={bool(stuck.get('ping_boss'))}")
-        print("DO NOT act. This agent is flagged stuck (fast loop or N-tick no-card-movement).")
+        if stuck.get("_unreadable"):
+            print("WARN: stuck-state unreadable (subprocess failure) -> fail-CLOSED halt. "
+                  "This is deliberate: the safety state could not be verified.")
+        else:
+            print(f"stuck=true reason={stuck.get('stuck_reason')} "
+                  f"ping_boss={bool(stuck.get('ping_boss'))}")
+        print("DO NOT act. This agent is flagged stuck (fast loop / N-tick no-card-movement / "
+              "unverifiable state).")
         print("Token-burn is forbidden here (INV5). Diagnose, then clear explicitly:")
         print(f"  {PY} scripts/autopilot/stuck.py reset --agent {agent}")
         if stuck.get("ping_boss"):

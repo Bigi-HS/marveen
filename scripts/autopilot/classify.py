@@ -42,9 +42,12 @@ WINDOW_BLOCKED_H = 72.0  # BP-02
 # repro-blocked is an explicit LLM-judged blocker marker (BP-02).
 BLOCKED_RE = re.compile(r"repro-?blocked|blocker:|blocked:", re.I)
 # awaiting/parked: Boss owes the next move, or the card is deliberately held.
+# Thor PR#882 FLAG-2: a bare TG-reference (e.g. "TG9452 alapjan kesz") must NOT
+# park a card -- a historical TG mention in a done-note was false-matching -> false
+# PARKED -> false idle (the dangerous direction). Only explicit awaiting phrasing parks.
 AWAITING_RE = re.compile(
     r"awaiting-?dominik|awaiting|do-?not-?nudge|parked|boss-?oldali|boss-?go|"
-    r"vak[aa]ci|nyaral|visszat[ee]r|oauth-consent|deploy-gated|\bTG\d",
+    r"vak[aa]ci|nyaral|visszat[ee]r|oauth-consent|deploy-gated",
     re.I,
 )
 

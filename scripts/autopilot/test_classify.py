@@ -82,6 +82,14 @@ def main():
     r = classify([c], "dave", NOW)
     ok &= check("bad timestamp + marker -> treated ancient -> busy", r["idle_ok"] is False)
 
+    # 13. FLAG-2 (Thor PR#882): a bare TG-reference must NOT park a card (false-idle).
+    r = classify([card("c11", assignee="dave", desc="TG9452 alapjan kesz", age_h=1)], "dave", NOW)
+    ok &= check("bare TG-ref -> NOT parked -> busy", r["idle_ok"] is False and r["counts"]["mine"] == 1)
+
+    # 14. FLAG-3: a deliberate 'nyaral' awaiting-phrase DOES park (documents intended match).
+    r = classify([card("c12", assignee="dave", desc="Dr. Stone nyaral, visszateres utan", age_h=1)], "dave", NOW)
+    ok &= check("nyaral phrase -> parked (intended)", r["idle_ok"] is True and r["counts"]["parked"] == 1)
+
     print("\n" + ("ALL PASS" if ok else "SOME FAILED"))
     return 0 if ok else 1
 
