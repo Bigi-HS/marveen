@@ -330,6 +330,55 @@ else
 fi
 
 # ===========================================================================
+# F) DURABLE CANARY REGISTRY opens the gate with the ENV FLAG UNSET.
+#
+# This is the piece that makes a live flip SURVIVE a watchdog respawn/reboot: the
+# gate must open from store/autopilot-canary.json membership alone, NOT only from
+# a transient WD_THROTTLE_ENABLED env var. Dangerous direction = a registry that
+# does NOT list the agent silently opening the gate; F2 falsifies that.
+#   F1: env UNSET + registry lists buster under "throttle" -> gate OPEN (throttle
+#       consulted -> a state file is written, the gate-OFF path never does that).
+#   F2: env UNSET + registry does NOT list buster            -> gate CLOSED (plain
+#       relaunch, zero throttle state -- behaviour-neutral vs pre-wiring).
+# ===========================================================================
+note "--- F: durable canary registry opens the gate with env UNSET"
+CANARY_FILE="$AUTOPILOT_STORE_DIR/autopilot-canary.json"
+# F1 -- registry lists buster -> OPEN
+reset_state
+rm -f "$(throttle_file)" "$(halt_marker)"
+unset WD_THROTTLE_ENABLED || true
+printf '%s\n' '{"throttle": ["buster"], "tick": ["buster"]}' > "$CANARY_FILE"
+before_calls=$(tmux_call_count)
+set +e
+wd_relaunch "$AGENT" "$FAKE_SESSION" "$FAKE_CMD" 2>/dev/null
+rcF1=$?
+set -e
+after_calls=$(tmux_call_count)
+[ "$rcF1" -eq 0 ] || fail "F1: canary-OPEN relaunch returned $rcF1 (expected 0)"
+[ "$after_calls" -eq $((before_calls + 1)) ] || fail "F1: expected exactly 1 tmux new-session, log grew by $((after_calls - before_calls))"
+# The DISCRIMINATOR: the gate-OPEN path consults throttle.py (Phase 3 record-restart
+# writes state). The gate-OFF path (A) never writes it. State file present => the
+# registry really opened the gate, not the legacy plain-relaunch branch.
+[ -f "$(throttle_file)" ] || fail "F1: canary registry did NOT open the gate (no throttle state written) -- env-only, not durable"
+note "F1 PASS: registry membership opened the gate with env unset (throttle state written)"
+# F2 -- registry does NOT list buster -> CLOSED (falsify silent-open)
+reset_state
+rm -f "$(throttle_file)" "$(halt_marker)"
+unset WD_THROTTLE_ENABLED || true
+printf '%s\n' '{"throttle": ["someone-else"]}' > "$CANARY_FILE"
+before_calls=$(tmux_call_count)
+set +e
+wd_relaunch "$AGENT" "$FAKE_SESSION" "$FAKE_CMD" 2>/dev/null
+rcF2=$?
+set -e
+after_calls=$(tmux_call_count)
+[ "$rcF2" -eq 0 ] || fail "F2: unlisted-agent relaunch returned $rcF2 (expected 0 plain relaunch)"
+[ "$after_calls" -eq $((before_calls + 1)) ] || fail "F2: expected exactly 1 tmux new-session, log grew by $((after_calls - before_calls))"
+[ ! -f "$(throttle_file)" ] || fail "F2: agent NOT in canary but gate OPENED (throttle state written) -- dangerous silent-open!"
+note "F2 PASS: agent absent from registry -> gate stayed CLOSED (plain relaunch, no throttle state)"
+rm -f "$CANARY_FILE"
+
+# ===========================================================================
 # Residue check: the temp store must NOT have leaked into the real store.
 # ===========================================================================
 REAL_THROTTLE="$ROOT/store/autopilot-throttle-$AGENT.json"
@@ -338,4 +387,4 @@ REAL_HALT="$ROOT/store/autopilot-halt-$AGENT.json"
 [ ! -f "$REAL_HALT" ]     || fail "RESIDUE: real store halt marker exists ($REAL_HALT) -- sandbox leaked!"
 note "residue check OK: no real store/autopilot-*-$AGENT.json written"
 
-echo "SIM: PASS -- wd_relaunch throttle chokepoint proven on stubbed buster sandbox: gate OFF plain relaunch, healthy trickle proceeds, crash-loop burst HALTS + SKIPS relaunch (falsifying direction asserted). Halt-marker (D) + tick-flag (E) PENDING on their parallel items -- NOT faked green. Zero live-agent interaction."
+echo "SIM: PASS -- wd_relaunch throttle chokepoint proven on stubbed buster sandbox: (A) gate OFF plain relaunch, (B) healthy trickle proceeds, (C) crash-loop burst HALTS + SKIPS relaunch (falsifying direction asserted), (D) durable halt-marker contract, (E) tick.py honours AUTOPILOT_TICK_ENABLED, (F) durable canary registry opens the gate with env UNSET and a non-listed agent stays CLOSED (falsifies silent-open). Zero live-agent interaction."
