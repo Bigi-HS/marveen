@@ -117,6 +117,14 @@ def normalize(text):
     return cleaned
 
 
+def _collapse(text):
+    """Separator-agnostic canonical form: normalize(), then drop EVERY non-alnum
+    char (spaces AND punctuation). Pure. "merge-to-main", "merge to main" and
+    "merge to-main" all collapse to the same "mergetomain", so a multiword stem
+    cannot be bypassed by swapping the separator between its words."""
+    return "".join(ch for ch in normalize(text) if ch.isalnum())
+
+
 def is_risky_instruction(text):
     """Pure. Returns (risky: bool, matched_stem: str). risky=True if any RISKY_STEM
     occurs as a substring of the normalized text. matched_stem is '' when not
@@ -124,11 +132,21 @@ def is_risky_instruction(text):
     norm = normalize(text)
     if not norm:
         return (False, "")
+    collapsed = _collapse(text)
     for stem in RISKY_STEMS:
-        # Stems with spaces are matched after normalize collapses whitespace, so
-        # compare against the single-spaced normalized form directly.
+        # Match on BOTH surfaces (OR), because normalize() treats separators
+        # asymmetrically -- it drops INTER-LETTER separators ("merge-to-main" ->
+        # "mergetomain") but keeps word-separating spaces ("merge to main"). That
+        # asymmetry left the hyphen-spelled stems dead and let mixed separators
+        # ("merge to-main") slip through BOTH spellings. The collapsed surface
+        # (all non-alnum removed, same transform on stem and text) closes every
+        # separator variant; the whitespace-aware surface is kept so multi-token
+        # shapes like "rm -rf" still match their natural form. Verified against
+        # live input + falsifying tests on the dangerous (false-negative) side.
+        # (lesson-verify-normalization-fix-against-live-input-1027)
         stem_norm = " ".join(stem.lower().split())
-        if stem_norm in norm:
+        stem_collapsed = _collapse(stem)
+        if stem_norm in norm or (stem_collapsed and stem_collapsed in collapsed):
             return (True, stem)
     return (False, "")
 
