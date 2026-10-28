@@ -385,3 +385,103 @@ wd_under_cap_stamp() {
   [ -n "$stamp_file" ] || return 0
   printf '%s\n' "$(date +%s)" >> "$stamp_file"
 }
+
+# ---------------------------------------------------------------------------
+# Autopilot restart-throttle wiring: wd_relaunch chokepoint (step5, card 05c1671f).
+# Spec: store/spec-autopilot-fleet-20261027.md §2.1.1. Throttle MAG: throttle.py
+# (TB-01/INV9, merged #886).
+#
+# The 2-phase throttle protocol MUST wrap every agent relaunch so a crash-looping
+# agent is HALTED instead of auto-restarted forever. ENFORCEMENT-NOT-CONVENTION
+# (Thor #886 FLAG-1): the `check` is INSIDE this helper, BEFORE the tmux
+# new-session, so a caller that relaunches THROUGH wd_relaunch structurally
+# cannot skip the check and grant a halted agent an extra restart (the
+# "double-restart gap"). Call-sites migrate their raw
+# `tmux new-session -d -s $SESSION "$cmd"` to `wd_relaunch`.
+#
+# ROLLOUT GATE (OPS-127 pattern, mirrors wd_read_model): WD_THROTTLE_ENABLED
+# default 0 (CLOSED). When CLOSED, wd_relaunch does ONLY the tmux new-session --
+# byte-equivalent to the legacy raw call -- so migrating a call-site is
+# BEHAVIOUR-NEUTRAL until the Boss-gated canary sets WD_THROTTLE_ENABLED=1 for
+# that watchdog. Both branches log which path ran (measurable activation).
+#
+# FAIL DIRECTION (lesson-gate-fail-direction-asymmetry-1027): this is a STOP
+# gate. throttle.py `check` fails CLOSED (halted OR unreadable-state -> exit 1 ->
+# SKIP relaunch). wd_relaunch then does NOT start the session and returns 1 so
+# the caller backs off; the Boss-ping marker is set by throttle.py itself. The
+# safe move when we cannot verify is NOT to keep auto-restarting a possibly
+# crash-looping agent.
+#
+# WIRING NOTE: this is the pure helper. Migrating the ~20 call-sites AND the
+# canary flag-flip are the live-rollout steps (c12-sandbox on buster-sim +
+# Boss deploy-window gated), NOT this PR. Adding an UNUSED function behind a
+# default-CLOSED flag has zero live blast-radius.
+#
+# set -u safe (F4); throttle path passed to python via argv, never interpolated
+# into source (F7).
+# ---------------------------------------------------------------------------
+
+# wd_relaunch <agent> <session> <cmd> [throttle_script]
+#
+# Relaunch an agent's tmux session, gated by the restart-throttle when the
+# rollout flag is OPEN.
+#
+#   agent           -- agent id (throttle state key, e.g. "dave")
+#   session         -- tmux session name (e.g. "agent-dave")
+#   cmd             -- command string passed to `tmux new-session -d -s`
+#   throttle_script -- optional throttle.py path (default: derived from lib dir;
+#                      scripts/lib/ -> scripts/autopilot/throttle.py)
+#
+# exit 0: relaunch performed (session start attempted, tmux rc propagated).
+# exit 1: relaunch SKIPPED -- missing args, OR (gate OPEN) agent is HALTED /
+#         state unreadable (fail-closed), OR tmux new-session itself failed.
+wd_relaunch() {
+  local agent="${1:-}"
+  local session="${2:-}"
+  local cmd="${3:-}"
+  local throttle="${4:-}"
+
+  if [ -z "$agent" ] || [ -z "$session" ] || [ -z "$cmd" ]; then
+    _wd_read_model_warn "WARN wd_relaunch: missing agent/session/cmd -> no-op, return 1"
+    return 1
+  fi
+
+  # Derive throttle.py path from the lib location when not provided (F7: the
+  # path is only ever passed to python as argv, never interpolated into source).
+  if [ -z "$throttle" ]; then
+    throttle="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/autopilot/throttle.py"
+  fi
+
+  if [ "${WD_THROTTLE_ENABLED:-0}" != "1" ]; then
+    # GATE CLOSED: legacy behaviour -- plain relaunch, no throttle. A crash-
+    # restart outside the Boss-gated window keeps the pre-wiring behaviour.
+    _wd_read_model_warn "INFO wd_relaunch: gate CLOSED (WD_THROTTLE_ENABLED!=1) agent=$agent -> plain relaunch"
+    tmux new-session -d -s "$session" "$cmd"
+    return $?
+  fi
+
+  # GATE OPEN. Phase 1 -- CHECK before relaunch (fail-CLOSED: halted OR
+  # unreadable -> throttle.py exit 1 -> SKIP). The check is here, before the
+  # tmux call, so it cannot be bypassed by a caller using wd_relaunch.
+  if ! python3 "$throttle" check --agent "$agent" >/dev/null 2>&1; then
+    _wd_read_model_warn "WARN wd_relaunch: gate OPEN, throttle CHECK=HALTED agent=$agent -> SKIP relaunch (fail-closed). throttle.py set the Boss-ping marker; manual reset required."
+    return 1
+  fi
+
+  # Phase 2 -- relaunch.
+  _wd_read_model_warn "INFO wd_relaunch: gate OPEN, throttle CHECK=ok agent=$agent -> relaunch"
+  tmux new-session -d -s "$session" "$cmd"
+  local launch_rc=$?
+
+  # Phase 3 -- record the restart AFTER launching (a failed launch still counts,
+  # matching the crash-loop intent). If recording trips the halt, the NEXT
+  # check blocks; this launch already happened (threshold is >= max, so the
+  # max-th restart is allowed and the halt applies from the next attempt).
+  local rec_out
+  rec_out="$(python3 "$throttle" record-restart --agent "$agent" 2>/dev/null)"
+  if [ $? -ne 0 ]; then
+    _wd_read_model_warn "WARN wd_relaunch: record-restart TRIPPED halt agent=$agent ($rec_out). Next relaunch will be blocked."
+  fi
+
+  return "$launch_rc"
+}

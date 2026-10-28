@@ -192,7 +192,12 @@ GUARD_RC=$?
 # lands upstream, deliberately excluded here.)
 for w in thor hibiki bond agent bigben chad claudia dave devil-advocate forge gyore percy; do
   f="$ROOT/scripts/${w}-watchdog.sh"
-  { grep -q '\. "\$(dirname "\$0")/lib/watchdog-common.sh" || { log "FATAL' "$f" \
+  # Match the fail-CLOSED source-guard independent of the dirname form: some
+  # watchdogs use `$(dirname "$0")`, others the equivalent-or-better
+  # `$(dirname "${BASH_SOURCE[0]}")`. Both are correct; assert the stable,
+  # variant-independent tail `/lib/watchdog-common.sh" || { log "FATAL` so a
+  # legitimate BASH_SOURCE variant is not a false-negative (was: gyore red).
+  { grep -q '/lib/watchdog-common.sh" || { log "FATAL' "$f" \
       && grep -q 'wd_read_model "\$ACONF"' "$f" \
       && ! grep -q "json.load(open('\$ACONF')" "$f"; } \
     && ok "${w}-watchdog.sh: sources lib w/ F1 guard, calls wd_read_model, inline block removed" \
@@ -325,6 +330,85 @@ wd_budget_paused "" "$STORE_TMP"
   || bad "B5: empty agent should return 1"
 
 rm -rf "$STORE_TMP"
+
+# ---- wd_relaunch: restart-throttle chokepoint (step5, card 05c1671f) --------
+# What this proves:
+#  W1  gate CLOSED (default) -> plain relaunch, throttle NOT consulted (so a
+#      call-site migration is behaviour-neutral).
+#  W2  gate OPEN + throttle check=ok -> relaunch happens.
+#  W3  [FALSIFYING, dangerous side] gate OPEN + throttle check=HALTED -> tmux
+#      new-session is NOT called (no extra "double-restart"); returns 1. This is
+#      the Thor #886 FLAG-1 ordering guarantee: the check is unskippable.
+#  W4  gate OPEN + record-restart trips halt -> THIS launch still happens; halt
+#      blocks the NEXT call (threshold = the max-th restart is allowed).
+#  W5  missing args -> return 1, no relaunch.
+#  W6  set -u safe with empty args.
+#
+# Mocking: `tmux` is shadowed by a shell function that records calls to a log
+# file (bash functions take precedence over external commands). throttle.py is
+# replaced by tiny python fakes passed as the 4th arg (argv[1] = subcommand).
+RELDIR="$(mktemp -d)"
+TMUX_LOG="$RELDIR/tmux.log"
+: > "$TMUX_LOG"
+tmux() { echo "TMUX_CALLED $*" >> "$TMUX_LOG"; return 0; }
+
+FAKE_OK="$RELDIR/throttle_ok.py"       # check -> 0, record-restart -> 0
+printf '%s\n' 'import sys' 'sub=sys.argv[1] if len(sys.argv)>1 else ""' 'print("{}")' 'sys.exit(0)' > "$FAKE_OK"
+FAKE_HALT="$RELDIR/throttle_halt.py"   # check -> 1 (halted/unreadable), else 0
+printf '%s\n' 'import sys' 'sub=sys.argv[1] if len(sys.argv)>1 else ""' 'sys.exit(1 if sub=="check" else 0)' > "$FAKE_HALT"
+FAKE_TRIP="$RELDIR/throttle_trip.py"   # check -> 0, record-restart -> 1 (just tripped)
+printf '%s\n' 'import sys' 'sub=sys.argv[1] if len(sys.argv)>1 else ""' 'print("{}")' 'sys.exit(1 if sub=="record-restart" else 0)' > "$FAKE_TRIP"
+
+# W1: gate CLOSED (default) -> relaunch via tmux, throttle NOT consulted.
+: > "$TMUX_LOG"
+( unset WD_THROTTLE_ENABLED 2>/dev/null
+  wd_relaunch "wtest" "agent-wtest" "sleep 1" "$FAKE_HALT" ) >/dev/null 2>&1
+rc=$?
+{ [ "$rc" -eq 0 ] && grep -q 'TMUX_CALLED new-session -d -s agent-wtest' "$TMUX_LOG"; } \
+  && ok "W1: gate CLOSED -> plain relaunch, throttle ignored (even a HALT fake)" \
+  || bad "W1: gate CLOSED (rc=$rc tmux='$(cat "$TMUX_LOG")')"
+
+# W2: gate OPEN + check ok -> relaunch happens.
+: > "$TMUX_LOG"
+( WD_THROTTLE_ENABLED=1 wd_relaunch "wtest" "agent-wtest" "sleep 1" "$FAKE_OK" ) >/dev/null 2>&1
+rc=$?
+{ [ "$rc" -eq 0 ] && grep -q 'TMUX_CALLED new-session -d -s agent-wtest' "$TMUX_LOG"; } \
+  && ok "W2: gate OPEN + check ok -> relaunch performed" \
+  || bad "W2: gate OPEN check-ok (rc=$rc tmux='$(cat "$TMUX_LOG")')"
+
+# W3 [FALSIFYING]: gate OPEN + check HALTED -> tmux NOT called, return 1.
+: > "$TMUX_LOG"
+( WD_THROTTLE_ENABLED=1 wd_relaunch "wtest" "agent-wtest" "sleep 1" "$FAKE_HALT" ) >/dev/null 2>&1
+rc=$?
+{ [ "$rc" -eq 1 ] && ! grep -q 'TMUX_CALLED' "$TMUX_LOG"; } \
+  && ok "W3: gate OPEN + HALTED -> NO relaunch (no double-restart), rc=1 [Thor #886 FLAG-1]" \
+  || bad "W3: HALTED still relaunched! (rc=$rc tmux='$(cat "$TMUX_LOG")')"
+
+# W4: gate OPEN + record-restart trips halt -> this launch STILL happens (rc 0).
+: > "$TMUX_LOG"
+( WD_THROTTLE_ENABLED=1 wd_relaunch "wtest" "agent-wtest" "sleep 1" "$FAKE_TRIP" ) >/dev/null 2>&1
+rc=$?
+{ [ "$rc" -eq 0 ] && grep -q 'TMUX_CALLED' "$TMUX_LOG"; } \
+  && ok "W4: gate OPEN + record-restart trips -> launch still occurs; halt blocks NEXT call" \
+  || bad "W4: trip-on-record (rc=$rc tmux='$(cat "$TMUX_LOG")')"
+
+# W5: missing args -> return 1, no relaunch.
+: > "$TMUX_LOG"
+( WD_THROTTLE_ENABLED=1 wd_relaunch "wtest" "" "sleep 1" "$FAKE_OK" ) >/dev/null 2>&1
+rc=$?
+{ [ "$rc" -eq 1 ] && ! grep -q 'TMUX_CALLED' "$TMUX_LOG"; } \
+  && ok "W5: missing session arg -> return 1, no relaunch" \
+  || bad "W5: missing-arg (rc=$rc tmux='$(cat "$TMUX_LOG")')"
+
+# W6: set -u safe with empty args.
+( set -u
+  WD_THROTTLE_ENABLED=1 wd_relaunch "" "" "" 2>/dev/null; r=$?
+  [ "$r" -eq 1 ] ) \
+  && ok "W6: wd_relaunch safe under set -u with empty args" \
+  || bad "W6: set -u regression on empty args"
+
+unset -f tmux
+rm -rf "$RELDIR"
 
 echo "----"
 echo "watchdog-common: $PASS passed, $FAIL failed"
