@@ -451,11 +451,30 @@ wd_relaunch() {
   if [ -z "$throttle" ]; then
     throttle="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/autopilot/throttle.py"
   fi
+  # canary.py lives beside throttle.py (same autopilot/ dir).
+  local canary="${throttle%/*}/canary.py"
 
-  if [ "${WD_THROTTLE_ENABLED:-0}" != "1" ]; then
+  # GATE DECISION -- two enable sources, OR'd (canary.py / spec section 2.2):
+  #   1. env WD_THROTTLE_ENABLED == "1"  (explicit per-process override: sim/tests)
+  #   2. durable per-agent registry (store/autopilot-canary.json) lists this agent
+  #      under "throttle" -- this is what SURVIVES a watchdog respawn / host reboot,
+  #      so it, not a transient env flip, is the real operator-facing canary.
+  # FAIL DIRECTION (lesson-gate-fail-direction-asymmetry-1027): if neither source
+  # is clearly ON, the gate stays CLOSED = plain legacy relaunch (behaviour-neutral
+  # vs the pre-wiring fleet). A canary.py that is missing / errors / prints nothing
+  # exits non-zero -> treated as NOT-canaried -> CLOSED. Ambiguity never arms the
+  # STOP-gate on a healthy agent. (F7: canary path only ever passed as argv.)
+  local gate_open=0
+  if [ "${WD_THROTTLE_ENABLED:-0}" = "1" ]; then
+    gate_open=1
+  elif python3 "$canary" throttle --agent "$agent" >/dev/null 2>&1; then
+    gate_open=1
+  fi
+
+  if [ "$gate_open" != "1" ]; then
     # GATE CLOSED: legacy behaviour -- plain relaunch, no throttle. A crash-
-    # restart outside the Boss-gated window keeps the pre-wiring behaviour.
-    _wd_read_model_warn "INFO wd_relaunch: gate CLOSED (WD_THROTTLE_ENABLED!=1) agent=$agent -> plain relaunch"
+    # restart outside the Boss-gated canary keeps the pre-wiring behaviour.
+    _wd_read_model_warn "INFO wd_relaunch: gate CLOSED (WD_THROTTLE_ENABLED!=1, agent=$agent not in canary) -> plain relaunch"
     tmux new-session -d -s "$session" "$cmd"
     return $?
   fi

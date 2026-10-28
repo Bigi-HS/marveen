@@ -23,7 +23,7 @@ def check(name, cond):
     return cond
 
 
-def run_with(responses, enabled="1"):
+def run_with(responses, enabled="1", canary=None):
     """Drive tick.main() with monkeypatched subprocess responses.
 
     responses: dict keyed by the subcommand word in argv -> dict to return.
@@ -31,7 +31,14 @@ def run_with(responses, enabled="1"):
                the STUCK/IDLE/BUSY path under test is reached). Returns a third
                element `called`: True iff _run_json was invoked at least once --
                the inert-gate tests assert this is False when the gate is OFF.
+    canary:    None  -> no registry file (hermetic: AUTOPILOT_STORE_DIR -> empty
+                        tmp dir, so the live store/autopilot-canary.json can never
+                        make an env-based test flaky);
+               dict  -> written as the registry so the canary-path tests drive the
+                        durable per-agent enable source directly.
     """
+    import json
+    import tempfile
     called = {"v": False}
 
     def fake_run_json(argv, fallback):
@@ -48,6 +55,12 @@ def run_with(responses, enabled="1"):
     orig = tick._run_json
     tick._run_json = fake_run_json
     prev_env = os.environ.get("AUTOPILOT_TICK_ENABLED")
+    prev_store = os.environ.get("AUTOPILOT_STORE_DIR")
+    tmpdir = tempfile.mkdtemp(prefix="tick-canary-")
+    os.environ["AUTOPILOT_STORE_DIR"] = tmpdir          # hermetic: isolate registry
+    if canary is not None:
+        with open(os.path.join(tmpdir, "autopilot-canary.json"), "w", encoding="utf-8") as fh:
+            json.dump(canary, fh)
     if enabled is None:
         os.environ.pop("AUTOPILOT_TICK_ENABLED", None)
     else:
@@ -63,6 +76,12 @@ def run_with(responses, enabled="1"):
             os.environ.pop("AUTOPILOT_TICK_ENABLED", None)
         else:
             os.environ["AUTOPILOT_TICK_ENABLED"] = prev_env
+        if prev_store is None:
+            os.environ.pop("AUTOPILOT_STORE_DIR", None)
+        else:
+            os.environ["AUTOPILOT_STORE_DIR"] = prev_store
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
     return rc, buf.getvalue(), called["v"]
 
 
@@ -97,7 +116,8 @@ def main():
 
     def inert(out, called):
         # DISABLED line present, EXIT 0, no subprocess, and nothing actionable leaked.
-        return ("DISABLED (AUTOPILOT_TICK_ENABLED!=1)" in out
+        return ("DISABLED (AUTOPILOT_TICK_ENABLED!=1" in out
+                and "not in canary registry" in out
                 and not called
                 and "drive ONE card" not in out
                 and "MINE" not in out and "STUCK-GATE" not in out)
@@ -119,6 +139,26 @@ def main():
     rc, out, called = run_with(busy, enabled="1")
     ok &= check('gate "1" -> enabled, busy actionable preamble',
                 rc == 0 and "drive ONE card" in out and called and "DISABLED" not in out)
+
+    # --- DURABLE CANARY REGISTRY (the respawn-surviving enable source) ---
+    # The gate must also open from store/autopilot-canary.json membership with the
+    # env flag UNSET -- that is what survives a watchdog respawn/reboot.
+    # I. env UNSET + registry lists the agent ("dave") under "tick" -> ENABLED.
+    rc, out, called = run_with(busy, enabled=None, canary={"tick": ["dave"]})
+    ok &= check("env unset + agent in canary registry -> enabled (normal path)",
+                rc == 0 and "drive ONE card" in out and called and "DISABLED" not in out)
+
+    # J. FAIL-DIRECTION (dangerous side): a registry that does NOT list the agent
+    #    must stay inert even with env unset -- a wired-but-not-canaried agent.
+    rc, out, called = run_with(busy, enabled=None, canary={"tick": ["someone-else"]})
+    ok &= check("env unset + agent NOT in registry -> inert (not silently enabled)",
+                rc == 0 and inert(out, called))
+
+    # K. FAIL-DIRECTION: throttle-only membership must NOT enable the TICK gate
+    #    (capability isolation -- the throttle canary is a different switch).
+    rc, out, called = run_with(busy, enabled=None, canary={"throttle": ["dave"]})
+    ok &= check("env unset + agent only under 'throttle' -> tick inert (capability isolation)",
+                rc == 0 and inert(out, called))
 
     print("\n" + ("ALL PASS" if ok else "SOME FAILED"))
     return 0 if ok else 1

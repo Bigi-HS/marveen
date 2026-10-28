@@ -62,6 +62,19 @@ def _run_json(argv: list, fallback: dict) -> dict:
         return fallback
 
 
+def _canary_enabled(capability: str, agent: str) -> bool:
+    """Durable per-agent canary check, fail-closed to False on ANY problem.
+
+    Imported lazily so tick.py keeps working even if canary.py is somehow absent
+    (an import failure must never enable a live driver -- it reads as OFF).
+    """
+    try:
+        import canary  # same dir (HERE is on sys.path via the shebang invocation)
+        return canary.is_enabled(capability, agent)
+    except Exception:  # noqa: BLE001 -- fail-closed: unreadable canary = OFF
+        return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("agent")
@@ -73,12 +86,21 @@ def main() -> int:
     # --- ACTIVATION GATE (freeze-carve-out, step5 item1, spec section 2.2). ---
     # FIRST thing after arg parsing, BEFORE any subprocess call, so OFF is truly
     # inert/cheap (no classify/stuck/rotation). Mirrors the WD_THROTTLE_ENABLED
-    # default-0 rollout in scripts/lib/watchdog-common.sh. FAIL DIRECTION: only
-    # the exact string "1" enables; unset/garbage = OFF (SAFE -- never drive a
-    # live agent on ambiguity).
-    if os.environ.get("AUTOPILOT_TICK_ENABLED", "0") != "1":
-        print(f"=== AUTOPILOT TICK [{agent}] :: DISABLED (AUTOPILOT_TICK_ENABLED!=1) "
-              f"-- legacy heartbeat ===")
+    # default-0 rollout in scripts/lib/watchdog-common.sh.
+    #
+    # TWO enable sources, OR'd (canary.py / spec section 2.2): the process env var
+    # AUTOPILOT_TICK_ENABLED (explicit per-process override -- buster sim + tests)
+    # OR the DURABLE per-agent registry (store/autopilot-canary.json). The registry
+    # is what survives a watchdog respawn / host reboot, so it -- not a transient
+    # env flip -- is the real operator-facing canary. FAIL DIRECTION: only the exact
+    # string "1" enables via env; unset/garbage = OFF. The registry fails closed to
+    # OFF on any parse problem (canary.is_enabled). Either way, ambiguity = OFF
+    # (SAFE -- never drive a live agent on ambiguity).
+    env_on = os.environ.get("AUTOPILOT_TICK_ENABLED", "0") == "1"
+    canary_on = _canary_enabled("tick", agent)
+    if not (env_on or canary_on):
+        print(f"=== AUTOPILOT TICK [{agent}] :: DISABLED (AUTOPILOT_TICK_ENABLED!=1, "
+              f"not in canary registry) -- legacy heartbeat ===")
         return 0
 
     # --- STUCK-GATE (section 4). Persistent flag survives restart (INV6). ---
