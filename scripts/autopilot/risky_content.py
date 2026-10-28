@@ -125,10 +125,21 @@ def is_risky_instruction(text):
     if not norm:
         return (False, "")
     for stem in RISKY_STEMS:
-        # Stems with spaces are matched after normalize collapses whitespace, so
-        # compare against the single-spaced normalized form directly.
-        stem_norm = " ".join(stem.lower().split())
-        if stem_norm in norm:
+        # The stem MUST live in the same normalized space as the text, so run the
+        # SAME normalize() over it (not just a whitespace-collapse). normalize() is
+        # asymmetric by design: it collapses whitespace runs to a single space but
+        # DROPS inter-letter separators entirely. So a multi-word risky phrase can
+        # reach the text in two canonical shapes -- space-separated ("merge to
+        # main") OR glued ("mergetomain", from "merge-to-main" / "merge_to_main" /
+        # "merge.to.main"). A single normalized stem only covers ONE of those
+        # (verified live: pre-fix, "merge-to-main" normalized to "mergetomain" and
+        # the spaced stem never matched -> bypass). So we test BOTH the normalized
+        # stem and its de-spaced form. lesson-verify-normalization-fix-against-live-input-1027.
+        stem_norm = normalize(stem)
+        if not stem_norm:
+            continue
+        stem_glued = stem_norm.replace(" ", "")
+        if stem_norm in norm or (stem_glued and stem_glued in norm):
             return (True, stem)
     return (False, "")
 

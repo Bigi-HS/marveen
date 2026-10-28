@@ -68,6 +68,24 @@ class ObfuscationBypass(unittest.TestCase):
         # Fully accented Hungarian still normalizes to the stem.
         self.assertTrue(is_risky_instruction("PUBLIKÁLD ki azonnal")[0])
 
+    def test_multiword_hyphen_glue(self):
+        # Live-verified bypass (lesson-verify-normalization-fix-against-live-input-1027):
+        # separators BETWEEN the words of a multi-word stem glue it ("mergetomain"),
+        # which the spaced stem alone never matched. Dangerous side.
+        self.assertTrue(is_risky_instruction("please merge-to-main now")[0])
+
+    def test_multiword_underscore_glue(self):
+        self.assertTrue(is_risky_instruction("merge_to_main asap")[0])
+
+    def test_multiword_dot_glue(self):
+        self.assertTrue(is_risky_instruction("just merge.to.main")[0])
+
+    def test_go_live_hyphen(self):
+        self.assertTrue(is_risky_instruction("we go-live tonight")[0])
+
+    def test_push_to_main_hyphen(self):
+        self.assertTrue(is_risky_instruction("push-to-main when ready")[0])
+
 
 class BenignNegatives(unittest.TestCase):
     """Non-risky nudges MUST pass (false-positive control). These are the SAFE
