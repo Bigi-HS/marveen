@@ -44,7 +44,7 @@ launch() {
   local model; model="$(read_model)"
   tmux set-environment -g -u TELEGRAM_BOT_TOKEN 2>/dev/null || true
   local cmd="export PATH=\"/opt/homebrew/bin:\$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN && export CLAUDE_CONFIG_DIR=\"$CFG\" && export TELEGRAM_STATE_DIR=\"$STATE\" && cd \"$AGENT_DIR\" && export FLEET_ROOT=/home/domin/marveen && . /home/domin/marveen/scripts/lib/fleet-oauth-env.sh && export GENESIS_AGENT_ID=\"blackbart\" && . /home/domin/marveen/scripts/lib/agent-token-env.sh && /usr/bin/claude --dangerously-skip-permissions --model '$model' --channels plugin:telegram@claude-plugins-official"
-  tmux new-session -d -s "$SESSION" "$cmd"
+  wd_relaunch "${SESSION#agent-}" "$SESSION" "$cmd"
   log "launched $SESSION (fresh, --channels, model=$model)"
   local i pane
   for i in $(seq 1 20); do

@@ -119,7 +119,7 @@ launch() {
 && export CLAUDE_CONFIG_DIR=\"$CFG\" \
 && cd \"$AGENT_DIR\" \
 && /usr/bin/claude --dangerously-skip-permissions --model '$model'"
-  tmux new-session -d -s "$SESSION" "$cmd"
+  wd_relaunch "${SESSION#agent-}" "$SESSION" "$cmd"
   STARTED_AT=$(date +%s)
   log "launched $SESSION (local Ollama, model=$model, base=$OLLAMA_BASE, no --channels/--continue)"
   return 0
