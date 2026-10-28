@@ -37,9 +37,23 @@ DEFAULT_MAX_RESTARTS = 5      # section 2.1 TB-01
 DEFAULT_WINDOW_S = 600        # 10 minutes
 
 
+def _safe(agent: str) -> str:
+    return "".join(ch for ch in agent if ch.isalnum() or ch in "-_")
+
+
 def _path(agent: str) -> str:
-    safe = "".join(ch for ch in agent if ch.isalnum() or ch in "-_")
-    return os.path.join(STORE_DIR, f"autopilot-throttle-{safe}.json")
+    return os.path.join(STORE_DIR, f"autopilot-throttle-{_safe(agent)}.json")
+
+
+def _marker_path(agent: str) -> str:
+    # Durable Boss-ping marker (spec §2.1 line 90/287: "halt -> skip + Boss-ping-marker"
+    # / "halt -> STOP + Boss-ping"). Kept SEPARATE from the throttle-state file so the
+    # out-of-band consumer (notify-halt.py, run from marveen's heartbeat which owns the
+    # TG channel) is DECOUPLED from exit codes and watchdog boundaries: a halted agent
+    # that is never relaunched again produces no further signal, so the halt must be
+    # persisted here or it would be silently lost (nominal != concrete safety net,
+    # lesson-auto-mode-safety-net-must-be-concrete-1026).
+    return os.path.join(STORE_DIR, f"autopilot-halt-{_safe(agent)}.json")
 
 
 def _load(path: str) -> dict:
@@ -60,6 +74,32 @@ def _atomic_save(path: str, state: dict) -> None:
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def _ensure_marker(agent: str, state: dict) -> None:
+    """Write/refresh the durable Boss-ping marker when an agent is halted.
+
+    Idempotent across a single halt episode: if a marker already exists it is NOT
+    rewritten (so `notified` set by the consumer survives). Only a reset clears it.
+    """
+    path = _marker_path(agent)
+    if os.path.exists(path):
+        return  # episode already marked; do not clobber the consumer's `notified`
+    _atomic_save(path, {
+        "agent": agent,
+        "halted_at": state.get("halted_at"),
+        "halt_reason": state.get("halt_reason"),
+        "restart_count_in_window": state.get("restart_count_in_window"),
+        "notified": False,
+    })
+
+
+def _clear_marker(agent: str) -> None:
+    path = _marker_path(agent)
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
 
 
 # --- pure core (unit-tested offline, time injected) ------------------------
@@ -127,6 +167,10 @@ def main() -> int:
         state = eval_restart(_load(path), now, args.window, args.max)
         state["last_update"] = now
         _atomic_save(path, state)
+        if state.get("halted"):
+            # Trip point: persist the Boss-ping marker so the halt cannot be lost
+            # even though this agent will not be relaunched again (spec §2.1).
+            _ensure_marker(args.agent, state)
         print(json.dumps({
             "halted": bool(state.get("halted")),
             "just_tripped": bool(state.get("just_tripped")),
@@ -151,6 +195,11 @@ def main() -> int:
             print(json.dumps({"halted": True, "_unreadable": True}))
             return 1
         halted = bool(state.get("halted"))
+        if halted:
+            # Defensive backfill: if a halt was tripped before this marker code
+            # existed (or the marker was lost), ensure it is present so the
+            # consumer can still fire. Idempotent -- never clobbers `notified`.
+            _ensure_marker(args.agent, state)
         print(json.dumps({"halted": halted, "reason": state.get("halt_reason"),
                           "ping_boss": bool(state.get("ping_boss"))}))
         return 1 if halted else 0
@@ -161,6 +210,7 @@ def main() -> int:
 
     if args.cmd == "reset":
         _atomic_save(_path(args.agent), {"last_update": _now(), "reset": True})
+        _clear_marker(args.agent)  # manual/Boss-GO recovery also clears the Boss-ping marker
         print(json.dumps({"reset": True, "agent": args.agent}))
         return 0
 
