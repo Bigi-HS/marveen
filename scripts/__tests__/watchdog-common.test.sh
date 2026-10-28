@@ -407,6 +407,22 @@ rc=$?
   && ok "W6: wd_relaunch safe under set -u with empty args" \
   || bad "W6: set -u regression on empty args"
 
+# W7 [FALSIFYING, diagnosability side -- FLAG-2, Thor #887]: gate OPEN + the
+# throttle check emits a diagnostic on stderr -> that stderr is routed to
+# WD_LOG_FILE (NOT fully swallowed), so a post-canary-flip halt is debuggable.
+# Falsifying the dangerous side: if stderr were `>/dev/null 2>&1`-swallowed (the
+# pre-fix behaviour), the diagnostic would NOT appear in the log and this fails.
+: > "$TMUX_LOG"
+FAKE_HALT_NOISY="$RELDIR/throttle_halt_noisy.py"   # check -> stderr + exit 1
+printf '%s\n' 'import sys' 'sub=sys.argv[1] if len(sys.argv)>1 else ""' 'sys.stderr.write("THROTTLE_DIAG halt-reason agent\n")' 'sys.exit(1 if sub=="check" else 0)' > "$FAKE_HALT_NOISY"
+W7LOG="$RELDIR/w7.log"; : > "$W7LOG"
+( WD_THROTTLE_ENABLED=1 WD_LOG_FILE="$W7LOG" \
+    wd_relaunch "wtest" "agent-wtest" "sleep 1" "$FAKE_HALT_NOISY" ) >/dev/null 2>&1
+rc=$?
+{ [ "$rc" -eq 1 ] && ! grep -q 'TMUX_CALLED' "$TMUX_LOG" && grep -q 'THROTTLE_DIAG' "$W7LOG"; } \
+  && ok "W7: gate OPEN + HALT -> check stderr routed to WD_LOG_FILE (FLAG-2 diagnosable), no relaunch" \
+  || bad "W7: check stderr swallowed or relaunch happened (rc=$rc log='$(cat "$W7LOG")')"
+
 unset -f tmux
 rm -rf "$RELDIR"
 

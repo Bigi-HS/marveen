@@ -463,7 +463,19 @@ wd_relaunch() {
   # GATE OPEN. Phase 1 -- CHECK before relaunch (fail-CLOSED: halted OR
   # unreadable -> throttle.py exit 1 -> SKIP). The check is here, before the
   # tmux call, so it cannot be bypassed by a caller using wd_relaunch.
-  if ! python3 "$throttle" check --agent "$agent" >/dev/null 2>&1; then
+  #
+  # FLAG-2 (Thor #887, canary-flip precondition): do NOT fully swallow the
+  # check's stderr with `>/dev/null 2>&1` -- that made a post-flip halt blind to
+  # debug. stdout is still discarded (only the exit code decides the gate), but
+  # stderr is captured and routed to WD_LOG_FILE via the warn helper so halts are
+  # diagnosable. `2>&1 >/dev/null` inside $() captures stderr, discards stdout.
+  local check_err check_rc
+  check_err="$(python3 "$throttle" check --agent "$agent" 2>&1 >/dev/null)"
+  check_rc=$?
+  if [ -n "$check_err" ]; then
+    _wd_read_model_warn "wd_relaunch: throttle check stderr agent=$agent: $check_err"
+  fi
+  if [ "$check_rc" -ne 0 ]; then
     _wd_read_model_warn "WARN wd_relaunch: gate OPEN, throttle CHECK=HALTED agent=$agent -> SKIP relaunch (fail-closed). throttle.py set the Boss-ping marker; manual reset required."
     return 1
   fi
