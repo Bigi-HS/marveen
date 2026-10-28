@@ -410,6 +410,24 @@ rc=$?
 unset -f tmux
 rm -rf "$RELDIR"
 
+# ---- CALL-SITE MIGRATION completeness (step5 Phase-5b, card 05c1671f) -------
+# Every standard per-agent watchdog relaunches THROUGH the wd_relaunch chokepoint
+# (so the throttle cannot be bypassed) and no longer carries a raw relaunch
+# `tmux new-session -d -s "$SESSION" "$cmd"`. The gate stays default-CLOSED, so
+# the migration is behaviour-neutral until the Boss-gated canary -- but the WIRING
+# must be complete now. (servo-skull-watchdog.sh is untracked / not yet on develop
+# -> migrated when it lands upstream, deliberately excluded, mirroring the F1 list.)
+for w in agent bigben blackbart bond buster chad claudia dave devil-advocate \
+         forge gyore hibiki local-agent percy scout sleep-agent thor; do
+  f="$ROOT/scripts/${w}-watchdog.sh"
+  [ -f "$f" ] || { bad "${w}-watchdog.sh: missing (cannot verify call-site migration)"; continue; }
+  # Must route through the chokepoint with the uniform agent-id derivation...
+  { grep -q 'wd_relaunch "${SESSION#agent-}" "$SESSION" "$cmd"' "$f" \
+      && ! grep -q 'tmux new-session -d -s "$SESSION" "$cmd"' "$f"; } \
+    && ok "${w}-watchdog.sh: relaunch migrated to wd_relaunch chokepoint, no raw tmux relaunch" \
+    || bad "${w}-watchdog.sh: call-site migration incomplete (missing wd_relaunch or raw tmux relaunch remains)"
+done
+
 echo "----"
 echo "watchdog-common: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
