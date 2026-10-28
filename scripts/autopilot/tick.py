@@ -18,6 +18,16 @@ tool call (section 2.3); this wrapper only names the forbidden set in the preamb
 
 idle_ok is computed by classify.py (fail-safe busy on any error, INV2). Stuck/
 rotation state is persistent via stuck.py (INV6). Nothing here trusts the LLM.
+
+ACTIVATION GATE (freeze-carve-out, step5 item1, spec section 2.2): the wrapper can
+be wired into every heartbeat while staying INERT until a Boss-gated per-agent
+canary flips it on. AUTOPILOT_TICK_ENABLED default 0 (OFF), mirroring the
+WD_THROTTLE_ENABLED default-0 rollout in scripts/lib/watchdog-common.sh. When OFF
+(unset or != "1") the gate is the FIRST thing in main(): it prints one DISABLED line
+and exits 0 with NO classify/stuck/rotation subprocess call (truly inert + cheap --
+legacy heartbeat behaviour). Only the exact string "1" enables; any other value
+(unset / garbage) = OFF. This is the SAFE direction (do not enable on ambiguity):
+accidentally staying inert costs nothing, accidentally driving a live agent does.
 """
 from __future__ import annotations
 
@@ -59,6 +69,17 @@ def main() -> int:
     ap.add_argument("--classify-args", default="", help="extra args for classify (testing)")
     args = ap.parse_args()
     agent, session = args.agent, args.session
+
+    # --- ACTIVATION GATE (freeze-carve-out, step5 item1, spec section 2.2). ---
+    # FIRST thing after arg parsing, BEFORE any subprocess call, so OFF is truly
+    # inert/cheap (no classify/stuck/rotation). Mirrors the WD_THROTTLE_ENABLED
+    # default-0 rollout in scripts/lib/watchdog-common.sh. FAIL DIRECTION: only
+    # the exact string "1" enables; unset/garbage = OFF (SAFE -- never drive a
+    # live agent on ambiguity).
+    if os.environ.get("AUTOPILOT_TICK_ENABLED", "0") != "1":
+        print(f"=== AUTOPILOT TICK [{agent}] :: DISABLED (AUTOPILOT_TICK_ENABLED!=1) "
+              f"-- legacy heartbeat ===")
+        return 0
 
     # --- STUCK-GATE (section 4). Persistent flag survives restart (INV6). ---
     # Thor PR#882 FLAG-1 (live-proven bypass): a genuine subprocess failure must
