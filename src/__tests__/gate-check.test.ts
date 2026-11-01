@@ -194,6 +194,33 @@ describe('isSecuritySensitivePath (MG-AC4)', () => {
     // agent-categories.json classifies agents by role, does not define deny-lists.
     expect(isSecuritySensitivePath('seed-config/agent-categories.json')).toBe(false)
   })
+
+  // INV13 (card f6dd4297): scripts/autopilot/** must auto-require Chad. PR#883 was
+  // the triggering incident -- risky_content.py merged without a Chad-required seat
+  // because none of the keyword patterns (guardrail/oauth/credential/token) matched
+  // and scripts/hooks/ only covers the hooks subdirectory. The entire autopilot
+  // module carries classifier and halt-notification code; weakening it is a security
+  // change and must require Chad review.
+  it('matches scripts/autopilot/** (INV13, card f6dd4297)', () => {
+    // The exact file that triggered the gap (PR#883).
+    expect(isSecuritySensitivePath('scripts/autopilot/risky_content.py')).toBe(true)
+    // Other autopilot module files: classifier, tick driver, halt consumer, canary.
+    expect(isSecuritySensitivePath('scripts/autopilot/classify.py')).toBe(true)
+    expect(isSecuritySensitivePath('scripts/autopilot/tick.py')).toBe(true)
+    expect(isSecuritySensitivePath('scripts/autopilot/notify-halt.py')).toBe(true)
+    expect(isSecuritySensitivePath('scripts/autopilot/canary.py')).toBe(true)
+    // Test suite files in the directory are also covered (conservative umbrella).
+    expect(isSecuritySensitivePath('scripts/autopilot/test_canary.py')).toBe(true)
+    expect(isSecuritySensitivePath('scripts/autopilot/test_throttle.py')).toBe(true)
+  })
+
+  it('does NOT match autopilot-prefixed scripts outside the directory (false-positive guard, INV13)', () => {
+    // scripts/autopilot-throttle-buster-sim.sh is a helper at the scripts/ root,
+    // NOT in the scripts/autopilot/ directory -- it must not trigger the Chad seat.
+    expect(isSecuritySensitivePath('scripts/autopilot-throttle-buster-sim.sh')).toBe(false)
+    // A hypothetical future scripts/autopilot-something/ sibling directory.
+    expect(isSecuritySensitivePath('scripts/autopilot-v2/foo.py')).toBe(false)
+  })
 })
 
 describe('runGateCheck requires chad for a gate-code PR (card 88eb6120)', () => {
