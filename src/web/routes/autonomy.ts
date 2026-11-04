@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { PROJECT_ROOT } from '../../config.js'
 import { readBody, json } from '../http-helpers.js'
 import { logger } from '../../logger.js'
+import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
 import type { RouteContext } from './types.js'
 
 const CONFIG_PATH = join(PROJECT_ROOT, 'store', 'autonomy-config.json')
@@ -35,7 +36,7 @@ function saveConfig(config: AutonomyConfig): void {
 }
 
 export async function tryHandleAutonomy(ctx: RouteContext): Promise<boolean> {
-  const { req, res, path, method } = ctx
+  const { req, res, path, method, identity } = ctx
 
   if (path === '/api/autonomy' && method === 'GET') {
     try {
@@ -49,6 +50,16 @@ export async function tryHandleAutonomy(ctx: RouteContext): Promise<boolean> {
   }
 
   if (path === '/api/autonomy' && method === 'POST') {
+    // Admin-scope gate (SEC: shared-bearer forgeable-actor, card 109e3c4d).
+    // POST raises/lowers the fleet-wide autonomy ceiling -- a privileged write.
+    // The shared bearer is readable by every sub-agent, so gating on "a valid
+    // token" alone lets any per-agent token mutate the ceiling. Authorize on the
+    // token-resolved identity with the strict fail-CLOSED shape (undefined
+    // identity -> false). GET /api/autonomy above stays open to any authed token.
+    if (!hasScope(identity?.scopes, ADMIN_SCOPE)) {
+      json(res, { error: 'Forbidden: admin scope required' }, 403)
+      return true
+    }
     try {
       const body = await readBody(req)
       const { key, level } = JSON.parse(body.toString())

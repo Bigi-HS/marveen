@@ -9,6 +9,7 @@ import { MAIN_AGENT_ID } from '../../config.js'
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import { listAgentNames } from '../agent-config.js'
+import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
 import {
   composeNudgePrompt,
   composeSkillPrompt,
@@ -43,7 +44,25 @@ function respondForStatus(res: RouteContext['res'], status: TriggerStatus, agent
 }
 
 export async function tryHandleAgentActions(ctx: RouteContext): Promise<boolean> {
-  const { req, res, path, method } = ctx
+  const { req, res, path, method, identity } = ctx
+
+  // Admin-scope gate (SEC: shared-bearer forgeable-actor, card 109e3c4d).
+  // Every route here injects a prompt into / interrupts another agent's live
+  // tmux pane -- a control-plane write. The dispatcher only proves the caller
+  // holds *a* valid dashboard bearer; since the shared token is readable by
+  // every sub-agent, that alone is forgeable (any per-agent token could drive
+  // any other agent's pane). Authorize on the token-resolved identity instead.
+  // Checked BEFORE isKnownAgent so the 404/403 split can't be used as an
+  // agent-existence oracle, and uses the strict `hasScope(identity?.scopes, ...)`
+  // shape (undefined identity -> false -> fail-CLOSED), never the `identity &&`
+  // fail-OPEN form. GET verbs are not handled by this module.
+  const isAgentActionRoute =
+    method === 'POST' &&
+    (/^\/api\/agents\/[^/]+\/(?:nudge|run-skill|interrupt)$/.test(path))
+  if (isAgentActionRoute && !hasScope(identity?.scopes, ADMIN_SCOPE)) {
+    json(res, { error: 'Forbidden: admin scope required' }, 403)
+    return true
+  }
 
   const nudgeMatch = path.match(/^\/api\/agents\/([^/]+)\/nudge$/)
   if (nudgeMatch && method === 'POST') {
