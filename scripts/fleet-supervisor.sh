@@ -1737,6 +1737,69 @@ g1_apply_send_enter() {
   return 0
 }
 
+# g2_apply_recover <agent> <now>
+# G2 usage-limit modal auto-dismiss (card 9644ed7c G2+G3).
+# Same shape as g1_apply_send_enter: 2-strike + drain-suppress + TOCTOU re-verify
+# + live-effect (Escape then 0) ONLY under DETECTOR_COMMON_ENABLED=1.
+# _G2_RESULT: first_strike | drain_suppress | dismissed | toctou
+_G2_RESULT=""
+g2_apply_recover() {
+  local _n="$1" _now="$2" _reverify _rc
+  _G2_RESULT=""
+  wedge_arm_2strike g2 "$_n"; _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    _G2_RESULT="first_strike"
+    return "$_rc"
+  fi
+  _G2_RESULT="flagged"
+  [ "${DETECTOR_COMMON_ENABLED:-0}" = "1" ] || return 0
+  if command -v effect_drain_check >/dev/null 2>&1 && effect_drain_check "$_n"; then
+    _G2_RESULT="drain_suppress"
+    return 0
+  fi
+  _reverify=$("$TMUX_BIN" capture-pane -t "=agent-$_n:0.0" -p 2>/dev/null) || _reverify=""
+  case "$_reverify" in
+    *"Stop and wait for limit to reset"*|*"Usage limit"*|*"usage limit"*)
+      "$TMUX_BIN" send-keys -t "=agent-$_n:0.0" Escape
+      sleep 0.1
+      "$TMUX_BIN" send-keys -t "=agent-$_n:0.0" '0'
+      log "G2 auto-dismiss: sent Escape+0 to agent-$_n (usage-limit modal confirmed)"
+      _G2_RESULT="dismissed" ;;
+    *)
+      log "G2 auto-dismiss: modal cleared in agent-$_n (TOCTOU guard)"
+      _G2_RESULT="toctou" ;;
+  esac
+  return 0
+}
+
+# g3_apply_recover <agent> <now>
+# G3 login-box auto-dismiss (card 9644ed7c G2+G3, ba53fdee follow-up).
+# 2-strike + TOCTOU re-verify + Escape ONLY under DETECTOR_COMMON_ENABLED=1.
+# _G3_RESULT: first_strike | dismissed | toctou
+_G3_RESULT=""
+g3_apply_recover() {
+  local _n="$1" _now="$2" _reverify _rc
+  _G3_RESULT=""
+  wedge_arm_2strike g3 "$_n"; _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    _G3_RESULT="first_strike"
+    return "$_rc"
+  fi
+  _G3_RESULT="flagged"
+  [ "${DETECTOR_COMMON_ENABLED:-0}" = "1" ] || return 0
+  _reverify=$("$TMUX_BIN" capture-pane -t "=agent-$_n:0.0" -p 2>/dev/null) || _reverify=""
+  case "$_reverify" in
+    *"claude.ai/login"*|*"claude.ai/oauth"*|*"Sign in to Claude"*|*"To sign in"*|*"open this URL in your browser"*)
+      "$TMUX_BIN" send-keys -t "=agent-$_n:0.0" Escape
+      log "G3 auto-dismiss: sent Escape to agent-$_n (login-box confirmed)"
+      _G3_RESULT="dismissed" ;;
+    *)
+      log "G3 auto-dismiss: login box cleared in agent-$_n (TOCTOU guard)"
+      _G3_RESULT="toctou" ;;
+  esac
+  return 0
+}
+
 fleet_wedge_sweep() {
   local now throttle_key last
   now=$(date +%s)
@@ -1820,7 +1883,14 @@ except Exception:
       case "$_state" in
         limit)
           if wedge_sleep_suppress "$_agent" "$now"; then napping_list="$napping_list $_agent"
-          else wedged_list="$wedged_list ${_agent}:G2"; fi ;;
+          else
+            g2_apply_recover "$_agent" "$now"
+            case "$_G2_RESULT" in
+              dismissed) dismissed_list="$dismissed_list ${_agent}:G2" ;;
+              first_strike) ;; # silent first strike, no flag yet
+              *) wedged_list="$wedged_list ${_agent}:G2" ;;
+            esac
+          fi ;;
         survey)
           # 2-strike persistence + TOCTOU-guarded auto-dismiss (b0e189fb / e167dd08).
           g6_apply_2strike "$_agent" "$now"
@@ -1831,12 +1901,20 @@ except Exception:
           # wedge_arm_2strike, so detection is byte-identical to S2.
           if wedge_sleep_suppress "$_agent" "$now"; then napping_list="$napping_list $_agent"
           elif g1_apply_send_enter "$_agent"; then wedged_list="$wedged_list ${_agent}:G1"; fi ;;
-        # login (G3/OAuth re-auth box) is detected by the CLI but NOT wired to a
-        # wedge class here -- wiring would be scope-expansion beyond c72ec834.
-        # TODO(ba53fdee follow-up): when G3 recovery is ready, map login -> G3.
+        login)
+          # G3: OAuth re-auth box. 2-strike + TOCTOU re-verify + Escape recovery
+          # (card 9644ed7c G2+G3, ba53fdee follow-up). Now wired.
+          g3_apply_recover "$_agent" "$now"
+          case "$_G3_RESULT" in
+            dismissed) dismissed_list="$dismissed_list ${_agent}:G3" ;;
+            first_strike) ;; # silent first strike, no flag yet
+            *) wedged_list="$wedged_list ${_agent}:G3" ;;
+          esac ;;
         *) healthy_count=$((healthy_count+1))
            g6_strike_clear "$_agent"              # reset G6 strike on healthy pane
-           wedge_arm_strike_clear g1 "$_agent" ;; # reset G1 strike (consecutive-strike)
+           wedge_arm_strike_clear g1 "$_agent"    # reset G1 strike (consecutive-strike)
+           wedge_arm_strike_clear g2 "$_agent"    # reset G2 strike (usage-limit)
+           wedge_arm_strike_clear g3 "$_agent" ;; # reset G3 strike (login-box)
       esac
     done <<< "$state_map"
   else
