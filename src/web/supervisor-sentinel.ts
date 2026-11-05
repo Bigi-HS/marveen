@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from 'node:child_process'
-import { existsSync, openSync, closeSync, statSync } from 'node:fs'
+import { existsSync, openSync, closeSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { logger } from '../logger.js'
 import { PROJECT_ROOT, MAIN_AGENT_ID } from '../config.js'
@@ -32,6 +32,10 @@ import { notifyChannel } from '../notify.js'
 
 const SUPERVISOR = join(PROJECT_ROOT, 'scripts', 'fleet-supervisor.sh')
 const LOG_FILE = join(PROJECT_ROOT, 'store', 'fleet-supervisor.log')
+// Same path as $LOCK in fleet-supervisor.sh. On WSL2 the kernel may not release
+// an flock when the holder dies, so we rm the stale file before relaunch so the
+// new spawn gets a fresh inode and flock -n 9 succeeds.
+export const LOCK_FILE = join(PROJECT_ROOT, 'store', '.fleet-supervisor.lock')
 // Armorer writes this file before a planned restart and removes it after verify.
 // While it is fresh the single-relaunch alert is suppressed (still relaunched)
 // so a real unexpected crash still stands out. TTL: 30 min; an stale marker is
@@ -85,6 +89,26 @@ export function decideAction(
 let relaunchStamps: number[] = []
 let lastEscalationMs: number | null = null
 
+// Remove a stale lock file left by a dead supervisor process.
+// On WSL2, the kernel may not release an flock when a process dies, leaving
+// fleet-supervisor.sh unable to re-acquire the lock on the next relaunch
+// (exits "another fleet-supervisor is already running (lock held)").
+// Called only after supervisorRunning() has confirmed no live holder, so
+// deleting the file is safe: the new spawn creates a fresh inode.
+// Returns true if the file was deleted, false otherwise.
+export function clearStaleLock(lockPath: string, running: boolean): boolean {
+  if (running) return false
+  try {
+    if (!existsSync(lockPath)) return false
+    unlinkSync(lockPath)
+    logger.warn({ lockPath }, 'supervisor-sentinel: stale flock cleared (WSL2 unreleased lock)')
+    return true
+  } catch (err) {
+    logger.warn({ err, lockPath }, 'supervisor-sentinel: failed to clear stale flock (non-fatal, supervisor spawn may fail)')
+    return false
+  }
+}
+
 // --- IO --------------------------------------------------------------------
 
 // True when a fresh planned-restart marker is present (written by Armorer before
@@ -121,6 +145,8 @@ export function supervisorRunning(): boolean {
 // detached:true makes the child a new session leader (setsid), so a later
 // dashboard restart never orphans or kills the supervisor it started.
 function relaunchSupervisor(): void {
+  // supervisorRunning() already confirmed no live holder; safe to remove.
+  clearStaleLock(LOCK_FILE, false)
   const fd = openSync(LOG_FILE, 'a')
   try {
     const child = spawn('/bin/bash', [SUPERVISOR], {
