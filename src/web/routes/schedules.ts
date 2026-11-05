@@ -36,7 +36,7 @@ export function __setRecordFireFn(fn: typeof recordTriggerFire): void { _recordF
 export function __resetRecordFireFn(): void { _recordFire = recordTriggerFire }
 
 export async function tryHandleSchedules(ctx: RouteContext): Promise<boolean> {
-  const { req, res, path, method } = ctx
+  const { req, res, path, method, url } = ctx
 
   if (path === '/api/schedules/agents' && method === 'GET') {
     const agentNames = listAgentNames()
@@ -110,7 +110,10 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
   }
 
   if (path === '/api/schedules' && method === 'GET') {
-    json(res, listScheduledTasks())
+    const agentFilter = url.searchParams.get('agent')
+    const tasks = listScheduledTasks()
+    const filtered = agentFilter ? tasks.filter(t => t.agent === agentFilter) : tasks
+    json(res, filtered.map(t => ({ ...t, id: t.name })))
     return true
   }
 
