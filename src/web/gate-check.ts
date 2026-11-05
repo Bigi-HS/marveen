@@ -96,8 +96,13 @@ export function isSecuritySensitivePath(filename: string): boolean {
   if (typeof filename !== 'string' || filename.length === 0) return false
   const f = filename.toLowerCase()
 
-  // Directory-rooted patterns: scripts/hooks/** and src/mcp/**.
+  // Directory-rooted patterns: scripts/hooks/**, scripts/autopilot/**, src/mcp/**.
   if (f.startsWith('scripts/hooks/')) return true
+  // INV13 (card f6dd4297): the autopilot module (classifier, tick driver, halt
+  // consumer, canary registry) carries security-relevant logic; PR#883 merged
+  // risky_content.py without an auto-required Chad seat because none of the keyword
+  // patterns matched. Conservative umbrella: the whole directory requires Chad.
+  if (f.startsWith('scripts/autopilot/')) return true
   if (f.startsWith('src/mcp/')) return true
 
   // src/analytics/** (card 8de7e55a, PR#335 gap): the analytics module holds the
