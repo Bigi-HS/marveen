@@ -149,20 +149,26 @@ if [ ! -f "$REPO/dist/index.js" ]; then
   skip 4 "dist/index.js missing -- cannot test abort gate"
 else
   ABORT_EXIT=0
-  # Use NOA_BOOT_SMOKE to get a minimal boot (db-init only, no port conflict with live)
-  # SANDBOX_ISOLATION=1 + live DB path should throw before the DB opens.
-  timeout 10 bash -c "
+  # Use NOA_BOOT_SMOKE to get a minimal boot (db-init only, no port conflict with live).
+  # SANDBOX_ISOLATION=1 + live DB path must throw the guard's specific error message
+  # before the DB opens. A timeout-kill (exit 124) or unrelated crash also gives
+  # non-zero exit -- we must verify the guard's own message in stderr to avoid
+  # false-green (timeout-killed != guard-aborted).
+  ABORT_OUT=$(timeout 5 bash -c "
     cd '$REPO'
     SANDBOX_ISOLATION=1 \
     NOA_DB_PATH=store/noa.db \
     NOA_BOOT_SMOKE=3432 \
     node dist/index.js
-  " >/dev/null 2>&1 || ABORT_EXIT=$?
+  " 2>&1) || ABORT_EXIT=$?
 
-  if [ "$ABORT_EXIT" -ne 0 ]; then
-    pass 4 "SANDBOX_ISOLATION=1 + live DB path -> non-zero exit ($ABORT_EXIT) -- guard fires"
-  else
+  # Guard throws: "SANDBOX_ISOLATION=1 but NOA_DB_PATH resolves to the live database"
+  if echo "$ABORT_OUT" | grep -q "SANDBOX_ISOLATION=1 but NOA_DB_PATH resolves to the live database"; then
+    pass 4 "SANDBOX_ISOLATION=1 + live DB path -> guard abort confirmed (exit $ABORT_EXIT, guard message present)"
+  elif [ "$ABORT_EXIT" -eq 0 ]; then
     fail 4 "SANDBOX_ISOLATION=1 + live DB path -> exit 0 -- isolation guard did NOT abort"
+  else
+    fail 4 "Non-zero exit ($ABORT_EXIT) but guard message NOT found -- may be timeout or other crash, not guard abort. Output: $(echo "$ABORT_OUT" | head -3)"
   fi
 fi
 
