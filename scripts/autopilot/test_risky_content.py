@@ -120,5 +120,62 @@ class NormalizeUnit(unittest.TestCase):
         self.assertFalse(is_risky_instruction(["delete"])[0])
 
 
+class FailDirectionContractTests(unittest.TestCase):
+    """risky_content is a BRAKE-class gate for the autopilot risky-action check.
+
+    Fail-direction contract (C sav: P1 formalizalas, card 9644ed7c Sprint 1):
+    - Fail-SAFE: any unparseable / edge-case input must NOT raise -- it must
+      return (False, None). The gate must never wedge the autopilot.
+    - The DANGEROUS direction (false negative: risky instruction -> SAFE) is
+      covered by ObfuscationBypass and the mixed-separator regression test above.
+    - This class pins the exception-path / edge-case side.
+    """
+
+    def test_non_string_input_does_not_raise(self):
+        for bad in (None, 42, [], {}, b"bytes", object()):
+            with self.subTest(val=bad):
+                try:
+                    result, reason = is_risky_instruction(bad)
+                    self.assertFalse(result, f"non-str input must not be risky: {bad!r}")
+                except Exception as exc:
+                    self.fail(
+                        f"is_risky_instruction raised {type(exc).__name__} on {bad!r}: {exc}"
+                    )
+
+    def test_very_long_input_does_not_raise(self):
+        big = "deploy " * 10_000
+        try:
+            is_risky_instruction(big)
+        except Exception as exc:
+            self.fail(f"very long input raised {type(exc).__name__}: {exc}")
+
+    def test_unicode_edge_cases_do_not_raise(self):
+        cases = [
+            "\x00deploy",           # null byte
+            "dep�loy",         # replacement character
+            "\U0001F600 deploy",    # emoji
+            "‮ deploy",        # RTL override
+            "d" + "​" * 500 + "eploy",  # many zero-width spaces
+        ]
+        for text in cases:
+            with self.subTest(text=repr(text)):
+                try:
+                    is_risky_instruction(text)
+                except Exception as exc:
+                    self.fail(
+                        f"unicode edge case raised {type(exc).__name__} on {text!r}: {exc}"
+                    )
+
+    def test_empty_string_is_not_risky(self):
+        risky, _ = is_risky_instruction("")
+        self.assertFalse(risky)
+
+    def test_whitespace_only_is_not_risky(self):
+        for s in ("   ", "\t\n\r", "　"):
+            with self.subTest(s=repr(s)):
+                risky, _ = is_risky_instruction(s)
+                self.assertFalse(risky, f"whitespace-only flagged as risky: {s!r}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
