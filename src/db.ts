@@ -83,9 +83,9 @@ export function initDatabase(dbPathOverride?: string): void {
       throw new Error(`NOA_DB_PATH resolves via symlink outside the project root: ${process.env['NOA_DB_PATH']}`)
     }
   }
-  // Sandbox isolation gate: abort before opening the live DB when
-  // SANDBOX_ISOLATION=1 (catches a misconfigured sandbox where NOA_DB_PATH
-  // was dropped and fell back to the default live path).
+  // Sandbox isolation gate: abort if SANDBOX_ISOLATION=1 and the resolved
+  // path is the live noa.db (catches a misconfigured sandbox where NOA_DB_PATH
+  // was dropped and the default fell through to the live fleet database).
   if (!useOverride) assertSandboxIsolation(dbPath, PROJECT_ROOT)
   // Step 1: close the TOCTOU window on fresh installs. openSync with 'wx'
   // + 0o600 creates the file ONLY if it doesn't exist and sets the strict
