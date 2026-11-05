@@ -2,6 +2,7 @@ import Database from 'better-sqlite3'
 import { join, sep } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync, realpathSync, statSync } from 'node:fs'
 import { STORE_DIR, DB_FILENAME, PROJECT_ROOT } from './config.js'
+import { assertSandboxIsolation } from './sandbox-guard.js'
 import { logger } from './logger.js'
 import { emitDashboardEvent, type DashboardEvent } from './event-bus.js'
 import { priorityForColumn, columnTypeIsInteger, type PriorityValue } from './priority.js'
@@ -82,6 +83,10 @@ export function initDatabase(dbPathOverride?: string): void {
       throw new Error(`NOA_DB_PATH resolves via symlink outside the project root: ${process.env['NOA_DB_PATH']}`)
     }
   }
+  // Sandbox isolation gate: abort before opening the live DB when
+  // SANDBOX_ISOLATION=1 (catches a misconfigured sandbox where NOA_DB_PATH
+  // was dropped and fell back to the default live path).
+  if (!useOverride) assertSandboxIsolation(dbPath, PROJECT_ROOT)
   // Step 1: close the TOCTOU window on fresh installs. openSync with 'wx'
   // + 0o600 creates the file ONLY if it doesn't exist and sets the strict
   // mode atomically. better-sqlite3 then opens the existing file rather
