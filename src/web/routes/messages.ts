@@ -81,7 +81,27 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       return true
     }
     const effectiveFrom = fromDecision.from.trim()
-    const guard = aiDefenceGuard(effectiveFrom, content.trim())
+    let guard: ReturnType<typeof aiDefenceGuard>
+    try {
+      guard = aiDefenceGuard(effectiveFrom, content.trim())
+    } catch (err) {
+      logger.error({ err, from: effectiveFrom }, 'AIDefence: guard threw, fail-closed BLOCK')
+      try {
+        recordGuardEvent({
+          mechanism: 'guard-error',
+          route: '/api/messages',
+          verdict: 'BLOCK',
+          fromAgent: effectiveFrom,
+          toAgent: to.trim(),
+          patternIds: 'guard-error',
+          maxSeverity: 'critical',
+          findingCount: 1,
+          content: content.trim(),
+        })
+      } catch { /* recorder failure non-fatal; guard already fail-CLOSED */ }
+      json(res, { error: 'Message blocked: security guard error' }, 400)
+      return true
+    }
     // Persist every verdict (PASS included) so block-rate denominators survive
     // the 7-day agent_messages sweep. guard_events has its own 90-day retention.
     const SEVERITY_RANK: Record<Severity, number> = { low: 0, medium: 1, high: 2, critical: 3 }

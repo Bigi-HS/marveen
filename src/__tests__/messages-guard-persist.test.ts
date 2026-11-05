@@ -190,3 +190,33 @@ describe('chad BLOCK→FLAG exemption (card 90c8c74b)', () => {
     expect(row!.verdict).toBe('BLOCK')
   })
 })
+
+// ── A-2 fix: guard throws → fail-CLOSED BLOCK + guard_events evidence row ────
+// Verifies that the 'guard-error' mechanism is accepted by recordGuardEvent,
+// meaning the catch block in messages.ts can persist an audit row on guard crash.
+// The route-level fail-CLOSED (400) is covered by TypeScript compile-time safety:
+// the catch block returns before createAgentMessage.
+
+describe('A-2: guard-error mechanism persisted correctly (card SEC-A2)', () => {
+  it('recordGuardEvent accepts mechanism=guard-error and writes a BLOCK/critical row', async () => {
+    const { recordGuardEvent: rec } = await import('../web/guard-event-recorder.js')
+    expect(() => rec({
+      mechanism: 'guard-error',
+      route: '/api/messages',
+      verdict: 'BLOCK',
+      fromAgent: 'test-agent',
+      toAgent: 'marveen',
+      patternIds: 'guard-error',
+      maxSeverity: 'critical',
+      findingCount: 1,
+      content: 'test',
+    })).not.toThrow()
+
+    const rows = getGuardEvents(5)
+    const row = rows.find(r => r.mechanism === 'guard-error')
+    expect(row).toBeDefined()
+    expect(row!.verdict).toBe('BLOCK')
+    expect(row!.max_severity).toBe('critical')
+    expect(row!.from_agent).toBe('test-agent')
+  })
+})
