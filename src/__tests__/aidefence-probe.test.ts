@@ -32,6 +32,7 @@ function makeDeps(overrides: Partial<AiDefenceProbeDeps> = {}): AiDefenceProbeDe
     guard: aiDefenceGuard,
     record: vi.fn((_input, _nowSec) => { rows.push(makeRow()) }),
     getEvents: vi.fn((_limit?: number, _since?: number) => [...rows]),
+    countNonCoordinatorMessages: vi.fn(() => 0),
     nowSec: () => NOW_SEC,
     ...overrides,
   }
@@ -135,5 +136,68 @@ describe('runAiDefenceProbe -- from_agent scoping', () => {
     })
     const result = runAiDefenceProbe(deps)
     expect(result.recorded).toBe(true)
+  })
+})
+
+// ---- liveness denominator (A-3 fix) --------------------------------------
+
+describe('runAiDefenceProbe -- liveness denominator', () => {
+  it('liveness=unknown and ok=true when no route traffic in window', () => {
+    // No route messages → cannot determine liveness → ok not affected
+    const deps = makeDeps({ countNonCoordinatorMessages: vi.fn(() => 0) })
+    const result = runAiDefenceProbe(deps)
+    expect(result.liveness).toBe('unknown')
+    expect(result.livenessDetail.routeMessages).toBe(0)
+    expect(result.ok).toBe(true)
+  })
+
+  it('liveness=alive when route traffic exists and non-probe guard_events exist', () => {
+    const realRow = makeRow({ from_agent: 'dave', id: 10 })
+    let probeRowAdded = false
+    const deps = makeDeps({
+      countNonCoordinatorMessages: vi.fn(() => 5),
+      record: vi.fn((_input, _nowSec) => { probeRowAdded = true }),
+      getEvents: vi.fn((_limit?: number, _since?: number) => {
+        const probeRow = probeRowAdded ? [makeRow()] : []
+        return [...probeRow, realRow]
+      }),
+    })
+    const result = runAiDefenceProbe(deps)
+    expect(result.liveness).toBe('alive')
+    expect(result.livenessDetail.routeMessages).toBe(5)
+    expect(result.livenessDetail.nonProbeGuardEvents).toBe(1)
+    expect(result.ok).toBe(true)
+  })
+
+  it('liveness=dead and ok=false when route traffic exists but no non-probe guard_events', () => {
+    // Route messages arrived but guard_events only has probe rows → pipeline dead
+    let probeRowAdded = false
+    const deps = makeDeps({
+      countNonCoordinatorMessages: vi.fn(() => 3),
+      record: vi.fn((_input, _nowSec) => { probeRowAdded = true }),
+      getEvents: vi.fn((_limit?: number, _since?: number) => {
+        return probeRowAdded ? [makeRow()] : []
+      }),
+    })
+    const result = runAiDefenceProbe(deps)
+    expect(result.liveness).toBe('dead')
+    expect(result.livenessDetail.routeMessages).toBe(3)
+    expect(result.livenessDetail.nonProbeGuardEvents).toBe(0)
+    expect(result.ok).toBe(false)
+  })
+
+  it('coordinator-direct messages do not trigger DEAD (routeMessages=0 → unknown)', () => {
+    // countNonCoordinatorMessages=0 means only coordinator-direct traffic, not route
+    const deps = makeDeps({ countNonCoordinatorMessages: vi.fn(() => 0) })
+    const result = runAiDefenceProbe(deps)
+    expect(result.liveness).toBe('unknown')
+    expect(result.ok).toBe(true)
+  })
+
+  it('passes window start (nowSec - 3600) to countNonCoordinatorMessages', () => {
+    const countFn = vi.fn(() => 0)
+    const deps = makeDeps({ countNonCoordinatorMessages: countFn })
+    runAiDefenceProbe(deps)
+    expect(countFn).toHaveBeenCalledWith(NOW_SEC - 3600)
   })
 })

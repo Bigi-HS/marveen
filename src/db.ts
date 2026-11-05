@@ -168,6 +168,7 @@ export function initDatabase(dbPathOverride?: string): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_messages_status ON agent_messages(status, to_agent)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_messages_created ON agent_messages(created_at)`)
   // Migration: add ack_expected to agent_messages (delivery ACK protocol, card
   // 1a99b7e2). Older installs created the table without it. Opt-in per message;
   // default 0 so nothing is tracked until a sender sets it (no cry-wolf).
@@ -1088,6 +1089,17 @@ export const MESSAGE_RETENTION_SEC = 7 * 24 * 60 * 60
 export function deleteOldMessages(nowSec: number, retentionSec: number = MESSAGE_RETENTION_SEC): number {
   const cutoff = nowSec - retentionSec
   return db.prepare('DELETE FROM agent_messages WHERE created_at < ?').run(cutoff).changes
+}
+
+// Count agent_messages that arrived via POST /api/messages (not coordinator-direct
+// inserts). The coordinator writes directly to the DB under its own agent id, so
+// filtering it out approximates route traffic. Used by the aiDefence liveness probe
+// to distinguish "quiet period" from "guard pipeline dead".
+export function countNonCoordinatorMessages(sinceSec: number, coordinatorId: string): number {
+  const row = db.prepare(
+    'SELECT COUNT(*) as cnt FROM agent_messages WHERE from_agent != ? AND created_at >= ?'
+  ).get(coordinatorId, sinceSec) as { cnt: number }
+  return row.cnt
 }
 
 // card 0ae61457 (A2): persist escalation timestamp for the pending-message
