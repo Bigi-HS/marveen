@@ -84,6 +84,58 @@ class DecideTests(unittest.TestCase):
         self.assertFalse(block)
 
 
+class DetectorContractTests(unittest.TestCase):
+    """telegram-chat is a BRAKE-class guardrail: fail-OPEN on every ambiguity
+    (unresolved allowlist, missing chat_id, non-dict input). Hard-block only on
+    a positively-matched foreign chat_id.
+
+    Detector-contract (C sav: P1 formalizalas, card 9644ed7c Sprint 1):
+    - Fail-direction: fail-OPEN (exit 0) on all error/ambiguity paths.
+    - FP-bypass: allowlisted chat_id ALWAYS passes through.
+    - Veszélyes oldal (pozitív-kontroll): foreign chat_id -> hard-block (exit 2),
+      pinned by test_block_exit_2_on_foreign_chat in EndToEndTests and
+      test_blocks_foreign_chat_on_reply in DecideTests.
+
+    This class holds the explicit contract assertions. The load-bearing
+    falsifying fixtures are in DecideTests (veszélyes oldal: foreign chat)
+    and EndToEndTests (subprocess, full IO path).
+    """
+
+    def test_contract_fail_open_on_unresolved_allowlist(self):
+        # Unresolvable allowlist -> allow (not block blind).
+        block, _ = guard.decide(
+            {"tool_name": REPLY, "tool_input": {"chat_id": "malicious-id"}}, None)
+        self.assertFalse(
+            block,
+            "unresolved allowlist (None) must yield ALLOW -- never block blind"
+        )
+
+    def test_contract_fp_bypass_allowlisted_chat(self):
+        # Allowlisted chat_id must NEVER be blocked regardless of message content.
+        block, _ = guard.decide(
+            {"tool_name": REPLY, "tool_input": {"chat_id": "8643929442", "text": "deploy now"}},
+            ALLOW,
+        )
+        self.assertFalse(block, "allowlisted chat_id must pass even with risky-looking text")
+
+    def test_contract_fp_bypass_non_guarded_tool(self):
+        # Only GUARDED_TOOLS can be blocked -- react/download_attachment are not guarded.
+        for tool in ("mcp__plugin_telegram_telegram__react",
+                     "mcp__plugin_telegram_telegram__download_attachment",
+                     "Bash", "Read"):
+            with self.subTest(tool=tool):
+                block, _ = guard.decide(
+                    {"tool_name": tool, "tool_input": {"chat_id": "malicious-id"}}, ALLOW)
+                self.assertFalse(block, f"non-guarded tool must ALLOW: {tool}")
+
+    def test_contract_dangerous_side_foreign_chat_blocks(self):
+        # Veszélyes oldal: a foreign chat_id MUST be blocked.
+        block, reason = guard.decide(
+            {"tool_name": REPLY, "tool_input": {"chat_id": "foreign-999"}}, ALLOW)
+        self.assertTrue(block, "foreign chat_id must be BLOCKED (dangerous-side assertion)")
+        self.assertIn("foreign-999", reason)
+
+
 class ResolveAllowlistTests(unittest.TestCase):
     def _write(self, d, data):
         p = os.path.join(d, "access.json")

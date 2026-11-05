@@ -200,5 +200,87 @@ class TestBuildIdMap(unittest.TestCase):
         self.assertEqual(result, {})
 
 
+# ---------------------------------------------------------------------------
+# Detector-contract (C sav: P1 formalizalas, card 9644ed7c Sprint 1)
+# ---------------------------------------------------------------------------
+class DetectorContractTests(unittest.TestCase):
+    """name-gate is a SOFT-BLOCK guardrail: fail-OPEN on every error/ambiguity,
+    never hard-deny. Fail-direction (LEGFONTOSABB invarians): any input shape
+    that falls outside the guard's scope -> exit 0 (allow), never raises.
+
+    Veszélyes oldal: routing-id megjelenik Boss-facing szövegben -> soft-block
+    (exit 2). Ez a "pozitív-kontroll" irány, tesztelve a TestFindRoutingIds
+    FN-class fixtúráiban.
+
+    Ez az osztály a fail-OPEN + robustness kontraktust assertálja -- azaz az
+    over-blocking / exception irányát zárja.
+    """
+
+    def test_extract_text_does_not_raise_on_non_dict_payload(self):
+        # name-gate contract: ANY non-dict input -> (None, False), never raises.
+        for bad in (None, "string", 42, [], b"bytes"):
+            with self.subTest(payload=bad):
+                try:
+                    text, is_guarded = _hook.extract_text(bad)
+                except Exception as exc:
+                    self.fail(
+                        f"extract_text raised {type(exc).__name__} on {bad!r}: {exc}"
+                    )
+                self.assertFalse(
+                    is_guarded,
+                    f"non-dict payload must yield is_guarded=False, got True on {bad!r}"
+                )
+
+    def test_extract_text_does_not_raise_on_missing_fields(self):
+        for payload in (
+            {},
+            {"tool_name": None},
+            {"tool_name": "mcp__plugin_telegram_telegram__reply"},
+            {"tool_name": "mcp__plugin_telegram_telegram__reply", "tool_input": None},
+            {"tool_name": "Bash"},
+            {"tool_name": "Bash", "tool_input": None},
+        ):
+            with self.subTest(payload=payload):
+                try:
+                    _hook.extract_text(payload)
+                except Exception as exc:
+                    self.fail(
+                        f"extract_text raised {type(exc).__name__} on {payload!r}: {exc}"
+                    )
+
+    def test_find_routing_ids_does_not_raise_on_bad_text(self):
+        # Non-string text arg -> empty list, no exception. The function's
+        # caller (main) must pass the text from extract_text which can be
+        # None; find_routing_ids must tolerate that gracefully.
+        for bad_text in (None, 42, [], {}):
+            with self.subTest(text=bad_text):
+                try:
+                    result = _hook.find_routing_ids(
+                        bad_text if isinstance(bad_text, str) else "", FAKE_ID_MAP
+                    )
+                    self.assertIsInstance(result, list)
+                except Exception as exc:
+                    self.fail(
+                        f"find_routing_ids raised {type(exc).__name__} on {bad_text!r}: {exc}"
+                    )
+
+    def test_fp_bypass_non_routing_text_never_blocks(self):
+        # FP-bypass contract: benign Boss-facing text with zero routing-ids
+        # must never trigger a soft-block.
+        benign = [
+            "Minden kész, haladunk a build-del.",
+            "Dave approve-olta.",
+            "Az Armorer deployolja.",
+            "Dr. Stone megtalálta a repot.",
+        ]
+        for text in benign:
+            with self.subTest(text=text):
+                found = _hook.find_routing_ids(text, _hook.build_id_map())
+                self.assertEqual(
+                    found, [],
+                    f"benign text triggered soft-block: {text!r} -> {found}"
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

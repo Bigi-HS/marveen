@@ -15,6 +15,7 @@ Applier field distinguishes between writers: 'curator-applyer' (default), 'vault
 """
 
 import json
+import os
 import sqlite3
 import sys
 import urllib.parse
@@ -22,9 +23,15 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-PROPOSALS_FILE = Path('/home/domin/marveen/store/vault-lint-l2-proposals.json')
-DB_PATH = Path('/home/domin/marveen/store/noa.db')
-LOG_DIR = Path('/home/domin/marveen/store')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from db_resolve import resolve_default_db  # noqa: E402
+
+_SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+_REPO_ROOT = _SCRIPT_DIR.parent
+
+PROPOSALS_FILE = _REPO_ROOT / 'store' / 'vault-lint-l2-proposals.json'
+DB_PATH = Path(resolve_default_db())
+LOG_DIR = _REPO_ROOT / 'store'
 ALLOWED_MIGRATIONS = {('hot', 'warm'), ('warm', 'cold')}
 APPLIER_NAME = 'vault-lint-tm1-executor'
 
