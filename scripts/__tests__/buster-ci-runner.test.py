@@ -290,6 +290,74 @@ class TestNodeModulesSymlink(unittest.TestCase):
             )
 
 
+class TestTokenResolution(unittest.TestCase):
+    """_token: per-agent GENESIS_AGENT_TOKEN must take priority over shared operator file."""
+
+    def _load_fresh(self):
+        """Reload module so TOKEN_CANDIDATES / module-level state is re-evaluated."""
+        return _load_runner()
+
+    def test_buster_ci_token_env_takes_priority(self):
+        """BUSTER_CI_TOKEN override wins over everything else."""
+        mod = self._load_fresh()
+        with patch.dict(os.environ, {'BUSTER_CI_TOKEN': 'explicit_override',
+                                     'GENESIS_AGENT_TOKEN': 'per_agent_tok'}, clear=False):
+            tok = mod._token()
+        self.assertEqual(tok, 'explicit_override')
+
+    def test_genesis_agent_token_used_when_no_buster_ci_token(self):
+        """GENESIS_AGENT_TOKEN is the per-agent identity token (agent-token-env.sh export)."""
+        mod = self._load_fresh()
+        env = dict(os.environ)
+        env.pop('BUSTER_CI_TOKEN', None)
+        env['GENESIS_AGENT_TOKEN'] = 'per_agent_genesis_token'
+        with patch.dict(os.environ, env, clear=True):
+            tok = mod._token()
+        self.assertEqual(tok, 'per_agent_genesis_token')
+
+    def test_operator_file_fallback_when_no_env_tokens(self):
+        """When env tokens are absent, fall back to the shared operator token file."""
+        mod = self._load_fresh()
+        env = dict(os.environ)
+        env.pop('BUSTER_CI_TOKEN', None)
+        env.pop('GENESIS_AGENT_TOKEN', None)
+        fake_path = MagicMock()
+        fake_path.exists.return_value = True
+        fake_path.read_text.return_value = 'operator_fallback_token'
+        mod._OPERATOR_TOKEN_FILE = fake_path
+        with patch.dict(os.environ, env, clear=True):
+            tok = mod._token()
+        self.assertEqual(tok, 'operator_fallback_token')
+
+    def test_raises_when_no_token_available(self):
+        """RuntimeError when no env token and no operator file."""
+        mod = self._load_fresh()
+        env = dict(os.environ)
+        env.pop('BUSTER_CI_TOKEN', None)
+        env.pop('GENESIS_AGENT_TOKEN', None)
+        fake_path = MagicMock()
+        fake_path.exists.return_value = False
+        mod._OPERATOR_TOKEN_FILE = fake_path
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(RuntimeError):
+                mod._token()
+
+    def test_genesis_token_beats_operator_file(self):
+        """GENESIS_AGENT_TOKEN must win over the shared file even when the file exists."""
+        mod = self._load_fresh()
+        fake_path = MagicMock()
+        fake_path.exists.return_value = True
+        fake_path.read_text.return_value = 'shared_operator_token'
+        mod._OPERATOR_TOKEN_FILE = fake_path
+        env = dict(os.environ)
+        env.pop('BUSTER_CI_TOKEN', None)
+        env['GENESIS_AGENT_TOKEN'] = 'per_agent_wins'
+        with patch.dict(os.environ, env, clear=True):
+            tok = mod._token()
+        self.assertEqual(tok, 'per_agent_wins')
+        fake_path.read_text.assert_not_called()
+
+
 if __name__ == '__main__':
     if not _RUNNER_PATH.exists():
         print(f'SKIP: {_RUNNER_PATH} not found')
