@@ -35,24 +35,32 @@ GITHUB_REPO = 'Bigi-HS/marveen'
 GITHUB_API = 'https://api.github.com'
 BUNDLE_SCRIPT = INSTALL_DIR / 'scripts' / 'pre-gate-bundle.sh'
 DASH_API = 'http://localhost:3420'
-# Token file: try the Buster per-agent token first; operator token as fallback.
-TOKEN_CANDIDATES = [
-    INSTALL_DIR / 'agents' / 'buster' / 'store' / '.dashboard-token',
-    INSTALL_DIR / 'store' / '.dashboard-token',
-]
+# Shared operator token fallback (identity = marveen, not buster).
+# Used only when no per-agent token is available; the CI route still accepts it
+# but records_by = operator identity, not 'buster', which loses CI independence.
+_OPERATOR_TOKEN_FILE = INSTALL_DIR / 'store' / '.dashboard-token'
 MAX_CONCURRENT_PRS = 1   # run one at a time (worktrees are expensive)
 PR_TIMEOUT_S = 600       # 10 minutes per PR (tsc+vitest can be slow)
 
 
 def _token():
+    # Priority 1: explicit override for testing
     override = os.environ.get('BUSTER_CI_TOKEN')
     if override:
         return override
-    for p in TOKEN_CANDIDATES:
-        if p.exists():
-            return p.read_text().strip()
-    raise RuntimeError('No Buster CI token file found. Set BUSTER_CI_TOKEN or ensure '
-                       'agents/buster/store/.dashboard-token or store/.dashboard-token exists.')
+    # Priority 2: per-agent token exported by agent-token-env.sh.
+    # This is the identity-bound token that makes the CI post record
+    # recorded_by='buster' and satisfy the CI_RUNNER independence invariant.
+    genesis_token = os.environ.get('GENESIS_AGENT_TOKEN')
+    if genesis_token:
+        return genesis_token
+    # Priority 3: shared operator token (fall-back; loses per-agent identity).
+    if _OPERATOR_TOKEN_FILE.exists():
+        return _OPERATOR_TOKEN_FILE.read_text().strip()
+    raise RuntimeError(
+        'No Buster CI token available. Expected GENESIS_AGENT_TOKEN in env '
+        '(set by agent-token-env.sh on launch) or store/.dashboard-token as fallback.'
+    )
 
 
 def _github_token() -> str:
