@@ -358,6 +358,87 @@ class TestTokenResolution(unittest.TestCase):
         fake_path.read_text.assert_not_called()
 
 
+class TestWorktreeBundleSelection(unittest.TestCase):
+    """_run_bundle_in_worktree must use the WORKTREE's own bundle script when it exists.
+
+    Root cause (card 55d37e01): the runner previously always used BUNDLE_SCRIPT
+    (resolved from INSTALL_DIR = main checkout). The main checkout's
+    pre-gate-bundle.sh derives its own INSTALL_DIR from BASH_SOURCE, so whole-tree
+    checks (lint, python tests) ran against the main checkout -- including untracked
+    dist.backup-* junk and whatever branch the main checkout was on -- not the clean
+    PR worktree. This caused false BLOCK verdicts on PRs that were clean in isolation.
+    """
+
+    def _bundle_pass(self):
+        return {
+            'verdict': 'PASS', 'diff_additions': 0,
+            'checks': [
+                {'name': 'typecheck', 'status': 'PASS', 'detail': ''},
+                {'name': 'tests', 'status': 'PASS', 'detail': ''},
+            ],
+        }
+
+    def _capture_bundle_cmd(self, mod, wt_bundle_exists: bool):
+        """Run _run_bundle_in_worktree and capture the bundle subprocess command.
+
+        Uses a real temporary directory so Path.exists() gives accurate results
+        without patching the Path class -- which is fragile across Python versions.
+        """
+        import subprocess as sp_module
+        import json as _json
+        import tempfile
+        import shutil
+
+        bundle_cmds = []
+
+        def fake_run(cmd, **kwargs):
+            cmd_str = ' '.join(str(c) for c in cmd)
+            if 'pre-gate-bundle' in cmd_str:
+                bundle_cmds.append(list(cmd))
+                return MagicMock(returncode=0,
+                                 stdout=_json.dumps(self._bundle_pass()), stderr='')
+            return MagicMock(returncode=0, stdout='', stderr='')
+
+        tmp = tempfile.mkdtemp()
+        try:
+            if wt_bundle_exists:
+                scripts_dir = os.path.join(tmp, 'scripts')
+                os.makedirs(scripts_dir, exist_ok=True)
+                open(os.path.join(scripts_dir, 'pre-gate-bundle.sh'), 'w').close()
+
+            with patch.object(sp_module, 'run', side_effect=fake_run):
+                with patch('tempfile.mkdtemp', return_value=tmp):
+                    with patch('shutil.rmtree'):
+                        with patch('os.symlink'):
+                            mod._run_bundle_in_worktree(
+                                pr_number=42, head_sha='a' * 40,
+                                base_branch='develop', dry_run=False
+                            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        return bundle_cmds, tmp
+
+    def test_uses_worktree_bundle_when_present(self):
+        """When wt/scripts/pre-gate-bundle.sh exists, it must be used -- not INSTALL_DIR's."""
+        mod = _load_runner()
+        cmds, wt_root = self._capture_bundle_cmd(mod, wt_bundle_exists=True)
+        self.assertTrue(cmds, 'No bundle subprocess call captured')
+        bundle_script_used = str(cmds[0][1])  # bash <script> ...
+        self.assertIn(wt_root, bundle_script_used,
+            f'Expected worktree bundle path ({wt_root}/...), got: {bundle_script_used!r}')
+        self.assertNotEqual(bundle_script_used, str(mod.BUNDLE_SCRIPT),
+            'Should NOT use the main-checkout BUNDLE_SCRIPT when worktree copy exists')
+
+    def test_falls_back_to_install_dir_bundle_when_worktree_copy_absent(self):
+        """When wt/scripts/pre-gate-bundle.sh is absent, fall back to INSTALL_DIR bundle."""
+        mod = _load_runner()
+        cmds, _ = self._capture_bundle_cmd(mod, wt_bundle_exists=False)
+        self.assertTrue(cmds, 'No bundle subprocess call captured')
+        bundle_script_used = str(cmds[0][1])
+        self.assertEqual(bundle_script_used, str(mod.BUNDLE_SCRIPT),
+            f'Expected INSTALL_DIR fallback, got: {bundle_script_used!r}')
+
+
 if __name__ == '__main__':
     if not _RUNNER_PATH.exists():
         print(f'SKIP: {_RUNNER_PATH} not found')

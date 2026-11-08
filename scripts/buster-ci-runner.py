@@ -162,9 +162,16 @@ def _run_bundle_in_worktree(pr_number: int, head_sha: str, base_branch: str,
         if not nm_link.exists():
             os.symlink(str(INSTALL_DIR / 'node_modules'), str(nm_link))
 
-        # Run pre-gate-bundle.sh with --json
+        # Run the WORKTREE's own pre-gate-bundle.sh so the bundle's BASH_SOURCE-
+        # derived INSTALL_DIR points at the clean merge-ref worktree -- not the
+        # main checkout. The main checkout can be on a different branch and carry
+        # untracked dist.backup-* junk, causing whole-tree checks (lint, python
+        # tests) to produce false BLOCK verdicts unrelated to the PR under test
+        # (card 55d37e01).
+        wt_bundle = wt_dir / 'scripts' / 'pre-gate-bundle.sh'
+        bundle_script = wt_bundle if wt_bundle.exists() else BUNDLE_SCRIPT
         result = subprocess.run(
-            ['bash', str(BUNDLE_SCRIPT), base_branch, head_sha, '--json'],
+            ['bash', str(bundle_script), base_branch, head_sha, '--json'],
             capture_output=True, text=True, cwd=str(wt_dir), timeout=PR_TIMEOUT_S
         )
 
