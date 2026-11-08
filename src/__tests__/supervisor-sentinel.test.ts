@@ -1,7 +1,8 @@
 import { describe, expect, it, afterEach } from 'vitest'
 import { readFileSync, writeFileSync, unlinkSync, utimesSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { decideAction, pruneStamps, supervisorRunning, isPlannedRestartWindow, PLANNED_RESTART_MARKER } from '../web/supervisor-sentinel.js'
+import { tmpdir } from 'node:os'
+import { decideAction, pruneStamps, supervisorRunning, isPlannedRestartWindow, clearStaleLock, PLANNED_RESTART_MARKER } from '../web/supervisor-sentinel.js'
 
 // The sentinel's behaviour lives in a pure decision (decideAction) so the
 // crash-loop / backoff / escalate logic is testable without spawning processes.
@@ -92,6 +93,31 @@ describe('isPlannedRestartWindow', () => {
   })
 })
 
+describe('clearStaleLock', () => {
+  const tmpLock = join(tmpdir(), 'test-fleet-supervisor-stale.lock')
+
+  afterEach(() => {
+    if (existsSync(tmpLock)) unlinkSync(tmpLock)
+  })
+
+  it('removes the lock file when supervisor is not running (WSL2 stale-flock scenario)', () => {
+    writeFileSync(tmpLock, '')
+    expect(clearStaleLock(tmpLock, false)).toBe(true)
+    expect(existsSync(tmpLock)).toBe(false)
+  })
+
+  it('does NOT clear lock when supervisor IS running', () => {
+    writeFileSync(tmpLock, '')
+    expect(clearStaleLock(tmpLock, true)).toBe(false)
+    expect(existsSync(tmpLock)).toBe(true)
+  })
+
+  it('returns false (no-op) when lock file is absent', () => {
+    expect(existsSync(tmpLock)).toBe(false)
+    expect(clearStaleLock(tmpLock, false)).toBe(false)
+  })
+})
+
 describe('safety contract', () => {
   it('relaunches setsid-detached (detached:true) so a dashboard restart cannot orphan it', () => {
     expect(SRC).toMatch(/detached:\s*true/)
@@ -121,5 +147,10 @@ describe('safety contract', () => {
   it('detects the supervisor via a cmdline that the node dashboard cannot self-match', () => {
     expect(SRC).toMatch(/pgrep/)
     expect(SRC).toMatch(/fleet-supervisor/)
+  })
+
+  it('clears stale lock before relaunch (WSL2 stale-flock guard)', () => {
+    expect(SRC).toMatch(/clearStaleLock/)
+    expect(SRC).toMatch(/LOCK_FILE/)
   })
 })
