@@ -11,6 +11,7 @@ import { migrateGateTables } from './web/gate-db.js'
 import { migrateAgentTokenTable } from './web/agent-token-registry.js'
 import { migrateAckRegistry } from './web/ack-registry.js'
 import { migrateCuratorVerdicts } from './curator-verdicts.js'
+import { migrateTelemetryTables } from './web/telemetry.js'
 
 let db: Database.Database
 
@@ -475,6 +476,14 @@ export function initDatabase(dbPathOverride?: string): void {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error('[db] curator_verdicts migration failed:', msg)
+  }
+
+  // P0 telemetry event bus (card 8b3b0408). Append-only event log + daily rollup.
+  try {
+    migrateTelemetryTables(db)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[db] telemetry migration failed:', msg)
   }
 
   // One-shot migration from the old JSON file (which had a read-modify-write
