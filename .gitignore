@@ -3,6 +3,7 @@ node_modules/
 dist/
 # Armorer deploy backups (rollback points, never source) -- exclude from tmux-anchor-lint scan
 dist-backup-*/
+dist.backup-*/
 dist-staged-*/
 
 # Secrets & personal data
