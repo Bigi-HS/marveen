@@ -24,7 +24,7 @@ import {
 } from '../db.js'
 
 // Use in-memory database for tests to avoid polluting the live vault.
-// Each test run gets a fresh, isolated DB that doesn't affect store/claudeclaw.db.
+// Each test run gets a fresh, isolated DB that doesn't affect store/noa.db.
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
   initDatabase(':memory:')
@@ -285,5 +285,26 @@ describe('getMessageStatusesByIds (A2 boot-fold reconcile)', () => {
 
   it('returns an empty map for no ids', () => {
     expect(getMessageStatusesByIds([]).size).toBe(0)
+  })
+})
+
+describe('claudeclaw.db retire guard (ENG-024)', () => {
+  const origEnv = process.env['NOA_DB_PATH']
+
+  afterAll(() => {
+    if (origEnv === undefined) delete process.env['NOA_DB_PATH']
+    else process.env['NOA_DB_PATH'] = origEnv
+    // Restore in-memory DB for any tests that run after this block
+    initDatabase(':memory:')
+  })
+
+  it('throws when NOA_DB_PATH resolves to claudeclaw.db', () => {
+    process.env['NOA_DB_PATH'] = 'store/claudeclaw.db'
+    expect(() => initDatabase()).toThrow(/claudeclaw\.db.*retired/i)
+  })
+
+  it('throws for CLAUDECLAW.DB (case-insensitive)', () => {
+    process.env['NOA_DB_PATH'] = 'store/CLAUDECLAW.DB'
+    expect(() => initDatabase()).toThrow(/claudeclaw\.db.*retired/i)
   })
 })
