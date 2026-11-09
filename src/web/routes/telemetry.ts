@@ -16,6 +16,7 @@ import {
   insertTelemetryEvent,
   insertTelemetryBatch,
   queryTelemetryEdges,
+  queryTelemetrySeries,
   type TelemetryEventInput,
 } from '../telemetry.js'
 import type { RouteContext } from './types.js'
@@ -86,6 +87,21 @@ export async function tryHandleTelemetry(ctx: RouteContext): Promise<boolean> {
 
     const edges = queryTelemetryEdges(getDb(), { fromTs, toTs, actor, limit })
     json(res, { edges, count: edges.length })
+    return true
+  }
+
+  // GET /api/telemetry/series -- daily trend from telemetry_daily (cost / tokens / session-wake).
+  // Query params: metric=cost|tokens|session-wake  from=YYYY-MM-DD  to=YYYY-MM-DD  actor=  limit=
+  if (path === '/api/telemetry/series' && method === 'GET') {
+    const metric = url.searchParams.get('metric') ?? undefined
+    const fromDay = url.searchParams.get('from') ?? undefined
+    const toDay = url.searchParams.get('to') ?? undefined
+    const actor = url.searchParams.get('actor') ?? undefined
+    const limit = url.searchParams.get('limit')
+      ? parseInt(url.searchParams.get('limit')!, 10) : undefined
+
+    const series = queryTelemetrySeries(getDb(), { metric, fromDay, toDay, actor, limit })
+    json(res, { series, metric: metric ?? 'all', count: series.length })
     return true
   }
 

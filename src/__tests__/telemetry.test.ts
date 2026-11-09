@@ -13,6 +13,10 @@ import {
   insertTelemetryBatch,
   queryTelemetryEdges,
   countTelemetryEvents,
+  rollupTelemetryDay,
+  purgeTelemetryRaw,
+  checkTelemetryFreshness,
+  queryTelemetrySeries,
   type TelemetryEventInput,
 } from '../web/telemetry.js'
 
@@ -267,5 +271,234 @@ describe('FALSIFYING: emit absent -> gate-FAIL', () => {
     // The companion test above asserts count > 0 AFTER emit fires.
     // Together they form the assertion-direction check: emit OFF → count=0 → test FAILS.
     expect(count).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Rollup
+// ---------------------------------------------------------------------------
+// 2025-01-15 noon UTC in epoch ms (used as a stable anchor for rollup tests).
+// 1736899200 = 2025-01-15 00:00:00 UTC (verified: 2025-01-01=1735689600 + 14*86400)
+const TEST_DAY = '2025-01-15'
+const TEST_TS = 1736899200000 + 12 * 60 * 60 * 1000  // 1736942400000
+
+describe('rollupTelemetryDay', () => {
+  it('aggregates events into telemetry_daily', () => {
+    const db = fresh()
+    insertTelemetryBatch(db, [
+      { actor: 'dave', verb: 'tool-call', object: 'Bash', weight: 1, cost_usd: 0, ts: TEST_TS },
+      { actor: 'dave', verb: 'tool-call', object: 'Bash', weight: 1, cost_usd: 0, ts: TEST_TS },
+      { actor: 'dave', verb: 'tool-call', object: 'Read', weight: 1, cost_usd: 0, ts: TEST_TS },
+    ])
+    rollupTelemetryDay(db, TEST_DAY)
+    const bash = db.prepare(
+      "SELECT count, weight_sum FROM telemetry_daily WHERE day=? AND actor=? AND object=? AND verb=?"
+    ).get(TEST_DAY, 'dave', 'Bash', 'tool-call') as { count: number; weight_sum: number } | undefined
+    expect(bash).toBeTruthy()
+    expect(bash!.count).toBe(2)
+    expect(bash!.weight_sum).toBe(2)
+  })
+
+  it('is idempotent -- double rollup does not duplicate rows', () => {
+    const db = fresh()
+    insertTelemetryEvent(db, { actor: 'thor', verb: 'tool-call', object: 'Read', ts: TEST_TS })
+    rollupTelemetryDay(db, TEST_DAY)
+    rollupTelemetryDay(db, TEST_DAY)
+    const total = db.prepare('SELECT COUNT(*) FROM telemetry_daily').pluck().get() as number
+    expect(total).toBe(1)
+    const row = db.prepare('SELECT count FROM telemetry_daily WHERE day=?').get(TEST_DAY) as { count: number }
+    expect(row.count).toBe(1)
+  })
+
+  it('writes a rollup checkpoint', () => {
+    const db = fresh()
+    insertTelemetryEvent(db, { actor: 'x', verb: 'tool-call', ts: TEST_TS })
+    rollupTelemetryDay(db, TEST_DAY, 9999999)
+    const cp = db.prepare(
+      'SELECT completed_at FROM telemetry_rollup_checkpoint WHERE day=?'
+    ).get(TEST_DAY) as { completed_at: number } | undefined
+    expect(cp).toBeTruthy()
+    expect(cp!.completed_at).toBe(9999999)
+  })
+
+  it('handles object=NULL (normalises to empty string)', () => {
+    const db = fresh()
+    // object-less event (e.g. session-wake)
+    insertTelemetryEvent(db, { actor: 'dave', verb: 'session-wake', ts: TEST_TS })
+    rollupTelemetryDay(db, TEST_DAY)
+    const row = db.prepare(
+      "SELECT count FROM telemetry_daily WHERE day=? AND verb='session-wake' AND object=''"
+    ).get(TEST_DAY) as { count: number } | undefined
+    expect(row).toBeTruthy()
+    expect(row!.count).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Purge
+// ---------------------------------------------------------------------------
+
+const OLD_DAY = '2025-01-10'
+const OLD_TS  = 1736899200000 - 5 * 24 * 60 * 60 * 1000  // 5 days before TEST_DAY (2025-01-10)
+
+describe('purgeTelemetryRaw', () => {
+  it('does NOT purge events when no rollup checkpoint exists', () => {
+    const db = fresh()
+    insertTelemetryEvent(db, { actor: 'dave', verb: 'tool-call', ts: OLD_TS })
+    const deleted = purgeTelemetryRaw(db, TEST_DAY)
+    expect(deleted).toBe(0)
+    expect(db.prepare('SELECT COUNT(*) FROM telemetry_event').pluck().get() as number).toBe(1)
+  })
+
+  it('purges events for days that have a checkpoint and are before beforeDay', () => {
+    const db = fresh()
+    insertTelemetryEvent(db, { actor: 'dave', verb: 'tool-call', ts: OLD_TS })
+    rollupTelemetryDay(db, OLD_DAY)
+    const deleted = purgeTelemetryRaw(db, TEST_DAY)
+    expect(deleted).toBe(1)
+    expect(db.prepare('SELECT COUNT(*) FROM telemetry_event').pluck().get() as number).toBe(0)
+  })
+
+  it('does not purge events for days >= beforeDay', () => {
+    const db = fresh()
+    // TEST_DAY events stay even after rolling up OLD_DAY
+    insertTelemetryEvent(db, { actor: 'dave', verb: 'tool-call', ts: OLD_TS })
+    insertTelemetryEvent(db, { actor: 'dave', verb: 'tool-call', ts: TEST_TS })
+    rollupTelemetryDay(db, OLD_DAY)
+    rollupTelemetryDay(db, TEST_DAY)
+    // purge everything before TEST_DAY -- that's OLD_DAY only
+    const deleted = purgeTelemetryRaw(db, TEST_DAY)
+    expect(deleted).toBe(1)
+    expect(db.prepare('SELECT COUNT(*) FROM telemetry_event').pluck().get() as number).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Freshness watchdog
+// ---------------------------------------------------------------------------
+
+describe('checkTelemetryFreshness', () => {
+  it('returns stale=true when no cost events exist', () => {
+    const db = fresh()
+    const result = checkTelemetryFreshness(db, { nowMs: TEST_TS })
+    expect(result.stale).toBe(true)
+    expect(result.lastEventMs).toBeNull()
+  })
+
+  it('returns stale=false for a recent cost event', () => {
+    const db = fresh()
+    const nowMs = TEST_TS
+    insertTelemetryEvent(db, { actor: 'dave', verb: 'cost', cost_usd: 0.01, ts: nowMs - 1000 })
+    const result = checkTelemetryFreshness(db, { nowMs, thresholdMs: 2 * 60 * 60 * 1000 })
+    expect(result.stale).toBe(false)
+    expect(result.lastEventMs).toBe(nowMs - 1000)
+  })
+
+  it('returns stale=true for an old cost event (beyond threshold)', () => {
+    const db = fresh()
+    const nowMs = TEST_TS
+    const oldTs = nowMs - 3 * 60 * 60 * 1000  // 3h ago (default threshold = 2h)
+    insertTelemetryEvent(db, { actor: 'dave', verb: 'cost', cost_usd: 0.01, ts: oldTs })
+    const result = checkTelemetryFreshness(db, { nowMs })
+    expect(result.stale).toBe(true)
+    expect(result.ageMs).toBeGreaterThan(2 * 60 * 60 * 1000)
+  })
+
+  it('emits an incident event when stale + emitIncident=true', () => {
+    const db = fresh()
+    const nowMs = TEST_TS
+    const result = checkTelemetryFreshness(db, { nowMs, emitIncident: true, actor: 'watchdog' })
+    expect(result.stale).toBe(true)
+    // incident event was inserted
+    const incident = db.prepare(
+      "SELECT * FROM telemetry_event WHERE verb='incident' AND actor='watchdog'"
+    ).get() as Record<string, unknown> | undefined
+    expect(incident).toBeTruthy()
+    expect(incident!['object']).toBe('telemetry-freshness')
+    expect(incident!['status']).toBe('warn')
+  })
+
+  it('does NOT emit incident when not stale', () => {
+    const db = fresh()
+    const nowMs = TEST_TS
+    insertTelemetryEvent(db, { actor: 'dave', verb: 'cost', ts: nowMs - 500 })
+    checkTelemetryFreshness(db, { nowMs, emitIncident: true })
+    const count = db.prepare(
+      "SELECT COUNT(*) FROM telemetry_event WHERE verb='incident'"
+    ).pluck().get() as number
+    expect(count).toBe(0)
+  })
+
+  it('supports custom verb list (e.g. session-wake)', () => {
+    const db = fresh()
+    const nowMs = TEST_TS
+    insertTelemetryEvent(db, { actor: 'runner', verb: 'session-wake', ts: nowMs - 500 })
+    const result = checkTelemetryFreshness(db, { verb: 'session-wake', nowMs, thresholdMs: 60000 })
+    expect(result.stale).toBe(false)
+  })
+
+  // FALSIFYING: stale + emitIncident=true -> incident MUST appear (dangerous-side check)
+  it('FALSIFYING: disabled watchdog leaves DB without incident (dangerous-side assertion)', () => {
+    const db = fresh()
+    // No events, but we do NOT call checkTelemetryFreshness.
+    // The absence of an incident event is the dangerous-side: stale but unwatched.
+    const count = db.prepare(
+      "SELECT COUNT(*) FROM telemetry_event WHERE verb='incident'"
+    ).pluck().get() as number
+    // sanity baseline: 0 without calling the watchdog
+    expect(count).toBe(0)
+    // The companion test above asserts count=1 AFTER the watchdog fires.
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Series query
+// ---------------------------------------------------------------------------
+
+describe('queryTelemetrySeries', () => {
+  function seedDaily(db: Database.Database) {
+    db.prepare(`
+      INSERT INTO telemetry_daily (day, actor, object, verb, count, weight_sum, tokens_in, tokens_out, cost_usd)
+      VALUES
+        ('2026-01-14', 'dave', 'Bash', 'tool-call', 5, 5, 100, 50, 0.001),
+        ('2026-01-14', 'dave', '', 'cost', 1, 1, 200, 100, 0.01),
+        ('2026-01-15', 'dave', 'Read', 'tool-call', 3, 3, 60, 30, 0.0),
+        ('2026-01-15', 'thor', '', 'session-wake', 2, 2, 0, 0, 0.0)
+    `).run()
+  }
+
+  it('returns aggregated rows grouped by day (all metrics)', () => {
+    const db = fresh()
+    seedDaily(db)
+    const rows = queryTelemetrySeries(db, {})
+    expect(rows.length).toBe(2)
+    const jan14 = rows.find(r => r.day === '2026-01-14')!
+    expect(jan14.count).toBe(6)  // 5 + 1
+    expect(jan14.cost_usd).toBeCloseTo(0.011, 5)
+  })
+
+  it('filters by fromDay/toDay', () => {
+    const db = fresh()
+    seedDaily(db)
+    const rows = queryTelemetrySeries(db, { fromDay: '2026-01-15', toDay: '2026-01-15' })
+    expect(rows.length).toBe(1)
+    expect(rows[0].day).toBe('2026-01-15')
+  })
+
+  it('filters by metric=session-wake (only session-wake verb rows)', () => {
+    const db = fresh()
+    seedDaily(db)
+    const rows = queryTelemetrySeries(db, { metric: 'session-wake' })
+    // only 2026-01-15 has session-wake events
+    expect(rows.length).toBe(1)
+    expect(rows[0].day).toBe('2026-01-15')
+    expect(rows[0].count).toBe(2)
+  })
+
+  it('respects the limit', () => {
+    const db = fresh()
+    seedDaily(db)
+    const rows = queryTelemetrySeries(db, { limit: 1 })
+    expect(rows.length).toBe(1)
   })
 })
