@@ -282,6 +282,8 @@ export interface UpdateTaskPatch {
   agent?: string
   type?: 'task' | 'heartbeat'
   status?: 'active' | 'paused'
+  skipIfBusy?: boolean
+  forceSend?: boolean
 }
 
 export function updateTask(id: string, patch: UpdateTaskPatch, db = getNoaDb()): ScheduledTask {
@@ -308,6 +310,8 @@ export function updateTask(id: string, patch: UpdateTaskPatch, db = getNoaDb()):
   if (patch.agent !== undefined) { sets.push('agent=?'); values.push(patch.agent) }
   if (patch.type !== undefined) { sets.push('type=?'); values.push(patch.type) }
   if (patch.status !== undefined) { sets.push('status=?'); values.push(patch.status) }
+  if (patch.skipIfBusy !== undefined) { sets.push('skip_if_busy=?'); values.push(patch.skipIfBusy ? 1 : 0) }
+  if (patch.forceSend !== undefined) { sets.push('force_send=?'); values.push(patch.forceSend ? 1 : 0) }
 
   if (sets.length > 0) {
     values.push(id)
