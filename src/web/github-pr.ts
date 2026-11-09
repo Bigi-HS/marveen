@@ -16,6 +16,9 @@ import type { GithubPrInfo } from './gate-check.js'
 // future repo move, but never needs to be set in normal operation.
 const GATE_REPO = process.env['GATE_REPO'] ?? 'Bigi-HS/marveen'
 const FILES_PAGE_CAP = 10 // 10 * 100 = 1000 files; a real PR never approaches this.
+// Fleet agents commit with emails like dave@marveen.fleet. The domain is used to
+// map a commit author email back to an agent ID for MG-SEC5 self-approval checks.
+const FLEET_EMAIL_DOMAIN = process.env['FLEET_EMAIL_DOMAIN'] ?? 'marveen.fleet'
 
 export function readGithubToken(): string {
   const creds = readFileSync(join(homedir(), '.git-credentials'), 'utf-8')
@@ -228,6 +231,25 @@ export async function closePullRequest(pr: number, deps: GithubDeps = {}): Promi
     throw new PrRequestError(502, 'GitHub authentication/permission error')
   }
   throw new PrRequestError(res.status, await safeGithubMessage(res, res.status))
+}
+
+// Fetches the commit author agent ID for a PR by looking at the first commit's
+// author email. Fleet agents use `{agent_id}@marveen.fleet` emails; non-fleet
+// commits (Boss, external) return null. Throws on network/API errors -- callers
+// that need fail-closed behaviour should catch and block.
+export async function fetchPrAuthorAgentId(pr: number): Promise<string | null> {
+  const token = readGithubToken()
+  const headers = ghHeaders(token)
+  const res = await fetch(
+    `https://api.github.com/repos/${GATE_REPO}/pulls/${pr}/commits?per_page=1`,
+    { headers },
+  )
+  if (!res.ok) throw new Error(`GitHub commits fetch failed (${res.status})`)
+  const commits = (await res.json()) as Array<{ commit?: { author?: { email?: string } } }>
+  if (commits.length === 0) return null
+  const email = commits[0]?.commit?.author?.email ?? ''
+  if (!email.endsWith('@' + FLEET_EMAIL_DOMAIN)) return null
+  return email.slice(0, email.length - FLEET_EMAIL_DOMAIN.length - 1) || null
 }
 
 // Fetches the current head.sha and the full changed-file path list for a PR.
