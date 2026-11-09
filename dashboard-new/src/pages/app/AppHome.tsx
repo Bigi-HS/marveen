@@ -33,8 +33,8 @@ function WorkoutCard({ plan, loading }: { plan: WorkoutPlan | null | undefined; 
       <ul className="mt-2 space-y-0.5 text-sm text-text-muted">
         {plan.exercises.slice(0, 3).map((ex, i) => (
           <li key={i}>
-            {ex.name} &mdash; {ex.sets}&times;{ex.reps}
-            {ex.weight > 0 ? ` @ ${ex.weight}${ex.unit}` : ''}
+            {ex.name} &mdash; {ex.sets ?? '?'}&times;{ex.reps ?? '?'}
+            {ex.weight != null && ex.weight > 0 ? ` @ ${ex.weight}${ex.unit ?? 'kg'}` : ''}
           </li>
         ))}
         {plan.exercises.length > 3 && (
