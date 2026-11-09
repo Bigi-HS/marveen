@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { cn } from '@/lib/cn'
 
-export type TabKey = 'home' | 'kanban' | 'gate' | 'hooks' | 'usage' | 'brain' | 'app-home' | 'workout' | 'todos' | 'app-setup'
+export type TabKey = 'home' | 'kanban' | 'gate' | 'hooks' | 'usage' | 'brain' | 'app-home' | 'workout' | 'todos' | 'journal' | 'app-setup'
 
 interface TabDef {
   key: TabKey
@@ -19,6 +19,7 @@ const TABS: TabDef[] = [
   { key: 'app-home', label: 'App', enabled: true },
   { key: 'workout', label: 'Edzés', enabled: true },
   { key: 'todos', label: 'Claudia', enabled: true },
+  { key: 'journal', label: 'Napló', enabled: true },
   { key: 'app-setup', label: 'Mobile Setup', enabled: true },
 ]
 

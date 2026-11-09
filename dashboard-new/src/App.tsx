@@ -8,6 +8,7 @@ import { UsagePage } from '@/pages/UsagePage'
 import { AppHome } from '@/pages/app/AppHome'
 import { WorkoutScreen } from '@/pages/app/WorkoutScreen'
 import { ClaudiaTodosScreen } from '@/pages/app/ClaudiaTodosScreen'
+import { GelimJournalScreen } from '@/pages/app/GelimJournalScreen'
 import { MobileSetup } from '@/pages/app/MobileSetup'
 
 // In Tauri, default to the App tab for the mobile-first experience.
@@ -26,6 +27,7 @@ export default function App() {
       {tab === 'app-home' && <AppHome />}
       {tab === 'workout' && <WorkoutScreen />}
       {tab === 'todos' && <ClaudiaTodosScreen />}
+      {tab === 'journal' && <GelimJournalScreen />}
       {tab === 'app-setup' && <MobileSetup />}
     </NavShell>
   )
