@@ -495,6 +495,31 @@ function listAgentSummaries(): AgentSummary[] {
   return listAgentNames().map(getAgentSummary)
 }
 
+// Redact sensitive patterns from a single pane-tail line before sending to any
+// client. Guards against token/JWT/path/env-var leakage via /api/agents/activity
+// (SEC-113, card ed4a714b). Targeted patterns only -- must not over-redact normal
+// operational status lines (tool names, task summaries, short IDs).
+//
+// Rules applied in order (first match per segment wins):
+//   1. Bearer <token>          -- HTTP auth header value
+//   2. JWT (3 base64url segs)  -- any JWT regardless of context
+//   3. /home/<user>/...        -- filesystem path with home dir
+//   4. ENV_VAR=<long-value>    -- uppercase env var with 20+ char value
+//   5. Long hex string 40+     -- SHA256/SHA1 hashes, raw token hex
+export function redactTailLine(line: string): string {
+  // 1. Bearer token
+  line = line.replace(/Bearer\s+\S{10,}/gi, 'Bearer [REDACTED]')
+  // 2. JWT (header.payload.signature -- each segment base64url 10+ chars)
+  line = line.replace(/[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '[REDACTED]')
+  // 3. /home/<username>/... paths
+  line = line.replace(/\/home\/[^\s/]+\/[^\s]*/g, '[REDACTED]')
+  // 4. UPPER_VAR=<value 20+ chars>
+  line = line.replace(/[A-Z][A-Z0-9_]{4,}=[^\s]{20,}/g, (m) => m.split('=')[0] + '=[REDACTED]')
+  // 5. Bare hex strings 40+ chars (SHA256/SHA1 hashes, raw hex tokens)
+  line = line.replace(/\b[0-9a-f]{40,}\b/g, '[REDACTED]')
+  return line
+}
+
 export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promise<boolean> {
   const { req, res, path, method } = ctx
 
@@ -549,6 +574,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
             .map(l => l.replace(/\s+$/, ''))
             .filter(l => l.trim().length > 0)
             .slice(-8)
+            .map(redactTailLine)
 
     const entries: Array<{ name: string; isMain: boolean; running: boolean; state: string; tail: string[] }> = []
 
