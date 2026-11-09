@@ -39,7 +39,7 @@ import {
   readGateHistory,
 } from '../gate-db.js'
 import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
-import { fetchPrInfo } from '../github-pr.js'
+import { fetchPrInfo, fetchPrAuthorAgentId } from '../github-pr.js'
 import { runDeployVerify } from '../deploy-verify.js'
 
 // The GitHub PR reader is the only network dependency; injectable so route
@@ -47,6 +47,17 @@ import { runDeployVerify } from '../deploy-verify.js'
 let prFetcher: (pr: number) => Promise<GithubPrInfo> = fetchPrInfo
 export function __setGatePrFetcher(fn: (pr: number) => Promise<GithubPrInfo>): void {
   prFetcher = fn
+}
+
+// MG-SEC5 fail-closed author fallback (card b1120e4b): if gate_pr_authors has no
+// row, the approve endpoint falls back to GitHub to verify the commit author.
+// Injectable for tests to avoid real network calls.
+let authorFetcher: (pr: number) => Promise<string | null> = fetchPrAuthorAgentId
+export function __setGateAuthorFetcher(fn: (pr: number) => Promise<string | null>): void {
+  authorFetcher = fn
+}
+export function __resetGateAuthorFetcher(): void {
+  authorFetcher = fetchPrAuthorAgentId
 }
 
 // The independent CI runner identity (card 0c166e48). Only this agent's token
@@ -115,12 +126,26 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
         return true
       }
     }
-    // MG-SEC5: self-approval block (card ec818352). A per-agent token may not
-    // record its own approval on a PR it authored. Admin/operator tokens bypass
-    // (author-deferral relay: NoA fills Dave-seat for Dave-authored PRs). Fail-open
-    // when no author record exists (old PRs opened before this table was added).
+    // MG-SEC5: self-approval block (card ec818352 + b1120e4b). A per-agent token may
+    // not record its own approval on a PR it authored. Admin/operator tokens bypass
+    // (author-deferral relay: NoA fills Dave-seat for Dave-authored PRs).
+    // Fail-closed (card b1120e4b): if no DB row, fall back to GitHub API to verify
+    // the commit author. If GitHub fails -> block (uncertain state). If GitHub
+    // returns null (non-fleet commit email) -> no block.
     if (identity && identity.source !== 'operator' && !hasScope(identity.scopes, ADMIN_SCOPE)) {
-      const prAuthor = readPrAuthor(getDb(), pr_number)
+      let prAuthor = readPrAuthor(getDb(), pr_number)
+      if (prAuthor === null) {
+        try {
+          prAuthor = await authorFetcher(pr_number)
+        } catch (err) {
+          logger.warn(
+            { agent: identity.agentId, pr: pr_number, err },
+            'MG-SEC5 fail-closed: GitHub author fetch failed, blocking approval',
+          )
+          json(res, { error: 'self-approval check: cannot verify PR author (MG-SEC5 fail-closed)' }, 403)
+          return true
+        }
+      }
       if (prAuthor != null && identity.agentId === prAuthor) {
         logger.warn(
           { agent: identity.agentId, pr: pr_number },

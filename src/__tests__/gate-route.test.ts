@@ -3,7 +3,7 @@ import { Readable } from 'node:stream'
 import { rmSync } from 'node:fs'
 import { initDatabase } from '../db.js'
 import { subscribeDashboardEvents, type DashboardEvent } from '../event-bus.js'
-import { tryHandleGate, __setGatePrFetcher } from '../web/routes/gate.js'
+import { tryHandleGate, __setGatePrFetcher, __setGateAuthorFetcher, __resetGateAuthorFetcher } from '../web/routes/gate.js'
 import { insertPrAuthor } from '../web/gate-db.js'
 import { getDb } from '../db.js'
 import type { GithubPrInfo } from '../web/gate-check.js'
@@ -282,9 +282,59 @@ describe('POST /api/gate/approve -- MG-SEC5: self-approval block', () => {
     expect(r.status).toBe(201)
   })
 
-  it('self-approval block skipped when author is unknown (no record -> fail-open)', async () => {
-    // PR 9999 has no author record -> no block
+  it('no DB record + GitHub returns null (non-fleet author) -> passes (not a fleet agent commit)', async () => {
+    // PR 9999 has no author record; GitHub says the commit author is not a fleet agent
+    // (e.g. Boss/Dominik committing from a personal email) -> no block.
+    __setGateAuthorFetcher(async () => null)
     const r = await call('POST', '/api/gate/approve', { pr_number: 9999, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved' }, daveId)
+    expect(r.status).toBe(201)
+  })
+
+  afterEach(() => __resetGateAuthorFetcher())
+})
+
+describe('POST /api/gate/approve -- MG-SEC5 fail-closed: GitHub author fallback (card b1120e4b)', () => {
+  const PR = 251
+
+  afterEach(() => __resetGateAuthorFetcher())
+
+  it('AC-2: blocks self-approval when no DB row but GitHub returns reviewer as author', async () => {
+    // No insertPrAuthor -> gate_pr_authors is empty for PR 251
+    __setGateAuthorFetcher(async () => 'dave')
+    const r = await call('POST', '/api/gate/approve',
+      { pr_number: PR, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved' }, daveId)
+    expect(r.status).toBe(403)
+    expect(r.body.error).toMatch(/self.approval|author/)
+  })
+
+  it('AC-2: allows approval when no DB row and GitHub returns a different author', async () => {
+    __setGateAuthorFetcher(async () => 'thor')
+    const r = await call('POST', '/api/gate/approve',
+      { pr_number: PR, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved' }, daveId)
+    expect(r.status).toBe(201)
+  })
+
+  it('AC-3: blocks approval when no DB row and GitHub fetch throws', async () => {
+    __setGateAuthorFetcher(async () => { throw new Error('GitHub unreachable') })
+    const r = await call('POST', '/api/gate/approve',
+      { pr_number: PR, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved' }, daveId)
+    expect(r.status).toBe(403)
+    expect(r.body.error).toMatch(/cannot verify|fail.closed|MG-SEC5/i)
+  })
+
+  it('AC-4: DB row present with matching author -> still blocked (unchanged path)', async () => {
+    insertPrAuthor(getDb(), PR, 'dave', 1750000000)
+    // authorFetcher never called when DB row exists
+    __setGateAuthorFetcher(async () => { throw new Error('should not be called') })
+    const r = await call('POST', '/api/gate/approve',
+      { pr_number: PR, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved' }, daveId)
+    expect(r.status).toBe(403)
+  })
+
+  it('AC-2: GitHub returns null (non-fleet commit email) -> no block', async () => {
+    __setGateAuthorFetcher(async () => null)
+    const r = await call('POST', '/api/gate/approve',
+      { pr_number: PR, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved' }, daveId)
     expect(r.status).toBe(201)
   })
 })
