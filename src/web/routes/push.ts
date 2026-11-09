@@ -3,6 +3,12 @@
 // POST /api/push/subscribe  -- store a PushSubscription from the browser
 // POST /api/push/send       -- server-side dispatch to all stored subscriptions
 //
+// Auth:
+//   subscribe: any authenticated identity (non-empty agentId); fail-closed if
+//              anonymous so unauthenticated callers cannot hijack subscriptions.
+//   send:      admin:* scope required (operator / admin token only); a low-priv
+//              agent token cannot trigger mass notifications.
+//
 // VAPID keys are read from env (VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT).
 // All heavy-lifting (actual sendNotification) is injectable via __setPushSender
 // so unit tests stay network-free.
@@ -12,6 +18,7 @@ import { readBody, json } from '../http-helpers.js'
 import { readEnvValue } from '../../env.js'
 import { getNoaDb } from '../../noa-db.js'
 import { logger } from '../../logger.js'
+import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
 import type { RouteContext } from './types.js'
 
 // ---------------------------------------------------------------------------
@@ -39,7 +46,7 @@ export function __setDbSeam(db: PushDb | null): void {
   _dbSeam = db
 }
 
-function getDb(): PushDb {
+function getPushDb(): PushDb {
   if (_dbSeam) return _dbSeam
   return new SqlitePushDb()
 }
@@ -120,19 +127,47 @@ export function applyPushMigrations(db = getNoaDb()): void {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function isValidHttpsUrl(value: string): boolean {
+  try {
+    const u = new URL(value)
+    return u.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Route handler
 // ---------------------------------------------------------------------------
 
 export async function tryHandlePush(ctx: RouteContext): Promise<boolean> {
-  const { req, res, path, method } = ctx
+  const { req, res, path, method, identity } = ctx
 
   if (!path.startsWith('/api/push/')) return false
 
   if (path === '/api/push/subscribe' && method === 'POST') {
+    // Fail-closed: require an authenticated identity. The main auth gate
+    // already 401s unauthenticated /api/* requests, but we guard explicitly
+    // here so the security intent is local and not silently removed if the
+    // path ever moves to the public-api list.
+    if (!identity?.agentId) {
+      json(res, { error: 'authentication required' }, 403)
+      return true
+    }
     return handleSubscribe(req, res)
   }
 
   if (path === '/api/push/send' && method === 'POST') {
+    // Admin scope required: triggering notifications to all subscribed devices
+    // is a privileged operation (open spammer risk). Operator and admin:*
+    // tokens pass; low-priv agent tokens do not.
+    if (!hasScope(identity?.scopes, ADMIN_SCOPE)) {
+      json(res, { error: 'admin scope required to send push notifications' }, 403)
+      return true
+    }
     return handleSend(req, res)
   }
 
@@ -143,7 +178,7 @@ async function handleSubscribe(
   req: RouteContext['req'],
   res: RouteContext['res'],
 ): Promise<true> {
-  const raw = await readBody(req as never)
+  const raw = await readBody(req, { maxBytes: 8 * 1024 })
   let parsed: { endpoint?: unknown; keys?: { p256dh?: unknown; auth?: unknown } }
   try {
     parsed = JSON.parse(raw.toString())
@@ -152,8 +187,8 @@ async function handleSubscribe(
     return true
   }
 
-  if (!parsed.endpoint || typeof parsed.endpoint !== 'string') {
-    json(res, { error: 'endpoint is required' }, 400)
+  if (!parsed.endpoint || typeof parsed.endpoint !== 'string' || !isValidHttpsUrl(parsed.endpoint)) {
+    json(res, { error: 'endpoint must be a valid https URL' }, 400)
     return true
   }
   if (!parsed.keys?.p256dh || typeof parsed.keys.p256dh !== 'string') {
@@ -171,7 +206,7 @@ async function handleSubscribe(
   }
 
   try {
-    getDb().upsertSubscription(sub)
+    getPushDb().upsertSubscription(sub)
     json(res, { ok: true }, 201)
   } catch (err) {
     logger.error({ err }, 'push/subscribe: db error')
@@ -184,7 +219,7 @@ async function handleSend(
   req: RouteContext['req'],
   res: RouteContext['res'],
 ): Promise<true> {
-  const raw = await readBody(req as never)
+  const raw = await readBody(req)
   let parsed: { title?: unknown; body?: unknown; url?: unknown }
   try {
     parsed = JSON.parse(raw.toString())
@@ -198,7 +233,7 @@ async function handleSend(
     return true
   }
 
-  const subs = getDb().getAllSubscriptions()
+  const subs = getPushDb().getAllSubscriptions()
   const sender = getSender()
   const payload = JSON.stringify({
     title: parsed.title,

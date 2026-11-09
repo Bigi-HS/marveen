@@ -1,6 +1,6 @@
 // Tests for POST /api/push/subscribe and POST /api/push/send
 // TDD: tests written before implementation (card 044a8f5f).
-// Covers route guard, JSON validation, DB seam, and the VAPID-send seam.
+// Covers route guard, JSON validation, auth guards, DB seam, and VAPID-send seam.
 // Live push delivery (actual web-push over the wire) is excluded -- network-free.
 
 import { describe, it, expect, afterEach, vi } from 'vitest'
@@ -11,14 +11,28 @@ import {
   __setDbSeam,
   type PushSubscription,
 } from '../web/routes/push.js'
+import type { AgentIdentity } from '../web/agent-token-registry.js'
 
 // ---------------------------------------------------------------------------
 // Test harness
 // ---------------------------------------------------------------------------
 
-async function call(method: string, path: string, rawBody?: string) {
+const ANON_IDENTITY: AgentIdentity = { agentId: '', scopes: [], source: 'agent' }
+const OPERATOR_IDENTITY: AgentIdentity = { agentId: 'marveen', scopes: ['admin:*'], source: 'operator' }
+const AGENT_IDENTITY: AgentIdentity = { agentId: 'dave', scopes: [], source: 'agent' }
+
+async function call(
+  method: string,
+  path: string,
+  rawBody?: string,
+  identity: AgentIdentity = ANON_IDENTITY,
+  remoteAddress = '127.0.0.1',
+) {
   const url = new URL('http://x' + path)
-  const req = Readable.from(rawBody === undefined ? [] : [Buffer.from(rawBody)]) as never
+  const req = Object.assign(
+    Readable.from(rawBody === undefined ? [] : [Buffer.from(rawBody)]),
+    { socket: { remoteAddress } },
+  ) as never
   const captured: { status: number; body: any } = { status: 200, body: undefined }
   const res = {
     writeHead(status: number) {
@@ -29,7 +43,7 @@ async function call(method: string, path: string, rawBody?: string) {
       captured.body = b ? JSON.parse(b) : undefined
     },
   } as never
-  const handled = await tryHandlePush({ req, res, method, path: url.pathname, url } as never)
+  const handled = await tryHandlePush({ req, res, method, path: url.pathname, url, identity } as never)
   return { handled, ...captured }
 }
 
@@ -72,12 +86,46 @@ describe('route guard', () => {
 })
 
 // ---------------------------------------------------------------------------
-// POST /api/push/subscribe
+// POST /api/push/subscribe -- auth guard
 // ---------------------------------------------------------------------------
 
-describe('POST /api/push/subscribe', () => {
+describe('POST /api/push/subscribe -- auth', () => {
+  it('rejects anonymous identity with 403 (fail-closed)', async () => {
+    const r = await call('POST', '/api/push/subscribe', '{}', ANON_IDENTITY)
+    expect(r.handled).toBe(true)
+    expect(r.status).toBe(403)
+  })
+
+  it('allows operator identity', async () => {
+    const db = makeMemDb()
+    __setDbSeam(db)
+    const body = JSON.stringify({
+      endpoint: 'https://push.example.com/sub1',
+      keys: { p256dh: 'BNFvtest1', auth: 'authtest1' },
+    })
+    const r = await call('POST', '/api/push/subscribe', body, OPERATOR_IDENTITY)
+    expect(r.status).toBe(201)
+  })
+
+  it('allows agent identity (any authenticated agent may register its browser)', async () => {
+    const db = makeMemDb()
+    __setDbSeam(db)
+    const body = JSON.stringify({
+      endpoint: 'https://push.example.com/sub2',
+      keys: { p256dh: 'BNFvtest2', auth: 'authtest2' },
+    })
+    const r = await call('POST', '/api/push/subscribe', body, AGENT_IDENTITY)
+    expect(r.status).toBe(201)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// POST /api/push/subscribe -- validation
+// ---------------------------------------------------------------------------
+
+describe('POST /api/push/subscribe -- validation', () => {
   it('rejects invalid JSON with 400', async () => {
-    const r = await call('POST', '/api/push/subscribe', '{bad json')
+    const r = await call('POST', '/api/push/subscribe', '{bad json', OPERATOR_IDENTITY)
     expect(r.handled).toBe(true)
     expect(r.status).toBe(400)
     expect(r.body.error).toMatch(/invalid JSON/i)
@@ -85,7 +133,23 @@ describe('POST /api/push/subscribe', () => {
 
   it('rejects missing endpoint with 400', async () => {
     const body = JSON.stringify({ keys: { p256dh: 'abc', auth: 'xyz' } })
-    const r = await call('POST', '/api/push/subscribe', body)
+    const r = await call('POST', '/api/push/subscribe', body, OPERATOR_IDENTITY)
+    expect(r.handled).toBe(true)
+    expect(r.status).toBe(400)
+    expect(r.body.error).toMatch(/endpoint/i)
+  })
+
+  it('rejects non-https endpoint with 400', async () => {
+    const body = JSON.stringify({ endpoint: 'http://insecure.example.com/sub', keys: { p256dh: 'abc', auth: 'xyz' } })
+    const r = await call('POST', '/api/push/subscribe', body, OPERATOR_IDENTITY)
+    expect(r.handled).toBe(true)
+    expect(r.status).toBe(400)
+    expect(r.body.error).toMatch(/endpoint/i)
+  })
+
+  it('rejects non-URL endpoint with 400', async () => {
+    const body = JSON.stringify({ endpoint: 'not-a-url', keys: { p256dh: 'abc', auth: 'xyz' } })
+    const r = await call('POST', '/api/push/subscribe', body, OPERATOR_IDENTITY)
     expect(r.handled).toBe(true)
     expect(r.status).toBe(400)
     expect(r.body.error).toMatch(/endpoint/i)
@@ -93,7 +157,7 @@ describe('POST /api/push/subscribe', () => {
 
   it('rejects missing keys.p256dh with 400', async () => {
     const body = JSON.stringify({ endpoint: 'https://push.example.com/sub1', keys: { auth: 'xyz' } })
-    const r = await call('POST', '/api/push/subscribe', body)
+    const r = await call('POST', '/api/push/subscribe', body, OPERATOR_IDENTITY)
     expect(r.handled).toBe(true)
     expect(r.status).toBe(400)
     expect(r.body.error).toMatch(/p256dh/i)
@@ -101,7 +165,7 @@ describe('POST /api/push/subscribe', () => {
 
   it('rejects missing keys.auth with 400', async () => {
     const body = JSON.stringify({ endpoint: 'https://push.example.com/sub1', keys: { p256dh: 'abc' } })
-    const r = await call('POST', '/api/push/subscribe', body)
+    const r = await call('POST', '/api/push/subscribe', body, OPERATOR_IDENTITY)
     expect(r.handled).toBe(true)
     expect(r.status).toBe(400)
     expect(r.body.error).toMatch(/auth/i)
@@ -114,7 +178,7 @@ describe('POST /api/push/subscribe', () => {
       endpoint: 'https://push.example.com/sub1',
       keys: { p256dh: 'BNFvtest1', auth: 'authtest1' },
     })
-    const r = await call('POST', '/api/push/subscribe', body)
+    const r = await call('POST', '/api/push/subscribe', body, OPERATOR_IDENTITY)
     expect(r.handled).toBe(true)
     expect(r.status).toBe(201)
     expect(r.body.ok).toBe(true)
@@ -125,27 +189,54 @@ describe('POST /api/push/subscribe', () => {
     const db = makeMemDb()
     __setDbSeam(db)
     const sub = { endpoint: 'https://push.example.com/sub1', keys: { p256dh: 'B1', auth: 'A1' } }
-    await call('POST', '/api/push/subscribe', JSON.stringify(sub))
+    await call('POST', '/api/push/subscribe', JSON.stringify(sub), OPERATOR_IDENTITY)
     const sub2 = { ...sub, keys: { p256dh: 'B2', auth: 'A2' } }
-    const r = await call('POST', '/api/push/subscribe', JSON.stringify(sub2))
+    const r = await call('POST', '/api/push/subscribe', JSON.stringify(sub2), OPERATOR_IDENTITY)
     expect(r.status).toBe(201)
     expect(db._subs.get('https://push.example.com/sub1')!.keys.p256dh).toBe('B2')
   })
 })
 
 // ---------------------------------------------------------------------------
-// POST /api/push/send
+// POST /api/push/send -- auth guard
 // ---------------------------------------------------------------------------
 
-describe('POST /api/push/send', () => {
+describe('POST /api/push/send -- auth', () => {
+  it('rejects anonymous identity with 403 (fail-closed)', async () => {
+    const r = await call('POST', '/api/push/send', JSON.stringify({ title: 'x' }), ANON_IDENTITY)
+    expect(r.handled).toBe(true)
+    expect(r.status).toBe(403)
+  })
+
+  it('rejects non-admin agent identity with 403', async () => {
+    const r = await call('POST', '/api/push/send', JSON.stringify({ title: 'x' }), AGENT_IDENTITY)
+    expect(r.handled).toBe(true)
+    expect(r.status).toBe(403)
+    expect(r.body.error).toMatch(/admin/i)
+  })
+
+  it('allows operator (admin:*) identity', async () => {
+    const db = makeMemDb()
+    __setDbSeam(db)
+    __setPushSender(vi.fn().mockResolvedValue(undefined))
+    const r = await call('POST', '/api/push/send', JSON.stringify({ title: 'Hey' }), OPERATOR_IDENTITY)
+    expect(r.status).toBe(200)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// POST /api/push/send -- logic
+// ---------------------------------------------------------------------------
+
+describe('POST /api/push/send -- logic', () => {
   it('rejects invalid JSON with 400', async () => {
-    const r = await call('POST', '/api/push/send', 'not json')
+    const r = await call('POST', '/api/push/send', 'not json', OPERATOR_IDENTITY)
     expect(r.handled).toBe(true)
     expect(r.status).toBe(400)
   })
 
   it('rejects missing title with 400', async () => {
-    const r = await call('POST', '/api/push/send', JSON.stringify({ body: 'hi' }))
+    const r = await call('POST', '/api/push/send', JSON.stringify({ body: 'hi' }), OPERATOR_IDENTITY)
     expect(r.handled).toBe(true)
     expect(r.status).toBe(400)
     expect(r.body.error).toMatch(/title/i)
@@ -155,7 +246,7 @@ describe('POST /api/push/send', () => {
     const db = makeMemDb()
     __setDbSeam(db)
     __setPushSender(vi.fn().mockResolvedValue(undefined))
-    const r = await call('POST', '/api/push/send', JSON.stringify({ title: 'Hey', body: 'msg' }))
+    const r = await call('POST', '/api/push/send', JSON.stringify({ title: 'Hey', body: 'msg' }), OPERATOR_IDENTITY)
     expect(r.handled).toBe(true)
     expect(r.status).toBe(200)
     expect(r.body.sent).toBe(0)
@@ -168,7 +259,7 @@ describe('POST /api/push/send', () => {
     __setDbSeam(db)
     const mockSend = vi.fn().mockResolvedValue(undefined)
     __setPushSender(mockSend)
-    const r = await call('POST', '/api/push/send', JSON.stringify({ title: 'Alert', body: 'text' }))
+    const r = await call('POST', '/api/push/send', JSON.stringify({ title: 'Alert', body: 'text' }), OPERATOR_IDENTITY)
     expect(r.status).toBe(200)
     expect(r.body.sent).toBe(2)
     expect(mockSend).toHaveBeenCalledTimes(2)
@@ -182,7 +273,7 @@ describe('POST /api/push/send', () => {
     __setPushSender(vi.fn()
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error('410 Gone')))
-    const r = await call('POST', '/api/push/send', JSON.stringify({ title: 'Alert' }))
+    const r = await call('POST', '/api/push/send', JSON.stringify({ title: 'Alert' }), OPERATOR_IDENTITY)
     expect(r.status).toBe(200)
     expect(r.body.sent).toBe(1)
     expect(r.body.failed).toBe(1)
@@ -194,7 +285,7 @@ describe('POST /api/push/send', () => {
     __setDbSeam(db)
     const mockSend = vi.fn().mockResolvedValue(undefined)
     __setPushSender(mockSend)
-    await call('POST', '/api/push/send', JSON.stringify({ title: 'T', body: 'B', url: '/kanban' }))
+    await call('POST', '/api/push/send', JSON.stringify({ title: 'T', body: 'B', url: '/kanban' }), OPERATOR_IDENTITY)
     const [sub, payload] = mockSend.mock.calls[0]
     expect(sub.endpoint).toBe('https://ep1')
     const parsed = JSON.parse(payload as string)
