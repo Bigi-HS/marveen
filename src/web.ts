@@ -103,6 +103,9 @@ import { tryHandleMedia } from './web/routes/media.js'
 import { applyMediaMigrations } from './noa-media.js'
 import { tryHandlePush, applyPushMigrations } from './web/routes/push.js'
 import { tryHandleAppAuth, applyAppTokenMigrations, verifyAppTokenBearer } from './web/routes/app-auth.js'
+import { tryHandleJournal, applyJournalMigrations } from './web/routes/journal.js'
+import { tryHandleWorkout } from './web/routes/workout.js'
+import { tryHandleAppCalendar } from './web/routes/app-calendar.js'
 import { isPublicApiPath } from './web/public-paths.js'
 import { tryHandleStatic } from './web/routes/static.js'
 import { tryHandleDashboardNew } from './web/routes/dashboard-new.js'
@@ -395,6 +398,9 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleMedia(routeCtx)) return
       if (await tryHandlePush(routeCtx)) return
       if (await tryHandleAppAuth(routeCtx)) return
+      if (await tryHandleJournal(routeCtx)) return
+      if (await tryHandleWorkout(routeCtx)) return
+      if (await tryHandleAppCalendar(routeCtx)) return
       // dashboard-new SPA on /v2, side-by-side with the legacy web/ app on '/'.
       // Mounted before the legacy static handler so the /v2 prefix is claimed first.
       if (tryHandleDashboardNew(routeCtx, DASHBOARD_NEW_DIST)) return
@@ -542,6 +548,9 @@ export function startWebServer(port = 3420): http.Server {
 
   applyAppTokenMigrations()
   logger.info('App-token migrations applied (app_tokens)')
+
+  applyJournalMigrations()
+  logger.info('Journal migrations applied (journal_entries)')
 
   const scheduleInterval = startScheduleRunner()
   logger.info('Schedule runner started (60s poll)')
