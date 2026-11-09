@@ -46,7 +46,7 @@ export interface JournalEntry {
   content: string
   mood: string | null
   tags: string | null
-  createdAt: string
+  createdAt: number
 }
 
 export async function fetchWorkoutPlan(): Promise<WorkoutPlan | null> {
