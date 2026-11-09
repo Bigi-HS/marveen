@@ -86,6 +86,19 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return (await res.json()) as T
 }
 
+export async function apiPut<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: 'PUT',
+    headers: { ...buildAuthHeaders(getToken()), 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    throw new ApiError(res.status, `PUT ${path} failed: ${res.status}`)
+  }
+  return (await res.json()) as T
+}
+
 export async function postJournalEntry(
   content: string,
   mood?: string,
@@ -173,5 +186,5 @@ export async function fetchPushSettings(): Promise<PushSettings> {
 }
 
 export async function savePushSettings(settings: Partial<PushSettings>): Promise<PushSettings> {
-  return apiPost<PushSettings>('/api/push/settings', settings)
+  return apiPut<PushSettings>('/api/push/settings', settings)
 }
