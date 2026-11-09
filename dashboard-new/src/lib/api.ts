@@ -30,22 +30,22 @@ export function getToken(): string | null {
 
 function defaultStripToken(): void {
   if (typeof window === 'undefined') return
-  const url = new URL(window.location.href)
-  url.searchParams.delete('token')
-  window.history.replaceState({}, '', url.pathname + url.search + url.hash)
+  // Remove the hash entirely -- the token was in the fragment, not the query string
+  window.history.replaceState({}, '', window.location.pathname + window.location.search)
 }
 
 /**
  * One-time deep-link login (mirrors web/app.js). dashboard-new keeps its bearer
  * token under its OWN localStorage key, separate from the legacy web/ app, so a
  * first visit to /v2 would otherwise land on the "Authentication required"
- * screen. If the URL carries `?token=<value>`, persist it and strip it from the
- * address bar (so it never lingers in history or a shared link). This is the
- * same entry path used for mobile onboarding. Returns true when a token was
- * captured. Dependencies are injectable for testing.
+ * screen. If the URL carries `#token=<value>`, persist it and strip it from the
+ * address bar (so it never lingers in history or a shared link). The token is
+ * passed as a URL fragment (#) rather than a query string (?) so it is never
+ * sent to the server in HTTP requests or server logs (SEC-112 #929).
+ * Returns true when a token was captured. Dependencies are injectable for testing.
  */
 export function captureTokenFromUrl(
-  search: string = typeof window !== 'undefined' ? window.location.search : '',
+  hash: string = typeof window !== 'undefined' ? window.location.hash : '',
   persist: (token: string) => void = (token) => {
     try {
       localStorage.setItem(TOKEN_STORAGE_KEY, token)
@@ -55,7 +55,8 @@ export function captureTokenFromUrl(
   },
   stripUrl: () => void = defaultStripToken,
 ): boolean {
-  const token = new URLSearchParams(search).get('token')
+  // Only read from fragment (#token=...) -- query string (?token=...) is no longer supported
+  const token = hash.startsWith('#') ? new URLSearchParams(hash.slice(1)).get('token') : null
   if (!token) return false
   persist(token)
   stripUrl()
