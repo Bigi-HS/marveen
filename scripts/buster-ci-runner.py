@@ -248,14 +248,15 @@ def run_pr(pr_number: int, head_sha: str, base_branch: str,
 
 
 def _check_main_checkout_branch() -> None:
-    """Warn if INSTALL_DIR is not on the develop branch.
+    """Check that INSTALL_DIR is on the develop branch; fatal if it is not.
 
     buster-ci-runner.py itself is loaded from INSTALL_DIR. If the main checkout
     drifts to a feature branch the runner code may differ from develop, producing
     false CI verdicts even after the worktree-bundle fix (card cc4d569b).
-    Non-fatal: wt_bundle isolation still protects the bundle script; this is an
-    early-warning so the drift is noticed and corrected before it causes a false
-    BLOCK (card 55d37e01 recurrence prevention).
+    Fatal for a confirmed wrong-branch state (exit 1) so the CI sweep is blocked
+    rather than continuing with possibly stale runner code (card cc4d569b step 2).
+    Non-fatal for infrastructure errors (git failure / unknown state) since those
+    do not prove the branch is wrong.
     """
     try:
         result = subprocess.run(
@@ -271,11 +272,12 @@ def _check_main_checkout_branch() -> None:
             )
         elif branch != 'develop':
             print(
-                f'HYGIENE WARNING: INSTALL_DIR is on branch "{branch}", not develop. '
+                f'BUSTER-CI ABORT: INSTALL_DIR is on branch "{branch}", not develop. '
                 'Runner code may differ from develop. '
-                'Switch with: git -C /home/domin/marveen checkout develop && git pull',
+                'Fix: git -C /home/domin/marveen checkout develop && git pull',
                 file=sys.stderr,
             )
+            sys.exit(1)
     except Exception:
         pass  # non-fatal: branch check must never abort the CI sweep
 

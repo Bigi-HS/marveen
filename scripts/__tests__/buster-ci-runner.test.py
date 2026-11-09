@@ -440,15 +440,19 @@ class TestWorktreeBundleSelection(unittest.TestCase):
 
 
 class TestMainCheckoutBranchGuard(unittest.TestCase):
-    """_check_main_checkout_branch warns when INSTALL_DIR is not on develop (card cc4d569b).
+    """_check_main_checkout_branch aborts when INSTALL_DIR is not on develop (card cc4d569b).
 
-    Non-fatal: does not abort the run. Protects against the false-BLOCK recurrence
-    where the runner's own code drifts (card 55d37e01 recurrence: main checkout on a
-    feature branch -> runner code != develop).
+    Fatal for a confirmed wrong-branch state: calls sys.exit(1) so the CI sweep is
+    blocked rather than continuing with possibly stale runner code.
+    Non-fatal for infrastructure errors (git failure / unknown state).
     """
 
     def _run_check(self, branch_output: str, returncode: int = 0):
-        """Run _check_main_checkout_branch with a faked git result, capture stderr."""
+        """Run _check_main_checkout_branch with a faked git result.
+
+        Returns (stderr_text, exit_code_or_None). exit_code_or_None is the integer
+        passed to sys.exit if it was called, or None if no exit occurred.
+        """
         import subprocess as sp_module
         import io
         mod = _load_runner()
@@ -458,31 +462,44 @@ class TestMainCheckoutBranchGuard(unittest.TestCase):
             buf = io.StringIO()
             orig = _sys.stderr
             _sys.stderr = buf
+            exit_code = None
             try:
                 mod._check_main_checkout_branch()
+            except SystemExit as exc:
+                exit_code = exc.code
             finally:
                 _sys.stderr = orig
-        return buf.getvalue()
+        return buf.getvalue(), exit_code
 
-    def test_no_warning_when_on_develop(self):
-        """No output when INSTALL_DIR is correctly on develop."""
-        stderr = self._run_check('develop\n')
+    def test_no_output_and_no_exit_when_on_develop(self):
+        """No output and no sys.exit when INSTALL_DIR is correctly on develop."""
+        stderr, exit_code = self._run_check('develop\n')
         self.assertEqual(stderr, '',
             f'Expected no warning on develop, got: {stderr!r}')
+        self.assertIsNone(exit_code, 'sys.exit must not be called on develop branch')
 
-    def test_warns_when_on_feature_branch(self):
-        """HYGIENE WARNING emitted when branch is not develop."""
-        stderr = self._run_check('eng/some-feature-branch\n')
-        self.assertIn('HYGIENE WARNING', stderr)
+    def test_aborts_with_exit1_when_on_feature_branch(self):
+        """sys.exit(1) called when branch is not develop (card cc4d569b)."""
+        stderr, exit_code = self._run_check('feature-x\n')
+        self.assertEqual(exit_code, 1,
+            f'Expected sys.exit(1) for non-develop branch, got exit_code={exit_code!r}')
+
+    def test_abort_message_contains_branch_name(self):
+        """BUSTER-CI ABORT message contains the offending branch name."""
+        stderr, _ = self._run_check('eng/some-feature-branch\n')
+        self.assertIn('BUSTER-CI ABORT', stderr)
         self.assertIn('eng/some-feature-branch', stderr)
 
-    def test_warns_when_git_fails(self):
-        """HYGIENE WARNING emitted when git symbolic-ref fails (detached HEAD, etc.)."""
-        stderr = self._run_check('', returncode=128)
-        self.assertIn('HYGIENE WARNING', stderr)
+    def test_no_exit_when_git_fails(self):
+        """No sys.exit when git symbolic-ref fails (detached HEAD, infra issue)."""
+        stderr, exit_code = self._run_check('', returncode=128)
+        self.assertIn('HYGIENE WARNING', stderr,
+            'Should still print a hygiene warning on git failure')
+        self.assertIsNone(exit_code,
+            'sys.exit must NOT be called on git failure (non-fatal path)')
 
     def test_check_does_not_raise(self):
-        """_check_main_checkout_branch must never raise -- it is a non-fatal guard."""
+        """_check_main_checkout_branch must never raise -- exception path is non-fatal."""
         import subprocess as sp_module
         mod = _load_runner()
         with patch.object(sp_module, 'run', side_effect=OSError('git not found')):
