@@ -102,6 +102,7 @@ import { tryHandleZeppAnomalies } from './web/routes/health-zepp-anomalies.js'
 import { tryHandleMedia } from './web/routes/media.js'
 import { applyMediaMigrations } from './noa-media.js'
 import { tryHandlePush, applyPushMigrations } from './web/routes/push.js'
+import { tryHandleAppAuth, applyAppTokenMigrations, verifyAppTokenBearer } from './web/routes/app-auth.js'
 import { isPublicApiPath } from './web/public-paths.js'
 import { tryHandleStatic } from './web/routes/static.js'
 import { tryHandleDashboardNew } from './web/routes/dashboard-new.js'
@@ -312,13 +313,23 @@ export function startWebServer(port = 3420): http.Server {
         isWrite: !isSafeMethod(method),
       })
       if (!gate.pass) {
-        const uo = reqOrigin(req)
-        logger.warn({ remote: uo.remote, sourceIp: uo.sourceIp, path }, 'dashboard request unauthorized')
-        res.writeHead(gate.status, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'Unauthorized' }))
-        return
+        // App-token fallback: try the bearer as a 90-day JWT issued via
+        // POST /api/auth/app-token (Phase 0B, card 61df322a). Runs ONLY after
+        // the primary gate fails so the hot-path (session/agent-token) is not
+        // slowed by crypto on every request.
+        const appIdentity = verifyAppTokenBearer(extractBearer(req.headers.authorization))
+        if (appIdentity) {
+          identity = appIdentity
+        } else {
+          const uo = reqOrigin(req)
+          logger.warn({ remote: uo.remote, sourceIp: uo.sourceIp, path }, 'dashboard request unauthorized')
+          res.writeHead(gate.status, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Unauthorized' }))
+          return
+        }
+      } else {
+        identity = gate.identity
       }
-      identity = gate.identity
     }
 
     try {
@@ -383,6 +394,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleZeppAnomalies(routeCtx)) return
       if (await tryHandleMedia(routeCtx)) return
       if (await tryHandlePush(routeCtx)) return
+      if (await tryHandleAppAuth(routeCtx)) return
       // dashboard-new SPA on /v2, side-by-side with the legacy web/ app on '/'.
       // Mounted before the legacy static handler so the /v2 prefix is claimed first.
       if (tryHandleDashboardNew(routeCtx, DASHBOARD_NEW_DIST)) return
@@ -527,6 +539,9 @@ export function startWebServer(port = 3420): http.Server {
 
   applyPushMigrations()
   logger.info('Push migrations applied (push_subscriptions)')
+
+  applyAppTokenMigrations()
+  logger.info('App-token migrations applied (app_tokens)')
 
   const scheduleInterval = startScheduleRunner()
   logger.info('Schedule runner started (60s poll)')
