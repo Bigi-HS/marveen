@@ -101,6 +101,7 @@ import { tryHandleZeppFreshness } from './web/routes/health-zepp-freshness.js'
 import { tryHandleZeppAnomalies } from './web/routes/health-zepp-anomalies.js'
 import { tryHandleMedia } from './web/routes/media.js'
 import { applyMediaMigrations } from './noa-media.js'
+import { tryHandlePush, applyPushMigrations } from './web/routes/push.js'
 import { isPublicApiPath } from './web/public-paths.js'
 import { tryHandleStatic } from './web/routes/static.js'
 import { tryHandleDashboardNew } from './web/routes/dashboard-new.js'
@@ -381,6 +382,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleZeppFreshness(routeCtx)) return
       if (await tryHandleZeppAnomalies(routeCtx)) return
       if (await tryHandleMedia(routeCtx)) return
+      if (await tryHandlePush(routeCtx)) return
       // dashboard-new SPA on /v2, side-by-side with the legacy web/ app on '/'.
       // Mounted before the legacy static handler so the /v2 prefix is claimed first.
       if (tryHandleDashboardNew(routeCtx, DASHBOARD_NEW_DIST)) return
@@ -522,6 +524,9 @@ export function startWebServer(port = 3420): http.Server {
 
   applyMediaMigrations()
   logger.info('Media migrations applied (media_items)')
+
+  applyPushMigrations()
+  logger.info('Push migrations applied (push_subscriptions)')
 
   const scheduleInterval = startScheduleRunner()
   logger.info('Schedule runner started (60s poll)')
