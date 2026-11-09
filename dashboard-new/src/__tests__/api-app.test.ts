@@ -6,6 +6,7 @@ import {
   apiPost,
   postJournalEntry,
   postWorkoutCheckin,
+  markTodoDone,
 } from '@/lib/api-app'
 
 function mockFetch(status: number, body: unknown) {
@@ -113,5 +114,40 @@ describe('postWorkoutCheckin', () => {
     expect(call[0]).toBe('/api/workout/checkin')
     const body = JSON.parse(call[1].body as string)
     expect(body.note).toBe('Done: 3x10 squat 80kg')
+  })
+})
+
+describe('markTodoDone id-guard (SEC-112, #931)', () => {
+  it('calls POST /api/todos/{id}/done for a valid alphanum id', async () => {
+    vi.stubGlobal('fetch', mockFetch(200, { ok: true }))
+    await markTodoDone('abc123')
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('/api/todos/abc123/done')
+  })
+
+  it('allows UUIDs (hyphens OK)', async () => {
+    vi.stubGlobal('fetch', mockFetch(200, { ok: true }))
+    await markTodoDone('a1b2c3d4-e5f6-7890-abcd-ef1234567890')
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain('/api/todos/')
+  })
+
+  it('throws without fetch for id with ../ (path traversal)', async () => {
+    const spy = vi.fn()
+    vi.stubGlobal('fetch', spy)
+    await expect(markTodoDone('../secret')).rejects.toThrow('Invalid todo id')
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('throws without fetch for id with slash', async () => {
+    const spy = vi.fn()
+    vi.stubGlobal('fetch', spy)
+    await expect(markTodoDone('a/b')).rejects.toThrow('Invalid todo id')
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('throws without fetch for empty id', async () => {
+    const spy = vi.fn()
+    vi.stubGlobal('fetch', spy)
+    await expect(markTodoDone('')).rejects.toThrow('Invalid todo id')
+    expect(spy).not.toHaveBeenCalled()
   })
 })

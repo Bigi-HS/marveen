@@ -57,10 +57,11 @@ export function buildAssigneeList(opts: {
 }
 
 export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
-  const { req, res, path, method } = ctx
+  const { req, res, path, method, url } = ctx
 
   if (path === '/api/kanban' && method === 'GET') {
-    json(res, listCards())
+    const status = url.searchParams.get('status') || undefined
+    json(res, listCards(status ? { status } : undefined))
     return true
   }
 

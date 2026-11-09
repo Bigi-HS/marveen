@@ -119,6 +119,9 @@ export async function fetchClaudiaTodos(): Promise<ClaudiaTodosResponse> {
 }
 
 export async function markTodoDone(id: string): Promise<{ ok: boolean }> {
+  if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) {
+    throw new Error('Invalid todo id')
+  }
   return apiPost<{ ok: boolean }>(`/api/todos/${id}/done`, {})
 }
 

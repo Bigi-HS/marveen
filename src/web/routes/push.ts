@@ -14,7 +14,7 @@
 // so unit tests stay network-free.
 
 import webpush from 'web-push'
-import { readBody, json } from '../http-helpers.js'
+import { readBody, json, RequestBodyTooLargeError } from '../http-helpers.js'
 import { readEnvValue } from '../../env.js'
 import { getNoaDb } from '../../noa-db.js'
 import { logger } from '../../logger.js'
@@ -242,7 +242,16 @@ export async function tryHandlePush(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'authentication required' }, 403)
       return true
     }
-    const body = await readBody(req)
+    let body: Buffer
+    try {
+      body = await readBody(req, { maxBytes: 4096 })
+    } catch (err) {
+      if (err instanceof RequestBodyTooLargeError) {
+        json(res, { error: `Request body too large (max ${err.limit} bytes)` }, 413)
+        return true
+      }
+      throw err
+    }
     let data: Record<string, unknown>
     try {
       data = JSON.parse(body.toString())

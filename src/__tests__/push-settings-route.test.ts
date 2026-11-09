@@ -130,4 +130,12 @@ describe('PUT /api/push/settings', () => {
     const r = await call('PUT', '/api/push/settings', 'not-json', AGENT)
     expect(r.status).toBe(400)
   })
+
+  it('returns 413 when body exceeds 4096 bytes (maxBytes guard)', async () => {
+    __setSettingsDbSeam(makeMemSettingsDb())
+    // 4097-byte body: should be rejected before JSON parse
+    const oversized = JSON.stringify({ workout: false, padding: 'x'.repeat(4100) })
+    const r = await call('PUT', '/api/push/settings', oversized, AGENT)
+    expect(r.status).toBe(413)
+  })
 })

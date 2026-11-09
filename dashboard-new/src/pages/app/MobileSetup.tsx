@@ -48,7 +48,7 @@ export function MobileSetup() {
   }
 
   const setupUrl = generated
-    ? `${window.location.origin}/v2/?token=${generated.token}`
+    ? `${window.location.origin}/v2/#token=${generated.token}`
     : null
 
   return (
@@ -96,7 +96,7 @@ export function MobileSetup() {
           <p className="text-xs text-text-muted">
             Nyisd meg a Tauri appban Tailscale-en át:{' '}
             <code className="text-text">
-              http://{'<tailscale-ip>'}:3420/v2/?token={'{TOKEN}'}
+              http://{'<tailscale-ip>'}:3420/v2/#token={'{TOKEN}'}
             </code>
           </p>
         </div>
