@@ -216,6 +216,8 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       ...(data.agent !== undefined ? { agent: data.agent } : {}),
       ...(data.type !== undefined ? { type: data.type as 'task' | 'heartbeat' } : {}),
       ...(data.enabled !== undefined ? { status: (data.enabled ? 'active' : 'paused') as 'active' | 'paused' } : {}),
+      ...(data.skipIfBusy !== undefined ? { skipIfBusy: data.skipIfBusy } : {}),
+      ...(data.forceSend !== undefined ? { forceSend: data.forceSend } : {}),
     }
 
     // noa.db-only task (file-dir hand-deleted but the row survived active -- the

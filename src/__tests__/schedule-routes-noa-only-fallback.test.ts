@@ -118,6 +118,15 @@ describe('PUT /api/schedules/:name -- noa.db-only fallback (card 5010afbd)', () 
     expect(r.status).toBe(400)
     expect(vi.mocked(updateTask)).not.toHaveBeenCalled()
   })
+
+  it('passes skipIfBusy and forceSend through to updateTask (3db3cf5e fix)', async () => {
+    vi.mocked(getTask).mockReturnValue(dbTask())
+    const r = await run('PUT', '/api/schedules/db-only', { skipIfBusy: false, forceSend: true })
+    expect(r.status).toBe(200)
+    expect(vi.mocked(updateTask)).toHaveBeenCalledWith(
+      'db-only', expect.objectContaining({ skipIfBusy: false, forceSend: true })
+    )
+  })
 })
 
 describe('DELETE /api/schedules/:name -- noa.db-only fallback (card 5010afbd)', () => {

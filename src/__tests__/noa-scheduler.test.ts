@@ -288,6 +288,25 @@ describe('createTask / listTasks / deleteTask', () => {
     expect(() => updateTask('gone', { description: 'new' }, db)).toThrowError(TaskNotFoundError)
   })
 
+  it('updateTask persists skipIfBusy and forceSend to skip_if_busy/force_send columns (3db3cf5e fix)', () => {
+    const db = getNoaDb()
+    createTask({ id: 'hb-skip', agent: 'marveen', type: 'heartbeat', prompt: 'x', schedule: '*/15 * * * *' }, db)
+    expect(getTask('hb-skip', db)!.skip_if_busy).toBe(0)
+    expect(getTask('hb-skip', db)!.force_send).toBe(0)
+
+    updateTask('hb-skip', { skipIfBusy: true }, db)
+    expect(getTask('hb-skip', db)!.skip_if_busy).toBe(1)
+    expect(getTask('hb-skip', db)!.force_send).toBe(0)
+
+    updateTask('hb-skip', { forceSend: true }, db)
+    expect(getTask('hb-skip', db)!.skip_if_busy).toBe(1)
+    expect(getTask('hb-skip', db)!.force_send).toBe(1)
+
+    updateTask('hb-skip', { skipIfBusy: false, forceSend: false }, db)
+    expect(getTask('hb-skip', db)!.skip_if_busy).toBe(0)
+    expect(getTask('hb-skip', db)!.force_send).toBe(0)
+  })
+
   it('listTasks filter by status returns only matching rows', () => {
     const db = getNoaDb()
     createTask({ id: 'active-t', agent: 'marveen', type: 'task', prompt: 'x', schedule: '0 9 * * *', status: 'active' }, db)
