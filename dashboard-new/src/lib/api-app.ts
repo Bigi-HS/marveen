@@ -2,16 +2,16 @@ import { apiGet, getToken, buildAuthHeaders, ApiError } from './api'
 
 export interface WorkoutExercise {
   name: string
-  sets: number
-  reps: number
-  weight: number
-  unit: string
+  sets: number | null
+  reps: number | null
+  weight: number | null
+  unit: string | null
 }
 
 export interface WorkoutPlan {
   date: string
   exercises: WorkoutExercise[]
-  notes: string
+  notes: string | null
 }
 
 export interface AppCalendarEvent {
