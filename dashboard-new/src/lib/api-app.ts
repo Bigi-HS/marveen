@@ -158,3 +158,20 @@ export interface AgentActivity {
 export async function fetchAgentActivity(): Promise<AgentActivity[]> {
   return apiGet<AgentActivity[]>('/api/agents/activity')
 }
+
+// Push settings types (Phase 2C, card 2f8257b2)
+
+export interface PushSettings {
+  workout: boolean
+  todo: boolean
+  fleet: boolean
+  journal: boolean
+}
+
+export async function fetchPushSettings(): Promise<PushSettings> {
+  return apiGet<PushSettings>('/api/push/settings')
+}
+
+export async function savePushSettings(settings: Partial<PushSettings>): Promise<PushSettings> {
+  return apiPost<PushSettings>('/api/push/settings', settings)
+}
