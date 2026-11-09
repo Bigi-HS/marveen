@@ -172,6 +172,13 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
   }
 
   if (path === '/api/messages' && method === 'GET') {
+    const VALID_PARAMS = new Set(['agent', 'status', 'limit', 'before', 'from', 'to'])
+    for (const key of url.searchParams.keys()) {
+      if (!VALID_PARAMS.has(key)) {
+        json(res, { error: `Unknown filter param: ${key}. Valid params: agent, status, limit, before, from, to` }, 400)
+        return true
+      }
+    }
     const agent = url.searchParams.get('agent') || ''
     const status = url.searchParams.get('status') || ''
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200)
