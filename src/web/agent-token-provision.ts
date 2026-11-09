@@ -189,6 +189,8 @@ export interface TokenSweepDeps {
   tokenFileFor: (agentId: string) => string
   now?: number
   thresholdMs?: number
+  // TTL for newly provisioned tokens (falls back to DEFAULT_AGENT_TOKEN_TTL_MS).
+  ttlMs?: number
   // Called when one agent's rotation throws, so the caller can log without the
   // sweep taking a dependency on any particular logger.
   onError?: (agentId: string, err: unknown) => void
@@ -219,11 +221,24 @@ export function sweepAgentTokenRotation(
   for (const agentId of deps.listAgents()) {
     checked++
     try {
-      const { refreshed: didRefresh } = refreshTokenIfNeeded(db, agentId, deps.tokenFileFor(agentId), {
-        now: deps.now,
-        thresholdMs: deps.thresholdMs,
-      })
-      if (didRefresh) refreshed.push(agentId)
+      const tokenFile = deps.tokenFileFor(agentId)
+      if (!existsSync(tokenFile)) {
+        // No token file: agent was never provisioned or file was removed.
+        // Provision unconditionally so the NEXT relaunch inherits a fresh token
+        // via agent-token-env.sh. Without this, a session that starts before its
+        // .genesis-token is written (e.g. buster launched on Nov-05, token
+        // provisioned Nov-08) is permanently skipped by needsRefresh (null ->
+        // false) until a manual reprovision (card c65875ed root cause).
+        provisionAgentToken(db, agentId, tokenFile, { now: deps.now, ttlMs: deps.ttlMs })
+        refreshed.push(agentId)
+      } else {
+        const { refreshed: didRefresh } = refreshTokenIfNeeded(db, agentId, tokenFile, {
+          now: deps.now,
+          thresholdMs: deps.thresholdMs,
+          ttlMs: deps.ttlMs,
+        })
+        if (didRefresh) refreshed.push(agentId)
+      }
     } catch (err) {
       errored.push(agentId)
       deps.onError?.(agentId, err)
