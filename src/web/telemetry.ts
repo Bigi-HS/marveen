@@ -248,3 +248,179 @@ export function countTelemetryEvents(
     'SELECT COUNT(*) FROM telemetry_event WHERE ts >= ?'
   ).pluck().get(fromTs) as number) ?? 0
 }
+
+// ---------------------------------------------------------------------------
+// Rollup — daily aggregates (§3 HIBRID, §3 FLAG-3)
+// ---------------------------------------------------------------------------
+
+// Aggregate a single UTC day from telemetry_event into telemetry_daily.
+// INSERT OR REPLACE makes this idempotent; writes a checkpoint after success.
+// Returns the number of distinct (actor, object, verb) groups upserted.
+export function rollupTelemetryDay(
+  db: Database.Database,
+  day: string,         // 'YYYY-MM-DD' UTC
+  nowMs = Date.now(),
+): number {
+  let changes = 0
+  const tx = db.transaction(() => {
+    const result = db.prepare(`
+      INSERT OR REPLACE INTO telemetry_daily
+        (day, actor, object, verb, count, weight_sum, tokens_in, tokens_out, cost_usd)
+      SELECT
+        date(ts / 1000, 'unixepoch')       AS day,
+        actor,
+        COALESCE(object, '')               AS object,
+        verb,
+        COUNT(*)                           AS count,
+        SUM(COALESCE(weight, 1))           AS weight_sum,
+        SUM(COALESCE(tokens_in, 0))        AS tokens_in,
+        SUM(COALESCE(tokens_out, 0))       AS tokens_out,
+        SUM(COALESCE(cost_usd, 0.0))       AS cost_usd
+      FROM telemetry_event
+      WHERE date(ts / 1000, 'unixepoch') = ?
+      GROUP BY date(ts / 1000, 'unixepoch'), actor, COALESCE(object, ''), verb
+    `).run(day)
+    changes = result.changes
+    db.prepare(`
+      INSERT OR REPLACE INTO telemetry_rollup_checkpoint (day, completed_at)
+      VALUES (?, ?)
+    `).run(day, nowMs)
+  })
+  tx()
+  return changes
+}
+
+// ---------------------------------------------------------------------------
+// Purge — delete raw events only after checkpoint (§3 FLAG-3)
+// ---------------------------------------------------------------------------
+
+// Delete raw telemetry_event rows for every day that (a) has a rollup checkpoint
+// and (b) is strictly before `beforeDay`. Returns total rows deleted.
+export function purgeTelemetryRaw(
+  db: Database.Database,
+  beforeDay: string,  // 'YYYY-MM-DD' UTC — days < this value are eligible
+): number {
+  const checkpointedDays = (db.prepare(
+    "SELECT day FROM telemetry_rollup_checkpoint WHERE day < ?"
+  ).all(beforeDay) as { day: string }[]).map(r => r.day)
+
+  if (checkpointedDays.length === 0) return 0
+
+  let total = 0
+  const stmt = db.prepare(
+    "DELETE FROM telemetry_event WHERE date(ts / 1000, 'unixepoch') = ?"
+  )
+  for (const d of checkpointedDays) {
+    total += stmt.run(d).changes
+  }
+  return total
+}
+
+// ---------------------------------------------------------------------------
+// Freshness watchdog (§3b) — detects silent instrument death
+// ---------------------------------------------------------------------------
+
+export interface FreshnessResult {
+  stale: boolean
+  lastEventMs: number | null
+  ageMs: number | null
+  verb: string
+}
+
+// Check whether the most recent event for the given verb(s) is within the
+// threshold.  If stale and emitIncident=true, an incident event is inserted so
+// "instrument went silent" becomes a detectable, queryable event.
+export function checkTelemetryFreshness(
+  db: Database.Database,
+  opts: {
+    verb?: string | string[]
+    thresholdMs?: number    // default 2h
+    emitIncident?: boolean  // default false
+    actor?: string          // actor for the incident event
+    nowMs?: number
+  } = {},
+): FreshnessResult {
+  const verbs = Array.isArray(opts.verb)
+    ? opts.verb
+    : [opts.verb ?? 'cost']
+  const thresholdMs = opts.thresholdMs ?? 2 * 60 * 60 * 1000
+  const nowMs = opts.nowMs ?? Date.now()
+
+  const placeholders = verbs.map(() => '?').join(', ')
+  const lastTs = (db.prepare(
+    `SELECT MAX(ts) FROM telemetry_event WHERE verb IN (${placeholders})`
+  ).pluck().get(...verbs) as number | null)
+
+  const ageMs = lastTs !== null ? nowMs - lastTs : null
+  const stale = lastTs === null || ageMs! > thresholdMs
+
+  if (stale && opts.emitIncident) {
+    insertTelemetryEvent(db, {
+      ts: nowMs,
+      actor: opts.actor ?? 'watchdog',
+      verb: 'incident',
+      object: 'telemetry-freshness',
+      status: 'warn',
+      meta: {
+        anomaly_flag: `stale-${verbs.join(',')}`,
+        status_detail: lastTs !== null
+          ? `last event ${Math.round(ageMs! / 1000)}s ago`
+          : 'no events ever',
+      },
+    }, nowMs)
+  }
+
+  return { stale, lastEventMs: lastTs ?? null, ageMs, verb: verbs.join(',') }
+}
+
+// ---------------------------------------------------------------------------
+// Series query — reads from telemetry_daily for trend charts (§5 API)
+// ---------------------------------------------------------------------------
+
+export interface SeriesRow {
+  day: string
+  count: number
+  weight_sum: number
+  tokens_in: number
+  tokens_out: number
+  cost_usd: number
+}
+
+// Query daily aggregates for trending.  metric='session-wake' filters to only
+// session-wake verb rows; 'cost'/'tokens' aggregate across all verbs (the
+// cost_usd / token columns are already per-verb sums in telemetry_daily).
+export function queryTelemetrySeries(
+  db: Database.Database,
+  opts: {
+    metric?: string
+    fromDay?: string
+    toDay?: string
+    actor?: string
+    limit?: number
+  } = {},
+): SeriesRow[] {
+  const limit = Math.min(opts.limit ?? 90, 365)
+  const clauses: string[] = ['1=1']
+  const params: (string | number)[] = []
+
+  if (opts.fromDay) { clauses.push('day >= ?'); params.push(opts.fromDay) }
+  if (opts.toDay)   { clauses.push('day <= ?'); params.push(opts.toDay) }
+  if (opts.actor)   { clauses.push('actor = ?'); params.push(opts.actor) }
+  if (opts.metric === 'session-wake') { clauses.push("verb = 'session-wake'") }
+
+  params.push(limit)
+
+  return db.prepare(`
+    SELECT day,
+           SUM(count)                     AS count,
+           SUM(weight_sum)                AS weight_sum,
+           SUM(COALESCE(tokens_in,  0))   AS tokens_in,
+           SUM(COALESCE(tokens_out, 0))   AS tokens_out,
+           SUM(COALESCE(cost_usd,   0.0)) AS cost_usd
+    FROM telemetry_daily
+    WHERE ${clauses.join(' AND ')}
+    GROUP BY day
+    ORDER BY day ASC
+    LIMIT ?
+  `).all(...params) as SeriesRow[]
+}
