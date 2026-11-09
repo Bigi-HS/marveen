@@ -142,3 +142,19 @@ export async function fetchKanbanOpen(): Promise<KanbanCardSummary[]> {
   const all = await apiGet<KanbanCardSummary[]>('/api/kanban')
   return all.filter((c) => c.status === 'planned' || c.status === 'in_progress' || c.status === 'waiting')
 }
+
+// Office screen types (Phase 2B, card 62b0e71f)
+
+export type AgentActivityLabel = 'working' | 'idle' | 'stopped' | 'unknown' | 'error'
+
+export interface AgentActivity {
+  name: string
+  isMain: boolean
+  running: boolean
+  state: AgentActivityLabel
+  tail: string[]
+}
+
+export async function fetchAgentActivity(): Promise<AgentActivity[]> {
+  return apiGet<AgentActivity[]>('/api/agents/activity')
+}
