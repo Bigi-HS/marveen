@@ -46,5 +46,9 @@ paths = [
   '''scripts/install-gitleaks\.sh''',
   # Test fixtures: fictive secrets are expected
   '''src/__tests__/.*''',
+  # Python unit fixtures (card 3d36c13a; Chad sec-DÖNTÉS 2026-11-09): token-shaped
+  # fakes exercise load_token's >=30 validator; fictive, not real. Mirrors the
+  # scripts/__tests__/ path-scope in scripts/pre-gate-bundle.sh check_static.
+  '''scripts/__tests__/.*''',
   '''scripts/hooks/test_.*''',
 ]

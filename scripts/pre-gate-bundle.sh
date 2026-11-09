@@ -259,8 +259,19 @@ check_diff_size() {
 # Static grep over the ADDED lines only. Reports pattern names + counts, never the
 # matched secret value (no-secret-echo rule).
 check_static() {
-  local added secret_hits=0 unused=()
+  local added added_secrets secret_hits=0 unused=()
   added="$(git -C "$INSTALL_DIR" diff --unified=0 "${BASE}...${HEAD}" -- . ":(exclude)${VITEST_EXCLUDE}" 2>/dev/null \
+            | grep -E '^\+' | grep -vE '^\+\+\+' || true)"
+
+  # Path-scoped allowlist for the secret scan ONLY (card 3d36c13a; Chad sec-DÖNTÉS
+  # 2026-11-09). WHY: Python unit fixtures under scripts/__tests__/ legitimately
+  # embed fake, TOKEN-SHAPED literals (e.g. "123456789:AB...<36ch>") so load_token's
+  # >=30-char validator is exercised in full. Those are fictive, NOT real secrets.
+  # SCOPE: the allowlist excludes scripts/__tests__/ from the hardcoded-secret grep
+  # ONLY -- every real source path is still scanned, and the unused-export scan below
+  # still covers the test dir. Mitigation: fixtures must use an obviously-fake value
+  # plus a FAKE_TOKEN_FOR_TESTS comment. Mirrored in scripts/gitleaks.toml paths[].
+  added_secrets="$(git -C "$INSTALL_DIR" diff --unified=0 "${BASE}...${HEAD}" -- . ":(exclude)${VITEST_EXCLUDE}" ":(exclude)scripts/__tests__/**" 2>/dev/null \
             | grep -E '^\+' | grep -vE '^\+\+\+' || true)"
 
   # --- hardcoded secrets (BLOCK) ---
@@ -277,7 +288,8 @@ check_static() {
     local c
     # -e guards patterns that begin with '-' (e.g. the PRIVATE KEY block) so grep
     # does not parse them as options; default to 0 if grep matched nothing.
-    c="$(printf '%s\n' "$added" | grep -ciE -e "$rx" || true)"
+    # Uses $added_secrets (test-dir-allowlisted), NOT $added -- see note above.
+    c="$(printf '%s\n' "$added_secrets" | grep -ciE -e "$rx" || true)"
     c="${c:-0}"
     if [ "$c" -gt 0 ]; then
       secret_hits=$((secret_hits + c))

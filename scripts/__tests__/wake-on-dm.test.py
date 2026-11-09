@@ -28,13 +28,13 @@ _spec.loader.exec_module(daemon)
 
 class TestLoadToken(unittest.TestCase):
     def test_valid_token_returned(self):
-        # Build the fake fixture token from fragments so no telegram-token-shaped
-        # literal (\d{8,10}:[A-Za-z0-9_-]{35,}) ever appears on a single source
-        # line -- the pre-gate secret-scanner greps added diff lines for that
-        # exact shape. The runtime value is a realistic-length fake (NOT a real
-        # token), so load_token's >=30 validator is still exercised in full.
-        fake_secret = "ABCdefGHIjklMNOpqrSTUvwxYZ1234567890"  # 36 chars, fake
-        content = f"TELEGRAM_BOT_TOKEN=123456789:{fake_secret}\n"
+        # FAKE_TOKEN_FOR_TESTS: a fictive, realistic-length Telegram-bot-token-shaped
+        # literal, used ONLY to exercise load_token's >=30-char validator in full.
+        # This is NOT a real secret. The pre-gate secret-scanner path-allowlists
+        # scripts/__tests__/ (see pre-gate-bundle.sh check_static + gitleaks.toml)
+        # precisely so fictive fixtures like this are not flagged as hardcoded secrets.
+        # Chad sec-DÖNTÉS 2026-11-09, card 3d36c13a (allowlist over the fragment trick).
+        content = "TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ1234567890\n"
         with mock.patch("builtins.open", mock.mock_open(read_data=content)):
             tok = daemon.load_token("buster")
         self.assertIsNotNone(tok)
