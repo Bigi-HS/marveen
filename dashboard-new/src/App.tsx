@@ -7,6 +7,7 @@ import { HookStreamPage } from '@/pages/HookStreamPage'
 import { UsagePage } from '@/pages/UsagePage'
 import { AppHome } from '@/pages/app/AppHome'
 import { WorkoutScreen } from '@/pages/app/WorkoutScreen'
+import { ClaudiaTodosScreen } from '@/pages/app/ClaudiaTodosScreen'
 import { MobileSetup } from '@/pages/app/MobileSetup'
 
 // In Tauri, default to the App tab for the mobile-first experience.
@@ -24,6 +25,7 @@ export default function App() {
       {tab === 'usage' && <UsagePage />}
       {tab === 'app-home' && <AppHome />}
       {tab === 'workout' && <WorkoutScreen />}
+      {tab === 'todos' && <ClaudiaTodosScreen />}
       {tab === 'app-setup' && <MobileSetup />}
     </NavShell>
   )
