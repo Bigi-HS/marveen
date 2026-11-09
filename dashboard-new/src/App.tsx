@@ -10,6 +10,7 @@ import { WorkoutScreen } from '@/pages/app/WorkoutScreen'
 import { ClaudiaTodosScreen } from '@/pages/app/ClaudiaTodosScreen'
 import { GelimJournalScreen } from '@/pages/app/GelimJournalScreen'
 import { MobileSetup } from '@/pages/app/MobileSetup'
+import { FlottaScreen } from '@/pages/app/FlottaScreen'
 
 // In Tauri, default to the App tab for the mobile-first experience.
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -29,6 +30,7 @@ export default function App() {
       {tab === 'todos' && <ClaudiaTodosScreen />}
       {tab === 'journal' && <GelimJournalScreen />}
       {tab === 'app-setup' && <MobileSetup />}
+      {tab === 'fleet' && <FlottaScreen />}
     </NavShell>
   )
 }
