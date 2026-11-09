@@ -45,9 +45,16 @@ BLOCKED_RE = re.compile(r"repro-?blocked|blocker:|blocked:", re.I)
 # Thor PR#882 FLAG-2: a bare TG-reference (e.g. "TG9452 alapjan kesz") must NOT
 # park a card -- a historical TG mention in a done-note was false-matching -> false
 # PARKED -> false idle (the dangerous direction). Only explicit awaiting phrasing parks.
+# NOTE: TG\d is intentionally ABSENT here (see heartbeat-kanban-push.py PARKED_RE comment).
+# Card 41e31d7e: synced with heartbeat-kanban-push.py expansion (card 7125b579) --
+# added boss.?block, boss.?lepes, boss.?decision, vakacio.?utan, external.trigger,
+# repro.?block, credential, boss_waiting to prevent driving Boss-blocked/external-trigger
+# cards that kanban-push correctly skips.
 AWAITING_RE = re.compile(
     r"awaiting-?dominik|awaiting|do-?not-?nudge|parked|boss-?oldali|boss-?go|"
-    r"vak[aa]ci|nyaral|visszat[ee]r|oauth-consent|deploy-gated",
+    r"boss.?block|boss.?lepes|boss.?decision|boss_waiting|"
+    r"vak[aa]ci|vakacio.?utan|nyaral|visszat[ee]r|oauth-consent|deploy-gated|"
+    r"external.trigger|repro.?block|credential",
     re.I,
 )
 
