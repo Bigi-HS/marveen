@@ -439,6 +439,59 @@ class TestWorktreeBundleSelection(unittest.TestCase):
             f'Expected INSTALL_DIR fallback, got: {bundle_script_used!r}')
 
 
+class TestMainCheckoutBranchGuard(unittest.TestCase):
+    """_check_main_checkout_branch warns when INSTALL_DIR is not on develop (card cc4d569b).
+
+    Non-fatal: does not abort the run. Protects against the false-BLOCK recurrence
+    where the runner's own code drifts (card 55d37e01 recurrence: main checkout on a
+    feature branch -> runner code != develop).
+    """
+
+    def _run_check(self, branch_output: str, returncode: int = 0):
+        """Run _check_main_checkout_branch with a faked git result, capture stderr."""
+        import subprocess as sp_module
+        import io
+        mod = _load_runner()
+        fake_result = MagicMock(returncode=returncode, stdout=branch_output, stderr='')
+        with patch.object(sp_module, 'run', return_value=fake_result):
+            import sys as _sys
+            buf = io.StringIO()
+            orig = _sys.stderr
+            _sys.stderr = buf
+            try:
+                mod._check_main_checkout_branch()
+            finally:
+                _sys.stderr = orig
+        return buf.getvalue()
+
+    def test_no_warning_when_on_develop(self):
+        """No output when INSTALL_DIR is correctly on develop."""
+        stderr = self._run_check('develop\n')
+        self.assertEqual(stderr, '',
+            f'Expected no warning on develop, got: {stderr!r}')
+
+    def test_warns_when_on_feature_branch(self):
+        """HYGIENE WARNING emitted when branch is not develop."""
+        stderr = self._run_check('eng/some-feature-branch\n')
+        self.assertIn('HYGIENE WARNING', stderr)
+        self.assertIn('eng/some-feature-branch', stderr)
+
+    def test_warns_when_git_fails(self):
+        """HYGIENE WARNING emitted when git symbolic-ref fails (detached HEAD, etc.)."""
+        stderr = self._run_check('', returncode=128)
+        self.assertIn('HYGIENE WARNING', stderr)
+
+    def test_check_does_not_raise(self):
+        """_check_main_checkout_branch must never raise -- it is a non-fatal guard."""
+        import subprocess as sp_module
+        mod = _load_runner()
+        with patch.object(sp_module, 'run', side_effect=OSError('git not found')):
+            try:
+                mod._check_main_checkout_branch()
+            except Exception as e:
+                self.fail(f'_check_main_checkout_branch raised unexpectedly: {e}')
+
+
 if __name__ == '__main__':
     if not _RUNNER_PATH.exists():
         print(f'SKIP: {_RUNNER_PATH} not found')
