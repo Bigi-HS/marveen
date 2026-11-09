@@ -108,3 +108,37 @@ export async function fetchClaudiaTodos(): Promise<ClaudiaTodosResponse> {
 export async function markTodoDone(id: string): Promise<{ ok: boolean }> {
   return apiPost<{ ok: boolean }>(`/api/todos/${id}/done`, {})
 }
+
+// Fleet screen types (Phase 2A, card 60abcc64)
+
+export interface AgentSummary {
+  name: string
+  displayName: string
+  description: string
+  model: string
+  running: boolean
+  status: 'configured' | 'draft'
+  contextPercent: number | null
+  channelHealthy: boolean | null
+  hasTelegram: boolean
+  hasAvatar: boolean
+}
+
+export interface KanbanCardSummary {
+  id: string
+  title: string
+  status: string
+  priority: string
+  assignee: string | null
+  code: string | null
+  project: string | null
+}
+
+export async function fetchFleetAgents(): Promise<AgentSummary[]> {
+  return apiGet<AgentSummary[]>('/api/agents')
+}
+
+export async function fetchKanbanOpen(): Promise<KanbanCardSummary[]> {
+  const all = await apiGet<KanbanCardSummary[]>('/api/kanban')
+  return all.filter((c) => c.status === 'planned' || c.status === 'in_progress' || c.status === 'waiting')
+}
