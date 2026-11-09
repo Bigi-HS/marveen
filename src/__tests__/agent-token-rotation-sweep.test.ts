@@ -71,16 +71,23 @@ describe('sweepAgentTokenRotation (ENG-341d6d70 -- wire refreshTokenIfNeeded int
     expect(resolveAgentIdentity(db, readTokenLine('near'), SHARED, NOW).kind).toBe('ok')
   })
 
-  it('no-ops agents that have never been launched (absent token file)', () => {
-    seed('live', -1)
+  it('provisions agents with no token file so the next relaunch gets a fresh token (card c65875ed fix)', () => {
+    // Previously: absent file -> needsRefresh(null) -> false -> sweep skipped the agent.
+    // A session started before its .genesis-token was written (e.g. buster Nov-05 launch,
+    // token provisioned Nov-08) would permanently fall back to the shared bearer until a
+    // manual reprovision. Fix: absent file -> provision unconditionally.
+    seed('live', -1) // expired: should rotate
+    // 'ghost' has no token file at all -> should now be provisioned
     const res = sweepAgentTokenRotation(db, {
       listAgents: () => ['live', 'ghost'],
       tokenFileFor,
       now: NOW,
     })
     expect(res.checked).toBe(2)
-    expect(res.refreshed).toEqual(['live'])
+    expect(res.refreshed.sort()).toEqual(['ghost', 'live'])
     expect(res.errored).toEqual([])
+    // The provisioned ghost token must be valid and readable
+    expect(resolveAgentIdentity(db, readTokenLine('ghost'), SHARED, NOW).kind).toBe('ok')
   })
 
   it('isolates a failing agent and continues the sweep (one bad agent cannot starve the fleet)', () => {

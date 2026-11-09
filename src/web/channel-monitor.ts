@@ -26,7 +26,7 @@ import {
   writeBudgetPauseMarker,
 } from './opus-burn-monitor.js'
 import { createAgentMessage, getDb } from '../db.js'
-import { sweepAgentTokenRotation } from './agent-token-provision.js'
+import { sweepAgentTokenRotation, readTokenFileExpiry } from './agent-token-provision.js'
 import {
   agentHasChannel,
   agentSessionName,
@@ -959,6 +959,32 @@ function checkAgentTokenRotation(): void {
   }
 }
 
+// Detect running agents whose on-disk token is expired or missing (card c65875ed).
+// A session launched before its .genesis-token was provisioned silently falls back
+// to the shared operator bearer on every GitHub/gate call -- the token identity
+// laundering is not visible at the call site. This detector fires a warning so the
+// issue is caught in the logs within one sweep interval rather than surfacing as an
+// obscure 401 or a CI-independence invariant violation.
+function checkRunningAgentTokenHealth(): void {
+  const nowMs = Date.now()
+  for (const agentId of listAgentNames()) {
+    try {
+      const tokenFile = join(agentDir(agentId), '.genesis-token')
+      const expiresAtMs = readTokenFileExpiry(tokenFile)
+      if (expiresAtMs == null) {
+        // File absent or unreadable: agent running without a per-agent token.
+        logger.warn({ agentId }, '[token-health] agent has no token file -- falls back to shared bearer (identity laundering risk)')
+      } else if (nowMs >= expiresAtMs) {
+        // Token already past expiry (sweep should have caught this, but log if missed).
+        const expiredSecs = Math.round((nowMs - expiresAtMs) / 1000)
+        logger.warn({ agentId, expiredSecs }, '[token-health] agent token EXPIRED -- falls back to shared bearer')
+      }
+    } catch {
+      // Non-fatal: a single agent's read error must not abort the health check.
+    }
+  }
+}
+
 function checkOpusBurnThresholds(): void {
   try {
     const now = Date.now()
@@ -1467,7 +1493,11 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
   // renewed immediately rather than after the first interval.
   const TOKEN_ROTATION_INTERVAL_MS = 15 * 60 * 1000
   checkAgentTokenRotation()
-  setInterval(checkAgentTokenRotation, TOKEN_ROTATION_INTERVAL_MS)
+  checkRunningAgentTokenHealth()
+  setInterval(() => {
+    checkAgentTokenRotation()
+    checkRunningAgentTokenHealth()
+  }, TOKEN_ROTATION_INTERVAL_MS)
   return setInterval(check, 60000)
 }
 
