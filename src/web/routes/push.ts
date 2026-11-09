@@ -112,6 +112,56 @@ function getSender(): PushSender {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Push notification settings (Phase 2C, card 2f8257b2)
+// ---------------------------------------------------------------------------
+
+export const PUSH_CATEGORIES = ['workout', 'todo', 'fleet', 'journal'] as const
+export type PushCategory = (typeof PUSH_CATEGORIES)[number]
+export type PushSettings = Record<PushCategory, boolean>
+
+interface PushSettingsDb {
+  getSettings(): PushSettings
+  setCategory(category: string, enabled: boolean): void
+}
+
+let _settingsDbSeam: PushSettingsDb | null = null
+
+export function __setSettingsDbSeam(db: PushSettingsDb | null): void {
+  _settingsDbSeam = db
+}
+
+class SqlitePushSettingsDb implements PushSettingsDb {
+  private db = getNoaDb()
+
+  getSettings(): PushSettings {
+    const rows = this.db.prepare(
+      'SELECT category, enabled FROM push_notification_settings',
+    ).all() as Array<{ category: string; enabled: number }>
+    const result: PushSettings = { workout: true, todo: true, fleet: true, journal: true }
+    for (const row of rows) {
+      if (PUSH_CATEGORIES.includes(row.category as PushCategory)) {
+        result[row.category as PushCategory] = row.enabled !== 0
+      }
+    }
+    return result
+  }
+
+  setCategory(category: string, enabled: boolean): void {
+    this.db.prepare(
+      `INSERT INTO push_notification_settings (category, enabled, updated_at)
+       VALUES (?, ?, unixepoch())
+       ON CONFLICT(category) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at`,
+    ).run(category, enabled ? 1 : 0)
+  }
+}
+
+function getSettingsDb(): PushSettingsDb {
+  if (_settingsDbSeam) return _settingsDbSeam
+  return new SqlitePushSettingsDb()
+}
+
+// ---------------------------------------------------------------------------
 // Schema migration (called at server boot)
 // ---------------------------------------------------------------------------
 
@@ -122,6 +172,13 @@ export function applyPushMigrations(db = getNoaDb()): void {
       p256dh   TEXT NOT NULL,
       auth     TEXT NOT NULL,
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    )
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS push_notification_settings (
+      category   TEXT PRIMARY KEY,
+      enabled    INTEGER NOT NULL DEFAULT 1,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
     )
   `)
 }
@@ -169,6 +226,38 @@ export async function tryHandlePush(ctx: RouteContext): Promise<boolean> {
       return true
     }
     return handleSend(req, res)
+  }
+
+  if (path === '/api/push/settings' && method === 'GET') {
+    if (!identity?.agentId) {
+      json(res, { error: 'authentication required' }, 403)
+      return true
+    }
+    json(res, getSettingsDb().getSettings())
+    return true
+  }
+
+  if (path === '/api/push/settings' && method === 'PUT') {
+    if (!identity?.agentId) {
+      json(res, { error: 'authentication required' }, 403)
+      return true
+    }
+    const body = await readBody(req)
+    let data: Record<string, unknown>
+    try {
+      data = JSON.parse(body.toString())
+    } catch {
+      json(res, { error: 'invalid JSON' }, 400)
+      return true
+    }
+    const sdb = getSettingsDb()
+    for (const cat of PUSH_CATEGORIES) {
+      if (typeof data[cat] === 'boolean') {
+        sdb.setCategory(cat, data[cat] as boolean)
+      }
+    }
+    json(res, sdb.getSettings())
+    return true
   }
 
   return false

@@ -86,6 +86,19 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return (await res.json()) as T
 }
 
+export async function apiPut<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: 'PUT',
+    headers: { ...buildAuthHeaders(getToken()), 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    throw new ApiError(res.status, `PUT ${path} failed: ${res.status}`)
+  }
+  return (await res.json()) as T
+}
+
 export async function postJournalEntry(
   content: string,
   mood?: string,
@@ -157,4 +170,21 @@ export interface AgentActivity {
 
 export async function fetchAgentActivity(): Promise<AgentActivity[]> {
   return apiGet<AgentActivity[]>('/api/agents/activity')
+}
+
+// Push settings types (Phase 2C, card 2f8257b2)
+
+export interface PushSettings {
+  workout: boolean
+  todo: boolean
+  fleet: boolean
+  journal: boolean
+}
+
+export async function fetchPushSettings(): Promise<PushSettings> {
+  return apiGet<PushSettings>('/api/push/settings')
+}
+
+export async function savePushSettings(settings: Partial<PushSettings>): Promise<PushSettings> {
+  return apiPut<PushSettings>('/api/push/settings', settings)
 }

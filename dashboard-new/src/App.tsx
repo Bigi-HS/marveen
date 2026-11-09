@@ -12,6 +12,7 @@ import { GelimJournalScreen } from '@/pages/app/GelimJournalScreen'
 import { MobileSetup } from '@/pages/app/MobileSetup'
 import { FlottaScreen } from '@/pages/app/FlottaScreen'
 import { OfficeScreen } from '@/pages/app/OfficeScreen'
+import { PushSettingsScreen } from '@/pages/app/PushSettingsScreen'
 
 // In Tauri, default to the App tab for the mobile-first experience.
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -33,6 +34,7 @@ export default function App() {
       {tab === 'app-setup' && <MobileSetup />}
       {tab === 'fleet' && <FlottaScreen />}
       {tab === 'office' && <OfficeScreen />}
+      {tab === 'push-settings' && <PushSettingsScreen />}
     </NavShell>
   )
 }
