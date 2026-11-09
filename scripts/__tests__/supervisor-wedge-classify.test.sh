@@ -214,6 +214,8 @@ grep -qF "testB:G2" "$LOGFILE" \
   || fail "INT-2: real limit menu -> G2 (not flagged)"
 
 # INT-3: survey in tail -> G6
+# G6 uses 2-strike: first sweep writes the strike file (first_strike, no log),
+# second sweep within the window confirms and dismisses (logs testC:G6).
 echo "--- INT-3: survey in tail -> G6 ---"
 : > "$LOGFILE"
 export FLEET_TEST_SWEEP_AGENTS="testC"
@@ -223,7 +225,8 @@ export FLEET_TEST_SWEEP_AGENTS="testC"
   echo "1. Amazing  2. Good  3. Meh"
 } > "$FAKE_PANE_DIR/testC"
 
-fleet_wedge_sweep
+fleet_wedge_sweep  # first strike: writes strike file, no log yet
+fleet_wedge_sweep  # second strike: confirms + dismisses -> logs testC:G6
 grep -qF "testC:G6" "$LOGFILE" \
   && pass "INT-3: survey in tail -> G6" \
   || fail "INT-3: survey in tail -> G6 (not flagged)"

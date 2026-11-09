@@ -34,7 +34,9 @@ echo '#!/bin/sh
 echo "2.1.200 (Claude Code)"' > "$FAKE_CLAUDE"
 chmod +x "$FAKE_CLAUDE"
 
-# Override PATH so `command -v claude` finds our stub
+# ensure_cli_version_watch uses CLAUDE_BIN_OVERRIDE (defaults to /usr/bin/claude),
+# not PATH lookup -- PATH override alone is ignored. Point the override at our stub.
+export CLAUDE_BIN_OVERRIDE="$FAKE_CLAUDE"
 export PATH="$TMP:$PATH"
 
 VER_FILE="$STATE_DIR/claude-cli-version.txt"
