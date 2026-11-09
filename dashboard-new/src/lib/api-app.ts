@@ -19,8 +19,26 @@ export interface AppCalendarEvent {
   summary: string
   start: string
   end: string
-  location: string
-  description: string
+  location: string | null
+  description: string | null
+}
+
+export interface TodoItem {
+  id: string
+  title: string
+  detail: string | null
+  kind: string | null
+  status: string | null
+  done: number
+  created_at: number
+}
+
+export interface ClaudiaTodosResponse {
+  today: TodoItem[]
+  carried: TodoItem[]
+  folyamatban: TodoItem[]
+  doneToday: TodoItem[]
+  capCount: number
 }
 
 export interface JournalEntry {
@@ -81,4 +99,12 @@ export async function postJournalEntry(
 
 export async function postWorkoutCheckin(note: string): Promise<{ sent: boolean }> {
   return apiPost<{ sent: boolean }>('/api/workout/checkin', { note })
+}
+
+export async function fetchClaudiaTodos(): Promise<ClaudiaTodosResponse> {
+  return apiGet<ClaudiaTodosResponse>('/api/todos?owner=claudia')
+}
+
+export async function markTodoDone(id: string): Promise<{ ok: boolean }> {
+  return apiPost<{ ok: boolean }>(`/api/todos/${id}/done`, {})
 }
