@@ -137,10 +137,17 @@ export function insertApproval(db: Database.Database, input: ApprovalInput, now:
 }
 
 export function readApprovals(db: Database.Database, pr: number, sha: string): ApprovalRow[] {
+  // Normalise mixed ms/epoch-sec recorded_at values: rows written before the
+  // nowEpoch() fix used Date.now() directly (13-digit ms), while current rows
+  // use epoch-sec (10-digit). Dividing the ms-era values by 1000 restores
+  // correct chronological ordering so latest-wins (evaluateApprovals) works.
   return db
     .prepare(
-      `SELECT reviewer, verdict, recorded_at FROM gate_approvals
-       WHERE pr_number = ? AND head_sha = ? ORDER BY recorded_at ASC, id ASC`,
+      `SELECT reviewer, verdict,
+         CASE WHEN recorded_at > 1000000000000 THEN recorded_at / 1000 ELSE recorded_at END AS recorded_at
+       FROM gate_approvals
+       WHERE pr_number = ? AND head_sha = ?
+       ORDER BY CASE WHEN recorded_at > 1000000000000 THEN recorded_at / 1000 ELSE recorded_at END ASC, id ASC`,
     )
     .all(pr, sha) as ApprovalRow[]
 }
@@ -284,24 +291,28 @@ export interface GateHistoryOptions {
 
 // Read gate approval history, newest-first. Optional pr filter and limit (max 1000).
 // Append-only source table (gate_approvals) -- no prune -- so this is the full audit log.
+// Normalises mixed ms/epoch-sec recorded_at values in the same way as readApprovals.
 export function readGateHistory(
   db: Database.Database,
   opts: GateHistoryOptions = {},
 ): GateApprovalRow[] {
   const limit = Math.max(1, Math.min(opts.limit ?? 100, 1000))
+  const normExpr = `CASE WHEN recorded_at > 1000000000000 THEN recorded_at / 1000 ELSE recorded_at END`
   if (opts.pr != null) {
     return db
       .prepare(
-        `SELECT id, pr_number, head_sha, reviewer, verdict, recorded_by, recorded_at, note
+        `SELECT id, pr_number, head_sha, reviewer, verdict, recorded_by,
+                ${normExpr} AS recorded_at, note
            FROM gate_approvals WHERE pr_number = ?
-           ORDER BY recorded_at DESC, id DESC LIMIT ?`,
+           ORDER BY ${normExpr} DESC, id DESC LIMIT ?`,
       )
       .all(opts.pr, limit) as GateApprovalRow[]
   }
   return db
     .prepare(
-      `SELECT id, pr_number, head_sha, reviewer, verdict, recorded_by, recorded_at, note
-         FROM gate_approvals ORDER BY recorded_at DESC, id DESC LIMIT ?`,
+      `SELECT id, pr_number, head_sha, reviewer, verdict, recorded_by,
+              ${normExpr} AS recorded_at, note
+         FROM gate_approvals ORDER BY ${normExpr} DESC, id DESC LIMIT ?`,
     )
     .all(limit) as GateApprovalRow[]
 }
