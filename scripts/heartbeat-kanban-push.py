@@ -25,8 +25,9 @@ OPEN = {"planned", "in_progress", "waiting"}
 # historical TG-reference was false-parking cards -> false-idle (Thor PR#882 FLAG-2).
 # Do NOT "re-sync" these two regexes; the divergence is intentional.
 PARKED_RE = re.compile(
-    r"awaiting|do-?not-?nudge|parked|Boss-?oldali|Boss-?GO|vak[aá]ci|nyaral[aá]s|"
-    r"visszat[eé]r|OAuth-consent|unblock|TG\d|deploy-gated|awaiting-dominik",
+    r"awaiting|do-?not-?nudge|parked|Boss-?oldali|Boss-?GO|Boss-?BLOCK|boss.?lepes|boss.?decision|"
+    r"vak[aá]ci|vakacio.?utan|nyaral[aá]s|visszat[eé]r|OAuth-consent|unblock|TG\d|deploy-gated|"
+    r"awaiting-dominik|external.trigger|repro.?block|credential|boss_waiting",
     re.I,
 )
 
