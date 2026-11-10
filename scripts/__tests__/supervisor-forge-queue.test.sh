@@ -291,5 +291,31 @@ else
     fail "AC8: injected entry lost -- TOCTOU still present"
 fi
 
+# ---------------------------------------------------------------------------
+# AC9: chmod 0600 applied on requeue for small queue (<=50 entries)
+# ---------------------------------------------------------------------------
+echo "--- AC9: chmod 0600 applied on requeue for small queue ---"
+: > "$LOGFILE"
+reset_throttle
+rm -f "$QUEUE_FILE"
+for i in 1 2 3; do
+    echo "{\"ts\":\"2026-10-01T10:0${i}:00Z\",\"from\":\"forge\",\"content\":\"alert $i\",\"type\":\"alert\"}" >> "$QUEUE_FILE"
+done
+chmod 0644 "$QUEUE_FILE"
+CURL="$(make_curl_alive_post_fail)"
+
+check_forge_escalation_queue
+
+if [ -f "$QUEUE_FILE" ]; then
+    perms=$(stat -c %a "$QUEUE_FILE" 2>/dev/null || stat -f %Lp "$QUEUE_FILE" 2>/dev/null)
+    if [ "$perms" = "600" ]; then
+        pass "AC9: chmod 0600 applied on requeue for small queue"
+    else
+        fail "AC9: queue file permissions are $perms after requeue (expected 600)"
+    fi
+else
+    fail "AC9: queue file missing after requeue"
+fi
+
 echo ""
 if [ "$FAIL" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$FAIL FAILED"; exit 1; fi
