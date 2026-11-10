@@ -517,8 +517,8 @@ except Exception:
             excess=$(( lines - 50 ))
             tmp=$(mktemp)
             tail -n +"$((excess + 1))" "$queue_file" > "$tmp" && mv "$tmp" "$queue_file"
-            chmod 0600 "$queue_file"
         fi
+        chmod 0600 "$queue_file"
     ) 8>>"$queue_file".lock 2>/dev/null
     rm -f "$fwd_file"
   fi
