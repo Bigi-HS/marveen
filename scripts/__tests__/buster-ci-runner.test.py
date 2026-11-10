@@ -439,6 +439,110 @@ class TestWorktreeBundleSelection(unittest.TestCase):
             f'Expected INSTALL_DIR fallback, got: {bundle_script_used!r}')
 
 
+class TestGitleaksSymlink(unittest.TestCase):
+    """_run_bundle_in_worktree must symlink gitleaks binary into the worktree.
+
+    scripts/bin/gitleaks is gitignored so it is absent from freshly-created
+    git worktrees. Without the symlink, check_gitleaks() in pre-gate-bundle.sh
+    records WARN (fail-open) and skips the scan entirely -- entropy / format
+    detection never runs in CI. Card: 5481e842.
+    """
+
+    def _bundle_pass(self):
+        return {
+            'verdict': 'PASS', 'diff_additions': 0,
+            'checks': [
+                {'name': 'typecheck', 'status': 'PASS', 'detail': ''},
+                {'name': 'tests', 'status': 'PASS', 'detail': ''},
+            ],
+        }
+
+    def _run_with_dirs(self, mod, wt_has_scripts_bin: bool,
+                       install_has_gitleaks: bool):
+        """Run _run_bundle_in_worktree with real tmpdirs.
+
+        Uses real filesystem so Path.is_dir() / Path.exists() produce accurate
+        results without fragile Path-class patching.
+        Returns list of (src, dst) tuples captured from os.symlink calls.
+        """
+        import subprocess as sp_module
+        import json as _json
+        import tempfile
+        import shutil
+
+        wt_tmp = tempfile.mkdtemp()
+        install_tmp = tempfile.mkdtemp()
+        symlink_calls = []
+
+        try:
+            # Build worktree structure
+            if wt_has_scripts_bin:
+                os.makedirs(os.path.join(wt_tmp, 'scripts', 'bin'), exist_ok=True)
+
+            # Build install dir structure
+            install_bin = os.path.join(install_tmp, 'scripts', 'bin')
+            os.makedirs(install_bin, exist_ok=True)
+            if install_has_gitleaks:
+                open(os.path.join(install_bin, 'gitleaks'), 'w').close()
+
+            def fake_run(cmd, **kwargs):
+                return MagicMock(returncode=0,
+                                 stdout=_json.dumps(self._bundle_pass()), stderr='')
+
+            def fake_symlink(src, dst, *a, **kw):
+                symlink_calls.append((src, dst))
+
+            orig_install_dir = mod.INSTALL_DIR
+            mod.INSTALL_DIR = Path(install_tmp)
+            # Also update BUNDLE_SCRIPT to avoid FileNotFoundError path issues
+            orig_bundle = mod.BUNDLE_SCRIPT
+            mod.BUNDLE_SCRIPT = Path(install_tmp) / 'scripts' / 'pre-gate-bundle.sh'
+            try:
+                with patch.object(sp_module, 'run', side_effect=fake_run):
+                    with patch('tempfile.mkdtemp', return_value=wt_tmp):
+                        with patch('shutil.rmtree'):
+                            with patch('os.symlink', side_effect=fake_symlink):
+                                mod._run_bundle_in_worktree(
+                                    pr_number=42, head_sha='a' * 40,
+                                    base_branch='develop', dry_run=False
+                                )
+            finally:
+                mod.INSTALL_DIR = orig_install_dir
+                mod.BUNDLE_SCRIPT = orig_bundle
+        finally:
+            shutil.rmtree(wt_tmp, ignore_errors=True)
+            shutil.rmtree(install_tmp, ignore_errors=True)
+
+        return symlink_calls
+
+    def test_symlinks_gitleaks_when_binary_and_dir_exist(self):
+        """Gitleaks symlink created when INSTALL_DIR binary exists and scripts/bin/ is in worktree."""
+        mod = _load_runner()
+        symlink_calls = self._run_with_dirs(
+            mod, wt_has_scripts_bin=True, install_has_gitleaks=True)
+        gl_calls = [(s, d) for s, d in symlink_calls if 'gitleaks' in d]
+        self.assertTrue(gl_calls,
+            f'Expected a gitleaks symlink but none found in: {symlink_calls}')
+
+    def test_no_symlink_when_install_binary_absent(self):
+        """No gitleaks symlink when INSTALL_DIR/scripts/bin/gitleaks does not exist."""
+        mod = _load_runner()
+        symlink_calls = self._run_with_dirs(
+            mod, wt_has_scripts_bin=True, install_has_gitleaks=False)
+        gl_calls = [(s, d) for s, d in symlink_calls if 'gitleaks' in d]
+        self.assertFalse(gl_calls,
+            f'Expected no gitleaks symlink but found: {gl_calls}')
+
+    def test_no_symlink_when_worktree_scripts_bin_absent(self):
+        """No gitleaks symlink when scripts/bin/ dir does not exist in worktree."""
+        mod = _load_runner()
+        symlink_calls = self._run_with_dirs(
+            mod, wt_has_scripts_bin=False, install_has_gitleaks=True)
+        gl_calls = [(s, d) for s, d in symlink_calls if 'gitleaks' in d]
+        self.assertFalse(gl_calls,
+            f'Expected no gitleaks symlink (scripts/bin/ absent) but found: {gl_calls}')
+
+
 class TestMainCheckoutBranchGuard(unittest.TestCase):
     """_check_main_checkout_branch aborts when INSTALL_DIR is not on develop (card cc4d569b).
 
