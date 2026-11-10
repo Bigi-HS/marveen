@@ -191,3 +191,32 @@ export async function fetchPushSettings(): Promise<PushSettings> {
 export async function savePushSettings(settings: Partial<PushSettings>): Promise<PushSettings> {
   return apiPut<PushSettings>('/api/push/settings', settings)
 }
+
+// Showcase screen types (Phase 3B, card 0eff4b06)
+
+export type ShowcaseState = 'running' | 'idle' | 'working' | 'stopped'
+
+export interface ShowcaseAgentItem {
+  roleLabel: string
+  state: ShowcaseState
+}
+
+export interface ShowcaseAgentsResponse {
+  agents: ShowcaseAgentItem[]
+}
+
+export interface ShowcaseTokenResponse {
+  ok: boolean
+  token: string
+  jti: string
+  expires_at: number
+}
+
+export async function fetchShowcaseAgents(): Promise<ShowcaseAgentItem[]> {
+  const data = await apiGet<ShowcaseAgentsResponse>('/api/showcase/agents')
+  return data.agents
+}
+
+export async function generateShowcaseShareToken(): Promise<ShowcaseTokenResponse> {
+  return apiPost<ShowcaseTokenResponse>('/api/showcase/token', {})
+}
