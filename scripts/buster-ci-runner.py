@@ -162,6 +162,14 @@ def _run_bundle_in_worktree(pr_number: int, head_sha: str, base_branch: str,
         if not nm_link.exists():
             os.symlink(str(INSTALL_DIR / 'node_modules'), str(nm_link))
 
+        # Symlink gitleaks binary (gitignored) so check_gitleaks() runs the actual
+        # scan instead of WARN-ing fail-open (card 5481e842).
+        gl_src = INSTALL_DIR / 'scripts' / 'bin' / 'gitleaks'
+        if gl_src.exists():
+            wt_gl = wt_dir / 'scripts' / 'bin' / 'gitleaks'
+            if wt_gl.parent.is_dir() and not wt_gl.exists():
+                os.symlink(str(gl_src), str(wt_gl))
+
         # Run the WORKTREE's own pre-gate-bundle.sh so the bundle's BASH_SOURCE-
         # derived INSTALL_DIR points at the clean merge-ref worktree -- not the
         # main checkout. The main checkout can be on a different branch and carry
