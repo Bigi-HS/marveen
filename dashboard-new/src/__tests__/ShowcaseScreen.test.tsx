@@ -97,7 +97,7 @@ describe('ShowcaseScreen share panel', () => {
 
   it('calls generateShowcaseShareToken on button click', async () => {
     mockFetch.mockResolvedValue(AGENTS)
-    mockGenerate.mockResolvedValue({ token: 'jwt.token.here', jti: 'abc123', expires_at: 9999999999 })
+    mockGenerate.mockResolvedValue({ ok: true, token: 'jwt.token.here', jti: 'abc123', expires_at: 9999999999 })
     render(<ShowcaseScreen />)
     await waitFor(() => screen.getByTestId('showcase-generate-btn'))
     fireEvent.click(screen.getByTestId('showcase-generate-btn'))
@@ -106,7 +106,7 @@ describe('ShowcaseScreen share panel', () => {
 
   it('shows share URL after token generation', async () => {
     mockFetch.mockResolvedValue(AGENTS)
-    mockGenerate.mockResolvedValue({ token: 'jwt.token.here', jti: 'abc123', expires_at: 9999999999 })
+    mockGenerate.mockResolvedValue({ ok: true, token: 'jwt.token.here', jti: 'abc123', expires_at: 9999999999 })
     render(<ShowcaseScreen />)
     await waitFor(() => screen.getByTestId('showcase-generate-btn'))
     fireEvent.click(screen.getByTestId('showcase-generate-btn'))
@@ -116,7 +116,7 @@ describe('ShowcaseScreen share panel', () => {
 
   it('shows embed iframe code after token generation', async () => {
     mockFetch.mockResolvedValue(AGENTS)
-    mockGenerate.mockResolvedValue({ token: 'jwt.token.here', jti: 'abc123', expires_at: 9999999999 })
+    mockGenerate.mockResolvedValue({ ok: true, token: 'jwt.token.here', jti: 'abc123', expires_at: 9999999999 })
     render(<ShowcaseScreen />)
     await waitFor(() => screen.getByTestId('showcase-generate-btn'))
     fireEvent.click(screen.getByTestId('showcase-generate-btn'))

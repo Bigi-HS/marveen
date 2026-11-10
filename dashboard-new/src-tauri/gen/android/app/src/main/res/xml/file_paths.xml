@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider paths for the NoA app (ENG-197).
+  Scoped to specific subdirectories instead of the root (.) to follow
+  the principle of least privilege for content URI sharing.
+-->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-  <external-path name="my_images" path="." />
-  <cache-path name="my_cache_images" path="." />
+  <!-- Shared images directory only (was: external-path path=".") -->
+  <external-path name="shared_images" path="Pictures/NoA/" />
+  <!-- App cache images (was: cache-path path=".") -->
+  <cache-path name="cache_images" path="images/" />
 </paths>
