@@ -27,12 +27,65 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
 
 OPEN = {"planned", "in_progress", "waiting"}
 ORCHESTRATOR = "marveen"  # only the orchestrator tracks delegated/unassigned cards as nudgeable
+
+# --- Planning-freeze awareness (card f4921a38, NoA option A) -----------------
+# During a planning freeze the fleet is deliberately dormant except infra, the
+# channel session, and keep-list agents. A non-keep agent must then go idle_ok
+# EVEN with open MINE cards -- otherwise the autopilot tick keeps driving it,
+# fighting the freeze. This is ORTHOGONAL to the PARKED staleness-kapu: the TG\d
+# drop (Thor PR#882 FLAG-2) and sec3 marker-expiry are untouched.
+#
+# This mirrors the SAME contract as scripts/fleet-supervisor.sh (freeze_* gate)
+# and src/web/planning-freeze.ts: flag = existence of store/planning-freeze.enabled,
+# keep-list = store/planning-freeze-keep.txt (one id/line, '#'-comments + blanks
+# dropped, first token taken, empty-after-filter -> DEFAULT_KEEP).
+_STORE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "store")
+FREEZE_FLAG_PATH = os.path.join(_STORE, "planning-freeze.enabled")
+FREEZE_KEEP_PATH = os.path.join(_STORE, "planning-freeze-keep.txt")
+DEFAULT_KEEP = ("claudia", "hibiki")
+
+
+def parse_keep_list(contents):
+    """Agent ids allowed to run during a freeze. Mirrors freeze_keep_ids()/parseKeepList():
+    None/empty-after-filter -> DEFAULT_KEEP."""
+    if contents is None:
+        return set(DEFAULT_KEEP)
+    ids = [
+        line.strip().split()[0]
+        for line in contents.split("\n")
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    return set(ids) if ids else set(DEFAULT_KEEP)
+
+
+def is_frozen(enabled, keep_ids, agent):
+    """Pure freeze predicate. Mirrors freezeBlocksWith(): frozen iff the flag is
+    set AND the agent is not in the keep-list. disabled -> never frozen."""
+    return bool(enabled) and agent not in keep_ids
+
+
+def _read_freeze_state(agent, flag_path=FREEZE_FLAG_PATH, keep_path=FREEZE_KEEP_PATH):
+    """Live freeze read for one agent. FAIL-SAFE DIRECTION: when uncertain, return
+    False (NOT frozen) -- the dangerous direction for this classifier is a FALSE
+    idle, so an unreadable flag/keep-file must leave the agent driving."""
+    try:
+        enabled = os.path.exists(flag_path)
+    except OSError:
+        return False
+    if not enabled:
+        return False
+    try:
+        contents = open(keep_path).read() if os.path.exists(keep_path) else None
+    except OSError:
+        contents = None
+    return is_frozen(True, parse_keep_list(contents), agent)
 
 # Staleness windows in HOURS -- a marker only parks a card while fresh (section 3).
 WINDOW_AWAITING_H = 48.0  # FI-01
@@ -89,14 +142,30 @@ def _row(card: dict, age_h: float, bucket: str) -> dict:
     }
 
 
-def classify(cards, agent: str, now: float, orchestrator: str = ORCHESTRATOR) -> dict:
+def classify(cards, agent: str, now: float, orchestrator: str = ORCHESTRATOR,
+             frozen: bool = False) -> dict:
     """Pure classification. Returns buckets + idle_ok for `agent`.
 
     MINE       = open cards this agent owns and must drive now (not fresh-parked).
     NUDGEABLE  = stale cards this agent is responsible for poking (orchestrator only).
     PARKED     = legitimately held RIGHT NOW (fresh marker / fresh delegation).
     idle_ok    = MINE empty AND NUDGEABLE empty.
+    frozen     = planning-freeze active for this agent -> idle_ok True, no driving
+                 (card f4921a38). Short-circuits ahead of the card buckets.
     """
+    if frozen:
+        # Freeze dominates the card buckets: a non-keep agent must not be driven
+        # while the fleet is frozen. Buckets stay empty so the tick injects no work.
+        return {
+            "agent": agent,
+            "idle_ok": True,
+            "error": None,
+            "frozen": True,
+            "counts": {"mine": 0, "nudgeable": 0, "parked": 0},
+            "mine": [],
+            "nudgeable": [],
+            "parked": [],
+        }
     mine, nudgeable, parked = [], [], []
     for c in cards:
         if c.get("status") not in OPEN:
@@ -140,6 +209,7 @@ def classify(cards, agent: str, now: float, orchestrator: str = ORCHESTRATOR) ->
         "agent": agent,
         "idle_ok": idle_ok,
         "error": None,
+        "frozen": False,
         "counts": {"mine": len(mine), "nudgeable": len(nudgeable), "parked": len(parked)},
         "mine": mine,
         "nudgeable": nudgeable,
@@ -153,6 +223,7 @@ def _fail_safe(agent: str, reason: str) -> dict:
         "agent": agent,
         "idle_ok": False,
         "error": reason,
+        "frozen": False,
         "counts": {"mine": 0, "nudgeable": 0, "parked": 0},
         "mine": [],
         "nudgeable": [],
@@ -177,17 +248,31 @@ def main() -> int:
     ap.add_argument("--agent", required=True)
     ap.add_argument("--cards-file", help="JSON list of cards (offline/testing)")
     ap.add_argument("--now", type=float, default=None, help="epoch override (testing)")
+    ap.add_argument("--frozen", action="store_true",
+                    help="force planning-freeze idle (offline/testing override)")
     ap.add_argument("--json", action="store_true", help="emit JSON (default human)")
     args = ap.parse_args()
 
     now = args.now if args.now is not None else time.time()
+    # Freeze read is live-only: offline fixture runs (--cards-file) stay deterministic
+    # and opt into freeze solely via --frozen.
+    if args.frozen:
+        frozen = True
+    elif args.cards_file:
+        frozen = False
+    else:
+        frozen = _read_freeze_state(args.agent)
     try:
-        if args.cards_file:
+        if frozen:
+            # No card fetch needed -- a frozen agent is idle regardless of the board.
+            result = classify([], args.agent, now, frozen=True)
+        elif args.cards_file:
             with open(args.cards_file) as fh:
                 cards = json.load(fh)
+            result = classify(cards, args.agent, now)
         else:
             cards = _fetch_live_cards()
-        result = classify(cards, args.agent, now)
+            result = classify(cards, args.agent, now)
     except Exception as exc:  # noqa: BLE001 -- fail-safe busy on ANY failure
         result = _fail_safe(args.agent, f"{type(exc).__name__}: {exc}")
 
@@ -198,7 +283,8 @@ def main() -> int:
     c = result["counts"]
     verdict = "IDLE-OK" if result["idle_ok"] else "BUSY"
     err = f"  (error -> fail-safe busy: {result['error']})" if result["error"] else ""
-    print(f"[{result['agent']}] {verdict}{err}")
+    frz = "  (planning-freeze -> frozen idle)" if result.get("frozen") else ""
+    print(f"[{result['agent']}] {verdict}{err}{frz}")
     print(f"  mine={c['mine']} nudgeable={c['nudgeable']} parked={c['parked']}")
     for label, rows in (("MINE", result["mine"]), ("NUDGEABLE", result["nudgeable"])):
         for r in rows:

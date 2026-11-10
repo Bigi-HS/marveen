@@ -5,10 +5,12 @@ Falsifying tests on the DANGEROUS side (lesson-isolation-gate-enforcement...):
 the risky failure is a FALSE idle (agent goes silent while work waits), so most
 tests assert that work is NOT hidden. Run: python3 scripts/autopilot/test_classify.py
 """
+import os
 import sys
+import tempfile
 import time
 
-from classify import classify, _fail_safe
+from classify import classify, _fail_safe, is_frozen, parse_keep_list, _read_freeze_state
 
 NOW = 1_700_000_000.0
 H = 3600.0
@@ -89,6 +91,55 @@ def main():
     # 14. FLAG-3: a deliberate 'nyaral' awaiting-phrase DOES park (documents intended match).
     r = classify([card("c12", assignee="dave", desc="Dr. Stone nyaral, visszateres utan", age_h=1)], "dave", NOW)
     ok &= check("nyaral phrase -> parked (intended)", r["idle_ok"] is True and r["counts"]["parked"] == 1)
+
+    # --- Piece 5 (card f4921a38): planning-freeze awareness (NoA option A) ---
+    # A frozen agent goes idle_ok=True even with its own fresh open card; the TG\d
+    # drop + sec3 marker-expiry stay untouched (orthogonal new capability, not a revert).
+
+    # 15. Frozen agent with a live own card -> idle (frozen short-circuit), frozen=True.
+    r = classify([card("f1", assignee="dave", age_h=1)], "dave", NOW, frozen=True)
+    ok &= check("frozen agent -> idle despite own card",
+                r["idle_ok"] is True and r.get("frozen") is True
+                and r["counts"]["mine"] == 0)
+
+    # 16. Not frozen (default) still drives the same card -> busy, frozen=False.
+    r = classify([card("f1", assignee="dave", age_h=1)], "dave", NOW)
+    ok &= check("not frozen -> busy, frozen flag present+false",
+                r["idle_ok"] is False and r.get("frozen") is False)
+
+    # 17. is_frozen pure predicate mirrors the server freeze contract.
+    keep = {"claudia", "hibiki"}
+    ok &= check("is_frozen: enabled + not in keep -> True", is_frozen(True, keep, "dave") is True)
+    ok &= check("is_frozen: enabled + in keep -> False", is_frozen(True, keep, "hibiki") is False)
+    ok &= check("is_frozen: disabled -> False", is_frozen(False, keep, "dave") is False)
+
+    # 18. parse_keep_list mirrors the shell/server parser (comments + blanks dropped,
+    #     first token taken, empty-after-filter -> DEFAULT_KEEP).
+    ok &= check("parse_keep_list: ids parsed",
+                parse_keep_list("claudia\n# note\n\nhibiki extra") == {"claudia", "hibiki"})
+    ok &= check("parse_keep_list: None -> default", parse_keep_list(None) == {"claudia", "hibiki"})
+    ok &= check("parse_keep_list: all-comments -> default",
+                parse_keep_list("# only comments\n") == {"claudia", "hibiki"})
+
+    # 19. _read_freeze_state: fail-safe direction is NOT frozen (keep driving) when
+    #     uncertain -- the dangerous direction for this module is a FALSE idle.
+    with tempfile.TemporaryDirectory() as d:
+        flag = os.path.join(d, "planning-freeze.enabled")
+        keepf = os.path.join(d, "planning-freeze-keep.txt")
+        # flag absent -> never frozen.
+        ok &= check("freeze-state: no flag -> not frozen",
+                    _read_freeze_state("dave", flag, keepf) is False)
+        # flag present, keep-file absent -> DEFAULT_KEEP fallback; dave frozen, hibiki not.
+        open(flag, "w").close()
+        ok &= check("freeze-state: flag + default keep -> dave frozen",
+                    _read_freeze_state("dave", flag, keepf) is True)
+        ok &= check("freeze-state: flag + default keep -> hibiki not frozen",
+                    _read_freeze_state("hibiki", flag, keepf) is False)
+        # explicit keep-file listing dave -> dave not frozen.
+        with open(keepf, "w") as fh:
+            fh.write("dave\nclaudia\n")
+        ok &= check("freeze-state: keep-file lists dave -> not frozen",
+                    _read_freeze_state("dave", flag, keepf) is False)
 
     print("\n" + ("ALL PASS" if ok else "SOME FAILED"))
     return 0 if ok else 1
