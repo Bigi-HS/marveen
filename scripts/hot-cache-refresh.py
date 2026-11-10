@@ -45,7 +45,10 @@ CHANNEL_AGENTS = ["marveen", "claudia", "hibiki", "bond", "bigben", "scout", "da
 REFRESH_INTERVAL_SECONDS = int(os.environ.get("HOT_CACHE_REFRESH_SECONDS", 4 * 3600))
 
 MAX_CARDS = 6
+MAX_CLOSED = 5
+MAX_OPEN = 5
 TITLE_CHARS = 100
+TOPIC_CHARS = 120
 INBOUND_SNIPPET_CHARS = 200
 # Stay under the hook's CONTENT_CHAR_LIMIT (2000) so a full inject is never truncated.
 CONTENT_CHAR_LIMIT = 1800
@@ -103,6 +106,68 @@ def _load_in_progress(agent_id: str, noa_db_path: str):
         con.close()
 
 
+_TOPIC_STATUS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS topic_status (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id   TEXT NOT NULL,
+    status     TEXT NOT NULL CHECK(status IN ('closed','open')),
+    topic      TEXT NOT NULL,
+    source_ref TEXT,
+    blocker    TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+)
+"""
+_TOPIC_STATUS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_ts_agent ON topic_status(agent_id, status, updated_at)"
+)
+
+
+def _ensure_topic_status_schema(noa_db_path: str) -> None:
+    """Idempotent: create topic_status if absent. Called by topic-status-write.py."""
+    try:
+        con = sqlite3.connect(noa_db_path, timeout=5)
+        con.execute(_TOPIC_STATUS_SCHEMA)
+        con.execute(_TOPIC_STATUS_INDEX)
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+
+def _load_topic_status(agent_id: str, noa_db_path: str) -> tuple:
+    """Return (closed_rows, open_rows) for the agent.
+
+    Each row is a (topic, ref) tuple where ref is source_ref (closed) or
+    blocker (open). Returns the most recent MAX_CLOSED/MAX_OPEN items in
+    insertion order (oldest-first within the window so renders are stable).
+    Degrades to empty lists on any error.
+    """
+    try:
+        con = sqlite3.connect(f"file:{noa_db_path}?mode=ro", uri=True, timeout=5)
+    except Exception:
+        return [], []
+    try:
+        closed = con.execute(
+            "SELECT topic, source_ref FROM topic_status"
+            " WHERE agent_id=? AND status='closed'"
+            " ORDER BY updated_at DESC LIMIT ?",
+            (agent_id, MAX_CLOSED),
+        ).fetchall()
+        open_ = con.execute(
+            "SELECT topic, blocker FROM topic_status"
+            " WHERE agent_id=? AND status='open'"
+            " ORDER BY updated_at DESC LIMIT ?",
+            (agent_id, MAX_OPEN),
+        ).fetchall()
+        # Reverse so the oldest of the window is first (FIFO render order).
+        return list(reversed(closed)), list(reversed(open_))
+    except Exception:
+        return [], []
+    finally:
+        con.close()
+
+
 def _last_inbound(agent_id: str):
     """The agent's most recent inbound ledger turn as (text, ts), or None."""
     try:
@@ -115,8 +180,14 @@ def _last_inbound(agent_id: str):
     return None
 
 
-def build_hot_cache(agent_id: str, cards, last_inbound, now: float) -> str:
-    """Pure: render the snapshot markdown from the agent's cards + last turn."""
+def build_hot_cache(
+    agent_id: str, cards, last_inbound, now: float, topic_status=None
+) -> str:
+    """Pure: render the snapshot markdown from cards + topic_status + last turn.
+
+    topic_status is an optional (closed_rows, open_rows) tuple as returned by
+    _load_topic_status.  Each row is a (topic, ref) tuple.
+    """
     lines = [f"# {agent_id} — Hot Cache"]
     stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(now))
     lines.append(f"_auto · frissítve {stamp} · forrás: kanban in_progress + ledger_")
@@ -130,6 +201,29 @@ def build_hot_cache(agent_id: str, cards, last_inbound, now: float) -> str:
             lines.append(f"- [{pri}] {cid} {t}")
     else:
         lines.append("- Nincs aktív kártya.")
+
+    # Téma-státusz block: LEZÁRT + NYITOTT, rendered BEFORE Utolsó beszélgetés.
+    if topic_status:
+        closed_rows, open_rows = topic_status
+        # Defensive cap: keep the most recent MAX_CLOSED/MAX_OPEN (tail = newest).
+        closed_rows = closed_rows[-MAX_CLOSED:] if len(closed_rows) > MAX_CLOSED else closed_rows
+        open_rows = open_rows[-MAX_OPEN:] if len(open_rows) > MAX_OPEN else open_rows
+        if closed_rows or open_rows:
+            lines.append("")
+            lines.append("**Téma-státusz (egy pillantásra):**")
+            for topic, ref in closed_rows:
+                t = " ".join((topic or "").split())
+                if len(t) > TOPIC_CHARS:
+                    t = t[:TOPIC_CHARS].rstrip() + "…"
+                ref_str = f" (forrás: {ref})" if ref else ""
+                lines.append(f"- LEZÁRT: {t}{ref_str}")
+            for topic, blocker in open_rows:
+                t = " ".join((topic or "").split())
+                if len(t) > TOPIC_CHARS:
+                    t = t[:TOPIC_CHARS].rstrip() + "…"
+                blk_str = f" (vár: {blocker})" if blocker else ""
+                lines.append(f"- NYITOTT: {t}{blk_str}")
+
     if last_inbound:
         text, ts = last_inbound
         snip = " ".join((text or "").split())
@@ -177,7 +271,8 @@ def refresh_agent(agent_id, install_dir, noa_db_path, now, interval, force) -> s
         return "skip"
     cards = _load_in_progress(agent_id, noa_db_path)
     last_inbound = _last_inbound(agent_id)
-    content = build_hot_cache(agent_id, cards, last_inbound, now)
+    topic_status = _load_topic_status(agent_id, noa_db_path)
+    content = build_hot_cache(agent_id, cards, last_inbound, now, topic_status=topic_status)
     _write_atomic(cache_path, content)
     return "refresh"
 

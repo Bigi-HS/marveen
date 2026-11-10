@@ -493,6 +493,24 @@ export function initDatabase(dbPathOverride?: string): void {
     console.error('[db] telemetry migration failed:', msg)
   }
 
+  // Topic-status table (card eaa623a9). Curator-emitted closed/open round
+  // tracking; hot-cache-refresh reads this to surface a one-glance status block
+  // at session start so closed decisions are never re-opened. Additive,
+  // CREATE-IF-NOT-EXISTS, no FK, no-op on existing DB, never bricks boot.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS topic_status (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id   TEXT NOT NULL,
+      status     TEXT NOT NULL CHECK(status IN ('closed','open')),
+      topic      TEXT NOT NULL,
+      source_ref TEXT,
+      blocker    TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_ts_agent ON topic_status(agent_id, status, updated_at)`)
+
   // One-shot migration from the old JSON file (which had a read-modify-write
   // race). Import rows if they exist, then rename the file so we don't keep
   // re-importing. Wrapped in a transaction so a crash mid-import is safe.
