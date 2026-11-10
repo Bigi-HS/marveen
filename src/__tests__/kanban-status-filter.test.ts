@@ -46,12 +46,14 @@ async function kanbanGet(path: string): Promise<{ status: number; body: unknown[
 }
 
 describe('GET /api/kanban status filter', () => {
-  it('without filter returns all non-archived cards', async () => {
+  it('without filter default-excludes done/icebox cards', async () => {
     createCard({ title: 'P1', status: 'planned', priority: 'normal' })
     createCard({ title: 'D1', status: 'done', priority: 'normal' })
     const r = await kanbanGet('/api/kanban')
+    // New contract (fd95a6e6): no status param -> exclude done/icebox to keep the
+    // query small and avoid blocking the event loop on a full-board scan.
     expect((r.body as { title: string }[]).map(c => c.title)).toContain('P1')
-    expect((r.body as { title: string }[]).map(c => c.title)).toContain('D1')
+    expect((r.body as { title: string }[]).map(c => c.title)).not.toContain('D1')
   })
 
   it('?status=planned returns only planned cards', async () => {

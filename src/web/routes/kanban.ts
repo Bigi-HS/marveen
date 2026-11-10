@@ -5,12 +5,49 @@ import {
   InvalidTransitionError, InvalidStatusError, InvalidSortOrderError, HasActiveChildrenError,
   ParentNotFoundError, InvalidProjectError, assertProjectPresent,
 } from '../../noa-kanban.js'
+import { getNoaDb } from '../../noa-memory.js'
 import { OWNER_NAME, BOT_NAME } from '../../config.js'
 import { listAgentNames, readAgentDisplayName, findAvatarForAgent } from '../agent-config.js'
 import { generateBreakdown } from '../llm-breakdown.js'
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
+
+const KANBAN_LIMIT_DEFAULT = 200
+const KANBAN_LIMIT_MAX = 500
+
+/**
+ * Query kanban cards directly from the DB with status filtering and pagination.
+ * Used by GET /api/kanban to avoid blocking the event loop with a full table
+ * scan of 179+ cards when no status filter is provided.
+ */
+function queryCards(opts: {
+  statusFilter?: string | null
+  excludeStatuses?: string[]
+  limit: number
+  offset: number
+}): unknown[] {
+  const db = getNoaDb()
+  const { statusFilter, excludeStatuses, limit, offset } = opts
+
+  if (statusFilter) {
+    return db.prepare(
+      'SELECT * FROM kanban_cards WHERE status=? AND archived_at IS NULL ORDER BY sort_order ASC LIMIT ? OFFSET ?'
+    ).all(statusFilter, limit, offset)
+  }
+
+  if (excludeStatuses && excludeStatuses.length > 0) {
+    const placeholders = excludeStatuses.map(() => '?').join(', ')
+    return db.prepare(
+      `SELECT * FROM kanban_cards WHERE status NOT IN (${placeholders}) AND archived_at IS NULL ORDER BY status, sort_order ASC LIMIT ? OFFSET ?`
+    ).all(...excludeStatuses, limit, offset)
+  }
+
+  // No filter: all non-archived cards with pagination
+  return db.prepare(
+    'SELECT * FROM kanban_cards WHERE archived_at IS NULL ORDER BY status, sort_order ASC LIMIT ? OFFSET ?'
+  ).all(limit, offset)
+}
 
 export interface AssigneeEntry {
   name: string
@@ -60,8 +97,29 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method, url } = ctx
 
   if (path === '/api/kanban' && method === 'GET') {
-    const status = url.searchParams.get('status') || undefined
-    json(res, listCards(status ? { status } : undefined))
+    const { searchParams } = url
+    const statusParam = searchParams.get('status')
+    const limitParam = searchParams.get('limit')
+    const offsetParam = searchParams.get('offset')
+
+    const limit = Math.min(
+      Math.max(parseInt(limitParam ?? '', 10) || KANBAN_LIMIT_DEFAULT, 1),
+      KANBAN_LIMIT_MAX,
+    )
+    const offset = Math.max(parseInt(offsetParam ?? '', 10) || 0, 0)
+
+    let cards
+    if (statusParam === null) {
+      // Default: exclude done/icebox to keep the query small and avoid blocking
+      // the event loop for 10s on 179+ card boards (card fd95a6e6).
+      cards = queryCards({ excludeStatuses: ['done', 'icebox'], limit, offset })
+    } else if (statusParam === 'all') {
+      cards = queryCards({ limit, offset })
+    } else {
+      cards = queryCards({ statusFilter: statusParam, limit, offset })
+    }
+
+    json(res, cards)
     return true
   }
 
