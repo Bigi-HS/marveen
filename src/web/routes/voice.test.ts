@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { tryHandleVoice, __setTranscriber } from './voice.js'
+import { tryHandleVoice, __setTranscriber, __setWhisperAvailable, __resetPythonCache } from './voice.js'
 import type { RouteContext } from './types.js'
 
 // ---------------------------------------------------------------------------
@@ -53,10 +53,15 @@ function getResponse(ctx: RouteContext): { status?: number; body?: unknown } {
 describe('POST /api/voice/transcribe', () => {
   beforeEach(() => {
     __setTranscriber(async (_buf, _mime) => 'hello world')
+    // Force availability so the route tests do not depend on a real
+    // faster_whisper install in the test host (card 85317b24).
+    __setWhisperAvailable(true)
   })
 
   afterEach(() => {
     __setTranscriber(null)
+    __setWhisperAvailable(null)
+    __resetPythonCache()
   })
 
   it('returns false for non-voice paths', async () => {
@@ -142,6 +147,60 @@ describe('POST /api/voice/transcribe', () => {
     expect(resp.status).toBe(200)
     expect((resp.body as any).ok).toBe(true)
     expect((resp.body as any).text).toBe('hello world')
+  })
+
+  it('returns 400 for a non-audio mimeType (card 85317b24 flag-1)', async () => {
+    const ctx = makeCtx('/api/voice/transcribe', 'POST', {
+      audioBase64: Buffer.from('fake-audio-data').toString('base64'),
+      mimeType: 'text/html',
+    })
+    const handled = await tryHandleVoice(ctx)
+    expect(handled).toBe(true)
+    const resp = getResponse(ctx)
+    expect(resp.status).toBe(400)
+    expect((resp.body as any).ok).toBe(false)
+    expect((resp.body as any).error).toMatch(/audio/i)
+  })
+
+  it('accepts other audio/* subtypes (e.g. audio/ogg)', async () => {
+    const ctx = makeCtx('/api/voice/transcribe', 'POST', {
+      audioBase64: Buffer.from('fake-audio-data').toString('base64'),
+      mimeType: 'audio/ogg',
+    })
+    const handled = await tryHandleVoice(ctx)
+    expect(handled).toBe(true)
+    const resp = getResponse(ctx)
+    expect(resp.status).toBe(200)
+    expect((resp.body as any).ok).toBe(true)
+  })
+
+  it('returns 413 when the request body exceeds MAX_AUDIO_BYTES (card 85317b24 flag-2)', async () => {
+    // Emit a single oversized chunk so readBody rejects before buffering 10 MB.
+    const oversized = { length: 10 * 1024 * 1024 + 1 } as unknown as Buffer
+    const req: any = {
+      on(event: string, cb: (data?: Buffer) => void) {
+        if (event === 'data') cb(oversized)
+        // intentionally never emit 'end' -- the overflow reject fires first
+        return req
+      },
+      destroy() { /* readBody calls this on overflow */ },
+    }
+    const responseData: { status?: number; body?: unknown } = {}
+    const res: any = {
+      writeHead: (s: number) => { responseData.status = s },
+      end: (d: string) => { try { responseData.body = JSON.parse(d) } catch { responseData.body = d } },
+    }
+    const ctx: RouteContext = {
+      req, res,
+      path: '/api/voice/transcribe',
+      method: 'POST',
+      url: new URL('http://dummy/api/voice/transcribe'),
+      identity: { agentId: 'test' } as any,
+    }
+    const handled = await tryHandleVoice(ctx)
+    expect(handled).toBe(true)
+    expect(responseData.status).toBe(413)
+    expect((responseData.body as any).ok).toBe(false)
   })
 
   it('returns ok:false when transcriber throws', async () => {
