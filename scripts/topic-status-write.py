@@ -50,6 +50,18 @@ def _db_path() -> str:
     return str(install / "store" / "noa.db")
 
 
+REF_CHARS = 80
+TOPIC_CHARS = 120
+
+
+def _sanitize(text: str, max_chars: int) -> str:
+    """Collapse whitespace (including newlines) and cap length."""
+    s = " ".join((text or "").split())
+    if len(s) > max_chars:
+        s = s[:max_chars].rstrip() + "…"
+    return s
+
+
 def _connect(path: str) -> sqlite3.Connection:
     con = sqlite3.connect(path, timeout=10)
     con.execute(SCHEMA)
@@ -60,13 +72,14 @@ def _connect(path: str) -> sqlite3.Connection:
 
 def cmd_close(con: sqlite3.Connection, agent_id: str, topic: str, source_ref: str) -> None:
     now = int(time.time())
+    clean_ref = _sanitize(source_ref, REF_CHARS)
     con.execute(
         "INSERT INTO topic_status(agent_id,status,topic,source_ref,created_at,updated_at)"
         " VALUES (?,?,?,?,?,?)",
-        (agent_id, "closed", topic, source_ref, now, now),
+        (agent_id, "closed", _sanitize(topic, TOPIC_CHARS), clean_ref, now, now),
     )
     con.commit()
-    print(f"closed: {topic!r} (source: {source_ref})")
+    print(f"closed: {topic!r} (source: {clean_ref})")
 
 
 def cmd_open(con: sqlite3.Connection, agent_id: str, topic: str, blocker: str) -> None:
@@ -74,10 +87,10 @@ def cmd_open(con: sqlite3.Connection, agent_id: str, topic: str, blocker: str) -
     con.execute(
         "INSERT INTO topic_status(agent_id,status,topic,blocker,created_at,updated_at)"
         " VALUES (?,?,?,?,?,?)",
-        (agent_id, "open", topic, blocker, now, now),
+        (agent_id, "open", _sanitize(topic, TOPIC_CHARS), _sanitize(blocker, REF_CHARS), now, now),
     )
     con.commit()
-    print(f"open: {topic!r} (blocker: {blocker})")
+    print(f"open: {topic!r} (blocker: {_sanitize(blocker, REF_CHARS)})")
 
 
 def cmd_done(con: sqlite3.Connection, agent_id: str, row_id: str) -> None:

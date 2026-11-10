@@ -148,6 +148,33 @@ class TestBuildHotCacheTopicBlock(unittest.TestCase):
         self.assertIn("LEZÁRT", out)
         self.assertIn("some decision", out)
 
+    # --- eb45c3c2: ref/blocker sanitization ---
+
+    def test_ref_newline_collapsed(self):
+        # source_ref with embedded newline must be collapsed to a single space
+        out = self._build(closed=[("Build merged", "commit\nabc1234")])
+        self.assertNotIn("commit\nabc1234", out)
+        self.assertIn("commit abc1234", out)
+
+    def test_blocker_newline_collapsed(self):
+        out = self._build(open_=[("Gate pending", "buster\nCI")])
+        self.assertNotIn("buster\nCI", out)
+        self.assertIn("buster CI", out)
+
+    def test_ref_length_capped(self):
+        long_ref = "x" * (mod.REF_CHARS + 50)
+        out = self._build(closed=[("some decision", long_ref)])
+        # The ref in the output must not exceed REF_CHARS + ellipsis
+        self.assertIn("…", out)
+        # The raw oversized string must not appear verbatim
+        self.assertNotIn(long_ref, out)
+
+    def test_blocker_length_capped(self):
+        long_blocker = "y" * (mod.REF_CHARS + 50)
+        out = self._build(open_=[("some question", long_blocker)])
+        self.assertIn("…", out)
+        self.assertNotIn(long_blocker, out)
+
     def test_respects_content_char_limit(self):
         # Even with many topic items the total content stays under CONTENT_CHAR_LIMIT
         closed = [(f"{'x' * 80} decision {i}", f"TG{9800+i}") for i in range(5)]
@@ -289,6 +316,47 @@ class TestTopicStatusWriteCLI(unittest.TestCase):
     def test_unknown_subcommand_exits_nonzero(self):
         r = self._run("marveen", "bogus")
         self.assertNotEqual(r.returncode, 0)
+
+    # --- eb45c3c2: write-side sanitization ---
+
+    def test_close_sanitizes_source_ref_newline(self):
+        # Newlines in source_ref must be collapsed to space on write
+        r = self._run("marveen", "close", "Build merged", "commit\nabc1234")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = self.con.execute(
+            "SELECT source_ref FROM topic_status WHERE agent_id='marveen'"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertNotIn("\n", row[0])
+        self.assertIn("commit abc1234", row[0])
+
+    def test_open_sanitizes_blocker_newline(self):
+        r = self._run("marveen", "open", "Gate pending", "buster\nCI")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = self.con.execute(
+            "SELECT blocker FROM topic_status WHERE agent_id='marveen'"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertNotIn("\n", row[0])
+        self.assertIn("buster CI", row[0])
+
+    def test_close_caps_long_source_ref(self):
+        long_ref = "x" * 200
+        r = self._run("marveen", "close", "some topic", long_ref)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = self.con.execute(
+            "SELECT source_ref FROM topic_status WHERE agent_id='marveen'"
+        ).fetchone()
+        self.assertLessEqual(len(row[0]), 83)  # REF_CHARS=80 + "…" (3-byte UTF-8)
+
+    def test_open_caps_long_blocker(self):
+        long_blocker = "y" * 200
+        r = self._run("marveen", "open", "some question", long_blocker)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = self.con.execute(
+            "SELECT blocker FROM topic_status WHERE agent_id='marveen'"
+        ).fetchone()
+        self.assertLessEqual(len(row[0]), 83)
 
 
 if __name__ == "__main__":
