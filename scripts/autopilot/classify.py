@@ -84,7 +84,14 @@ def _read_freeze_state(agent, flag_path=FREEZE_FLAG_PATH, keep_path=FREEZE_KEEP_
     try:
         contents = open(keep_path).read() if os.path.exists(keep_path) else None
     except OSError:
-        contents = None
+        # A genuinely UNREADABLE keep-file (permission/IO error) is distinct from
+        # an ABSENT one. Absent -> contents=None -> DEFAULT_KEEP (deliberate: a
+        # freeze with no keep-file runs only the default keep-list). But on a real
+        # read error we cannot determine keep-membership, and resolving that
+        # uncertainty toward DEFAULT_KEEP would FREEZE (idle) a non-keep agent on a
+        # transient IO fault. FALSE idle is this classifier's dangerous direction,
+        # so fail toward NOT frozen -- keep driving (Chad #964 fail-safe flag).
+        return False
     return is_frozen(True, parse_keep_list(contents), agent)
 
 # Staleness windows in HOURS -- a marker only parks a card while fresh (section 3).
