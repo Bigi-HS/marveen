@@ -103,6 +103,7 @@ import { tryHandleMedia } from './web/routes/media.js'
 import { applyMediaMigrations } from './noa-media.js'
 import { tryHandlePush, applyPushMigrations } from './web/routes/push.js'
 import { tryHandleAppAuth, applyAppTokenMigrations, verifyAppTokenBearer } from './web/routes/app-auth.js'
+import { tryHandleShowcase, applyShowcaseMigrations, verifyShowcaseJwtBearer } from './web/routes/showcase.js'
 import { tryHandleJournal, applyJournalMigrations } from './web/routes/journal.js'
 import { tryHandleWorkout } from './web/routes/workout.js'
 import { tryHandleAppCalendar } from './web/routes/app-calendar.js'
@@ -320,15 +321,23 @@ export function startWebServer(port = 3420): http.Server {
         // POST /api/auth/app-token (Phase 0B, card 61df322a). Runs ONLY after
         // the primary gate fails so the hot-path (session/agent-token) is not
         // slowed by crypto on every request.
-        const appIdentity = verifyAppTokenBearer(extractBearer(req.headers.authorization))
+        const bearer = extractBearer(req.headers.authorization)
+        const appIdentity = verifyAppTokenBearer(bearer)
         if (appIdentity) {
           identity = appIdentity
         } else {
-          const uo = reqOrigin(req)
-          logger.warn({ remote: uo.remote, sourceIp: uo.sourceIp, path }, 'dashboard request unauthorized')
-          res.writeHead(gate.status, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Unauthorized' }))
-          return
+          // Showcase share-JWT fallback: a 24h token minted via POST
+          // /api/showcase/token grants showcase-read-only scope only.
+          const showcaseIdentity = verifyShowcaseJwtBearer(bearer)
+          if (showcaseIdentity) {
+            identity = showcaseIdentity
+          } else {
+            const uo = reqOrigin(req)
+            logger.warn({ remote: uo.remote, sourceIp: uo.sourceIp, path }, 'dashboard request unauthorized')
+            res.writeHead(gate.status, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'Unauthorized' }))
+            return
+          }
         }
       } else {
         identity = gate.identity
@@ -398,6 +407,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleMedia(routeCtx)) return
       if (await tryHandlePush(routeCtx)) return
       if (await tryHandleAppAuth(routeCtx)) return
+      if (await tryHandleShowcase(routeCtx)) return
       if (await tryHandleJournal(routeCtx)) return
       if (await tryHandleWorkout(routeCtx)) return
       if (await tryHandleAppCalendar(routeCtx)) return
@@ -548,6 +558,9 @@ export function startWebServer(port = 3420): http.Server {
 
   applyAppTokenMigrations()
   logger.info('App-token migrations applied (app_tokens)')
+
+  applyShowcaseMigrations()
+  logger.info('Showcase migrations applied (showcase_tokens)')
 
   applyJournalMigrations()
   logger.info('Journal migrations applied (journal_entries)')
