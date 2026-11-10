@@ -624,9 +624,15 @@ def match_env_file_print(command: str) -> bool:
     host all stay denied.
     """
     def _is_sensitive(tok: str, sanctioned: bool) -> bool:
-        if _ENV_FILE_RE.search(tok):
+        # K-1c pattern: resolve symlinks so "cat mylink" where mylink -> .env
+        # is caught by R2.  Fall back to the original token when realpath fails.
+        try:
+            resolved = os.path.realpath(tok)
+        except Exception:
+            resolved = tok
+        if _ENV_FILE_RE.search(resolved) or _ENV_FILE_RE.search(tok):
             return True
-        if _TOKEN_PATHS_RE.search(tok):
+        if _TOKEN_PATHS_RE.search(resolved) or _TOKEN_PATHS_RE.search(tok):
             return not sanctioned
         return False
 
