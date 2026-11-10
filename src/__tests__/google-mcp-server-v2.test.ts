@@ -91,6 +91,13 @@ describe('buildToolDefs registry', () => {
       expect(typeof d.inputSchema).toBe('object')
     }
   })
+
+  it('calendar_create_event schema includes recurrence as optional (20eddc2b)', () => {
+    const def = defs.find((d) => d.name === 'calendar_create_event')!
+    expect(def).toBeDefined()
+    expect(def.description).toContain('RRULE')
+    expect('recurrence' in def.inputSchema).toBe(true)
+  })
 })
 
 describe('read handlers wrap untrusted content', () => {
