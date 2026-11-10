@@ -61,6 +61,41 @@ PENDING_RX = re.compile(
     re.I,
 )
 
+# Managed-queue acknowledgement marker (card 16bbd5b5). A warm/hot memory that is
+# a DELIBERATELY long-lived, actively-managed surface (e.g. a Boss-facing revisit
+# queue with documented weekly cadence + awaiting-dominik language) otherwise trips
+# STALE_PENDING on every sweep -- a recurring false positive. An operator/agent can
+# mark such a memory as acknowledged:
+#   [HYGIENE-ACK]                -> permanent ack (intentionally long-lived)
+#   [HYGIENE-ACK: 2026-11-10]    -> fresh-stamp ack; expires after --ack-ttl-days,
+#                                   so it must be re-stamped on each revisit, which
+#                                   keeps a TRULY forgotten item flagging again.
+# A memory WITHOUT the marker is unchanged -- a genuine forgotten-pending still flags.
+ACK_TTL_DAYS_DEFAULT = 30
+MANAGED_ACK_RX = re.compile(r"\[HYGIENE-ACK(?::\s*(\d{4}-\d{2}-\d{2}))?\]", re.I)
+
+
+def managed_ack_active(content, now, ack_ttl_days):
+    """True if content carries an active managed-queue ack marker.
+
+    Undated marker -> always active. Dated marker -> active only while its stamp is
+    within ack_ttl_days of now (a stale stamp expires, so the item re-surfaces). A
+    malformed date is treated as an undated (permanent) ack -- the marker's presence
+    is an explicit management signal and should not resurrect the nag on a typo.
+    """
+    m = MANAGED_ACK_RX.search(content or "")
+    if not m:
+        return False
+    date_str = m.group(1)
+    if not date_str:
+        return True
+    try:
+        stamp = time.mktime(time.strptime(date_str, "%Y-%m-%d"))
+    except (ValueError, OverflowError):
+        return True
+    return (now - stamp) / 86400.0 <= ack_ttl_days
+
+
 # Volatile-topic signal for conflict clustering.
 TOPIC_RX = re.compile(
     r"(heti struktúr|cél-?struktúr|edzés.?terv|weekly plan|heti terv|roster"
@@ -83,6 +118,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--agent", default=None, help="limit to one agent_id")
     ap.add_argument("--stale-days", type=int, default=STALE_DAYS_DEFAULT)
+    ap.add_argument("--ack-ttl-days", type=int, default=ACK_TTL_DAYS_DEFAULT,
+                    help="a dated [HYGIENE-ACK: YYYY-MM-DD] marker expires after this many days")
     ap.add_argument("--db", default=DB)
     ap.add_argument("--json-only", action="store_true")
     args = ap.parse_args()
@@ -99,6 +136,7 @@ def main():
     rows = list(c.execute(q, params))
 
     stale_pending = []
+    managed_acked = 0
     topic_by_agent = defaultdict(list)
 
     for mid, agent, cat, content, ts in rows:
@@ -106,6 +144,11 @@ def main():
         ad = age_days(ts, now)
         is_pending = bool(PENDING_RX.search(content))
         if is_pending and ad is not None and ad > args.stale_days:
+            # Intentionally-managed, acknowledged queue -> not a forgotten-pending
+            # FP (card 16bbd5b5). A genuine forgotten-pending carries no marker.
+            if managed_ack_active(content, now, args.ack_ttl_days):
+                managed_acked += 1
+                continue
             stale_pending.append({
                 "id": mid, "agent": agent, "category": cat,
                 "age_days": round(ad, 1),
@@ -129,6 +172,7 @@ def main():
         "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "stale_days_threshold": args.stale_days,
         "scanned_warm_hot": len(rows),
+        "managed_acked_excluded": managed_acked,
         "stale_pending": sorted(stale_pending, key=lambda x: -x["age_days"]),
         "conflict_clusters": sorted(conflict_clusters, key=lambda x: -x["count"]),
         "ok": not stale_pending and not conflict_clusters,
