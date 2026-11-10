@@ -169,22 +169,35 @@ export function pendingAgeMinutes(nowMs: number, oldestCreatedAtSec: number): nu
 }
 
 /**
- * Content-safety gate for the staged-input wedge recovery Enter (card 7e0b0cce).
+ * Content-safety gate for the staged-input wedge recovery Enter (card 7e0b0cce,
+ * hardened in cards cf84e0a6 + 44ae9e4c).
  *
  * Risk: auto-submitting a recovery Enter on unrecognized staged content sends
  * arbitrary text typed by the user or by a prior tool invocation (Claudia
- * 6h-wedge precedent 2026-08-24). The gate checks that the pane content looks
- * like an injected task/heartbeat/inter-agent message before we fire Enter.
+ * 6h-wedge precedent 2026-08-24). The gate only proceeds when the pane shows a
+ * recognized injected task/heartbeat/inter-agent message.
  *
- * Returns true (SAFE -- proceed with Enter) when:
- *   - paneContent is null or empty (nothing staged)
- *   - trimmed length <= 40 chars (too short to be a real draft; the injection
- *     prefixes are always longer, so we also catch whitespace-padded empties)
- *   - starts with a recognized injection prefix (case-insensitive):
- *     [Uzenet, [Task, [Heartbeat, [Scheduled, [Inter-agent, [Feladat
+ * FAIL-CLOSED (card 44ae9e4c, Chad SEC flag #1835): the gate ABSTAINS unless it
+ * can positively confirm a safe injected message. In particular an unreadable
+ * (null) or empty pane now abstains rather than firing -- previously it returned
+ * true (fail-open), so a pane-read failure would auto-submit. A real wedge always
+ * presents a non-empty typing-state pane, so fail-closing null/empty does not
+ * break any legitimate recovery (the call-site only reaches here when the pane
+ * was classified typing + the inbox is overdue).
  *
- * Returns false (ABSTAIN -- skip Enter) for long unrecognized content.
- * The monitor should log the first 100 chars and skip the send.
+ * LINE-SCOPED MATCH (card cf84e0a6): the injected message sits inside the TUI
+ * input box, i.e. mid-pane, NOT at the start of the captured pane. The previous
+ * `trimmed.startsWith(prefix)` matched the whole pane and so almost always
+ * abstained on a real capture (the prefix is never the first character). We now
+ * scan each line, strip leading TUI chrome (prompt markers / box borders), and
+ * accept when a STAGED LINE begins with a recognized prefix. A prefix appearing
+ * mid-line (e.g. "I have a question about [Heartbeat]...") is still rejected.
+ *
+ * The blanket "<=40 chars -> true" short-circuit (Chad flag #2) is removed: short
+ * content must also present a recognized prefix line, else it abstains.
+ *
+ * Recognized prefixes (case-insensitive):
+ *   [Uzenet, [Task, [Heartbeat, [Scheduled, [Inter-agent, [Feladat
  */
 
 const SAFE_PREFIXES: ReadonlyArray<string> = [
@@ -196,11 +209,21 @@ const SAFE_PREFIXES: ReadonlyArray<string> = [
   '[feladat',
 ]
 
+// Leading TUI chrome stripped before the per-line prefix test: whitespace, the
+// prompt marker '>', and common box-drawing borders tmux/Ink render around the
+// input box. Keeps the match anchored to the start of the staged line while
+// tolerating the box chrome that precedes it in a real pane capture.
+const LEADING_CHROME_RE = /^[\s>│|╎┃┆┊*\-─]+/
+
 export function isSafeToAutoEnter(paneContent: string | null): boolean {
-  if (paneContent == null) return true
+  // Fail-closed: unreadable pane -> abstain (card 44ae9e4c flag-1).
+  if (paneContent == null) return false
   const trimmed = paneContent.trim()
-  if (trimmed.length === 0) return true
-  if (trimmed.length <= 40) return true
-  const lower = trimmed.toLowerCase()
-  return SAFE_PREFIXES.some((prefix) => lower.startsWith(prefix))
+  // Fail-closed: nothing we can positively recognize -> abstain.
+  if (trimmed.length === 0) return false
+  for (const line of trimmed.split('\n')) {
+    const stripped = line.replace(LEADING_CHROME_RE, '').trim().toLowerCase()
+    if (SAFE_PREFIXES.some((prefix) => stripped.startsWith(prefix))) return true
+  }
+  return false
 }

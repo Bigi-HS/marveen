@@ -1384,8 +1384,12 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         }
         if (enterDecision.send) {
           if (!isSafeToAutoEnter(pane)) {
+            // Card 44ae9e4c flag-3: the ABSTAIN path fires precisely when the
+            // staged content is UNRECOGNIZED -- i.e. it may be a user-typed draft
+            // (potential PII). Log its length only, never the raw content, so the
+            // server log cannot leak what the user was typing.
             logger.warn(
-              { agent: t.agentName, session: t.session, panePreview: (pane ?? '').slice(0, 100) },
+              { agent: t.agentName, session: t.session, stagedLen: (pane ?? '').trim().length },
               'staged-input wedge: ABSTAIN -- staged content is unrecognized (not an injected task/heartbeat), skipping recovery Enter',
             )
           } else {
