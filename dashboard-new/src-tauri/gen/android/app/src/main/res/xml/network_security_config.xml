@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network security config for the NoA app (ENG-195).
+
+  Debug builds already allow all cleartext via usesCleartextTraffic="true" in
+  build.gradle.kts. This file provides a principled per-domain allowlist so that
+  a future release build can re-enable cleartext only for the private fleet
+  endpoints (Tailscale 100.x.x.x, LAN 192.168.x.x/10.x.x.x) without opening
+  all cleartext globally.
+
+  Release builds: add networkSecurityConfig="@xml/network_security_config" to
+  <application> in AndroidManifest.xml to activate this config.
+-->
+<network-security-config>
+  <!-- System CAs trust anchor (default; explicit for clarity) -->
+  <base-config cleartextTrafficPermitted="false">
+    <trust-anchors>
+      <certificates src="system" />
+    </trust-anchors>
+  </base-config>
+
+  <!-- Debug: allow cleartext to localhost (Tauri asset server + Genesis API proxy) -->
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="false">localhost</domain>
+    <domain includeSubdomains="false">127.0.0.1</domain>
+    <domain includeSubdomains="false">10.0.2.2</domain>  <!-- Android emulator host -->
+  </domain-config>
+
+  <!-- Tailscale private range: allow cleartext for self-hosted fleet access -->
+  <domain-config cleartextTrafficPermitted="true">
+    <!-- 100.64.0.0/10 (Tailscale CGNAT range) cannot be listed as domain-config
+         with IP ranges; use a broader cleartext flag for private deployments.
+         TODO: replace with an HTTPS endpoint once a valid cert is in place. -->
+    <domain includeSubdomains="true">ts.net</domain>
+  </domain-config>
+</network-security-config>
