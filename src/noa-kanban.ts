@@ -525,6 +525,15 @@ export function applyKanbanMigrations(db = getNoaDb()): void {
       db.prepare(`UPDATE kanban_cards SET project = ? WHERE project = ?`).run(to, from)
     } catch { /* table absent in a partial schema -- ok */ }
   }
+  // MEM-008: normalize rows where updated_at or last_moved was written as epoch-ms
+  // (13-digit value > 1e12) instead of epoch-sec (10-digit). The corrupted row
+  // aa67106f / id=570030c9 was caused by a write-path that called Date.now() without
+  // Math.floor(.../ 1000). Integer-divide by 1000 brings them back to epoch-sec.
+  // Idempotent: a row already in epoch-sec (< 1e12) is never touched.
+  try {
+    db.exec(`UPDATE kanban_cards SET updated_at = updated_at / 1000 WHERE updated_at > 1000000000000`)
+    db.exec(`UPDATE kanban_cards SET last_moved = last_moved / 1000 WHERE last_moved > 1000000000000`)
+  } catch { /* table or column absent in a partial schema -- ok */ }
   // Card-code backfill (card cf0d1bfe S2). Runs AFTER the project value-remap so a
   // folded value (test-metrics -> ENG) is coded under its canonical prefix. Assign
   // a `PREFIX-NNN` code to every code-less card that carries a CANONICAL project,
