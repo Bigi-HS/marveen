@@ -47,18 +47,18 @@ function getPlanFetcher(): PlanFetcher {
 // Checkin sender seam (sends inter-agent to Hibiki in production)
 // ---------------------------------------------------------------------------
 
-type CheckinSender = (note: string, completed: boolean) => Promise<void>
+type CheckinSender = (note: string, completed: boolean, agentId: string) => Promise<void>
 
 let _checkinSender: CheckinSender | null = null
 export function __setCheckinSender(fn: CheckinSender | null): void { _checkinSender = fn }
 
 function defaultCheckinSender(): CheckinSender {
-  return async (note, completed) => {
+  return async (note, completed, agentId) => {
     const db = getNoaDb()
     db.prepare(
       `INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, priority)
-       VALUES ('marveen', 'hibiki', ?, 'pending', unixepoch(), 50)`,
-    ).run(`[App workout checkin] completed=${completed} note: ${note}`)
+       VALUES (?, 'hibiki', ?, 'pending', unixepoch(), 50)`,
+    ).run(agentId, `[App workout checkin] completed=${completed} note: ${note}`)
   }
 }
 
@@ -106,8 +106,9 @@ export async function tryHandleWorkout(ctx: RouteContext): Promise<boolean> {
     }
     const note = typeof parsed.note === 'string' ? parsed.note.slice(0, 1024) : ''
     const completed = parsed.completed === true
+    const fromAgent = identity?.agentId ?? 'marveen'
     try {
-      await getCheckinSender()(note, completed)
+      await getCheckinSender()(note, completed, fromAgent)
       json(res, { ok: true })
     } catch (err) {
       logger.error({ err }, 'workout/checkin: send error')
