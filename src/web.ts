@@ -106,6 +106,7 @@ import { tryHandleAppAuth, applyAppTokenMigrations, verifyAppTokenBearer } from 
 import { tryHandleShowcase, applyShowcaseMigrations, verifyShowcaseJwtBearer, isShowcaseAllowedPath } from './web/routes/showcase.js'
 import { tryHandleJournal, applyJournalMigrations } from './web/routes/journal.js'
 import { tryHandleWorkout } from './web/routes/workout.js'
+import { tryHandleRpg, applyRpgMigrations } from './web/routes/rpg.js'
 import { tryHandleAppCalendar } from './web/routes/app-calendar.js'
 import { isPublicApiPath } from './web/public-paths.js'
 import { tryHandleStatic } from './web/routes/static.js'
@@ -417,6 +418,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandlePush(routeCtx)) return
       if (await tryHandleAppAuth(routeCtx)) return
       if (await tryHandleShowcase(routeCtx)) return
+      if (await tryHandleRpg(routeCtx)) return
       if (await tryHandleJournal(routeCtx)) return
       if (await tryHandleWorkout(routeCtx)) return
       if (await tryHandleAppCalendar(routeCtx)) return
@@ -570,6 +572,9 @@ export function startWebServer(port = 3420): http.Server {
 
   applyShowcaseMigrations()
   logger.info('Showcase migrations applied (showcase_tokens)')
+
+  applyRpgMigrations()
+  logger.info('RPG migrations applied (xp_events, achievements)')
 
   applyJournalMigrations()
   logger.info('Journal migrations applied (journal_entries)')
