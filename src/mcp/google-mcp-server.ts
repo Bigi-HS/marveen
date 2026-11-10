@@ -593,7 +593,7 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
     // --- Calendar write (calendar) ---
     {
       name: TOOL_CALENDAR_CREATE_EVENT,
-      description: 'Create an event (summary/start/end, optional description/location). Defaults to the primary calendar; pass calendarId to create it in another.',
+      description: 'Create a calendar event (summary/start/end, optional description/location). Pass calendarId for a non-primary calendar. Pass recurrence as RRULE strings, e.g. [\'RRULE:FREQ=WEEKLY;BYDAY=TH\'] for a recurring event.',
       inputSchema: { ...eventInputShape, calendarId: z.string().optional() },
       guarded: false,
       write: true,
@@ -605,7 +605,7 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
     },
     {
       name: TOOL_CALENDAR_UPDATE_EVENT,
-      description: 'Update fields of a SINGLE event instance. Rejects scope=all (use calendar_update_event_all). Defaults to the primary calendar; pass calendarId for another.',
+      description: 'Update fields of a SINGLE event instance. Rejects scope=all (use calendar_update_event_all). Pass calendarId for non-primary. Accepts recurrence (RRULE strings) to change the recurrence rule.',
       inputSchema: { id: z.string(), scope: z.string().optional(), calendarId: z.string().optional(), ...eventInputShape },
       guarded: false,
       write: true,
@@ -620,7 +620,7 @@ export function buildToolDefs(deps: ToolDeps): ToolDef[] {
       name: TOOL_CALENDAR_UPDATE_EVENT_ALL,
       // Not ask-first guarded (card a7b62541): calendar write moved off the marveen
       // gate to Claudia's Boss-direct confirm. The audit line is still recorded.
-      description: 'Update ALL instances of a recurring event (patch the master). Defaults to the primary calendar; pass calendarId for another.',
+      description: 'Update ALL instances of a recurring event (patch the master). Pass calendarId for non-primary. Accepts recurrence (RRULE strings) to modify the recurrence rule.',
       inputSchema: { id: z.string(), calendarId: z.string().optional(), ...eventInputShape },
       guarded: false,
       write: true,

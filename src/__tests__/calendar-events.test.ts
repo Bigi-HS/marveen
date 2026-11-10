@@ -85,6 +85,17 @@ describe('createEvent (F-AC6)', () => {
     expect(calls[0].body.summary).toBe('Lunch')
     expect(out.id).toBe('ev1')
   })
+
+  it('passes recurrence RRULE strings through to the API body (20eddc2b)', async () => {
+    const { fn, calls } = capturing(jsonRes({ id: 'ev2', summary: 'Standup' }))
+    await createEvent('tok', {
+      summary: 'Standup',
+      start: { dateTime: '2026-06-20T09:00:00+02:00' },
+      end: { dateTime: '2026-06-20T09:30:00+02:00' },
+      recurrence: ['RRULE:FREQ=WEEKLY;BYDAY=TH'],
+    }, fn)
+    expect(calls[0].body.recurrence).toEqual(['RRULE:FREQ=WEEKLY;BYDAY=TH'])
+  })
 })
 
 describe('updateEvent (single, SEC-AC7)', () => {
