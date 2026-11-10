@@ -108,6 +108,7 @@ import { tryHandleJournal, applyJournalMigrations } from './web/routes/journal.j
 import { tryHandleWorkout } from './web/routes/workout.js'
 import { tryHandleRpg, applyRpgMigrations } from './web/routes/rpg.js'
 import { tryHandleAppCalendar } from './web/routes/app-calendar.js'
+import { tryHandleVoice } from './web/routes/voice.js'
 import { isPublicApiPath } from './web/public-paths.js'
 import { tryHandleStatic } from './web/routes/static.js'
 import { tryHandleDashboardNew } from './web/routes/dashboard-new.js'
@@ -422,6 +423,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleJournal(routeCtx)) return
       if (await tryHandleWorkout(routeCtx)) return
       if (await tryHandleAppCalendar(routeCtx)) return
+      if (await tryHandleVoice(routeCtx)) return
       // dashboard-new SPA on /v2, side-by-side with the legacy web/ app on '/'.
       // Mounted before the legacy static handler so the /v2 prefix is claimed first.
       if (tryHandleDashboardNew(routeCtx, DASHBOARD_NEW_DIST)) return

@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { fetchClaudiaTodos, fetchCalendarToday, markTodoDone } from '@/lib/api-app'
 import { Skeleton } from '@/components/Skeleton'
+import { VoiceInputButton } from '@/components/VoiceInputButton'
 import { cn } from '@/lib/cn'
 import type { ClaudiaTodosResponse, TodoItem, AppCalendarEvent } from '@/lib/api-app'
 
@@ -54,6 +55,8 @@ export function ClaudiaTodosScreen() {
   const [fetchError, setFetchError] = useState<string | null>(null)
   const [doneIds, setDoneIds] = useState<Set<string>>(new Set())
   const [doneError, setDoneError] = useState<string | null>(null)
+  const [todoInput, setTodoInput] = useState('')
+  const todoInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     Promise.all([fetchClaudiaTodos(), fetchCalendarToday()])
@@ -123,8 +126,31 @@ export function ClaudiaTodosScreen() {
     )
   }
 
+  function handleVoiceTranscript(text: string) {
+    setTodoInput(text)
+    // Focus the input so the user can review/edit before submitting
+    setTimeout(() => todoInputRef.current?.focus(), 50)
+  }
+
   return (
     <div className="space-y-5">
+      {/* Voice / text todo-add row */}
+      <div className="surface-card flex items-center gap-2 rounded-xl border border-border px-3 py-2">
+        <input
+          ref={todoInputRef}
+          type="text"
+          value={todoInput}
+          onChange={(e) => setTodoInput(e.target.value)}
+          placeholder="Új feladat Claudiának..."
+          className="min-w-0 flex-1 bg-transparent text-sm text-text placeholder:text-text-muted outline-none"
+          aria-label="Új feladat szövege"
+        />
+        <VoiceInputButton
+          onTranscript={handleVoiceTranscript}
+          ariaLabel="Feladat diktálása"
+        />
+      </div>
+
       {/* Todos section */}
       <div className="space-y-4">
         <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Claudia feladatai</p>
