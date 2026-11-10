@@ -79,6 +79,12 @@ function makeInMemoryDb(): RpgDb {
     getAchievements() {
       return db.prepare('SELECT id, title, unlocked_at FROM achievements ORDER BY unlocked_at DESC LIMIT 20').all() as Array<{ id: string; title: string; unlocked_at: number }>
     },
+    getSourceBreakdown() {
+      const rows = db.prepare('SELECT source, SUM(amount) AS total FROM xp_events GROUP BY source').all() as Array<{ source: string; total: number }>
+      const result: Record<string, number> = {}
+      for (const row of rows) result[row.source] = row.total
+      return result
+    },
   }
 }
 

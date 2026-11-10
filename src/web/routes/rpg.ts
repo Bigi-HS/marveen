@@ -103,6 +103,7 @@ export interface RpgDb {
   getTodayEventCount(date: string): number
   insertAchievement(id: string, title: string, unlockedAt: number): void
   getAchievements(): Array<{ id: string; title: string; unlocked_at: number }>
+  getSourceBreakdown(): Record<string, number>
 }
 
 let _dbSeam: RpgDb | null = null
@@ -141,6 +142,15 @@ class SqliteRpgDb implements RpgDb {
     return this.db.prepare(
       'SELECT id, title, unlocked_at FROM achievements ORDER BY unlocked_at DESC LIMIT 20',
     ).all() as Array<{ id: string; title: string; unlocked_at: number }>
+  }
+
+  getSourceBreakdown(): Record<string, number> {
+    const rows = this.db.prepare(
+      'SELECT source, SUM(amount) AS total FROM xp_events GROUP BY source',
+    ).all() as Array<{ source: string; total: number }>
+    const result: Record<string, number> = {}
+    for (const row of rows) result[row.source] = row.total
+    return result
   }
 }
 
@@ -220,8 +230,9 @@ export async function tryHandleRpg(ctx: RouteContext): Promise<boolean> {
     const streak = computeStreak(dates, today)
     const combo = db.getTodayEventCount(today)
     const recentAchievements = db.getAchievements()
+    const sourceBreakdown = db.getSourceBreakdown()
 
-    json(res, { totalXp, level, xpInLevel, xpForNextLevel, streak, combo, today, recentAchievements })
+    json(res, { totalXp, level, xpInLevel, xpForNextLevel, streak, combo, today, recentAchievements, sourceBreakdown })
     return true
   }
 
