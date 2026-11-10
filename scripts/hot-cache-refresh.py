@@ -49,6 +49,7 @@ MAX_CLOSED = 5
 MAX_OPEN = 5
 TITLE_CHARS = 100
 TOPIC_CHARS = 120
+REF_CHARS = 80
 INBOUND_SNIPPET_CHARS = 200
 # Stay under the hook's CONTENT_CHAR_LIMIT (2000) so a full inject is never truncated.
 CONTENT_CHAR_LIMIT = 1800
@@ -215,13 +216,19 @@ def build_hot_cache(
                 t = " ".join((topic or "").split())
                 if len(t) > TOPIC_CHARS:
                     t = t[:TOPIC_CHARS].rstrip() + "…"
-                ref_str = f" (forrás: {ref})" if ref else ""
+                r = " ".join((ref or "").split())
+                if len(r) > REF_CHARS:
+                    r = r[:REF_CHARS].rstrip() + "…"
+                ref_str = f" (forrás: {r})" if r else ""
                 lines.append(f"- LEZÁRT: {t}{ref_str}")
             for topic, blocker in open_rows:
                 t = " ".join((topic or "").split())
                 if len(t) > TOPIC_CHARS:
                     t = t[:TOPIC_CHARS].rstrip() + "…"
-                blk_str = f" (vár: {blocker})" if blocker else ""
+                b = " ".join((blocker or "").split())
+                if len(b) > REF_CHARS:
+                    b = b[:REF_CHARS].rstrip() + "…"
+                blk_str = f" (vár: {b})" if b else ""
                 lines.append(f"- NYITOTT: {t}{blk_str}")
 
     if last_inbound:
