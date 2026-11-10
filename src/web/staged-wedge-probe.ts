@@ -167,3 +167,40 @@ export function pendingAgeMinutes(nowMs: number, oldestCreatedAtSec: number): nu
   const ageSec = Math.floor(nowMs / 1000) - oldestCreatedAtSec
   return Math.max(0, Math.floor(ageSec / 60))
 }
+
+/**
+ * Content-safety gate for the staged-input wedge recovery Enter (card 7e0b0cce).
+ *
+ * Risk: auto-submitting a recovery Enter on unrecognized staged content sends
+ * arbitrary text typed by the user or by a prior tool invocation (Claudia
+ * 6h-wedge precedent 2026-08-24). The gate checks that the pane content looks
+ * like an injected task/heartbeat/inter-agent message before we fire Enter.
+ *
+ * Returns true (SAFE -- proceed with Enter) when:
+ *   - paneContent is null or empty (nothing staged)
+ *   - trimmed length <= 40 chars (too short to be a real draft; the injection
+ *     prefixes are always longer, so we also catch whitespace-padded empties)
+ *   - starts with a recognized injection prefix (case-insensitive):
+ *     [Uzenet, [Task, [Heartbeat, [Scheduled, [Inter-agent, [Feladat
+ *
+ * Returns false (ABSTAIN -- skip Enter) for long unrecognized content.
+ * The monitor should log the first 100 chars and skip the send.
+ */
+
+const SAFE_PREFIXES: ReadonlyArray<string> = [
+  '[uzenet',
+  '[task',
+  '[heartbeat',
+  '[scheduled',
+  '[inter-agent',
+  '[feladat',
+]
+
+export function isSafeToAutoEnter(paneContent: string | null): boolean {
+  if (paneContent == null) return true
+  const trimmed = paneContent.trim()
+  if (trimmed.length === 0) return true
+  if (trimmed.length <= 40) return true
+  const lower = trimmed.toLowerCase()
+  return SAFE_PREFIXES.some((prefix) => lower.startsWith(prefix))
+}

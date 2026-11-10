@@ -46,6 +46,7 @@ import { detectPaneState, decidePaneErrorAlert, detectsUsageLimitMenu, detectsAc
 import {
   classifyStagedWedgeProbe, pendingAgeMinutes, DEFAULT_STAGED_WEDGE_THRESHOLDS,
   decideStagedWedgeEnter, DEFAULT_STAGED_WEDGE_ENTER_THRESHOLDS,
+  isSafeToAutoEnter,
   type StagedWedgeEnterState,
 } from './staged-wedge-probe.js'
 import {
@@ -1382,14 +1383,21 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           agentStagedWedgeEnter.set(t.agentName, enterDecision.next)
         }
         if (enterDecision.send) {
-          logger.warn(
-            { agent: t.agentName, session: t.session, oldestPendingAgeMin, attempt: enterDecision.next.attempts },
-            'staged-input wedge: overdue inbox + parked input confirmed -- sending recovery Enter',
-          )
-          try {
-            execFileSync(TMUX, ['send-keys', '-t', `=${t.session}:`, 'Enter'], { timeout: 5000 })
-          } catch (err) {
-            logger.error({ err, agent: t.agentName, session: t.session }, 'staged-input wedge: failed to send recovery Enter')
+          if (!isSafeToAutoEnter(pane)) {
+            logger.warn(
+              { agent: t.agentName, session: t.session, panePreview: (pane ?? '').slice(0, 100) },
+              'staged-input wedge: ABSTAIN -- staged content is unrecognized (not an injected task/heartbeat), skipping recovery Enter',
+            )
+          } else {
+            logger.warn(
+              { agent: t.agentName, session: t.session, oldestPendingAgeMin, attempt: enterDecision.next.attempts },
+              'staged-input wedge: overdue inbox + parked input confirmed -- sending recovery Enter',
+            )
+            try {
+              execFileSync(TMUX, ['send-keys', '-t', `=${t.session}:`, 'Enter'], { timeout: 5000 })
+            } catch (err) {
+              logger.error({ err, agent: t.agentName, session: t.session }, 'staged-input wedge: failed to send recovery Enter')
+            }
           }
         } else if (stagedVerdict === 'staged-wedge' && enterDecision.next.attempts >= DEFAULT_STAGED_WEDGE_ENTER_THRESHOLDS.maxAttempts) {
           logger.warn(
