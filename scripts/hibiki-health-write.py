@@ -18,7 +18,13 @@ Usage:
         [--store STORE]
 
     python3 scripts/hibiki-health-write.py weight \
-        --date 2026-09-22 --weight_kg 82.5 --source manual [--store STORE]
+        --date 2026-06-15 --kg 82.5 --source manual [--notes "reggel, éhgyomorra"] \
+        [--store STORE]
+
+    python3 scripts/hibiki-health-write.py workout \
+        --date 2026-06-15 --type strength --duration 65 --source manual \
+        --exercises '[{"name":"Squat","sets":[{"reps":5,"load_kg":100}]}]' \
+        [--notes "new PR"] [--store STORE]
 
     python3 scripts/hibiki-health-write.py init-store [--store STORE]
 
@@ -306,42 +312,164 @@ def write_dexa(
     )
 
 
+# --------------------------------------------------------------------------- #
+# Weight log write (WRK-AC1, SEC-AC1)
+# --------------------------------------------------------------------------- #
 def write_weight(
     store: str,
     date_str: str,
-    weight_kg: float,
+    kg: float,
     source: str,
+    notes: str | None = None,
 ) -> None:
-    """Append or update a weight entry in weight_log.json (SEC-AC1/3/4b)."""
+    """Write a body-weight measurement to hibiki-progress.json (SEC-AC1/3 enforced)."""
     if source not in VALID_SOURCES:
         print(f"ERROR: source must be one of {VALID_SOURCES}, got {source!r}", file=sys.stderr)
         sys.exit(1)
 
-    errors = validate_ranges({"weight_kg": weight_kg})
+    errors = validate_ranges({"weight_kg": kg})
     if errors:
         print("ERROR: range validation failed (SEC-AC1):", file=sys.stderr)
         for e in errors:
             print(f"  {e}", file=sys.stderr)
         sys.exit(1)
 
-    path = os.path.join(store, "weight_log.json")
-    data = _open_store_file(path)
-    entries = data.get("entries", [])
+    path = os.path.join(store, "hibiki-progress.json")
+    data = _read_json(path)
+    log = data.get("weight_log", [])
 
     entry: dict[str, Any] = {
         "date": date_str,
-        "weight_kg": weight_kg,
+        "kg": kg,
         "source": source,
     }
-    existing = next((i for i, e in enumerate(entries) if e.get("date") == date_str), None)
-    if existing is not None:
-        entries[existing] = entry
-    else:
-        entries.append(entry)
+    if notes:
+        entry["notes"] = notes
 
-    data["entries"] = sorted(entries, key=lambda e: e.get("date", ""))
+    existing = next((i for i, e in enumerate(log) if e.get("date") == date_str), None)
+    if existing is not None:
+        old_kg = log[existing].get("kg")
+        if old_kg is not None and abs(old_kg - kg) > 10:
+            print(
+                f"WARNING: replacing existing weight entry for {date_str} -- "
+                f"difference is large ({old_kg} -> {kg} kg). Verify this is intentional.",
+                file=sys.stderr,
+            )
+        log[existing] = entry
+    else:
+        log.append(entry)
+
+    data["weight_log"] = sorted(log, key=lambda e: e.get("date", ""))
     _write_store_file(path, data)
-    print(f"OK: weight entry written for {date_str} ({weight_kg} kg, source={source})")
+    print(f"OK: weight entry written for {date_str} ({kg} kg, source={source})")
+
+
+# --------------------------------------------------------------------------- #
+# Workout log write (WRK-AC2, SEC-AC1)
+# --------------------------------------------------------------------------- #
+def _validate_exercises(exercises: list) -> list[str]:
+    """Validate exercise set/rep/load values (SEC-AC1). Returns error messages."""
+    errors: list[str] = []
+    if not isinstance(exercises, list):
+        return ["exercises must be a JSON array"]
+    for ex_idx, ex in enumerate(exercises):
+        if not isinstance(ex, dict):
+            errors.append(f"exercises[{ex_idx}] must be an object")
+            continue
+        name = ex.get("name", f"exercise[{ex_idx}]")
+        ex_sets = ex.get("sets", [])
+        if not isinstance(ex_sets, list):
+            errors.append(f"{name}: sets must be an array")
+            continue
+        if ex_sets:
+            errs = validate_ranges({"sets": len(ex_sets)})
+            for e in errs:
+                errors.append(f"{name}: {e}")
+        for s_idx, s in enumerate(ex_sets):
+            if not isinstance(s, dict):
+                errors.append(f"{name} sets[{s_idx}] must be an object")
+                continue
+            if "reps" in s:
+                try:
+                    reps_val = float(str(s["reps"]).split("/")[0].strip())
+                except (ValueError, TypeError):
+                    reps_val = None
+                if reps_val is not None:
+                    errs = validate_ranges({"reps": reps_val})
+                    for e in errs:
+                        errors.append(f"{name} sets[{s_idx}]: {e}")
+            if "load_kg" in s and s["load_kg"] not in (None, ""):
+                try:
+                    load_val = float(s["load_kg"])
+                except (ValueError, TypeError):
+                    errors.append(f"{name} sets[{s_idx}]: load_kg is not a number")
+                    continue
+                errs = validate_ranges({"load_kg": load_val})
+                for e in errs:
+                    errors.append(f"{name} sets[{s_idx}]: {e}")
+    return errors
+
+
+def write_workout(
+    store: str,
+    date_str: str,
+    workout_type: str,
+    duration_min: float,
+    source: str,
+    exercises: list | None = None,
+    notes: str | None = None,
+) -> None:
+    """Write a workout session to hibiki-progress.json (SEC-AC1/3 enforced)."""
+    if source not in VALID_SOURCES:
+        print(f"ERROR: source must be one of {VALID_SOURCES}, got {source!r}", file=sys.stderr)
+        sys.exit(1)
+
+    errors = validate_ranges({"duration_min": duration_min})
+    if errors:
+        print("ERROR: range validation failed (SEC-AC1):", file=sys.stderr)
+        for e in errors:
+            print(f"  {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if exercises:
+        ex_errors = _validate_exercises(exercises)
+        if ex_errors:
+            print("ERROR: exercise range validation failed (SEC-AC1):", file=sys.stderr)
+            for e in ex_errors:
+                print(f"  {e}", file=sys.stderr)
+            sys.exit(1)
+
+    path = os.path.join(store, "hibiki-progress.json")
+    data = _read_json(path)
+    log = data.get("workout_log", [])
+
+    entry: dict[str, Any] = {
+        "date": date_str,
+        "type": workout_type,
+        "duration_min": duration_min,
+        "source": source,
+    }
+    if exercises:
+        entry["exercises"] = exercises
+    if notes:
+        entry["notes"] = notes
+
+    existing = next(
+        (i for i, e in enumerate(log) if e.get("date") == date_str and e.get("type") == workout_type),
+        None,
+    )
+    if existing is not None:
+        log[existing] = entry
+    else:
+        log.append(entry)
+
+    data["workout_log"] = sorted(log, key=lambda e: (e.get("date", ""), e.get("type", "")))
+    _write_store_file(path, data)
+    ex_count = len(exercises) if exercises else 0
+    print(
+        f"OK: workout entry written for {date_str} "
+        f"(type={workout_type}, duration={duration_min}min, exercises={ex_count}, source={source})"
+    )
 
 
 def write_nutrition_not_logged(store: str, date_str: str) -> None:
@@ -468,11 +596,25 @@ def main() -> None:
     d.add_argument("--store", default=DEFAULT_STORE)
 
     # weight subcommand
-    w = sub.add_parser("weight", help="Write a body weight entry (SEC-AC1/3/4b)")
+    w = sub.add_parser("weight", help="Write a body-weight measurement (SEC-AC1, WRK-AC1)")
     w.add_argument("--date", default=str(date.today()))
-    w.add_argument("--weight_kg", type=float, required=True)
+    w.add_argument("--kg", type=float, required=True)
     w.add_argument("--source", required=True, choices=list(VALID_SOURCES))
+    w.add_argument("--notes", default=None)
     w.add_argument("--store", default=DEFAULT_STORE)
+
+    # workout subcommand
+    wo = sub.add_parser("workout", help="Write a workout session (SEC-AC1, WRK-AC2)")
+    wo.add_argument("--date", default=str(date.today()))
+    wo.add_argument("--type", dest="workout_type", required=True,
+                    help="Workout type, e.g. strength, cardio, hiit, mobility")
+    wo.add_argument("--duration", type=float, required=True,
+                    help="Session duration in minutes (1-240)")
+    wo.add_argument("--exercises", default=None,
+                    help="JSON array of exercise objects with name and sets")
+    wo.add_argument("--source", required=True, choices=list(VALID_SOURCES))
+    wo.add_argument("--notes", default=None)
+    wo.add_argument("--store", default=DEFAULT_STORE)
 
     # init-store subcommand
     i = sub.add_parser("init-store", help="Create store files with 0600 (SEC-AC4b)")
@@ -526,8 +668,26 @@ def main() -> None:
         write_weight(
             store=os.path.abspath(args.store),
             date_str=args.date,
-            weight_kg=args.weight_kg,
+            kg=args.kg,
             source=args.source,
+            notes=args.notes,
+        )
+    elif args.cmd == "workout":
+        exercises = None
+        if args.exercises:
+            try:
+                exercises = json.loads(args.exercises)
+            except json.JSONDecodeError as exc:
+                print(f"ERROR: --exercises is not valid JSON: {exc}", file=sys.stderr)
+                sys.exit(1)
+        write_workout(
+            store=os.path.abspath(args.store),
+            date_str=args.date,
+            workout_type=args.workout_type,
+            duration_min=args.duration,
+            source=args.source,
+            exercises=exercises,
+            notes=args.notes,
         )
     elif args.cmd == "init-store":
         init_store(os.path.abspath(args.store))
