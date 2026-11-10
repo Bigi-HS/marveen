@@ -141,6 +141,18 @@ def main():
         ok &= check("freeze-state: keep-file lists dave -> not frozen",
                     _read_freeze_state("dave", flag, keepf) is False)
 
+    # 20. (Chad #964 fail-safe) flag present but keep-file UNREADABLE (not merely
+    #     absent) -> OSError -> NOT frozen (drive), since FALSE idle is dangerous.
+    #     Simulated with a directory at the keep-path: exists()=True, open() raises
+    #     IsADirectoryError (an OSError subclass).
+    with tempfile.TemporaryDirectory() as d:
+        flag = os.path.join(d, "planning-freeze.enabled")
+        open(flag, "w").close()
+        keep_dir = os.path.join(d, "keep-as-dir")
+        os.mkdir(keep_dir)  # unreadable-as-file -> OSError on open
+        ok &= check("freeze-state: keep-file OSError -> not frozen (fail-safe busy)",
+                    _read_freeze_state("dave", flag, keep_dir) is False)
+
     print("\n" + ("ALL PASS" if ok else "SOME FAILED"))
     return 0 if ok else 1
 
