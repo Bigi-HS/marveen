@@ -1,4 +1,4 @@
-// Showcase backend (card ee1f77e3, Phase 3A).
+// Showcase backend (card ee1f77e3, Phase 3A) + SEC-114 fixes.
 //
 // GET  /api/showcase/agents  -- anonymised agent list (roleLabel + state only)
 // POST /api/showcase/token   -- mint a 24h share-JWT (admin scope required)
@@ -7,10 +7,16 @@
 //  - Zero internal data leaves: no agentId, no pane-tail, no card content,
 //    no memory, no internal URLs, no token material in the response body.
 //  - Only admin:* can mint share tokens; showcase-read-only cannot escalate.
-//  - IP-based sliding-window rate-limit on the GET endpoint.
+//  - Per-bearer-token rate-limit on GET (SEC-114 fix #1): keyed on a SHA-256
+//    prefix of the Authorization header, NOT on the socket IP. When running
+//    behind a Funnel/reverse-proxy, all requests arrive from 127.0.0.1, so
+//    an IP-keyed limiter collapses into one shared bucket for all visitors.
+//    Bearer-keyed limits give every token its own bucket regardless of topology.
+//  - Scope isolation enforced in web.ts (SEC-114 fix #2): showcase-read-only
+//    identity is path-restricted to /api/showcase/* before reaching any route.
 //  - Funnel exposure remains INERT until Boss-GO (Phase 3B wiring).
 
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import Database from 'better-sqlite3'
@@ -230,6 +236,18 @@ export function verifyShowcaseJwtBearer(bearer: string | null | undefined): Agen
 }
 
 // ---------------------------------------------------------------------------
+// Scope isolation helper (SEC-114 fix #2)
+// ---------------------------------------------------------------------------
+
+// Pure predicate: is this path reachable with a showcase-read-only identity?
+// Called by web.ts at the gate level (before routing) to enforce that a share
+// JWT cannot access any path outside /api/showcase/*. Extracted as a named
+// function so the gate logic is unit-testable in isolation.
+export function isShowcaseAllowedPath(path: string): boolean {
+  return path.startsWith('/api/showcase/')
+}
+
+// ---------------------------------------------------------------------------
 // Agent list seam (injectable for tests)
 // ---------------------------------------------------------------------------
 
@@ -278,10 +296,18 @@ export async function tryHandleShowcase(ctx: RouteContext): Promise<boolean> {
 
   // GET /api/showcase/agents
   if (path === '/api/showcase/agents' && method === 'GET') {
-    // Rate-limit by socket IP (unspoofable kernel peer).
-    const socketIp = (req.socket as { remoteAddress?: string })?.remoteAddress ?? 'unknown'
+    // Rate-limit key: SHA-256 prefix of the Authorization header (per-bearer-
+    // token bucket). Behind a reverse-proxy/Funnel, all requests share the same
+    // socket IP (127.0.0.1), so an IP-keyed bucket would collapse the whole
+    // allowance into one shared pool. Keying on the bearer guarantees each token
+    // gets its own 20-req/min budget regardless of network topology. We hash to
+    // avoid storing the raw credential in the in-memory bucket map.
+    const authHeader = (req.headers as Record<string, string | undefined>)['authorization'] ?? ''
+    const rlKey = authHeader
+      ? createHash('sha256').update(authHeader).digest('hex').slice(0, 16)
+      : (req.socket as { remoteAddress?: string })?.remoteAddress ?? 'unknown'
     const rl = getRateLimiter()
-    const rlResult = rl.allow(socketIp)
+    const rlResult = rl.allow(rlKey)
     if (!rlResult.allowed) {
       json(res, { error: 'rate limit exceeded' }, 429)
       return true

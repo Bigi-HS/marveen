@@ -103,7 +103,7 @@ import { tryHandleMedia } from './web/routes/media.js'
 import { applyMediaMigrations } from './noa-media.js'
 import { tryHandlePush, applyPushMigrations } from './web/routes/push.js'
 import { tryHandleAppAuth, applyAppTokenMigrations, verifyAppTokenBearer } from './web/routes/app-auth.js'
-import { tryHandleShowcase, applyShowcaseMigrations, verifyShowcaseJwtBearer } from './web/routes/showcase.js'
+import { tryHandleShowcase, applyShowcaseMigrations, verifyShowcaseJwtBearer, isShowcaseAllowedPath } from './web/routes/showcase.js'
 import { tryHandleJournal, applyJournalMigrations } from './web/routes/journal.js'
 import { tryHandleWorkout } from './web/routes/workout.js'
 import { tryHandleAppCalendar } from './web/routes/app-calendar.js'
@@ -328,8 +328,17 @@ export function startWebServer(port = 3420): http.Server {
         } else {
           // Showcase share-JWT fallback: a 24h token minted via POST
           // /api/showcase/token grants showcase-read-only scope only.
+          // SEC-114 fix #2: enforce path isolation here, at the GATE, before
+          // the request reaches any route handler. A showcase JWT may ONLY
+          // access /api/showcase/* -- any other path is a scope escalation.
+          // Failing closed (403) prevents journal/workout/push data leakage.
           const showcaseIdentity = verifyShowcaseJwtBearer(bearer)
           if (showcaseIdentity) {
+            if (!isShowcaseAllowedPath(path)) {
+              res.writeHead(403, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'Forbidden: showcase token is restricted to /api/showcase/*' }))
+              return
+            }
             identity = showcaseIdentity
           } else {
             const uo = reqOrigin(req)

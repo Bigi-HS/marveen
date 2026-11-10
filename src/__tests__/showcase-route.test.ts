@@ -18,6 +18,7 @@ import {
   signShowcaseToken,
   verifyShowcaseJwt,
   verifyShowcaseJwtBearer,
+  isShowcaseAllowedPath,
   __setSecretSeam,
   __setDbSeam,
   __setAgentListSeam,
@@ -102,11 +103,12 @@ async function call(
   path: string,
   identity: AgentIdentity = ANON,
   remoteAddress?: string,
+  authorizationHeader?: string,
 ) {
   const url = new URL('http://x' + path)
   const req = Object.assign(Readable.from([]), {
     socket: { remoteAddress: remoteAddress ?? '127.0.0.1' },
-    headers: {},
+    headers: authorizationHeader ? { authorization: authorizationHeader } : {},
   }) as never
   const captured: { status: number; headers: Record<string, string>; body: unknown } = {
     status: 200,
@@ -355,5 +357,114 @@ describe('signShowcaseToken / verifyShowcaseJwt', () => {
   it('verifyShowcaseJwtBearer returns null for garbage', () => {
     expect(verifyShowcaseJwtBearer('Bearer garbage')).toBeNull()
     expect(verifyShowcaseJwtBearer(null)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SEC-114 fix #1: per-bearer rate-limit (Funnel-safe)
+// ---------------------------------------------------------------------------
+
+describe('SEC-114 fix #1 -- per-bearer rate-limit key', () => {
+  it('two distinct auth headers get separate buckets (one blocked, one passes)', async () => {
+    // First token exhausts its bucket.
+    let blocked = false
+    const rl1Calls: string[] = []
+    __setRateLimiterSeam({
+      allow: (key) => {
+        rl1Calls.push(key)
+        // Block the first unique key (simulating exhaustion), pass the second.
+        const unique = [...new Set(rl1Calls)]
+        return unique.length === 1 && rl1Calls.filter(k => k === key).length > 1
+          ? { allowed: false, retryAfterMs: 1000 }
+          : { allowed: true, retryAfterMs: 0 }
+      },
+      prune: () => 0,
+      size: () => 0,
+    })
+    // First call with header A -- passes (first hit on key A)
+    const r1 = await call('GET', '/api/showcase/agents', ADMIN, '127.0.0.1', 'Bearer tokenA')
+    expect(r1.status).toBe(200)
+    // Second call with same header A -- blocked (second hit on same key)
+    const r2 = await call('GET', '/api/showcase/agents', ADMIN, '127.0.0.1', 'Bearer tokenA')
+    expect(r2.status).toBe(429)
+    // Call with different header B -- passes (first hit on key B)
+    const r3 = await call('GET', '/api/showcase/agents', ADMIN, '127.0.0.1', 'Bearer tokenB')
+    expect(r3.status).toBe(200)
+    // The two distinct tokens must have produced distinct RL keys.
+    const unique = [...new Set(rl1Calls)]
+    expect(unique.length).toBe(2)
+    blocked = r2.status === 429
+    expect(blocked).toBe(true)
+  })
+
+  it('no-auth request falls back to socket IP key', async () => {
+    const seenKeys: string[] = []
+    __setRateLimiterSeam({
+      allow: (key) => { seenKeys.push(key); return { allowed: true, retryAfterMs: 0 } },
+      prune: () => 0,
+      size: () => 0,
+    })
+    await call('GET', '/api/showcase/agents', ADMIN, '10.0.0.1')
+    expect(seenKeys[0]).toBe('10.0.0.1')
+  })
+
+  it('rate-limit key is not the raw token (must be hashed)', async () => {
+    const seenKeys: string[] = []
+    __setRateLimiterSeam({
+      allow: (key) => { seenKeys.push(key); return { allowed: true, retryAfterMs: 0 } },
+      prune: () => 0,
+      size: () => 0,
+    })
+    const rawToken = 'Bearer supersecrettoken123'
+    await call('GET', '/api/showcase/agents', ADMIN, '127.0.0.1', rawToken)
+    expect(seenKeys[0]).not.toContain('supersecrettoken123')
+    expect(seenKeys[0]).toMatch(/^[0-9a-f]{16}$/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SEC-114 fix #2: scope isolation (isShowcaseAllowedPath)
+// ---------------------------------------------------------------------------
+
+describe('SEC-114 fix #2 -- isShowcaseAllowedPath scope isolation', () => {
+  it('allows /api/showcase/agents', () => {
+    expect(isShowcaseAllowedPath('/api/showcase/agents')).toBe(true)
+  })
+
+  it('allows /api/showcase/token', () => {
+    expect(isShowcaseAllowedPath('/api/showcase/token')).toBe(true)
+  })
+
+  it('allows any /api/showcase/* sub-path', () => {
+    expect(isShowcaseAllowedPath('/api/showcase/anything/nested')).toBe(true)
+  })
+
+  it('[S2] blocks /api/journal -- private data endpoint', () => {
+    expect(isShowcaseAllowedPath('/api/journal')).toBe(false)
+  })
+
+  it('[S2] blocks /api/workout -- private data endpoint', () => {
+    expect(isShowcaseAllowedPath('/api/workout')).toBe(false)
+  })
+
+  it('[S2] blocks /api/push/settings -- private data endpoint', () => {
+    expect(isShowcaseAllowedPath('/api/push/settings')).toBe(false)
+  })
+
+  it('[S2] blocks /api/memories -- private data endpoint', () => {
+    expect(isShowcaseAllowedPath('/api/memories')).toBe(false)
+  })
+
+  it('[S2] blocks /api/agents -- internal agent config', () => {
+    expect(isShowcaseAllowedPath('/api/agents')).toBe(false)
+  })
+
+  it('[S2] blocks /api/kanban -- internal task data', () => {
+    expect(isShowcaseAllowedPath('/api/kanban')).toBe(false)
+  })
+
+  it('blocks a path that merely contains "showcase" mid-string', () => {
+    // Guard against accidental path-prefix bypasses.
+    expect(isShowcaseAllowedPath('/api/not-showcase/agents')).toBe(false)
   })
 })
