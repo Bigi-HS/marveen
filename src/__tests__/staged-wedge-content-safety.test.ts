@@ -1,98 +1,133 @@
 /**
- * Tests for isSafeToAutoEnter (card 7e0b0cce).
+ * Tests for isSafeToAutoEnter (card 7e0b0cce, hardened in cf84e0a6 + 44ae9e4c).
  *
  * Risk: auto-Enter on unrecognized staged content submits wrong content to the
- * agent (Claudia 6h-wedge precedent 08-24). The safety gate prevents this by
- * checking that pane content looks like an injected task/heartbeat/inter-agent
- * message before we fire the recovery Enter.
+ * agent (Claudia 6h-wedge precedent 08-24). The safety gate only proceeds when a
+ * STAGED LINE in the pane begins with a recognized injection prefix.
+ *
+ * Contract (fail-closed + line-scoped):
+ *  - null / empty / whitespace -> false (ABSTAIN, fail-closed; card 44ae9e4c)
+ *  - short content with no recognized prefix -> false (the old <=40 pass is gone)
+ *  - a recognized prefix on its own line (possibly mid-pane, behind TUI chrome)
+ *    -> true (line-scoped match; card cf84e0a6)
+ *  - a prefix appearing mid-line, or unrecognized content -> false
  */
 
 import { describe, it, expect } from 'vitest'
 import { isSafeToAutoEnter } from '../web/staged-wedge-probe.js'
 
-describe('isSafeToAutoEnter -- null / empty / short inputs', () => {
-  it('returns true for null (no staged content)', () => {
-    expect(isSafeToAutoEnter(null)).toBe(true)
+describe('isSafeToAutoEnter -- fail-closed on null / empty / short', () => {
+  it('returns false for null (fail-closed: unreadable pane, card 44ae9e4c flag-1)', () => {
+    expect(isSafeToAutoEnter(null)).toBe(false)
   })
 
-  it('returns true for empty string', () => {
-    expect(isSafeToAutoEnter('')).toBe(true)
+  it('returns false for empty string (fail-closed)', () => {
+    expect(isSafeToAutoEnter('')).toBe(false)
   })
 
-  it('returns true for whitespace-only string', () => {
-    expect(isSafeToAutoEnter('   \n\t  ')).toBe(true)
+  it('returns false for whitespace-only string (fail-closed)', () => {
+    expect(isSafeToAutoEnter('   \n\t  ')).toBe(false)
   })
 
-  it('returns true for a short string under 40 chars (trimmed)', () => {
-    expect(isSafeToAutoEnter('some short text')).toBe(true)
+  it('returns false for a short string with no recognized prefix (card 44ae9e4c flag-2)', () => {
+    expect(isSafeToAutoEnter('some short text')).toBe(false)
   })
 
-  it('returns true for a string exactly 40 chars (boundary)', () => {
-    expect(isSafeToAutoEnter('a'.repeat(40))).toBe(true)
+  it('returns false for a 40-char string with no recognized prefix', () => {
+    expect(isSafeToAutoEnter('a'.repeat(40))).toBe(false)
   })
 
-  it('returns false for a string of 41 chars without recognized prefix', () => {
+  it('returns false for a 41-char string without recognized prefix', () => {
     expect(isSafeToAutoEnter('a'.repeat(41))).toBe(false)
   })
 })
 
 describe('isSafeToAutoEnter -- recognized injection prefixes -> true', () => {
   it('recognizes [Uzenet prefix (inter-agent message)', () => {
-    const content = '[Uzenet]: alma-agensnek: Keres az ellenőrző rendszer eredményt. Az aktuális feladat feldolgozása folyamatban van, kérlek erősítsd meg.'
+    const content = '[Uzenet]: alma-agensnek: Keres az ellenőrző rendszer eredményt.'
     expect(isSafeToAutoEnter(content)).toBe(true)
   })
 
   it('recognizes [Task prefix (task injection)', () => {
-    const content = '[Task abc123]: Process the following kanban card update and report back to the orchestrator with status.'
-    expect(isSafeToAutoEnter(content)).toBe(true)
+    expect(isSafeToAutoEnter('[Task abc123]: Process the kanban card update.')).toBe(true)
   })
 
   it('recognizes [Heartbeat prefix (scheduled heartbeat)', () => {
-    const content = '[Heartbeat: hb-task-001]: This is a periodic heartbeat message to check the agent state and connectivity.'
-    expect(isSafeToAutoEnter(content)).toBe(true)
+    expect(isSafeToAutoEnter('[Heartbeat: hb-001]: periodic state check.')).toBe(true)
   })
 
   it('recognizes [Scheduled prefix (scheduled task)', () => {
-    const content = '[Scheduled task-444]: Run the daily log summary and push results to the memory tier cold storage.'
-    expect(isSafeToAutoEnter(content)).toBe(true)
+    expect(isSafeToAutoEnter('[Scheduled task-444]: Run the daily log summary.')).toBe(true)
   })
 
   it('recognizes [Inter-agent prefix', () => {
-    const content = '[Inter-agent from dave]: The build finished successfully. All tests pass. PR is ready for review.'
-    expect(isSafeToAutoEnter(content)).toBe(true)
+    expect(isSafeToAutoEnter('[Inter-agent from dave]: The build finished.')).toBe(true)
   })
 
   it('recognizes [Feladat prefix (Hungarian task injection)', () => {
-    const content = '[Feladat 7e0b0cce]: Implementáld a tartalom-biztonsági kaput a staged-input wedge visszaállítóban.'
-    expect(isSafeToAutoEnter(content)).toBe(true)
+    expect(isSafeToAutoEnter('[Feladat 7e0b0cce]: Implementáld a kaput.')).toBe(true)
   })
 
   it('is case-insensitive for prefixes', () => {
-    expect(isSafeToAutoEnter('[UZENET]: something long enough to exceed the forty character limit here')).toBe(true)
-    expect(isSafeToAutoEnter('[HEARTBEAT: xyz]: something long enough to exceed the forty character limit here')).toBe(true)
-    expect(isSafeToAutoEnter('[TASK id]: something long enough to exceed the forty character limit here')).toBe(true)
-    expect(isSafeToAutoEnter('[FELADAT 123]: something long enough to exceed the forty character limit here')).toBe(true)
+    expect(isSafeToAutoEnter('[UZENET]: something')).toBe(true)
+    expect(isSafeToAutoEnter('[HEARTBEAT: xyz]: something')).toBe(true)
+    expect(isSafeToAutoEnter('[TASK id]: something')).toBe(true)
+    expect(isSafeToAutoEnter('[FELADAT 123]: something')).toBe(true)
   })
 })
 
-describe('isSafeToAutoEnter -- unrecognized long content -> false (ABSTAIN)', () => {
-  it('returns false for long unrecognized content (Claudia 6h-wedge precedent: mid-draft text)', () => {
-    const content = 'Here is a long piece of content that the user was typing and never submitted to the agent, which should not be auto-submitted by the recovery path.'
+describe('isSafeToAutoEnter -- line-scoped match on a real pane (card cf84e0a6)', () => {
+  it('accepts a recognized prefix on its own line mid-pane (the regression this card fixes)', () => {
+    // Real capture: TUI chrome + status lines precede the staged input box, so the
+    // injected message is NOT at the pane start. startsWith on the whole pane would
+    // over-abstain; the line-scoped scan still finds the staged line.
+    const pane = [
+      '  marveen-session  •  esc to interrupt',
+      '────────────────────────────────────────',
+      'Some earlier assistant output scrolled above.',
+      '> [Uzenet]: dave-agensnek: kerlek erositsd meg az allapotot most.',
+      '────────────────────────────────────────',
+      '  context: 42%   •   tokens: 128k',
+    ].join('\n')
+    expect(isSafeToAutoEnter(pane)).toBe(true)
+  })
+
+  it('accepts a prefix line behind box-border chrome', () => {
+    const pane = '│ [Task 9f2]: process the next kanban lane card and report back. │'
+    expect(isSafeToAutoEnter(pane)).toBe(true)
+  })
+
+  it('accepts when the staged line is preceded by blank lines and a prompt marker', () => {
+    const pane = '\n\n  >  [Heartbeat: hb-77]: periodic check\n'
+    expect(isSafeToAutoEnter(pane)).toBe(true)
+  })
+})
+
+describe('isSafeToAutoEnter -- unrecognized content -> false (ABSTAIN)', () => {
+  it('returns false for long unrecognized content (mid-draft user text)', () => {
+    const content = 'Here is a long piece of content that the user was typing and never submitted.'
     expect(isSafeToAutoEnter(content)).toBe(false)
   })
 
-  it('returns false for a long code snippet staged in input', () => {
-    const content = 'const result = await fetch("/api/kanban", { method: "POST", body: JSON.stringify({ title: "test card", status: "planned" }) })'
+  it('returns false for a code snippet staged in input', () => {
+    const content = 'const result = await fetch("/api/kanban", { method: "POST" })'
     expect(isSafeToAutoEnter(content)).toBe(false)
   })
 
-  it('returns false when prefix-like text appears mid-string (not at start)', () => {
-    const content = 'I have a question about [Heartbeat: xyz] behavior and why it triggers the recovery path in some edge cases.'
+  it('returns false when a prefix appears mid-line (not at the start of the line)', () => {
+    const content = 'I have a question about [Heartbeat: xyz] behavior and why it triggers recovery.'
     expect(isSafeToAutoEnter(content)).toBe(false)
   })
 
-  it('returns false for long content starting with an unrecognized bracket tag', () => {
-    const content = '[Unknown tag]: This should not be auto-submitted because it has an unrecognized bracket prefix.'
-    expect(isSafeToAutoEnter(content)).toBe(false)
+  it('returns false when prefix-like text is embedded mid-pane inside a prose line', () => {
+    const pane = [
+      'The user wrote a long explanation here about the system design and then',
+      'mentioned [Task foo] somewhere in the middle of a sentence, not as a staged line.',
+    ].join('\n')
+    expect(isSafeToAutoEnter(pane)).toBe(false)
+  })
+
+  it('returns false for content starting with an unrecognized bracket tag', () => {
+    expect(isSafeToAutoEnter('[Unknown tag]: should not be auto-submitted.')).toBe(false)
   })
 })
