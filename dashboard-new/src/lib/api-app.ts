@@ -220,3 +220,27 @@ export async function fetchShowcaseAgents(): Promise<ShowcaseAgentItem[]> {
 export async function generateShowcaseShareToken(): Promise<ShowcaseTokenResponse> {
   return apiPost<ShowcaseTokenResponse>('/api/showcase/token', {})
 }
+
+// RPG screen types (Phase 3D, card 5138b7c7)
+
+export interface RpgAchievement {
+  id: string
+  title: string
+  unlocked_at: number
+}
+
+export interface RpgStatsResponse {
+  totalXp: number
+  level: number
+  xpInLevel: number
+  xpForNextLevel: number
+  streak: number
+  combo: number
+  today: string
+  recentAchievements: RpgAchievement[]
+  sourceBreakdown: Record<string, number>
+}
+
+export async function fetchRpgStats(): Promise<RpgStatsResponse> {
+  return apiGet<RpgStatsResponse>('/api/rpg/stats')
+}

@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { cn } from '@/lib/cn'
 
-export type TabKey = 'home' | 'kanban' | 'gate' | 'hooks' | 'usage' | 'brain' | 'app-home' | 'workout' | 'todos' | 'journal' | 'app-setup' | 'fleet' | 'office' | 'push-settings' | 'showcase'
+export type TabKey = 'home' | 'kanban' | 'gate' | 'hooks' | 'usage' | 'brain' | 'app-home' | 'workout' | 'todos' | 'journal' | 'app-setup' | 'fleet' | 'office' | 'push-settings' | 'showcase' | 'rpg'
 
 interface TabDef {
   key: TabKey
@@ -25,6 +25,7 @@ const TABS: TabDef[] = [
   { key: 'office', label: 'Iroda', enabled: true },
   { key: 'push-settings', label: 'Értesítések', enabled: true },
   { key: 'showcase', label: 'Showcase', enabled: true },
+  { key: 'rpg', label: 'RPG', enabled: true },
 ]
 
 /** App chrome: header with the NoA avatar glow + a tab bar. Mobile-first. */
