@@ -15,6 +15,8 @@ import { OfficeScreen } from '@/pages/app/OfficeScreen'
 import { PushSettingsScreen } from '@/pages/app/PushSettingsScreen'
 import { ShowcaseScreen } from '@/pages/app/ShowcaseScreen'
 import { RPGScreen } from '@/pages/app/RPGScreen'
+import { TwelveWeekYearScreen } from '@/pages/app/TwelveWeekYearScreen'
+import { LongTermTodoScreen } from '@/pages/app/LongTermTodoScreen'
 
 // In Tauri, default to the App tab for the mobile-first experience.
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -39,6 +41,8 @@ export default function App() {
       {tab === 'push-settings' && <PushSettingsScreen />}
       {tab === 'showcase' && <ShowcaseScreen />}
       {tab === 'rpg' && <RPGScreen />}
+      {tab === 'twelveweekyear' && <TwelveWeekYearScreen />}
+      {tab === 'longtermtodos' && <LongTermTodoScreen />}
     </NavShell>
   )
 }

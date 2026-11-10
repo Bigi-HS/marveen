@@ -244,3 +244,23 @@ export interface RpgStatsResponse {
 export async function fetchRpgStats(): Promise<RpgStatsResponse> {
   return apiGet<RpgStatsResponse>('/api/rpg/stats')
 }
+
+// TwelveWeekYear + LongTermTodo screen types (Phase 2D+2E, cards 2ecd1c93, b9e85b3a)
+
+export interface MemoryEntry {
+  id: number
+  agent_id: string
+  content: string
+  category: string
+  keywords: string
+  created_at: number
+  updated_at: number
+}
+
+export async function fetchTwelveWeekYearData(): Promise<MemoryEntry[]> {
+  return apiGet<MemoryEntry[]>('/api/memories?agent=gelim&q=12wy&category=cold&limit=10')
+}
+
+export async function fetchLongTermTodos(): Promise<MemoryEntry[]> {
+  return apiGet<MemoryEntry[]>('/api/memories?agent=claudia&q=&category=warm&limit=20')
+}
