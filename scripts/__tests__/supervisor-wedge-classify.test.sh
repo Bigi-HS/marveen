@@ -77,6 +77,15 @@ $LIMIT_MENU_TAIL")
 [ "$result" = "limit" ] && pass "ADV-G2-2: real limit menu -> limit" \
   || fail "ADV-G2-2: real limit menu -> limit (got: $result)"
 
+echo "--- ADV-G2-3: '/clear to save Xk tokens' banner in tail -> NOT limit (canonical) ---"
+# NoA-mandated adversarial fixture (card c72ec834): the idle banner must not be
+# classified as a usage-limit by the canonical detector either.
+result=$(classify_single "$(in_scrollback 'Some output' 5)
+new task? /clear to save 15k tokens
+? for shortcuts")
+[ "$result" != "limit" ] && pass "ADV-G2-3: /clear banner NOT limit (got: $result)" \
+  || fail "ADV-G2-3: /clear banner NOT limit (got: $result)"
+
 # --- G6 adversarial ---
 echo "--- ADV-G6-1: survey in tail-10 -> survey ---"
 result=$(classify_single "$(in_scrollback 'Some output' 5)
@@ -264,11 +273,15 @@ grep -qF "testE:G3" "$LOGFILE" \
   && fail "INT-5: login chrome in scrollback -> NOT G3 (was flagged G3)" \
   || pass "INT-5: login chrome in scrollback -> NOT G3 (healthy as expected)"
 
-# INT-6 (optional): degraded fallback when NODE is unavailable
-echo "--- INT-6: NODE unavailable -> degraded bare-substring fallback ---"
+# INT-6: degraded fallback when NODE is unavailable -- real limit menu -> G2.
+# Card c72ec834: the aligned fallback now matches the canonical STRONG menu line
+# "Stop and wait for limit to reset", so the fallback correctly detects a genuine
+# usage-limit menu (previously a false NEGATIVE: the old globs missed it entirely).
+echo "--- INT-6: NODE unavailable -> fallback catches real limit menu (G2) ---"
 : > "$LOGFILE"
 export FLEET_TEST_SWEEP_AGENTS="testF"
 {
+  echo "Some normal output"
   echo "Stop and wait for limit to reset"
 } > "$FAKE_PANE_DIR/testF"
 
@@ -276,13 +289,30 @@ _saved_node="$NODE"
 NODE="/nonexistent-node"
 fleet_wedge_sweep
 NODE="$_saved_node"
-# Fallback bare-substring: "Stop and wait for limit to reset" matches *"Usage limit"*? No.
-# But it would match the fallback pattern ONLY if one of the bare-substring patterns is present.
-# "Stop and wait for limit to reset" does NOT contain "Usage limit"/"weekly limit"/"credit"/"budget".
-# So fallback returns healthy. Verify no false G2 (degrade-safe).
 grep -qF "testF:G2" "$LOGFILE" \
-  && fail "INT-6: degraded fallback no false G2 (was flagged)" \
-  || pass "INT-6: degraded fallback: no G2 for STRONG-only pattern (fallback safe)"
+  && pass "INT-6: degraded fallback detects real limit menu -> G2" \
+  || fail "INT-6: degraded fallback should flag real limit menu G2 (not flagged)"
+
+# INT-7 (ADVERSARIAL, card c72ec834 -- NoA-mandated): the '/clear to save Xk
+# tokens' banner plus budget/credit/weekly-limit discussion vocabulary, in the
+# ACTIVE TAIL (not scrollback), via the degraded fallback -> must NOT flag G2.
+# This is the exact inkwell LIVE-FP shape (2026-10-06): the old bare-substring
+# globs matched "credit"/"budget"/"weekly limit" and flagged a healthy pane.
+echo "--- INT-7: ADVERSARIAL fallback -- /clear banner + budget/credit vocab in tail -> NOT G2 ---"
+: > "$LOGFILE"
+export FLEET_TEST_SWEEP_AGENTS="testG"
+{
+  echo "We discussed the credit balance and budget allocation for the weekly limit."
+  echo "new task? /clear to save 15k tokens"
+  echo "? for shortcuts"
+} > "$FAKE_PANE_DIR/testG"
+
+NODE="/nonexistent-node"
+fleet_wedge_sweep
+NODE="$_saved_node"
+grep -qF "testG:G2" "$LOGFILE" \
+  && fail "INT-7: ADVERSARIAL fallback flagged G2 on /clear banner + vocab (FP regression)" \
+  || pass "INT-7: ADVERSARIAL fallback: /clear banner + budget/credit vocab NOT G2"
 
 # ---------------------------------------------------------------------------
 echo ""
