@@ -77,6 +77,23 @@ export function migrateGateTables(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_gate_ci_pr_sha ON gate_ci_runs(pr_number, head_sha)`)
+
+  // Card 2fd80824: SHA-drift invalidation. When a PR author pushes a new commit
+  // the previously-recorded approval seats become stale. Rather than mutating
+  // the append-only gate_approvals table we record an explicit invalidation row.
+  // Any (pr_number, head_sha) pair that has at least one row here is considered
+  // invalidated and its seats are excluded by readValidSeats().
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gate_invalidations (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      pr_number   INTEGER NOT NULL,
+      head_sha    TEXT NOT NULL,
+      reason      TEXT NOT NULL,
+      recorded_by TEXT NOT NULL,
+      recorded_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_gate_inv_pr ON gate_invalidations(pr_number, head_sha)`)
 }
 
 // Record the opening agent for a PR (card ec818352, MG-SEC5). INSERT OR IGNORE
@@ -150,6 +167,60 @@ export function readApprovals(db: Database.Database, pr: number, sha: string): A
        ORDER BY CASE WHEN recorded_at > 1000000000000 THEN recorded_at / 1000 ELSE recorded_at END ASC, id ASC`,
     )
     .all(pr, sha) as ApprovalRow[]
+}
+
+// -- SHA-drift invalidation (card 2fd80824) ------------------------------------
+
+export interface InvalidationInput {
+  pr_number: number
+  head_sha: string
+  reason: string
+  recorded_by: string
+}
+
+export interface GateInvalidationRow {
+  id: number
+  pr_number: number
+  head_sha: string
+  reason: string
+  recorded_by: string
+  recorded_at: number
+}
+
+// Append an invalidation record for (pr_number, head_sha). After this, any
+// previously-recorded approval seats for that (pr, sha) pair are considered
+// stale and will be excluded by readValidSeats().
+export function recordInvalidation(db: Database.Database, input: InvalidationInput, now: number): GateInvalidationRow {
+  const info = db
+    .prepare(
+      `INSERT INTO gate_invalidations (pr_number, head_sha, reason, recorded_by, recorded_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(input.pr_number, input.head_sha, input.reason, input.recorded_by, now)
+  return {
+    id: Number(info.lastInsertRowid),
+    pr_number: input.pr_number,
+    head_sha: input.head_sha,
+    reason: input.reason,
+    recorded_by: input.recorded_by,
+    recorded_at: now,
+  }
+}
+
+// Returns true if at least one invalidation row exists for (pr_number, head_sha).
+export function isInvalidated(db: Database.Database, pr: number, sha: string): boolean {
+  const row = db
+    .prepare(`SELECT COUNT(*) AS c FROM gate_invalidations WHERE pr_number = ? AND head_sha = ?`)
+    .get(pr, sha) as { c: number }
+  return row.c > 0
+}
+
+// Like readApprovals, but returns an empty array when the (pr_number, head_sha)
+// pair has been invalidated. Gate status checks should use this wrapper instead
+// of the raw readApprovals so stale seats are automatically excluded.
+export function readValidSeats(db: Database.Database, pr: number, sha: string): ApprovalRow[] {
+  if (isInvalidated(db, pr, sha)) return []
+  return readApprovals(db, pr, sha)
 }
 
 export interface OverrideInput {

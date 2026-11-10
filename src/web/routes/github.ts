@@ -15,7 +15,7 @@ import { readBody, json } from '../http-helpers.js'
 import { openPullRequest, closePullRequest, PrRequestError, fetchPrInfo, type ClosePrResult } from '../github-pr.js'
 import { mergePullRequest, MergeRequestError, validateMergeParams } from '../github-merge.js'
 import { runGateCheck, resolveCiStatus, isGateCiRequired, type GithubPrInfo } from '../gate-check.js'
-import { readApprovals, hasActiveOverride, consumeOverride, insertPrAuthor, readPrAuthor, readLatestCiRun } from '../gate-db.js'
+import { readApprovals, readValidSeats, hasActiveOverride, consumeOverride, insertPrAuthor, readPrAuthor, readLatestCiRun } from '../gate-db.js'
 import { getDb } from '../../db.js'
 import type { RouteContext } from './types.js'
 
@@ -95,7 +95,7 @@ export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
       const db = getDb()
       gateResult = await runGateCheck(v.pr, {
         fetchPr: mergePrFetcher,
-        readApprovals: (pr, sha) => readApprovals(db, pr, sha),
+        readApprovals: (pr, sha) => readValidSeats(db, pr, sha),
         hasActiveOverride: (pr, sha) => hasActiveOverride(db, pr, sha),
         // Card 0c166e48: merge-time inherits the independent-CI requirement, so a
         // required-and-missing CI PASS blocks the merge exactly as it blocks

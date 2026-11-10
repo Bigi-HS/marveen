@@ -30,6 +30,7 @@ import {
 import {
   insertApproval,
   readApprovals,
+  readValidSeats,
   insertOverride,
   hasActiveOverride,
   consumeOverride,
@@ -37,7 +38,9 @@ import {
   insertCiRun,
   readLatestCiRun,
   readGateHistory,
+  recordInvalidation,
 } from '../gate-db.js'
+import { createAgentMessage } from '../../db.js'
 import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
 import { fetchPrInfo, fetchPrAuthorAgentId } from '../github-pr.js'
 import { runDeployVerify } from '../deploy-verify.js'
@@ -254,7 +257,7 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
     try {
       const result = await runGateCheck(pr, {
         fetchPr: prFetcher,
-        readApprovals: (p, sha) => readApprovals(db, p, sha),
+        readApprovals: (p, sha) => readValidSeats(db, p, sha),
         hasActiveOverride: (p, sha) => hasActiveOverride(db, p, sha),
         // Card 0c166e48: independent CI status for the live head, gated by the
         // GATE_CI_REQUIRED rollout flag (default off = observability only).
@@ -343,6 +346,57 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
     }
     const rows = readGateHistory(getDb(), { pr, limit })
     json(res, { rows, count: rows.length })
+    return true
+  }
+
+  // Card 2fd80824 -- SHA-drift invalidation: explicitly mark a (pr_number, head_sha)
+  // pair as stale so previously-recorded approval seats are excluded from gate
+  // status checks going forward. Sends an inter-agent notification to 'marveen'
+  // so the orchestrator is aware of the invalidation immediately.
+  if (path === '/api/gate/invalidate' && method === 'POST') {
+    // MG-SEC7 (card 2fd80824): invalidation is a destructive gate operation --
+    // any authenticated agent could otherwise DoS the gate by invalidating all
+    // seats on any PR. Admin scope or operator source required.
+    const { identity } = ctx
+    if (identity && identity.source !== 'operator' && !hasScope(identity.scopes, ADMIN_SCOPE)) {
+      json(res, { error: 'admin scope required for /api/gate/invalidate' }, 403)
+      return true
+    }
+    const body = await parseJsonBody(req)
+    if (!body) {
+      json(res, { error: 'invalid JSON body' }, 400)
+      return true
+    }
+    const { pr_number, head_sha, reason } = body
+    if (!isPositiveInt(pr_number)) {
+      json(res, { error: 'pr_number must be a positive integer' }, 400)
+      return true
+    }
+    if (!isValidSha(head_sha)) {
+      json(res, { error: 'head_sha must be exactly 40 hex characters' }, 400)
+      return true
+    }
+    if (typeof reason !== 'string' || reason.trim().length === 0) {
+      json(res, { error: 'reason is required' }, 400)
+      return true
+    }
+    const recordedBy = identity?.agentId ?? 'unknown'
+    const row = recordInvalidation(getDb(), { pr_number, head_sha, reason: reason.trim(), recorded_by: recordedBy }, nowEpoch())
+    // Notify the orchestrator so it can re-request missing approvals.
+    try {
+      createAgentMessage(
+        'gate',
+        'marveen',
+        `Gate invalidation: PR #${pr_number} SHA ${head_sha.slice(0, 8)} invalidated. Reason: ${reason.trim()}`,
+        false,
+        'normal',
+        null,
+      )
+    } catch (err) {
+      logger.warn({ pr_number, head_sha, err }, 'Gate invalidation: inter-agent notify to marveen failed (non-fatal)')
+    }
+    emitDashboardEvent({ type: 'gate', id: String(pr_number), action: 'invalidated' })
+    json(res, row, 201)
     return true
   }
 
