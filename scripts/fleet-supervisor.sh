@@ -1934,7 +1934,17 @@ except Exception:
         _g2_scan=$(printf '%s\n' "$_pane_text" | tail -n "${G2_TAIL_LINES:-18}")
         _g1_scan=$(printf '%s\n' "$_pane_text" | tail -n "${G1_TAIL_LINES:-10}")
       fi
-      if case "$_g2_scan" in *"Usage limit"*|*"weekly limit"*|*"credit"*|*"budget"*) true ;; *) false ;; esac; then
+      # G2 bare-substring fallback (card c72ec834). The old globs
+      # (*Usage limit*|*weekly limit*|*credit*|*budget*) were both too LOOSE --
+      # bare "credit"/"budget"/"weekly limit" match ordinary discussion vocabulary
+      # (inkwell LIVE-FP 2026-10-06: healthy idle pane flagged G2 across 3 sweeps)
+      # -- and too NARROW -- the real "Stop and wait for limit to reset" menu
+      # contains none of them (a false negative). Mirror the canonical
+      # detectsUsageLimitMenu (pane-state.ts) STRONG + specific phrases instead:
+      # the menu option line and the unambiguous "hit/reached your usage/session
+      # limit" phrasings. The '/clear to save Xk tokens' banner and prose about
+      # budgets/credits no longer match.
+      if printf '%s\n' "$_g2_scan" | grep -qiE "stop and wait for limit to reset|you'?ve (hit|reached) your (usage|session) limit|(usage|session) limit reached|claude usage limit"; then
         if wedge_sleep_suppress "$n" "$now"; then napping_list="$napping_list $n"
         else wedged_list="$wedged_list ${n}:G2"; fi
       elif case "$_g1_scan" in *"Press Enter"*|*"press enter"*) true ;; *) false ;; esac; then
