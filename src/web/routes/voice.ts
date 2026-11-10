@@ -47,6 +47,18 @@ function detectPython(): string | null {
   return null
 }
 
+// Cached interpreter probe (card 85317b24 flag-3). detectPython() spawns a Python
+// subprocess; it was previously called twice per request (availability check +
+// transcription), doubling the probe cost and the spurious-failure surface. Probe
+// at most once per process. `undefined` = not yet probed; `null` = none found.
+let _pythonCmd: string | null | undefined
+function detectPythonCached(): string | null {
+  if (_pythonCmd === undefined) _pythonCmd = detectPython()
+  return _pythonCmd
+}
+// Test seam: clear the interpreter cache between cases.
+export function __resetPythonCache(): void { _pythonCmd = undefined }
+
 // Inline Python script: load model once, transcribe file, print result.
 // Using "tiny" model: fast, low RAM, acceptable accuracy for short commands.
 const WHISPER_SCRIPT = `
@@ -61,7 +73,7 @@ print(text)
 
 function defaultTranscriber(): TranscribeFn {
   return async (audioBuffer, _mimeType) => {
-    const py = detectPython()
+    const py = detectPythonCached()
     if (!py) throw new Error('faster_whisper not available')
 
     const tmpIn = join(tmpdir(), `voice-${randomUUID()}.webm`)
@@ -87,15 +99,18 @@ function getTranscriber(): TranscribeFn {
 }
 
 // ---------------------------------------------------------------------------
-// Availability check (cached after first call)
+// Availability check (uses the cached interpreter probe)
 // ---------------------------------------------------------------------------
 
-let _whisperAvailable: boolean | null = null
+// Test seam: force availability on/off without a real interpreter probe so the
+// route tests (mimeType validation, 413 overflow) are deterministic regardless
+// of whether faster_whisper is installed in the test host.
+let _whisperAvailableOverride: boolean | null = null
+export function __setWhisperAvailable(v: boolean | null): void { _whisperAvailableOverride = v }
 
 function isWhisperAvailable(): boolean {
-  if (_whisperAvailable !== null) return _whisperAvailable
-  _whisperAvailable = detectPython() !== null
-  return _whisperAvailable
+  if (_whisperAvailableOverride !== null) return _whisperAvailableOverride
+  return detectPythonCached() !== null
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +156,15 @@ export async function tryHandleVoice(ctx: RouteContext): Promise<boolean> {
       return true
     }
 
-    const mimeType = typeof parsed.mimeType === 'string' ? parsed.mimeType : 'audio/webm'
+    // Validate the client-supplied mimeType (card 85317b24 flag-1). It was
+    // previously ignored; while the transcriber content-sniffs the audio (the
+    // declared type is advisory), rejecting a non-audio/* type is cheap defense
+    // against malformed/misrouted clients and makes the accepted input explicit.
+    const mimeType = typeof parsed.mimeType === 'string' && parsed.mimeType ? parsed.mimeType : 'audio/webm'
+    if (!/^audio\//i.test(mimeType)) {
+      json(res, { ok: false, error: 'mimeType must be an audio/* type' }, 400)
+      return true
+    }
 
     let audioBuffer: Buffer
     try {
