@@ -30,6 +30,7 @@ import {
 import {
   insertApproval,
   readApprovals,
+  readValidSeats,
   insertOverride,
   hasActiveOverride,
   consumeOverride,
@@ -256,7 +257,7 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
     try {
       const result = await runGateCheck(pr, {
         fetchPr: prFetcher,
-        readApprovals: (p, sha) => readApprovals(db, p, sha),
+        readApprovals: (p, sha) => readValidSeats(db, p, sha),
         hasActiveOverride: (p, sha) => hasActiveOverride(db, p, sha),
         // Card 0c166e48: independent CI status for the live head, gated by the
         // GATE_CI_REQUIRED rollout flag (default off = observability only).
@@ -353,6 +354,14 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
   // status checks going forward. Sends an inter-agent notification to 'marveen'
   // so the orchestrator is aware of the invalidation immediately.
   if (path === '/api/gate/invalidate' && method === 'POST') {
+    // MG-SEC7 (card 2fd80824): invalidation is a destructive gate operation --
+    // any authenticated agent could otherwise DoS the gate by invalidating all
+    // seats on any PR. Admin scope or operator source required.
+    const { identity } = ctx
+    if (identity && identity.source !== 'operator' && !hasScope(identity.scopes, ADMIN_SCOPE)) {
+      json(res, { error: 'admin scope required for /api/gate/invalidate' }, 403)
+      return true
+    }
     const body = await parseJsonBody(req)
     if (!body) {
       json(res, { error: 'invalid JSON body' }, 400)
@@ -371,8 +380,7 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'reason is required' }, 400)
       return true
     }
-    const { identity } = ctx
-    const recordedBy = identity?.agentId ?? (typeof body['recorded_by'] === 'string' ? (body['recorded_by'] as string) : 'unknown')
+    const recordedBy = identity?.agentId ?? 'unknown'
     const row = recordInvalidation(getDb(), { pr_number, head_sha, reason: reason.trim(), recorded_by: recordedBy }, nowEpoch())
     // Notify the orchestrator so it can re-request missing approvals.
     try {

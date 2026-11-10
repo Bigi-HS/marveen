@@ -19,7 +19,7 @@ import {
   readValidSeats,
 } from '../web/gate-db.js'
 import { initDatabase } from '../db.js'
-import { tryHandleGate } from '../web/routes/gate.js'
+import { tryHandleGate, __setGatePrFetcher } from '../web/routes/gate.js'
 import type { AgentIdentity } from '../web/agent-token-registry.js'
 import { ADMIN_SCOPE } from '../web/agent-token-registry.js'
 
@@ -246,5 +246,80 @@ describe('POST /api/gate/invalidate -- inter-agent notification', () => {
     ).get() as { content: string } | undefined
     expect(msg?.content).toBeTruthy()
     expect(msg?.content).toMatch(/500|invalidat/i)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// HIGH-2: scope guard -- per-agent token without ADMIN_SCOPE must get 403
+// ---------------------------------------------------------------------------
+
+describe('POST /api/gate/invalidate -- scope guard (MG-SEC7)', () => {
+  it('returns 403 for a per-agent token without admin scope', async () => {
+    const perAgent: AgentIdentity = { agentId: 'dave', scopes: ['message:send'], source: 'agent' }
+    const r = await call('POST', '/api/gate/invalidate', {
+      pr_number: 300,
+      head_sha: SHA_A,
+      reason: 'attempted by non-admin agent',
+    }, perAgent)
+    expect(r.status).toBe(403)
+    expect(r.body?.error).toMatch(/admin/i)
+  })
+
+  it('allows operator-sourced identity without explicit admin scope', async () => {
+    const operator: AgentIdentity = { agentId: 'marveen', scopes: [], source: 'operator' }
+    const r = await call('POST', '/api/gate/invalidate', {
+      pr_number: 301,
+      head_sha: SHA_A,
+      reason: 'operator invalidation',
+    }, operator)
+    expect(r.status).toBe(201)
+  })
+
+  it('allows admin-scoped agent token', async () => {
+    const admin: AgentIdentity = { agentId: 'marveen', scopes: [ADMIN_SCOPE], source: 'agent' }
+    const r = await call('POST', '/api/gate/invalidate', {
+      pr_number: 302,
+      head_sha: SHA_A,
+      reason: 'admin invalidation',
+    }, admin)
+    expect(r.status).toBe(201)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// HIGH-1 integration: /api/gate/check must NOT pass when seats are invalidated
+// (proves readValidSeats is wired into the check path, not just the DB layer)
+// ---------------------------------------------------------------------------
+
+describe('/api/gate/check with invalidated seats -- integration (card 2fd80824 HIGH-1)', () => {
+  beforeEach(() => {
+    __setGatePrFetcher(async () => ({ headSha: SHA_A, files: ['src/db.ts'] }))
+  })
+
+  it('gate/check returns approved seats when not invalidated', async () => {
+    const db = (await import('../db.js')).getDb()
+    insertApproval(db, { pr_number: 600, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, 1)
+    insertApproval(db, { pr_number: 600, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved', recorded_by: 'dave' }, 2)
+
+    const r = await call('GET', '/api/gate/check?pr=600')
+    expect(r.status).toBe(200)
+    // `approved` is the GateCheckResult field listing reviewers with approved verdict
+    expect((r.body?.approved as string[] ?? []).length).toBeGreaterThan(0)
+  })
+
+  it('gate/check reports zero approved seats after invalidation (readValidSeats wired correctly)', async () => {
+    const db = (await import('../db.js')).getDb()
+    insertApproval(db, { pr_number: 601, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, 1)
+    insertApproval(db, { pr_number: 601, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved', recorded_by: 'dave' }, 2)
+
+    // Invalidate the (pr, sha) pair -- simulates a force-push or SHA drift
+    recordInvalidation(db, { pr_number: 601, head_sha: SHA_A, reason: 'force push detected', recorded_by: 'buster' }, 3)
+
+    const r = await call('GET', '/api/gate/check?pr=601')
+    expect(r.status).toBe(200)
+    // After invalidation readValidSeats returns [] -> evaluateApprovals sees no rows
+    // -> approved=[], missing=required (all required), pass=false
+    expect((r.body?.approved as string[] ?? []).length).toBe(0)
+    expect(r.body?.pass).toBe(false)
   })
 })
