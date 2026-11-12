@@ -1,0 +1,15 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "NoA",
+        "url": "https://bigi.tail1a5fa5.ts.net/v2/"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: https://asset.localhost; connect-src 'self' https://bigi.tail1a5fa5.ts.net ipc: asset: https://ipc.localhost"
+    }
+  }
+}
