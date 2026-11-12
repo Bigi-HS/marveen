@@ -1,7 +1,42 @@
 // Read-only API client for the :3420 backend. F0+F1 perform GET requests only
 // (INV-2 / AC-G2): no post/put/delete helper exists in this module by design.
 
-const TOKEN_STORAGE_KEY = 'noa-api-token'
+export const TOKEN_STORAGE_KEY = 'noa-api-token'
+
+/**
+ * Persist a bearer token to the same store getToken() reads. No-op (swallows) on
+ * a storage error (private mode / quota) -- there is nothing else we can do and a
+ * throw here would crash the connect UI.
+ */
+export function saveToken(token: string): void {
+  try {
+    localStorage.setItem(TOKEN_STORAGE_KEY, token)
+  } catch {
+    /* storage unavailable -- nothing else we can do */
+  }
+}
+
+/**
+ * Extract a bearer token from manual paste input (first-run connect on the
+ * installable app, where the #token= deep-link fragment never reaches the
+ * webview). Accepts a full pairing URL (`<origin>/v2/#token=<jwt>`), a bare
+ * `#token=`/`?token=` fragment, or a raw JWT. Returns the trimmed token, or null
+ * when nothing usable is found. Unlike captureTokenFromUrl (which is deliberately
+ * fragment-only for the automatic deep-link), this is lenient on `?token=` too
+ * because a human is pasting whatever they copied.
+ */
+export function parseTokenInput(input: string): string | null {
+  const raw = (input ?? '').trim()
+  if (!raw) return null
+  const match = raw.match(/[#?&]token=([^#?&\s]+)/)
+  if (match) return match[1] || null
+  // A URL that carries no token= is not a usable token.
+  if (/^https?:\/\//i.test(raw)) return null
+  // Otherwise treat the whole string as a raw token. A JWT never contains
+  // whitespace, so a multi-word paste is an artifact, not a token.
+  if (/\s/.test(raw)) return null
+  return raw
+}
 
 export class ApiError extends Error {
   constructor(
@@ -46,13 +81,7 @@ function defaultStripToken(): void {
  */
 export function captureTokenFromUrl(
   hash: string = typeof window !== 'undefined' ? window.location.hash : '',
-  persist: (token: string) => void = (token) => {
-    try {
-      localStorage.setItem(TOKEN_STORAGE_KEY, token)
-    } catch {
-      /* storage unavailable (private mode) -- nothing else we can do */
-    }
-  },
+  persist: (token: string) => void = saveToken,
   stripUrl: () => void = defaultStripToken,
 ): boolean {
   // Only read from fragment (#token=...) -- query string (?token=...) is no longer supported
