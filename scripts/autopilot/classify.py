@@ -98,6 +98,22 @@ def _read_freeze_state(agent, flag_path=FREEZE_FLAG_PATH, keep_path=FREEZE_KEEP_
 WINDOW_AWAITING_H = 48.0  # FI-01
 WINDOW_DELEGATED_H = 24.0  # FI-02
 WINDOW_BLOCKED_H = 72.0  # BP-02
+# Card 9fb626a2: the structured boss_waiting=1 DB flag parks a card (Boss owes the
+# next move) regardless of age; the ORCHESTRATOR re-surfaces it only after this
+# window so a forgotten Boss-decision cannot rot silently (NoA threshold, 7 days).
+# Distinct from the text-marker expiry above: this flag is explicit and non-rotting.
+WINDOW_BOSS_WAITING_H = 7 * 24.0
+
+
+def _truthy(v) -> bool:
+    """Interpret the boss_waiting column across the int/bool/str forms the API emits."""
+    if v is None:
+        return False
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v != 0
+    return str(v).strip().lower() in ("1", "true", "yes")
 
 # repro-blocked is an explicit LLM-judged blocker marker (BP-02).
 BLOCKED_RE = re.compile(r"repro-?blocked|blocker:|blocked:", re.I)
@@ -179,6 +195,21 @@ def classify(cards, agent: str, now: float, orchestrator: str = ORCHESTRATOR,
             continue
         owner = c.get("assignee") or c.get("owner") or ""
         age_h = _age_hours(c, now)
+
+        if _truthy(c.get("boss_waiting")):
+            # Structured override (card 9fb626a2): the Boss owes the next move, so the
+            # OWNER never drives it (never MINE) -- unlike the text awaiting-marker, this
+            # flag does not expire into actionable. Only the orchestrator re-surfaces it,
+            # and only once it has waited past WINDOW_BOSS_WAITING_H, as an aging-flag for
+            # the morning brief. A non-orchestrator still ignores cards it does not own.
+            if owner != agent and agent != orchestrator:
+                continue
+            if agent == orchestrator and age_h >= WINDOW_BOSS_WAITING_H:
+                nudgeable.append(_row(c, age_h, "boss-waiting-stale"))
+            else:
+                parked.append(_row(c, age_h, "boss-waiting"))
+            continue
+
         text = (c.get("title") or "") + "\n" + (c.get("description") or "")
         marker, window = _marker(text)
         fresh_marker = marker is not None and age_h < window
