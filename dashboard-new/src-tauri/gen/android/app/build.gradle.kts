@@ -25,6 +25,26 @@ android {
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
+    // Release signing from env vars -- NEVER inline keystore or passwords.
+    // Set ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASS, ANDROID_KEY_ALIAS,
+    // ANDROID_KEY_PASS before building (source ~/.android/noa-signing.env or
+    // equivalent). If ANDROID_KEYSTORE_PATH is absent the release variant builds
+    // unsigned (safe for CI smoke; not shippable). Re-use the same keystore on
+    // every build -- a new keystore invalidates over-the-air updates.
+    // WARNING: gen/android/ is Tauri-generated. If `tauri android init` is re-run
+    // it overwrites this file. Keep this diff as a git-tracked patch; re-apply
+    // after any re-init before building release.
+    signingConfigs {
+        create("release") {
+            val ksPath = System.getenv("ANDROID_KEYSTORE_PATH")
+            if (ksPath != null) {
+                storeFile = file(ksPath)
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASS")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("ANDROID_KEY_PASS")
+            }
+        }
+    }
     buildTypes {
         getByName("debug") {
             applicationIdSuffix = ".debug"
@@ -40,6 +60,8 @@ android {
             }
         }
         getByName("release") {
+            val signed = System.getenv("ANDROID_KEYSTORE_PATH") != null
+            if (signed) signingConfig = signingConfigs.getByName("release")
             optimization {
                enable = true
             }
@@ -49,6 +71,17 @@ android {
                   exclude("build/**")
                 }.files.toTypedArray()
             )
+        }
+    }
+    // Per-ABI splits: arm64-v8a (~20 MB) is the primary artifact for Boss's phone.
+    // armeabi-v7a + x86_64 included for broader coverage. universalApk disabled
+    // (the 623 MB universal debug blob is replaced by focused per-arch packages).
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86_64")
+            isUniversalApk = false
         }
     }
     compileOptions {
