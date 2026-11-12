@@ -16,9 +16,11 @@ NOW = 1_700_000_000.0
 H = 3600.0
 
 
-def card(id, status="planned", assignee="", desc="", age_h=0.0, priority="normal", title="t"):
+def card(id, status="planned", assignee="", desc="", age_h=0.0, priority="normal", title="t",
+         boss_waiting=0):
     return {"id": id, "status": status, "assignee": assignee, "description": desc,
-            "last_moved": NOW - age_h * H, "priority": priority, "title": title}
+            "last_moved": NOW - age_h * H, "priority": priority, "title": title,
+            "boss_waiting": boss_waiting}
 
 
 def check(name, cond):
@@ -152,6 +154,71 @@ def main():
         os.mkdir(keep_dir)  # unreadable-as-file -> OSError on open
         ok &= check("freeze-state: keep-file OSError -> not frozen (fail-safe busy)",
                     _read_freeze_state("dave", flag, keep_dir) is False)
+
+    # --- Card 9fb626a2: structured boss_waiting=1 flag honouring (NoA threshold=7d) ---
+    # A card with the structured DB flag boss_waiting=1 is waiting on the Boss, not on
+    # the worker. Unlike the text awaiting-marker (which auto-expires at 48h), this flag
+    # is an explicit, non-rotting signal: the OWNER never drives it, and only the
+    # ORCHESTRATOR surfaces it, and only after it has been unmoved > 7 days. The sec3
+    # text-marker expiry (Thor PR#882 FLAG-2) is untouched -- this is an orthogonal
+    # structured override, not a revert.
+    BW_H = 7 * 24.0
+
+    # 21. (THE FIX, ff15559d) own boss_waiting=1 card with an EXPIRED awaiting-text
+    #     (67 days) -> PARKED, NOT mine. Pre-fix this fell into MINE -> false TICK_DRIVE.
+    r = classify([card("bw1", assignee="dave", desc="awaiting-dominik", age_h=67 * 24,
+                       boss_waiting=1)], "dave", NOW)
+    ok &= check("boss_waiting owner + expired marker -> parked, not mine",
+                r["idle_ok"] is True and r["counts"]["mine"] == 0 and r["counts"]["parked"] == 1)
+
+    # 22. own boss_waiting=1 card, fresh, no marker -> PARKED (not mine).
+    r = classify([card("bw2", assignee="dave", age_h=2, boss_waiting=1)], "dave", NOW)
+    ok &= check("boss_waiting owner fresh -> parked",
+                r["idle_ok"] is True and r["counts"]["parked"] == 1)
+
+    # 23. A worker never nudges its own boss_waiting card even when very stale (>7d):
+    #     it waits on the Boss, not on the worker -> still PARKED, never nudgeable.
+    r = classify([card("bw3", assignee="dave", age_h=30 * 24, boss_waiting=1)], "dave", NOW)
+    ok &= check("boss_waiting worker-owned >7d -> parked (worker never nudges)",
+                r["idle_ok"] is True and r["counts"]["nudgeable"] == 0)
+
+    # 24. Orchestrator surfaces a stale (>7d) boss_waiting card as NUDGEABLE so it
+    #     reaches the morning brief aging-flag -- the escalation path.
+    r = classify([card("bw4", assignee="dave", age_h=8 * 24, boss_waiting=1)], "marveen", NOW)
+    ok &= check("orch: boss_waiting >7d -> nudgeable (escalate)",
+                r["counts"]["nudgeable"] == 1 and not r["idle_ok"])
+
+    # 25. Orchestrator does NOT surface a boss_waiting card younger than 7 days ->
+    #     parked, idle (no sub-weekly Boss nag).
+    r = classify([card("bw5", assignee="dave", age_h=3 * 24, boss_waiting=1)], "marveen", NOW)
+    ok &= check("orch: boss_waiting <7d -> parked+idle (no nag)",
+                r["idle_ok"] is True and r["counts"]["parked"] == 1)
+
+    # 26. A non-orchestrator worker still ignores a PEER's boss_waiting card entirely.
+    r = classify([card("bw6", assignee="hibiki", age_h=30 * 24, boss_waiting=1)], "dave", NOW)
+    ok &= check("non-orch ignores peer boss_waiting card -> idle",
+                r["idle_ok"] is True and r["counts"]["parked"] == 0)
+
+    # 27. boss_waiting=0 is unaffected: an expired marker still falls into MINE
+    #     (guards against over-parking -- the flag must be the ONLY trigger).
+    r = classify([card("bw7", assignee="dave", desc="awaiting-dominik", age_h=67 * 24,
+                       boss_waiting=0)], "dave", NOW)
+    ok &= check("boss_waiting=0 + expired marker -> busy (unchanged)",
+                r["idle_ok"] is False and r["counts"]["mine"] == 1)
+
+    # 28. Truthy variants of the flag (int 1, bool True, str "1") all park for the owner;
+    #     falsey variants (0, "0", "", None) do not.
+    for val in (1, True, "1"):
+        r = classify([card("bwT", assignee="dave", age_h=2, boss_waiting=val)], "dave", NOW)
+        ok &= check(f"boss_waiting truthy {val!r} -> parked", r["counts"]["parked"] == 1)
+    for val in (0, "0", "", None):
+        r = classify([card("bwF", assignee="dave", age_h=2, boss_waiting=val)], "dave", NOW)
+        ok &= check(f"boss_waiting falsey {val!r} -> mine", r["counts"]["mine"] == 1)
+
+    # 29. Orchestrator owns its OWN stale boss_waiting card -> it escalates that too.
+    r = classify([card("bw8", assignee="marveen", age_h=10 * 24, boss_waiting=1)], "marveen", NOW)
+    ok &= check("orch owns stale boss_waiting -> nudgeable",
+                r["counts"]["nudgeable"] == 1 and not r["idle_ok"])
 
     print("\n" + ("ALL PASS" if ok else "SOME FAILED"))
     return 0 if ok else 1
