@@ -308,10 +308,14 @@ class TestIdempotency(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestDedupJaccard(unittest.TestCase):
     def test_high_overlap_is_candidate(self):
-        """jaccard("a,b,c" vs "b,c,d") = 2/4 = 0.5 -> candidate."""
+        """jaccard("a,b,c" vs "b,c,d") = 2/4 = 0.5 -> candidate.
+
+        Card 431c9468: content-hash must ALSO match now, so both rows share an
+        identical body; this stays a valid TRUE-dup positive.
+        """
         db = make_db()
-        insert(db, category="warm", keywords="a, b, c", content="entry1")
-        insert(db, category="warm", keywords="b, c, d", content="entry2")
+        insert(db, category="warm", keywords="a, b, c", content="same body text")
+        insert(db, category="warm", keywords="b, c, d", content="same body text")
         report = run_on(db)
         self.assertEqual(len(report["dedup_candidates"]), 1)
         self.assertAlmostEqual(report["dedup_candidates"][0]["jaccard"], 0.5)
@@ -355,13 +359,29 @@ class TestDedupJaccard(unittest.TestCase):
         os.unlink(db)
 
     def test_exact_match_jaccard_one(self):
-        """Identical keyword sets: jaccard=1.0 -> candidate."""
+        """Identical keyword sets: jaccard=1.0 -> candidate.
+
+        Card 431c9468: content-hash must ALSO match now, so both rows share an
+        identical body; this stays a true exact dup.
+        """
         db = make_db()
-        insert(db, category="warm", keywords="x, y", content="e1")
-        insert(db, category="warm", keywords="x, y", content="e2")
+        insert(db, category="warm", keywords="x, y", content="identical")
+        insert(db, category="warm", keywords="x, y", content="identical")
         report = run_on(db)
         self.assertEqual(len(report["dedup_candidates"]), 1)
         self.assertAlmostEqual(report["dedup_candidates"][0]["jaccard"], 1.0)
+        os.unlink(db)
+
+    def test_different_content_same_keywords_no_candidate(self):
+        """Card 431c9468 FP guard: same agent, same category, same keywords but
+        DIFFERENT content must NOT be a dedup candidate. Keyword Jaccard is 1.0
+        and there is no identity veto, so only the mandatory content-hash gate
+        prevents the false exact-dup."""
+        db = make_db()
+        insert(db, category="warm", keywords="x, y", content="foo")
+        insert(db, category="warm", keywords="x, y", content="bar")
+        report = run_on(db)
+        self.assertEqual(len(report["dedup_candidates"]), 0)
         os.unlink(db)
 
 

@@ -15,6 +15,7 @@ Usage:
   VAULT_L2_HOT_STALE_DAYS=5 python3 scripts/vault-lint-layer2.py
 """
 
+import hashlib
 import json
 import os
 import re
@@ -82,6 +83,19 @@ def jaccard(a: frozenset, b: frozenset) -> float:
         return 0.0
     union = len(a | b)
     return len(a & b) / union if union else 0.0
+
+
+def content_fingerprint(content) -> str:
+    """Normalized content hash for exact-dup gating (card 431c9468).
+
+    Keyword Jaccard over-fires on same-keyword / different-content entries
+    (profile updates, state-transitions, time-series): 2026-10-01 nightly had
+    33/35 false exact-dups. Requiring content-hash equality makes only TRUE
+    exact dups candidates; Jaccard stays as the ranking / pre-filter signal.
+    Whitespace-normalized so pure reflow differences still count as identical.
+    """
+    norm = re.sub(r"\s+", " ", (content or "").strip())
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +285,11 @@ def compute_dedup_candidates(
 
                 score = jaccard(a["keywords"], b["keywords"])
                 if score >= jaccard_threshold:
+                    # Card 431c9468: content-hash equality is MANDATORY for an
+                    # exact-dup candidate. Jaccard keyword-overlap alone over-
+                    # fires on same-keyword / different-content entries.
+                    if content_fingerprint(a["content_full"]) != content_fingerprint(b["content_full"]):
+                        continue
                     candidates.append(
                         {
                             "agent_id": a["agent_id"],
