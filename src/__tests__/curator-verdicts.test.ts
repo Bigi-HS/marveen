@@ -279,6 +279,111 @@ describe('applyPendingCuratorVerdicts', () => {
 // it -- causing a 'no such table: migration_log' crash on the live noa.db.
 // This test proves the production migration alone is sufficient: no extra DDL.
 
+// ---------------------------------------------------------------------------
+// apply-layer ID-integrity guards (card 54013aa4)
+// ---------------------------------------------------------------------------
+// The candidate generator (vault-lint-layer2, PR #977) now gates on a content
+// hash, but the APPLY layer must independently refuse to archive a memory when
+// the mapping itself is corrupt. Three invariants (audit 351c80a7):
+//   1. self-archive  -- entry_a == entry_b (a record superseding itself)
+//   2. cross-agent   -- archive and keep belong to different agents
+//   3. repeated-id   -- entry_a was already superseded by a prior application
+// A blocked verdict is consumed (applied_at set) with a BLOCKED audit row and
+// NEVER mutates memory; it is counted in result.blocked, not result.approved.
+
+describe('applyPendingCuratorVerdicts -- apply-layer ID-integrity guards (card 54013aa4)', () => {
+  let db: Database.Database
+
+  function seedMemoryFor(agent: string, category = 'warm'): number {
+    const stmt = db.prepare(
+      `INSERT INTO memories (agent_id, content, category) VALUES (?, 'seed content', ?)`,
+    )
+    return Number((stmt.run(agent, category) as { lastInsertRowid: number | bigint }).lastInsertRowid)
+  }
+
+  beforeEach(() => {
+    db = freshDb()
+  })
+
+  it('self-archive (entry_a == entry_b): blocked, memory unchanged, applied_at set', () => {
+    const id = seedMemoryFor('marveen', 'warm')
+    const vId = saveCuratorVerdict(db, {
+      agent_id: 'applegate', entry_a_id: id, entry_b_id: id, jaccard: 1.0, verdict: 'APPROVE',
+    })
+
+    const result = applyPendingCuratorVerdicts(db)
+    expect(result.approved).toBe(0)
+    expect(result.blocked).toBe(1)
+
+    const mem = db.prepare('SELECT category, content FROM memories WHERE id = ?').get(id) as { category: string; content: string }
+    expect(mem.category).toBe('warm')
+    expect(mem.content).not.toMatch(/^SUPERSEDED:/)
+
+    const v = db.prepare('SELECT applied_at FROM curator_verdicts WHERE id = ?').get(vId) as { applied_at: number | null }
+    expect(v.applied_at).not.toBeNull()
+
+    const log = db.prepare(`SELECT rule, reason FROM migration_log WHERE entry_id = ?`).get(id) as { rule: string; reason: string } | undefined
+    expect(log?.rule).toBe('BLOCKED')
+    expect(log?.reason).toContain('self-archive')
+  })
+
+  it('cross-agent slip: archive and keep on different agents -> blocked, memory unchanged', () => {
+    const aId = seedMemoryFor('marveen', 'warm')
+    const bId = seedMemoryFor('dave', 'warm')
+    saveCuratorVerdict(db, {
+      agent_id: 'applegate', entry_a_id: aId, entry_b_id: bId, jaccard: 0.95, verdict: 'APPROVE',
+    })
+
+    const result = applyPendingCuratorVerdicts(db)
+    expect(result.approved).toBe(0)
+    expect(result.blocked).toBe(1)
+
+    const mem = db.prepare('SELECT category FROM memories WHERE id = ?').get(aId) as { category: string }
+    expect(mem.category).toBe('warm')
+
+    const log = db.prepare(`SELECT rule, reason FROM migration_log WHERE entry_id = ?`).get(aId) as { rule: string; reason: string } | undefined
+    expect(log?.rule).toBe('BLOCKED')
+    expect(log?.reason).toContain('cross-agent')
+  })
+
+  it('same-agent, distinct, first-time APPROVE still applies (regression)', () => {
+    const aId = seedMemoryFor('marveen', 'warm')
+    const bId = seedMemoryFor('marveen', 'warm')
+    saveCuratorVerdict(db, {
+      agent_id: 'applegate', entry_a_id: aId, entry_b_id: bId, jaccard: 0.9, verdict: 'APPROVE',
+    })
+
+    const result = applyPendingCuratorVerdicts(db)
+    expect(result.approved).toBe(1)
+    expect(result.blocked).toBe(0)
+
+    const mem = db.prepare('SELECT category, content FROM memories WHERE id = ?').get(aId) as { category: string; content: string }
+    expect(mem.category).toBe('cold')
+    expect(mem.content).toMatch(/^SUPERSEDED:/)
+  })
+
+  it('repeated archive-id: same entry_a archived twice -> second is blocked', () => {
+    const aId = seedMemoryFor('marveen', 'warm')
+    const bId = seedMemoryFor('marveen', 'warm')
+    const cId = seedMemoryFor('marveen', 'warm')
+    // Two APPROVE verdicts both archiving aId (against different keeps).
+    saveCuratorVerdict(db, { agent_id: 'applegate', entry_a_id: aId, entry_b_id: bId, jaccard: 0.9, verdict: 'APPROVE' })
+    saveCuratorVerdict(db, { agent_id: 'applegate', entry_a_id: aId, entry_b_id: cId, jaccard: 0.9, verdict: 'APPROVE' })
+
+    const result = applyPendingCuratorVerdicts(db)
+    expect(result.approved).toBe(1)
+    expect(result.blocked).toBe(1)
+
+    // migration_log: exactly one SUPERSEDED + one BLOCKED (repeated) for aId.
+    const superseded = (db.prepare(`SELECT COUNT(*) AS c FROM migration_log WHERE entry_id = ? AND rule = 'SUPERSEDED'`).get(aId) as { c: number }).c
+    const blocked = (db.prepare(`SELECT COUNT(*) AS c FROM migration_log WHERE entry_id = ? AND rule = 'BLOCKED'`).get(aId) as { c: number }).c
+    expect(superseded).toBe(1)
+    expect(blocked).toBe(1)
+    const blockedRow = db.prepare(`SELECT reason FROM migration_log WHERE entry_id = ? AND rule = 'BLOCKED'`).get(aId) as { reason: string }
+    expect(blockedRow.reason).toContain('repeated')
+  })
+})
+
 describe('production migration completeness -- migration_log created by migrateCuratorVerdicts', () => {
   it('migration_log table exists after migrateCuratorVerdicts (no extra DDL)', () => {
     const db = new Database(':memory:')
