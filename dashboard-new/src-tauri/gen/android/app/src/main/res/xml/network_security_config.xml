@@ -9,7 +9,7 @@
 
   Release reaches the fleet backend over HTTPS at the Tailscale MagicDNS origin
   (https://bigi.tail1a5fa5.ts.net) with a publicly-trusted certificate, so the
-  release build needs NO cleartext exception -- the system trust anchors cover
+  release build needs NO cleartext exception; the system trust anchors cover
   it and usesCleartextTraffic stays "false". The earlier ts.net cleartext
   allowance (ENG-195 TODO "replace once a valid cert is in place") is resolved
   and removed.
