@@ -111,7 +111,7 @@ def validate_proposal(conn, proposal):
     return True, None, (db_id, db_cat, to_cat, db_agent, False)  # False = apply
 
 
-def apply_migrations(proposals):
+def apply_migrations(proposals, dry_run=False):
     """
     Apply validated TM-1 proposals. Per-item skip (not all-or-rollback).
 
@@ -143,6 +143,10 @@ def apply_migrations(proposals):
 
             if should_skip:
                 skipped += 1
+                continue
+
+            if dry_run:
+                print(f"DRY-RUN would apply TM-1 entry {db_id}: {from_cat} -> {to_cat}")
                 continue
 
             # B2: Apply migration WITHOUT bumping accessed_at (migration != access)
@@ -269,8 +273,15 @@ def main():
         report_to_daily_log(0, 0, None)
         return 0
 
+    dry_run = '--dry-run' in sys.argv
+    if dry_run:
+        print("DRY-RUN: no DB writes, no audit log, no daily-log report", file=sys.stderr)
+
     # Apply migrations (per-item skip, not all-or-rollback)
-    applied_count, failed_count, audit_records, error = apply_migrations(proposals)
+    applied_count, failed_count, audit_records, error = apply_migrations(proposals, dry_run=dry_run)
+
+    if dry_run:
+        return 0 if failed_count == 0 else 1
 
     if error:
         print(f"ERROR: {error}", file=sys.stderr)
