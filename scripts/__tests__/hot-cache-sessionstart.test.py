@@ -18,7 +18,12 @@ HOOK = Path(__file__).parent.parent / "hooks" / "hot-cache-sessionstart.py"
 INSTALL_DIR = Path(__file__).parent.parent.parent
 
 
-def run_hook(source: str, agent_id: str, hot_cache_content: str | None = "Test hot-cache content") -> dict:
+def run_hook(
+    source: str,
+    agent_id: str,
+    hot_cache_content: str | None = "Test hot-cache content",
+    roster: bool = False,
+) -> dict:
     if agent_id == "marveen":
         cwd = str(INSTALL_DIR)
         cache_path = INSTALL_DIR / ".claude" / "hot-cache.md"
@@ -37,7 +42,13 @@ def run_hook(source: str, agent_id: str, hot_cache_content: str | None = "Test h
     # refresh (card 6485f301) so the hook reads the fixture verbatim instead of
     # regenerating it from the live DBs (which would also clobber real caches).
     # Refresh has its own coverage in hot-cache-sessionstart-refresh.test.ts.
-    env = {**os.environ, "HOT_CACHE_SESSIONSTART_REFRESH": "0"}
+    # Roster append (card aeea36ee) is OFF by default here so the policy tests
+    # are not perturbed by the real roster file; the roster tests opt in.
+    env = {
+        **os.environ,
+        "HOT_CACHE_SESSIONSTART_REFRESH": "0",
+        "HOT_CACHE_SESSIONSTART_ROSTER": "1" if roster else "0",
+    }
     result = subprocess.run(
         [sys.executable, str(HOOK)], input=payload, capture_output=True, text=True, env=env
     )
@@ -103,6 +114,62 @@ class TestHotCacheF3Policy(unittest.TestCase):
             with self.subTest(source=source):
                 result = run_hook(source, "dave", hot_cache_content=None)
                 self.assertEqual(result, {})
+
+
+ROSTER_PATH = INSTALL_DIR / "store" / "fleet-roster-registry.md"
+ROSTER_MARKER = "Genesis Fleet -- Kanonikus Roster"
+
+
+class TestFleetRosterAppend(unittest.TestCase):
+    """Part B wiring (card aeea36ee): the SessionStart inject also carries the
+    canonical fleet roster, defensively (missing file -> graceful skip)."""
+
+    def setUp(self):
+        # Preserve any existing roster so the test never clobbers real state.
+        self._backup = ROSTER_PATH.read_bytes() if ROSTER_PATH.exists() else None
+        ROSTER_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        if self._backup is not None:
+            ROSTER_PATH.write_bytes(self._backup)
+        elif ROSTER_PATH.exists():
+            ROSTER_PATH.unlink()
+
+    def _ctx(self, result):
+        return result.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+    def test_roster_appended_when_present(self):
+        ROSTER_PATH.write_text(
+            "# " + ROSTER_MARKER + "\n\n| agent_id | Display |\n|---|---|\n| dave | Dave |\n",
+            encoding="utf-8",
+        )
+        result = run_hook("resume", "dave", hot_cache_content=LONG_CONTENT, roster=True)
+        ctx = self._ctx(result)
+        self.assertIn(ROSTER_MARKER, ctx)
+        self.assertIn("FLEET ROSTER", ctx)
+
+    def test_roster_absent_graceful_skip(self):
+        if ROSTER_PATH.exists():
+            ROSTER_PATH.unlink()
+        result = run_hook("resume", "dave", hot_cache_content=LONG_CONTENT, roster=True)
+        ctx = self._ctx(result)
+        # Hot-cache still injected, roster simply omitted -- no crash, no marker.
+        self.assertGreater(len(ctx), 0)
+        self.assertNotIn(ROSTER_MARKER, ctx)
+
+    def test_roster_flag_off_omits_roster(self):
+        ROSTER_PATH.write_text("# " + ROSTER_MARKER + "\n", encoding="utf-8")
+        result = run_hook("resume", "dave", hot_cache_content=LONG_CONTENT, roster=False)
+        ctx = self._ctx(result)
+        self.assertGreater(len(ctx), 0)
+        self.assertNotIn(ROSTER_MARKER, ctx)
+
+    def test_no_hot_cache_no_roster_still_noop(self):
+        # Even with a roster present, no hot-cache file -> whole hook no-ops
+        # (roster append happens only after a hot-cache block is produced).
+        ROSTER_PATH.write_text("# " + ROSTER_MARKER + "\n", encoding="utf-8")
+        result = run_hook("resume", "dave", hot_cache_content=None, roster=True)
+        self.assertEqual(result, {})
 
 
 if __name__ == "__main__":
