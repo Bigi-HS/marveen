@@ -13,7 +13,12 @@
 // All heavy-lifting (actual sendNotification) is injectable via __setPushSender
 // so unit tests stay network-free.
 
-import webpush from 'web-push'
+// web-push@4 is a native ESM package that exposes ONLY named exports (no
+// default). A default import boots-crashes under Node's ESM loader
+// ("does not provide an export named 'default'"), even though tsc stays green
+// via @types/web-push@3 + esModuleInterop. Use a namespace import. See
+// src/__tests__/push-web-push-esm-import.test.ts (incident 2026-11-12).
+import * as webpush from 'web-push'
 import { readBody, json, RequestBodyTooLargeError } from '../http-helpers.js'
 import { readEnvValue } from '../../env.js'
 import { getNoaDb } from '../../noa-db.js'
