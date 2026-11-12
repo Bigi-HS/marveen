@@ -91,7 +91,9 @@ def test_same_agent_same_keywords_merge():
 
     candidates = vl2.compute_dedup_candidates(memories, jaccard_threshold=0.4)
 
-    # Should be 1 because agent_id is same (no veto), jaccard ~= 0.5 >= 0.4
+    # Should be 1 because agent_id is same (no veto), jaccard ~= 0.5 >= 0.4.
+    # Card 431c9468: content-hash gate also satisfied -- default make_memory
+    # content ("Test entry for marveen") is identical for both ids 3 and 4.
     assert len(candidates) == 1, (
         f"Expected 1 dedup-candidate for same-agent (marveen vs marveen), "
         f"but got {len(candidates)}: {candidates}"
@@ -234,7 +236,9 @@ def test_near_threshold_same_agent():
 
     candidates = vl2.compute_dedup_candidates(memories, jaccard_threshold=0.5)
 
-    # Jaccard = 0.5, threshold = 0.5 -> should match
+    # Jaccard = 0.5, threshold = 0.5 -> should match.
+    # Card 431c9468: content-hash gate also satisfied -- default make_memory
+    # content ("Test entry for dave") is identical for both ids 30 and 31.
     assert len(candidates) == 1, (
         f"Expected 1 dedup-candidate at exact threshold (0.5), "
         f"but got {len(candidates)}"
@@ -295,13 +299,18 @@ def test_applicate_executor_cross_identity_no_merge():
     print("✓ test_applicate_executor_cross_identity_no_merge PASS")
 
 
-def test_applicate_executor_same_identity_merge():
-    """Case 2: applicate vault, same executor name (blackbeard: vs blackbeard:).
+def test_applicate_executor_same_identity_different_content_no_merge():
+    """Case 2 FP (card 431c9468): applicate vault, same executor name
+    (blackbeard: vs blackbeard:), same keywords, but DIFFERENT content.
 
-    Both entries agent_id=applicate and same executor name (extracted from content prefix).
-    Keywords are same -> should be merge-candidate (no veto).
+    Both entries agent_id=applicate and same executor name (extracted from the
+    content prefix), so the identity-key guard does NOT veto. Jaccard over the
+    identical keyword set is 1.0. But the bodies differ -- this is a profile
+    UPDATE ("új flotta-tag" -> "Updated profile, koordinátor eszköz"), not an
+    exact duplicate. The mandatory content-hash gate correctly rejects it.
 
-    Expected: 1 dedup-candidate (no veto; same identity).
+    Expected: 0 dedup-candidates (same identity + same keywords + different
+    content is NOT an exact dup).
     """
     memories = [
         make_memory(
@@ -318,14 +327,89 @@ def test_applicate_executor_same_identity_merge():
 
     candidates = vl2.compute_dedup_candidates(memories, jaccard_threshold=0.4)
 
-    # Both agent_id=applicate and extracted name is "blackbeard" in both
-    # Identity matches, Jaccard is high -> should be candidate.
-    # Jaccard({executor,dev,sonnet}) = 1.0 >= 0.4
-    assert len(candidates) == 1, (
-        f"Expected 1 dedup-candidate for applicate same-executor (blackbeard vs blackbeard), "
-        f"but got {len(candidates)}"
+    # Identity matches and Jaccard = 1.0, but content differs (profile update)
+    # -> content-hash gate rejects. Expected: 0.
+    assert len(candidates) == 0, (
+        f"Expected 0 dedup-candidates for applicate same-executor with different "
+        f"content (profile update, not exact dup), but got {len(candidates)}: {candidates}"
     )
-    print("✓ test_applicate_executor_same_identity_merge PASS")
+    print("✓ test_applicate_executor_same_identity_different_content_no_merge PASS")
+
+
+def test_applicate_executor_same_identity_exact_dup_merges():
+    """Case 2 (card 431c9468): applicate vault, same executor name
+    (blackbeard: vs blackbeard:), same keywords, IDENTICAL content.
+
+    This is a TRUE exact dup: no identity veto, Jaccard = 1.0, and the
+    content-hash gate passes because the bodies are byte-identical.
+
+    Expected: 1 dedup-candidate (true exact dup still detected).
+    """
+    memories = [
+        make_memory(
+            52, "applicate", "warm",
+            "executor, dev, sonnet",
+            content="blackbeard: új flotta-tag, programozó munkaágens"
+        ),
+        make_memory(
+            53, "applicate", "warm",
+            "executor, dev, sonnet",
+            content="blackbeard: új flotta-tag, programozó munkaágens"
+        ),
+    ]
+
+    candidates = vl2.compute_dedup_candidates(memories, jaccard_threshold=0.4)
+
+    # Same identity, Jaccard = 1.0, identical content -> content-hash gate passes.
+    assert len(candidates) == 1, (
+        f"Expected 1 dedup-candidate for applicate same-executor exact dup "
+        f"(identical content), but got {len(candidates)}: {candidates}"
+    )
+    print("✓ test_applicate_executor_same_identity_exact_dup_merges PASS")
+
+
+def test_same_keywords_different_content_no_merge():
+    """Core FP guard (card 431c9468): same agent, same category, same keywords,
+    but DIFFERENT explicit content.
+
+    Keyword Jaccard is 1.0 and there is no identity veto, so the old detector
+    would have flagged this pair. The mandatory content-hash gate rejects it
+    because the bodies differ (e.g. a state-transition "state A" -> "state B").
+
+    Expected: 0 dedup-candidates.
+    """
+    memories = [
+        make_memory(60, "dave", "warm", "x, y, z", content="state A"),
+        make_memory(61, "dave", "warm", "x, y, z", content="state B"),
+    ]
+
+    candidates = vl2.compute_dedup_candidates(memories, jaccard_threshold=0.4)
+
+    assert len(candidates) == 0, (
+        f"Expected 0 dedup-candidates for same-keyword different-content pair "
+        f"(core FP guard), but got {len(candidates)}: {candidates}"
+    )
+    print("✓ test_same_keywords_different_content_no_merge PASS")
+
+
+def test_same_keywords_identical_content_merges():
+    """True-dup positive (card 431c9468): same agent, same keywords, IDENTICAL
+    explicit content -> still a dedup candidate.
+
+    Expected: 1 dedup-candidate (content-hash gate passes on identical body).
+    """
+    memories = [
+        make_memory(62, "dave", "warm", "x, y, z", content="same body text"),
+        make_memory(63, "dave", "warm", "x, y, z", content="same body text"),
+    ]
+
+    candidates = vl2.compute_dedup_candidates(memories, jaccard_threshold=0.4)
+
+    assert len(candidates) == 1, (
+        f"Expected 1 dedup-candidate for same-keyword identical-content pair "
+        f"(true dup), but got {len(candidates)}: {candidates}"
+    )
+    print("✓ test_same_keywords_identical_content_merges PASS")
 
 
 # ============================================================================
@@ -345,7 +429,10 @@ def run_all_tests(verbose=False):
         test_near_threshold_same_agent,
         test_empty_keywords_skipped,
         test_applicate_executor_cross_identity_no_merge,  # Case 2: applicate vault
-        test_applicate_executor_same_identity_merge,      # Case 2: applicate same executor
+        test_applicate_executor_same_identity_different_content_no_merge,  # 431c9468 FP
+        test_applicate_executor_same_identity_exact_dup_merges,            # 431c9468 true dup
+        test_same_keywords_different_content_no_merge,    # 431c9468 core FP guard
+        test_same_keywords_identical_content_merges,      # 431c9468 true dup
     ]
 
     passed = 0
