@@ -73,17 +73,10 @@ android {
             )
         }
     }
-    // Per-ABI splits: arm64-v8a (~20 MB) is the primary artifact for Boss's phone.
-    // armeabi-v7a + x86_64 included for broader coverage. universalApk disabled
-    // (the 623 MB universal debug blob is replaced by focused per-arch packages).
-    splits {
-        abi {
-            isEnable = true
-            reset()
-            include("arm64-v8a", "armeabi-v7a", "x86_64")
-            isUniversalApk = false
-        }
-    }
+    // NOTE: ABI splits removed. Tauri's RustPlugin already creates per-ABI product
+    // flavors (universal/arm64/arm/x86/x86_64) with ndk.abiFilters. Using splits.abi
+    // alongside flavor-scoped ndk.abiFilters causes a Gradle conflict. Build with
+    // `--target aarch64` for the Boss phone artifact (app-arm64-arm64-release.apk, ~20 MB).
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8

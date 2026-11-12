@@ -54,26 +54,30 @@ npm ci --prefer-offline 2>&1 | tail -5
 echo "[build-v2-apk] vite build..."
 npm run build 2>&1 | tail -5
 
-# --- (3) Tauri android release build (all 3 ABI targets) ---
-# --apk builds APKs (not AAB). ABI splits are configured in build.gradle.kts.
-# BLOCKER NOTE (resolve before shipping to Boss):
-#   BLOCKER 1: CSP connect-src must include the Tailscale backend origin.
-#   BLOCKER 2: cleartext traffic policy (plain-http Tailscale vs https+MagicDNS).
-#   These are tracked and being resolved with Dave/NoA separately; this script
-#   builds the binary layer regardless of network-config state.
-echo "[build-v2-apk] tauri android build --apk..."
-npx tauri android build --apk 2>&1 | tail -20
+# --- (3) Tauri android release build (arm64 flavor) ---
+# Tauri uses product flavors (not splits.abi) for per-ABI builds via RustPlugin.
+# --target aarch64 builds only the arm64 flavor -> app-arm64-arm64-release.apk (~20 MB).
+# For all flavors (universal+arm64+arm+x86+x86_64), omit --target.
+# BLOCKER NOTE: resolved in #969 (CSP connect-src + network_security_config).
+echo "[build-v2-apk] tauri android build --apk --target aarch64..."
+npx tauri android build --apk --target aarch64 2>&1 | tail -20
 
 # --- (4) collect artifacts ---
 mkdir -p "$OUT_DIR"
-GRADLE_OUT="$APP_DIR/src-tauri/gen/android/app/build/outputs/apk/release"
+# Tauri flavor output: build/outputs/apk/<flavor>/release/
+GRADLE_OUT_ARM64="$APP_DIR/src-tauri/gen/android/app/build/outputs/apk/arm64/release"
+GRADLE_OUT_FALLBACK="$APP_DIR/src-tauri/gen/android/app/build/outputs/apk/release"
 
-if [ ! -d "$GRADLE_OUT" ]; then
-    echo "[build-v2-apk] ERROR: Gradle output dir not found: $GRADLE_OUT"
+if [ -d "$GRADLE_OUT_ARM64" ]; then
+    GRADLE_OUT="$GRADLE_OUT_ARM64"
+elif [ -d "$GRADLE_OUT_FALLBACK" ]; then
+    GRADLE_OUT="$GRADLE_OUT_FALLBACK"
+else
+    echo "[build-v2-apk] ERROR: Gradle output dir not found (tried arm64 and release)"
     exit 1
 fi
 
-echo "[build-v2-apk] copying APKs to $OUT_DIR..."
+echo "[build-v2-apk] collecting from $GRADLE_OUT..."
 cp "$GRADLE_OUT"/*.apk "$OUT_DIR/" 2>/dev/null || { echo "ERROR: no APKs found in $GRADLE_OUT"; exit 1; }
 
 # --- (5) SHA256 manifest ---
@@ -82,18 +86,16 @@ MANIFEST="$OUT_DIR/sha256-v${VERSION}.txt"
 echo "[build-v2-apk] SHA256 manifest:"
 cat "$MANIFEST"
 
-# --- (6) size check -- arm64-v8a should be ~20 MB, not 623 MB ---
-ARM64="$OUT_DIR/app-arm64-v8a-release.apk"
-if [ -f "$ARM64" ]; then
+# --- (6) size check -- arm64 flavor APK should be ~20 MB ---
+ARM64=$(ls "$OUT_DIR"/app-arm64-arm64-release.apk "$OUT_DIR"/app-arm64-v8a-release.apk 2>/dev/null | head -1)
+if [ -n "$ARM64" ] && [ -f "$ARM64" ]; then
     SIZE_MB=$(python3 -c "import os; print(f'{os.path.getsize(\"$ARM64\")/1024/1024:.1f}')")
-    echo "[build-v2-apk] arm64-v8a: ${SIZE_MB} MB"
-    python3 -c "
-size = $(python3 -c "import os; print(os.path.getsize('$ARM64')/1024/1024)")
-if size > 100:
-    print(f'WARNING: arm64-v8a is {size:.1f} MB -- expected ~20 MB for a split APK. Check ABI splits config.')
-else:
-    print(f'OK: arm64-v8a size {size:.1f} MB is within expected range.')
-"
+    echo "[build-v2-apk] arm64: ${SIZE_MB} MB ($(basename $ARM64))"
+    if python3 -c "import sys; sys.exit(0 if float('$SIZE_MB') <= 100 else 1)"; then
+        echo "OK: arm64 size ${SIZE_MB} MB is within expected range."
+    else
+        echo "WARNING: arm64 is ${SIZE_MB} MB -- expected ~20 MB. Check flavor config."
+    fi
 fi
 
 echo "[build-v2-apk] DONE. Artifacts in $OUT_DIR/"
