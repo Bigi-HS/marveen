@@ -65,15 +65,21 @@ npx tauri android build --apk --target aarch64 2>&1 | tail -20
 # --- (4) collect artifacts ---
 mkdir -p "$OUT_DIR"
 # Tauri flavor output: build/outputs/apk/<flavor>/release/
-GRADLE_OUT_ARM64="$APP_DIR/src-tauri/gen/android/app/build/outputs/apk/arm64/release"
-GRADLE_OUT_FALLBACK="$APP_DIR/src-tauri/gen/android/app/build/outputs/apk/release"
-
-if [ -d "$GRADLE_OUT_ARM64" ]; then
-    GRADLE_OUT="$GRADLE_OUT_ARM64"
-elif [ -d "$GRADLE_OUT_FALLBACK" ]; then
-    GRADLE_OUT="$GRADLE_OUT_FALLBACK"
-else
-    echo "[build-v2-apk] ERROR: Gradle output dir not found (tried arm64 and release)"
+# Tauri --target aarch64 builds the universal Gradle flavor (all Rust ABIs compiled
+# for one target). Output: apk/universal/release/ or apk/arm64/release/ depending
+# on how the CLI invokes Gradle. Search all flavor dirs.
+GRADLE_APK_BASE="$APP_DIR/src-tauri/gen/android/app/build/outputs/apk"
+GRADLE_OUT=""
+for flavor in universal arm64 release; do
+    candidate="$GRADLE_APK_BASE/$flavor/release"
+    if [ -d "$candidate" ] && ls "$candidate"/*.apk 2>/dev/null | head -1 | grep -q .; then
+        GRADLE_OUT="$candidate"
+        break
+    fi
+done
+if [ -z "$GRADLE_OUT" ]; then
+    echo "[build-v2-apk] ERROR: no APK found under $GRADLE_APK_BASE"
+    find "$GRADLE_APK_BASE" -name "*.apk" 2>/dev/null || true
     exit 1
 fi
 
@@ -86,15 +92,15 @@ MANIFEST="$OUT_DIR/sha256-v${VERSION}.txt"
 echo "[build-v2-apk] SHA256 manifest:"
 cat "$MANIFEST"
 
-# --- (6) size check -- arm64 flavor APK should be ~20 MB ---
-ARM64=$(ls "$OUT_DIR"/app-arm64-arm64-release.apk "$OUT_DIR"/app-arm64-v8a-release.apk 2>/dev/null | head -1)
-if [ -n "$ARM64" ] && [ -f "$ARM64" ]; then
-    SIZE_MB=$(python3 -c "import os; print(f'{os.path.getsize(\"$ARM64\")/1024/1024:.1f}')")
-    echo "[build-v2-apk] arm64: ${SIZE_MB} MB ($(basename $ARM64))"
+# --- (6) size check -- aarch64 APK should be ~15-25 MB ---
+MAIN_APK=$(ls "$OUT_DIR"/*.apk 2>/dev/null | head -1)
+if [ -n "$MAIN_APK" ] && [ -f "$MAIN_APK" ]; then
+    SIZE_MB=$(python3 -c "import os; print(f'{os.path.getsize(\"$MAIN_APK\")/1024/1024:.1f}')")
+    echo "[build-v2-apk] $(basename $MAIN_APK): ${SIZE_MB} MB"
     if python3 -c "import sys; sys.exit(0 if float('$SIZE_MB') <= 100 else 1)"; then
-        echo "OK: arm64 size ${SIZE_MB} MB is within expected range."
+        echo "OK: size ${SIZE_MB} MB is within expected range."
     else
-        echo "WARNING: arm64 is ${SIZE_MB} MB -- expected ~20 MB. Check flavor config."
+        echo "WARNING: ${SIZE_MB} MB -- expected ~20 MB. Check build config."
     fi
 fi
 
