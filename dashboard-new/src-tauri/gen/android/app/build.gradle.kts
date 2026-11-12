@@ -38,10 +38,28 @@ android {
         create("release") {
             val ksPath = System.getenv("ANDROID_KEYSTORE_PATH")
             if (ksPath != null) {
+                // Fail closed: if signing is requested (path set) but any of the
+                // other three credentials is absent, abort with a clear message
+                // instead of building a half-configured (and misleadingly broken)
+                // signing config.
+                val creds = mapOf(
+                    "ANDROID_KEYSTORE_PASS" to System.getenv("ANDROID_KEYSTORE_PASS"),
+                    "ANDROID_KEY_ALIAS" to System.getenv("ANDROID_KEY_ALIAS"),
+                    "ANDROID_KEY_PASS" to System.getenv("ANDROID_KEY_PASS")
+                )
+                val missing = creds.filterValues { it == null }.keys
+                if (missing.isNotEmpty()) {
+                    throw GradleException(
+                        "Release signing requested (ANDROID_KEYSTORE_PATH set) but missing: " +
+                            missing.joinToString(", ") +
+                            ". Set all four of ANDROID_KEYSTORE_PATH/PASS and " +
+                            "ANDROID_KEY_ALIAS/PASS (e.g. source ~/.android/noa-signing.env)."
+                    )
+                }
                 storeFile = file(ksPath)
-                storePassword = System.getenv("ANDROID_KEYSTORE_PASS")
-                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
-                keyPassword = System.getenv("ANDROID_KEY_PASS")
+                storePassword = creds["ANDROID_KEYSTORE_PASS"]
+                keyAlias = creds["ANDROID_KEY_ALIAS"]
+                keyPassword = creds["ANDROID_KEY_PASS"]
             }
         }
     }
