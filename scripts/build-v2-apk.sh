@@ -7,7 +7,7 @@
 #
 # Usage:
 #   # Signed release (requires signing env vars):
-#   source ~/.android/noa-signing.env   # sets ANDROID_KEYSTORE_* vars
+#   set -a; source ~/.android/noa-signing.env; set +a   # source + auto-export
 #   bash scripts/build-v2-apk.sh
 #
 #   # Unsigned (CI smoke, not shippable):
