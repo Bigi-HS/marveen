@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { apiPost } from '@/lib/api-app'
 import { getToken } from '@/lib/api'
 import { isAuthError } from '@/lib/auth-error'
+import { buildPairingUrl } from '@/lib/pairing'
+import { PairingQR } from '@/components/PairingQR'
 
 interface TokenResult {
   token: string
@@ -48,7 +50,7 @@ export function MobileSetup() {
   }
 
   const setupUrl = generated
-    ? `${window.location.origin}/v2/#token=${generated.token}`
+    ? buildPairingUrl(window.location.origin, generated.token)
     : null
 
   return (
@@ -83,6 +85,10 @@ export function MobileSetup() {
           <p className="text-xs text-text-muted">
             Érvényes: {new Date(generated.expiresAt).toLocaleDateString('hu-HU')}
           </p>
+          <div className="flex flex-col items-center gap-2 py-1">
+            <PairingQR url={setupUrl} />
+            <p className="text-xs text-text-muted">Szkenneld be a telefonoddal</p>
+          </div>
           <div className="flex items-center gap-2 rounded-lg bg-surface px-3 py-2">
             <code className="flex-1 truncate text-xs text-text-muted">{setupUrl}</code>
             <button
