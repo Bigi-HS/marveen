@@ -286,6 +286,49 @@ def test_audit_log_write():
         print("✓ Fixture 7: Audit log (append-only) PASSED")
 
 
+def test_dry_run_no_db_writes():
+    """Fixture 8: --dry-run applies nothing (no DB write, no audit, returns 0/0/[]).
+
+    Contrast with Fixture 6: the SAME valid proposal migrates entry 100 hot->warm
+    when dry_run=False. Here dry_run=True must leave the DB untouched, so these
+    assertions fail loudly if the dry-run path ever starts mutating.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / 'test.db'
+        setup_test_db(db_path)
+
+        with patch.object(executor_module, 'DB_PATH', db_path):
+            proposals = [
+                {
+                    'entry_id': 100,
+                    'agent_id': 'applegate',
+                    'from_category': 'hot',
+                    'to_category': 'warm',
+                    'type': 'TM-1'
+                }
+            ]
+
+            applied_count, failed_count, audit_records, error = apply_migrations(
+                proposals, dry_run=True
+            )
+
+            assert applied_count == 0, f"dry-run should apply 0, got {applied_count}"
+            assert failed_count == 0, f"dry-run should fail 0, got {failed_count}"
+            assert audit_records == [], f"dry-run should emit no audit records, got {audit_records}"
+            assert error is None, f"dry-run should not error, got {error}"
+
+        # Dangerous-direction assertions: entry 100 must stay 'hot' and the
+        # migration_log must stay empty (would fail if dry-run wrote).
+        conn = sqlite3.connect(str(db_path))
+        cat = conn.execute('SELECT category FROM memories WHERE id = 100').fetchone()[0]
+        assert cat == 'hot', f"dry-run must NOT migrate; entry 100 should stay 'hot', got {cat}"
+        log_rows = conn.execute('SELECT COUNT(*) FROM migration_log').fetchone()[0]
+        assert log_rows == 0, f"dry-run must NOT write migration_log, got {log_rows} rows"
+        conn.close()
+
+        print("✓ Fixture 8: Dry-run (no DB writes, no audit) PASSED")
+
+
 def run_all_tests():
     """Run all test fixtures."""
     print("=" * 60)
@@ -300,6 +343,7 @@ def run_all_tests():
         ("Fixture 5: Already applied", test_already_applied_in_migration_log),
         ("Fixture 6: Per-item skip", test_apply_migrations_per_item_skip),
         ("Fixture 7: Audit log", test_audit_log_write),
+        ("Fixture 8: Dry-run (no writes)", test_dry_run_no_db_writes),
     ]
 
     passed = 0
