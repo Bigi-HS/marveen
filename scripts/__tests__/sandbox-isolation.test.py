@@ -252,6 +252,116 @@ class SandboxDownIdempotencyTests(unittest.TestCase):
                 )
 
 
+class SandboxDownRmrfGuardTests(unittest.TestCase):
+    """sandbox-down.sh: the rm -rf fallback must validate its target path first.
+
+    Chad SEC medium on merged #984 (card 7618968d): _remove_worktree falls back to
+    `rm -rf "$worktree"` when `git worktree remove` fails, previously with only an
+    empty-string check. An empty / '/' / outside-the-sandbox-base path would cause a
+    catastrophic delete. The guard `_is_safe_rm_target <path> <base>` must reject any
+    path that is empty, '/', or not strictly nested under the sandbox worktree base.
+
+    The predicate is exercised directly (by sourcing the script) so the dangerous
+    inputs '/' and '' are tested WITHOUT ever running a real rm -rf on them.
+    """
+
+    def _guard(self, path: str, base: str) -> subprocess.CompletedProcess:
+        """Source sandbox-down.sh and call _is_safe_rm_target with (path, base).
+
+        Sourcing (not executing) means BASH_SOURCE[0] != $0, so main() does not run;
+        only the function definitions load. Returns the completed process; rc 0 means
+        the path is accepted as a safe rm -rf target, non-zero means rejected.
+        """
+        cmd = 'source "$1"; _is_safe_rm_target "$2" "$3"'
+        return subprocess.run(
+            ["bash", "-c", cmd, "guard", SANDBOX_DOWN, path, base],
+            capture_output=True, text=True, timeout=15,
+        )
+
+    def test_guard_rejects_empty_path(self):
+        r = self._guard("", "/tmp/base/.sandbox-worktrees")
+        self.assertNotEqual(r.returncode, 0, "empty path must be rejected")
+
+    def test_guard_rejects_root(self):
+        for danger in ("/", "//", "/.", "/.."):
+            r = self._guard(danger, "/tmp/base/.sandbox-worktrees")
+            self.assertNotEqual(
+                r.returncode, 0, f"root-ish path {danger!r} must be rejected")
+
+    def test_guard_rejects_path_outside_base(self):
+        base = "/tmp/base/.sandbox-worktrees"
+        # The live repo root, a sibling of base, and a prefix-collision sibling.
+        for danger in ("/home/domin/marveen", "/tmp/base",
+                       "/tmp/base/.sandbox-worktrees-evil/wt-1",
+                       "/tmp/other/wt-1"):
+            r = self._guard(danger, base)
+            self.assertNotEqual(
+                r.returncode, 0, f"path outside base {danger!r} must be rejected")
+
+    def test_guard_rejects_base_itself(self):
+        base = "/tmp/base/.sandbox-worktrees"
+        r = self._guard(base, base)
+        self.assertNotEqual(r.returncode, 0, "deleting the base dir itself must be rejected")
+
+    def test_guard_accepts_path_under_base(self):
+        """NON-VACUOUS: a legitimate sandbox worktree path IS accepted."""
+        base = "/tmp/base/.sandbox-worktrees"
+        r = self._guard(base + "/wt-12345", base)
+        self.assertEqual(
+            r.returncode, 0,
+            f"legit sandbox worktree under base must be accepted.\n"
+            f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}")
+
+    def test_fallback_refuses_rm_rf_outside_base(self):
+        """End-to-end: a worktree path outside the base survives teardown (not deleted)."""
+        with tempfile.TemporaryDirectory() as d:
+            live_root = os.path.join(d, "live")
+            os.makedirs(os.path.join(live_root, "store"), exist_ok=True)
+            # Sentinel dir OUTSIDE live_root/store/.sandbox-worktrees.
+            victim = os.path.join(d, "victim")
+            os.makedirs(victim, exist_ok=True)
+            _write(os.path.join(victim, "precious.txt"), "DO-NOT-DELETE\n")
+            env = dict(os.environ,
+                       SANDBOX_LIVE_ROOT=live_root,
+                       SANDBOX_WORKTREE=victim,
+                       SANDBOX_SESSION_PREFIX="sb-test-guard")
+            r = subprocess.run(
+                ["bash", SANDBOX_DOWN],
+                capture_output=True, text=True, env=env, timeout=15,
+            )
+            self.assertEqual(r.returncode, 0, f"teardown must still exit 0 (idempotent).\n{r.stderr}")
+            self.assertTrue(
+                os.path.isdir(victim) and os.path.isfile(os.path.join(victim, "precious.txt")),
+                f"rm -rf fallback must REFUSE a path outside the sandbox base.\n"
+                f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}")
+            self.assertIn("REFUSING", r.stdout + r.stderr,
+                          "teardown must log that it refused the unsafe rm -rf")
+
+    def test_fallback_removes_path_under_base(self):
+        """NON-VACUOUS end-to-end: a dir under the base IS cleaned by the rm -rf fallback."""
+        with tempfile.TemporaryDirectory() as d:
+            live_root = os.path.join(d, "live")
+            wt = os.path.join(live_root, "store", ".sandbox-worktrees", "wt-test")
+            os.makedirs(wt, exist_ok=True)
+            _write(os.path.join(wt, "junk.txt"), "sandbox-junk\n")
+            env = dict(os.environ,
+                       SANDBOX_LIVE_ROOT=live_root,
+                       SANDBOX_WORKTREE=wt,
+                       SANDBOX_SESSION_PREFIX="sb-test-guard")
+            # git worktree remove will fail (live_root is not a git repo / wt is not a
+            # registered worktree), so the guarded rm -rf fallback runs and -- because
+            # the path is under the base -- removes it.
+            r = subprocess.run(
+                ["bash", SANDBOX_DOWN],
+                capture_output=True, text=True, env=env, timeout=15,
+            )
+            self.assertEqual(r.returncode, 0, f"teardown must exit 0.\n{r.stderr}")
+            self.assertFalse(
+                os.path.exists(wt),
+                f"a sandbox worktree under the base must be cleaned by the fallback.\n"
+                f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}")
+
+
 if __name__ == "__main__":
     missing = [p for p in (SANDBOX_UP, SANDBOX_DOWN, SELFTEST) if not os.path.exists(p)]
     if missing:
