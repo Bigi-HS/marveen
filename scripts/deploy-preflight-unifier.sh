@@ -10,6 +10,7 @@
 #   C3  rollback point              (what scripts/rollback.sh would ACTUALLY restore)
 #   C4  build artifact sanity       (dist newer than the last src commit)
 #   C5  running-process freshness   (every repo shell process runs current code)
+#   C6  isolated boot-smoke         (the built dist actually BOOTS under native ESM)
 #
 # Usage:  scripts/deploy-preflight-unifier.sh [--target <ref>]
 # Exit 0 = all checks clean or warning-only, safe to request GO.
@@ -435,6 +436,34 @@ ${suspect_lines%$'\n'}"
   else
     pass "C5d supervisor: exactly one fleet-supervisor running"
   fi
+fi
+echo
+
+# --- C6: the built dist actually BOOTS under native ESM ---------------------
+#
+# C4 proves the dist is RECENT and from the right source; it does NOT prove it
+# BOOTS. tsc --noEmit (@types interop) and vitest/vite (synthesises a default
+# export) both go green on an ESM default-vs-named import mismatch -- only a real
+# `node dist/index.js` catches it. That exact gap caused the 2026-11-12 live
+# dashboard outage (push.ts default-imported web-push@4, named-only ESM -> boot
+# crash; fix PR #972). This is the non-negotiable hard layer of the boot-smoke
+# gate (the pre-gate-bundle path-scoped check is the cheaper secondary).
+#
+# boot-smoke.sh boots an ISOLATED COPY of the dist (throwaway PROJECT_ROOT,
+# NOA_BOOT_SMOKE = no peer-kill, SANDBOX_ISOLATION=1 against a noa.db copy,
+# non-3420 port) -- it REUSES the dist C4 just validated, it does NOT rebuild.
+echo "--- C6: boot-smoke (isolated dist boot) ---"
+BOOT_SMOKE="$SCRIPT_DIR/boot-smoke.sh"
+if [ ! -f "$BOOT_SMOKE" ]; then
+  fail "C6 boot-smoke: detector missing at $BOOT_SMOKE -- the gate cannot prove the dist boots"
+else
+  bs_out=$(bash "$BOOT_SMOKE" "$REPO" 2>&1); bs_rc=$?
+  echo "$bs_out" | tail -4 | sed 's/^/  /'
+  case "$bs_rc" in
+    0) pass "C6 boot-smoke: the built dist boots and binds its port in isolation -- no ESM/boot crash" ;;
+    2) warn "C6 boot-smoke: could not run (no built dist or db / unsafe port) -- boot is UNVERIFIED; build dist and re-run" ;;
+    *) fail "C6 boot-smoke: the built dist FAILED to boot (process exited / never bound) -- deploying it would boot-crash live. See log above." ;;
+  esac
 fi
 echo
 
