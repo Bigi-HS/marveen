@@ -108,7 +108,11 @@ _kill_tmux_sessions() {
 
     while IFS= read -r session; do
         log "killing tmux session: $session"
-        tmux kill-session -t "$session" 2>/dev/null || \
+        # Anchor the target with "=" (exact match). Without it, tmux falls back to
+        # prefix matching when the named session is absent -- so if the session
+        # vanished between list-sessions and here, an unanchored kill could hit a
+        # SIBLING session sharing the prefix. "=$session" forbids that fallback.
+        tmux kill-session -t "=$session" 2>/dev/null || \
             warn "failed to kill session $session (may already be gone)"
     done <<< "$sessions"
 }
