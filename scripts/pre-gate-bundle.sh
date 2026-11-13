@@ -75,6 +75,28 @@ pgb_count_additions() {
   awk '{ if ($1 ~ /^[0-9]+$/) total += $1 } END { print total + 0 }'
 }
 
+# Boot-path detector (card 2e3779c5). Reads a `git diff --name-only` list on
+# stdin (one path per line) and echoes the subset that touches the BOOT PATH --
+# the files a change to which can make `node dist/index.js` fail to boot while
+# tsc/vitest stay green (the #972 ESM default-vs-named class):
+#   src/index.ts    -- the boot entry
+#   src/web/**      -- the web server + routes mounted at boot (push.ts lived here)
+#   package.json    -- a dependency add/bump can introduce a named-only ESM module
+# Matched paths are echoed comma-joined; empty when none. Pure (no git/node) so
+# check_boot_smoke can AUTO-trigger protective-by-default on these paths.
+pgb_boot_path_touched() {
+  local line out=""
+  while IFS= read -r line; do
+    case "$line" in
+      src/index.ts|package.json) : ;;
+      src/web/*) : ;;
+      *) continue ;;
+    esac
+    if [ -z "$out" ]; then out="$line"; else out="$out,$line"; fi
+  done
+  printf '%s' "$out"
+}
+
 # Emit the bundle as JSON conforming to scripts/pre-gate-schema.json. Reads the parallel
 # CHECK_* arrays from the environment of the caller. Built via python3 (jq is absent on
 # this host) so quoting/escaping is correct. Never prints a secret VALUE -- details are
@@ -544,6 +566,50 @@ check_test_mutation() {
   fi
 }
 
+# Boot-smoke check (card 2e3779c5). SECONDARY layer to the PRIMARY deploy-preflight
+# boot-smoke (deploy-preflight-unifier.sh C6, which is a hard always-on gate). Here it
+# is PROTECTIVE-BY-DEFAULT: it AUTO-triggers when the PR diff touches the boot path
+# (pgb_boot_path_touched) so a boot-path change cannot merge without a real
+# `node dist/index.js` boot, yet docs/script/test-only PRs pay nothing. PGB_BOOT_SMOKE
+# is an explicit override/escape-hatch: "1" forces the smoke on, "0" forces it off.
+#
+# Severity: boot crash (exit 1) -> BLOCK (the #972 class is a live outage). A
+# precondition miss (no built dist, exit 2) is fail-open WARN -- same convention as
+# the other optional-tooling checks: the dist is not built in every worktree, and the
+# PRIMARY preflight layer (where a real dist always exists) is the non-negotiable gate.
+# PGB_BOOT_SMOKE_BIN overrides the script path (test seam, like GITLEAKS_BIN).
+check_boot_smoke() {
+  local override="${PGB_BOOT_SMOKE:-}"
+  local touched=""
+  # Decide whether to run: explicit override wins, else auto on boot-path diff.
+  if [ "$override" = "0" ] || [ "$override" = "off" ] || [ "$override" = "false" ]; then
+    record boot-smoke PASS "forced off (PGB_BOOT_SMOKE=${override}); boot not exercised"
+    return
+  fi
+  if [ "$override" = "1" ] || [ "$override" = "on" ] || [ "$override" = "true" ]; then
+    touched="(forced on)"
+  else
+    touched="$(git -C "$INSTALL_DIR" diff --name-only "${BASE}...${HEAD}" 2>/dev/null | pgb_boot_path_touched)"
+    if [ -z "$touched" ]; then
+      record boot-smoke PASS "boot path untouched (src/index.ts, src/web/**, package.json); smoke not required"
+      return
+    fi
+  fi
+
+  local bin="${PGB_BOOT_SMOKE_BIN:-${INSTALL_DIR}/scripts/boot-smoke.sh}"
+  if [ ! -x "$bin" ] && [ ! -f "$bin" ]; then
+    record boot-smoke WARN "boot-path touched (${touched}) but boot-smoke.sh missing at ${bin}; cannot verify boot"
+    return
+  fi
+  local out rc
+  out="$(bash "$bin" "$INSTALL_DIR" 2>&1)"; rc=$?
+  case "$rc" in
+    0) record boot-smoke PASS "dist boots + binds in isolation (boot-path: ${touched})" ;;
+    2) record boot-smoke WARN "boot-smoke could not run (no built dist / unsafe port) -- unverified (boot-path: ${touched})" ;;
+    *) record boot-smoke BLOCK "dist FAILED to boot (process exited / never bound) -- deploy would boot-crash (boot-path: ${touched})" ;;
+  esac
+}
+
 # Optional cross-model critic (--cross-model flag). Calls a local Ollama model to
 # surface same-model blind spots. Result is ADVISORY ONLY: FLAG lines must be
 # addressed by the gate reviewer in their APPROVE comment, but they never change
@@ -859,6 +925,7 @@ main() {
   check_gitleaks
   check_mock_integrity
   check_test_mutation
+  check_boot_smoke
   [ "$cross_model" -eq 1 ] && check_cross_model
   [ "$skill_check" -eq 1 ] && check_skill_regression
   check_da_sentinel
