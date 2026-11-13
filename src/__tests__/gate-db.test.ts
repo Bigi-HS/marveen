@@ -28,8 +28,16 @@ describe('migrateGateTables (MG-AC1 additive)', () => {
     const tables = db
       .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'gate_%' ORDER BY name`)
       .all() as Array<{ name: string }>
-    // gate_invalidations added by card 2fd80824 (SHA-drift invalidation)
-    expect(tables.map((t) => t.name)).toEqual(['gate_approvals', 'gate_ci_runs', 'gate_invalidations', 'gate_overrides', 'gate_pr_authors'])
+    // gate_invalidations added by card 2fd80824 (SHA-drift invalidation);
+    // gate_pr_risk added by card 66cf63ed (derived-risk intake snapshot)
+    expect(tables.map((t) => t.name)).toEqual([
+      'gate_approvals',
+      'gate_ci_runs',
+      'gate_invalidations',
+      'gate_overrides',
+      'gate_pr_authors',
+      'gate_pr_risk',
+    ])
   })
 })
 

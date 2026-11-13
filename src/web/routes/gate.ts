@@ -39,6 +39,7 @@ import {
   readLatestCiRun,
   readGateHistory,
   recordInvalidation,
+  insertPrRisk,
 } from '../gate-db.js'
 import { createAgentMessage } from '../../db.js'
 import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
@@ -268,6 +269,25 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
         // that preflights /api/gate/check sees the identical pass decision.
         readAuthor: (p) => readPrAuthor(db, p),
       })
+      // Card 66cf63ed: record the derived-risk intake snapshot (OBSERVABILITY
+      // ONLY -- never read back by enforcement). Wrapped so an advisory-write
+      // failure can never break the gate check response.
+      try {
+        insertPrRisk(
+          db,
+          {
+            pr_number: pr,
+            head_sha: result.head_sha,
+            risk_tags: result.risk_tags.join(','),
+            risk_level: result.risk_level,
+            risk_unknown: result.risk_unknown ? 1 : 0,
+            recorded_by: ctx.identity?.agentId ?? 'gate-check',
+          },
+          nowEpoch(),
+        )
+      } catch (riskErr) {
+        logger.warn({ pr, err: riskErr }, 'gate check: risk intake write failed (non-fatal)')
+      }
       json(res, result)
     } catch (err) {
       json(res, { error: 'gate check failed', detail: err instanceof Error ? err.message : String(err) }, 502)

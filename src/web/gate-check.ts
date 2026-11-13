@@ -198,6 +198,162 @@ export function requiredReviewers(securityTouched: boolean): Reviewer[] {
   return securityTouched ? [qa, 'dave', 'chad'] : [qa, 'dave']
 }
 
+// ---------------------------------------------------------------------------
+// Intake risk-classifier -> derived req-matrix (card 66cf63ed).
+//
+// Today's req-matrix is deterministic but BINARY: isSecuritySensitivePath over
+// the diff -> one bit -> +chad. That bit is blind to risk classes the path
+// allowlist cannot see: PR #986 changed scripts/sandbox-down.sh (an `rm -rf`
+// footgun) -- under scripts/ but not scripts/hooks/, so securityTouched=false
+// and only thor+dave were auto-required; a HUMAN caught the destructive surface.
+// This classifier DERIVES the seat-set from the diff with a pure, deterministic
+// function ("factory bin job" -- a script writes the matrix, not a human and not
+// an LLM). Same diff in -> same matrix out, always.
+//
+// LOAD-BEARING INVARIANT: strictly additive. For any diff the derived seat-set
+// is a SUPERSET of today's requiredReviewers(isSecuritySensitivePath-over-diff);
+// it can only ADD seats, never remove one. Proven in the unit tests (pre- AND
+// post-recusal). See store/specs/v2-gate-risk-matrix.md.
+// ---------------------------------------------------------------------------
+
+export const RISK_TAGS = ['security', 'credential', 'destructive', 'input-parsing', 'exec'] as const
+export type Tag = (typeof RISK_TAGS)[number]
+export const RISK_LEVELS = ['low', 'medium', 'high'] as const
+export type RiskLevel = (typeof RISK_LEVELS)[number]
+
+// Per-file diff slice the classifier consumes. `addedLines` are the '+' hunk
+// lines (leading '+' stripped); `patchPresent` is false for binaries / omitted /
+// oversized diffs (GitHub drops the patch field) -> content UNKNOWN -> fail-closed.
+export interface PrFileDiff {
+  filename: string
+  addedLines: string[]
+  patchPresent: boolean
+}
+
+export interface DiffRisk {
+  tags: Tag[] // sorted, de-duplicated
+  level: RiskLevel
+  unknown: boolean
+}
+
+// `credential` is reserved for keyword/exact-file secret modules. NOTE it is
+// PATH-based, not content-based (Chad obligation c2): a token accidentally
+// pasted into an ordinary source file is NOT tagged credential here -- gitleaks /
+// the secret-scanner cover that class. This tag is only about which FILES carry
+// credential logic (card 9839f503 scope). Run ONLY after isSecuritySensitivePath
+// already qualified the path, so it is a pure display sub-classification.
+function isCredentialPath(f: string): boolean {
+  const lower = f.toLowerCase()
+  const base = lower.split('/').pop() ?? lower
+  if (base.includes('.env')) return true
+  if (base.includes('oauth') || base.includes('credential')) return true
+  if (base.includes('token') && (lower.includes('auth') || lower.includes('secret') || lower.includes('store'))) {
+    return true
+  }
+  if (lower === 'src/web/dashboard-auth.ts') return true
+  if (lower === 'src/web/agent-token-registry.ts') return true
+  return false
+}
+
+// Path tags (security | credential) are DERIVED FROM isSecuritySensitivePath
+// itself, not a parallel allowlist -- so the {security,credential} union fires
+// EXACTLY when isSecuritySensitivePath is true, BY CONSTRUCTION (Chad obligation
+// a). The split is a DISPLAY distinction only (both require chad); it can never
+// drift a path OUT of the chad-required set.
+export function pathTags(filename: string): Tag[] {
+  if (!isSecuritySensitivePath(filename)) return []
+  return [isCredentialPath(filename) ? 'credential' : 'security']
+}
+
+// Content-tag signals, matched against ADDED lines only (so removing a dangerous
+// line never ADDS a tag, and unrelated context never trips one). Conservative:
+// a match ADDS a tag; over-matching is safe (a harmless extra chad seat), a
+// false-negative is the class we must avoid, so the set errs toward over-match.
+const DESTRUCTIVE_RE: RegExp[] = [
+  // `rm -rf` (flag clusters with r before f: -rf, -Rf, -rfv). ACCEPTED RESIDUAL
+  // (Chad obligation c1): reversed `rm -fr` and split `rm -r -f` are NOT matched
+  // -- an accepted gap under the trusted-author model; the §10 metric surfaces
+  // whether the anchor needs tuning.
+  /\brm\s+-[a-z]*r[a-z]*f[a-z]*\b/i,
+  /\bdrop\s+table\b/i,
+  /\btruncate\s+table\b/i,
+  /--force\b/, // git push --force / --force-with-lease
+  /\bgit\s+reset\s+.*--hard\b/i,
+  /\bshutil\.rmtree\b/,
+  /\brimraf\b/,
+  /\bfs\.rm(Sync)?\s*\([^)]*recursive/i,
+]
+const EXEC_RE: RegExp[] = [
+  /\bchild_process\b/,
+  /\bexecFileSync\b|\bexecSync\b/,
+  /\beval\s*\(/,
+  /\bnew\s+Function\s*\(/,
+  /\bos\.system\s*\(/,
+  /\bsubprocess\b/,
+  /\bspawnSync\b|\bspawn\s*\(/,
+]
+// input-parsing -- NARROWED (NoA review pt 2): unsafe deserializers OR a parse
+// primitive co-located ON THE SAME added line with a request/network source
+// token. Plain JSON.parse of internal/config data does NOT tag.
+const UNSAFE_DESER_RE: RegExp[] = [/\bpickle\.loads?\s*\(/, /\bresolve_entities\s*=\s*true\b/i]
+const PARSE_RE = /\bJSON\.parse\s*\(|\.parse\s*\(/
+const REQUEST_SOURCE_RE = /\b(req|request|body|payload|webhook|socket|response)\b/
+
+function lineHasInputParsing(line: string): boolean {
+  // (a) yaml.load without a Safe loader
+  if (/\byaml\.load\s*\(/.test(line) && !/safe/i.test(line)) return true
+  // (a) other inherently-unsafe deserializers
+  if (UNSAFE_DESER_RE.some((re) => re.test(line))) return true
+  // (b) a parse primitive co-located with a request/network source token
+  if (PARSE_RE.test(line) && REQUEST_SOURCE_RE.test(line)) return true
+  return false
+}
+
+export function contentTags(addedLines: string[]): Tag[] {
+  const tags = new Set<Tag>()
+  for (const line of addedLines) {
+    if (DESTRUCTIVE_RE.some((re) => re.test(line))) tags.add('destructive')
+    if (EXEC_RE.some((re) => re.test(line))) tags.add('exec')
+    if (lineHasInputParsing(line)) tags.add('input-parsing')
+  }
+  return [...tags]
+}
+
+const HIGH_TAGS: readonly Tag[] = ['security', 'credential', 'destructive']
+const MEDIUM_TAGS: readonly Tag[] = ['input-parsing', 'exec']
+
+// Pure classifier: (diff) -> matrix. No clock, no network, no randomness. Same
+// diff -> same matrix, always. Empty file list -> unknown (fail-closed).
+export function classifyDiffRisk(files: PrFileDiff[]): DiffRisk {
+  const tags = new Set<Tag>()
+  let unknown = files.length === 0
+  for (const f of files) {
+    for (const t of pathTags(f.filename)) tags.add(t)
+    if (!f.patchPresent) {
+      unknown = true
+    } else {
+      for (const t of contentTags(f.addedLines)) tags.add(t)
+    }
+  }
+  const tagList = [...tags].sort()
+  const level: RiskLevel = tagList.some((t) => HIGH_TAGS.includes(t))
+    ? 'high'
+    : tagList.some((t) => MEDIUM_TAGS.includes(t))
+      ? 'medium'
+      : 'low'
+  return { tags: tagList, level, unknown }
+}
+
+// The derived req-matrix: floor [qa, dave]; +chad for ANY tag OR unknown
+// (strict default). This is a SUPERSET of requiredReviewers for the same diff
+// (chad fires whenever a path tag is present -- which is exactly when
+// isSecuritySensitivePath was true -- plus the new content/unknown cases).
+export function requiredSeatsForRisk(risk: DiffRisk): Reviewer[] {
+  const qa = getQaSeat()
+  if (risk.tags.length > 0 || risk.unknown) return [qa, 'dave', 'chad']
+  return [qa, 'dave']
+}
+
 // The standing backup seat promoted when a required reviewer recuses (card
 // 46de122b). Chad is the fleet's technical/security second seat.
 const RECUSAL_BACKUP: Reviewer = 'chad'
@@ -288,6 +444,25 @@ export function evaluateApprovals(approvals: ApprovalRow[], required: Reviewer[]
 export interface GithubPrInfo {
   headSha: string
   files: string[]
+  // Per-file added-lines + patch-presence for content-tag derivation (card
+  // 66cf63ed). OPTIONAL for back-compat: a caller that supplies only `files`
+  // gets the legacy path-only classification (see riskForPrInfo); the real
+  // fetchPrInfo populates this so content tags and unknown->chad activate.
+  fileDiffs?: PrFileDiff[]
+}
+
+// Derive the risk matrix from PR info. With fileDiffs -> full classifier
+// (path + content + unknown). Without -> LEGACY path-only fallback, byte-
+// identical to the pre-classifier behaviour (no content inspection, never
+// unknown) so existing files-only callers/fixtures are unchanged.
+export function riskForPrInfo(info: GithubPrInfo): DiffRisk {
+  if (info.fileDiffs !== undefined) {
+    return classifyDiffRisk(info.fileDiffs)
+  }
+  const tags = new Set<Tag>()
+  for (const f of info.files) for (const t of pathTags(f)) tags.add(t)
+  const tagList = [...tags].sort()
+  return { tags: tagList, level: tagList.length > 0 ? 'high' : 'low', unknown: false }
 }
 
 export interface GateCheckDeps {
@@ -327,6 +502,14 @@ export interface GateCheckResult {
   // `recused` lists reviewers dropped from `required` because they authored the PR.
   author: string | null
   recused: string[]
+  // Derived risk surface (card 66cf63ed). Auditable record of WHY the seat-set
+  // was what it was: `risk_tags` are the derived surface tags, `risk_level` the
+  // max-wins level, `risk_unknown` true when content could not be classified
+  // (binary/omitted patch -> chad forced). Advisory/observability -- the ENFORCED
+  // input is always this check-time re-derivation over the live head.
+  risk_tags: string[]
+  risk_level: string
+  risk_unknown: boolean
 }
 
 // MG-AC3 / MG-AC6 -- the gate check. Always evaluates against the CURRENT
@@ -335,13 +518,18 @@ export interface GateCheckResult {
 // with everything missing. A Boss-level override for the current (pr, sha)
 // forces pass=true (MG-AC7) while still reporting the underlying approval state.
 export async function runGateCheck(pr: number, deps: GateCheckDeps): Promise<GateCheckResult> {
-  const { headSha, files } = await deps.fetchPr(pr)
-  const securityTouched = files.some(isSecuritySensitivePath)
+  const info = await deps.fetchPr(pr)
+  const headSha = info.headSha
+  // Derived risk matrix (card 66cf63ed), re-computed from the LIVE head every
+  // check -- never read from a stored gate_pr_risk intake row (that row is
+  // advisory/audit only; a stale intake could under-require). This re-derivation
+  // is the SOLE enforcement input (same principle as head-sha-bound approvals).
+  const risk = riskForPrInfo(info)
   // Author recusal (card 46de122b): a reviewer who authored the PR cannot fill
   // their own seat, so drop them from `required` and promote the backup. Author
   // comes from the trusted identity-bound record; null (or no dep) -> no recusal.
   const author = deps.readAuthor ? deps.readAuthor(pr) : null
-  const recusal = applyAuthorRecusal(requiredReviewers(securityTouched), author)
+  const recusal = applyAuthorRecusal(requiredSeatsForRisk(risk), author)
   const required = recusal.required
   const evaluation = evaluateApprovals(deps.readApprovals(pr, headSha), required)
   const overrideActive = deps.hasActiveOverride(pr, headSha)
@@ -370,5 +558,8 @@ export async function runGateCheck(pr: number, deps: GateCheckDeps): Promise<Gat
     ci_pass: ciPass,
     author: author ?? null,
     recused: recusal.recused,
+    risk_tags: risk.tags,
+    risk_level: risk.level,
+    risk_unknown: risk.unknown,
   }
 }
