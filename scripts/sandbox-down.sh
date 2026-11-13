@@ -25,43 +25,61 @@
 #   SANDBOX_SESSION_PREFIX    tmux session name prefix (e.g. sb-12345-1700000000)
 #   SANDBOX_RECORD            path to the .sandbox-active-<id> record file (optional)
 #   SANDBOX_LIVE_ROOT         live project root (for git worktree remove command)
+#
+# This file is dual-mode: when executed it runs the full teardown (main); when
+# sourced it only defines functions, so the rm -rf guard predicate can be unit
+# tested against dangerous inputs ('/', '') without ever running a real rm -rf.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SANDBOX_LIVE_ROOT="${SANDBOX_LIVE_ROOT:-$(dirname "$SCRIPT_DIR")}"
 
-RECORD_FILE="${1:-${SANDBOX_RECORD:-}}"
+# Sandbox worktrees always live under this base (mirrors sandbox-up.sh's
+# SANDBOX_DIR_BASE). The rm -rf fallback is only ever allowed inside it.
+SANDBOX_DIR_BASE="${SANDBOX_DIR_BASE:-$SANDBOX_LIVE_ROOT/store/.sandbox-worktrees}"
 
 log()  { printf '[sandbox-down] %s\n' "$*"; }
 warn() { printf '[sandbox-down] WARN: %s\n' "$*" >&2; }
 
 # ---------------------------------------------------------------------------
-# Discover sandbox parameters from record file or env vars.
+# Safety guard (Chad SEC medium, card 7618968d): validate an rm -rf target.
+#
+# Returns 0 only if <path> is a safe thing to `rm -rf`: non-empty, not the
+# filesystem root, and canonically nested STRICTLY under <base>. Everything else
+# (empty, '/', the base itself, any path outside the base, prefix-collision
+# siblings) is rejected so a missing/malformed SANDBOX_WORKTREE can never trigger
+# a catastrophic delete of the live tree or the root.
 # ---------------------------------------------------------------------------
-SANDBOX_WORKTREE="${SANDBOX_WORKTREE:-}"
-SANDBOX_SESSION_PREFIX="${SANDBOX_SESSION_PREFIX:-}"
+_is_safe_rm_target() {
+    local path="$1"
+    local base="$2"
 
-if [ -n "$RECORD_FILE" ] && [ -f "$RECORD_FILE" ]; then
-    log "reading sandbox record: $RECORD_FILE"
-    # Source key=value pairs from the record (safe: our own format).
-    # shellcheck disable=SC1090
-    while IFS='=' read -r key val; do
-        case "$key" in
-            sandbox_worktree)      SANDBOX_WORKTREE="$val" ;;
-            sandbox_session_prefix) SANDBOX_SESSION_PREFIX="$val" ;;
-        esac
-    done < "$RECORD_FILE"
-fi
+    # Reject empty path or empty base outright.
+    [ -n "$path" ] || return 1
+    [ -n "$base" ] || return 1
 
-if [ -z "$SANDBOX_WORKTREE" ] && [ -z "$SANDBOX_SESSION_PREFIX" ]; then
-    log "no sandbox parameters found (SANDBOX_WORKTREE and SANDBOX_SESSION_PREFIX not set)"
-    log "nothing to tear down -- exit 0 (idempotent)"
-    exit 0
-fi
+    # Fast-reject obvious catastrophic literals before canonicalization.
+    case "$path" in
+        /|//|.|..|/.|/..) return 1 ;;
+    esac
 
-log "teardown: worktree=$SANDBOX_WORKTREE  session_prefix=$SANDBOX_SESSION_PREFIX"
+    # Canonicalize lexically (-m allows not-yet/already removed paths; resolves
+    # '..' and symlinks). A path that cannot be canonicalized is rejected.
+    local rp bp
+    rp="$(realpath -m -- "$path" 2>/dev/null)" || return 1
+    bp="$(realpath -m -- "$base" 2>/dev/null)" || return 1
 
-ERRORS=0
+    # Never the root, never the base directory itself.
+    [ "$rp" != "/" ] || return 1
+    [ "$rp" != "$bp" ] || return 1
+
+    # Must be strictly nested under base. The trailing slash on both sides
+    # prevents prefix-collision (e.g. /x/base-evil must NOT match /x/base).
+    case "$rp/" in
+        "$bp"/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 # ---------------------------------------------------------------------------
 # Defense line 1: Kill all sb-<prefix>-* tmux sessions.
@@ -95,8 +113,6 @@ _kill_tmux_sessions() {
     done <<< "$sessions"
 }
 
-_kill_tmux_sessions "$SANDBOX_SESSION_PREFIX" || ERRORS=$(( ERRORS + 1 ))
-
 # ---------------------------------------------------------------------------
 # Defense line 2: WAL-checkpoint the sandbox DB before removing the worktree.
 # ---------------------------------------------------------------------------
@@ -125,8 +141,6 @@ d.close();
     fi
 }
 
-_checkpoint_sandbox_db "$SANDBOX_WORKTREE" || true
-
 # ---------------------------------------------------------------------------
 # Defense line 3: Remove the git worktree.
 # ---------------------------------------------------------------------------
@@ -142,45 +156,88 @@ _remove_worktree() {
     fi
     log "removing git worktree: $worktree"
     git -C "$SANDBOX_LIVE_ROOT" worktree remove --force "$worktree" 2>/dev/null || {
-        warn "git worktree remove failed for $worktree -- falling back to rm -rf"
-        rm -rf "$worktree" 2>/dev/null || \
-            warn "rm -rf $worktree also failed (non-fatal, may need manual cleanup)"
+        warn "git worktree remove failed for $worktree -- evaluating rm -rf fallback"
+        # SAFETY (card 7618968d): only rm -rf a path that is validated to live
+        # strictly under the sandbox base. A missing/'/'/outside path is refused
+        # and left for manual cleanup rather than risking a catastrophic delete.
+        if _is_safe_rm_target "$worktree" "$SANDBOX_DIR_BASE"; then
+            warn "falling back to rm -rf (path validated under $SANDBOX_DIR_BASE)"
+            rm -rf "$worktree" 2>/dev/null || \
+                warn "rm -rf $worktree also failed (non-fatal, may need manual cleanup)"
+        else
+            warn "REFUSING rm -rf: '$worktree' is not safely under sandbox base '$SANDBOX_DIR_BASE' -- manual cleanup required"
+            return 1
+        fi
     }
     log "worktree removed"
 }
 
-_remove_worktree "$SANDBOX_WORKTREE" || ERRORS=$(( ERRORS + 1 ))
+# ---------------------------------------------------------------------------
+# main -- the full teardown sequence. Runs only when the script is executed
+# directly (see the BASH_SOURCE guard at the bottom).
+# ---------------------------------------------------------------------------
+main() {
+    local RECORD_FILE="${1:-${SANDBOX_RECORD:-}}"
 
-# ---------------------------------------------------------------------------
-# Clean up the record file.
-# ---------------------------------------------------------------------------
-if [ -n "$RECORD_FILE" ] && [ -f "$RECORD_FILE" ]; then
-    rm -f "$RECORD_FILE" 2>/dev/null || \
-        warn "failed to remove record file $RECORD_FILE (non-fatal)"
-    log "removed record file: $RECORD_FILE"
-fi
+    local SANDBOX_WORKTREE="${SANDBOX_WORKTREE:-}"
+    local SANDBOX_SESSION_PREFIX="${SANDBOX_SESSION_PREFIX:-}"
 
-# ---------------------------------------------------------------------------
-# Release the sandbox lock (if we still hold it).
-# ---------------------------------------------------------------------------
-LOCK_FILE="$SANDBOX_LIVE_ROOT/store/.sandbox.lock"
-if [ -f "$LOCK_FILE" ]; then
-    # Only remove it if it is not held by another process (flock check).
-    if flock -n "$LOCK_FILE" true 2>/dev/null; then
-        rm -f "$LOCK_FILE" 2>/dev/null || true
-        log "released sandbox lock"
-    else
-        log "sandbox lock is held by another process -- not removing"
+    if [ -n "$RECORD_FILE" ] && [ -f "$RECORD_FILE" ]; then
+        log "reading sandbox record: $RECORD_FILE"
+        # Read key=value pairs from the record (safe: our own format).
+        local key val
+        while IFS='=' read -r key val; do
+            case "$key" in
+                sandbox_worktree)       SANDBOX_WORKTREE="$val" ;;
+                sandbox_session_prefix) SANDBOX_SESSION_PREFIX="$val" ;;
+            esac
+        done < "$RECORD_FILE"
     fi
-fi
 
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
-if [ "$ERRORS" -gt 0 ]; then
-    warn "teardown completed with $ERRORS non-fatal error(s) -- sandbox may need manual cleanup"
-    exit 0  # Still exit 0: teardown errors are non-fatal (idempotent contract)
-fi
+    if [ -z "$SANDBOX_WORKTREE" ] && [ -z "$SANDBOX_SESSION_PREFIX" ]; then
+        log "no sandbox parameters found (SANDBOX_WORKTREE and SANDBOX_SESSION_PREFIX not set)"
+        log "nothing to tear down -- exit 0 (idempotent)"
+        exit 0
+    fi
 
-log "teardown complete -- all sandbox resources cleaned up"
-exit 0
+    log "teardown: worktree=$SANDBOX_WORKTREE  session_prefix=$SANDBOX_SESSION_PREFIX"
+
+    local ERRORS=0
+
+    _kill_tmux_sessions "$SANDBOX_SESSION_PREFIX" || ERRORS=$(( ERRORS + 1 ))
+    _checkpoint_sandbox_db "$SANDBOX_WORKTREE" || true
+    _remove_worktree "$SANDBOX_WORKTREE" || ERRORS=$(( ERRORS + 1 ))
+
+    # Clean up the record file.
+    if [ -n "$RECORD_FILE" ] && [ -f "$RECORD_FILE" ]; then
+        rm -f "$RECORD_FILE" 2>/dev/null || \
+            warn "failed to remove record file $RECORD_FILE (non-fatal)"
+        log "removed record file: $RECORD_FILE"
+    fi
+
+    # Release the sandbox lock (if we still hold it).
+    local LOCK_FILE="$SANDBOX_LIVE_ROOT/store/.sandbox.lock"
+    if [ -f "$LOCK_FILE" ]; then
+        # Only remove it if it is not held by another process (flock check).
+        if flock -n "$LOCK_FILE" true 2>/dev/null; then
+            rm -f "$LOCK_FILE" 2>/dev/null || true
+            log "released sandbox lock"
+        else
+            log "sandbox lock is held by another process -- not removing"
+        fi
+    fi
+
+    # Summary.
+    if [ "$ERRORS" -gt 0 ]; then
+        warn "teardown completed with $ERRORS non-fatal error(s) -- sandbox may need manual cleanup"
+        exit 0  # Still exit 0: teardown errors are non-fatal (idempotent contract)
+    fi
+
+    log "teardown complete -- all sandbox resources cleaned up"
+    exit 0
+}
+
+# Run the teardown only when executed directly; sourcing loads functions only.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    main "$@"
+fi
