@@ -52,6 +52,8 @@ export interface ApplyResult {
   approved: number
   rejected: number
   skipped: number
+  /** APPROVE rows refused by an apply-layer ID-integrity guard (card 54013aa4). */
+  blocked: number
 }
 
 // Additive, idempotent, never-break-boot.
@@ -140,16 +142,61 @@ export function listCuratorVerdicts(
   return db.prepare(`SELECT * FROM curator_verdicts ${where} ORDER BY created_at DESC`).all(params) as CuratorVerdictRow[]
 }
 
+interface MemRef {
+  category: string
+  content: string
+  agent_id: string
+}
+
+// Apply-layer ID-integrity guards (card 54013aa4). The candidate generator
+// (vault-lint-layer2, PR #977) gates on a content hash, but the APPLY layer
+// must INDEPENDENTLY refuse to archive a memory when the mapping itself is
+// corrupt -- these are ID-integrity failures a content hash cannot catch.
+// Returns a human-readable block reason, or null when the application is safe.
+// Audit reference 351c80a7.
+function curatorApplyBlockReason(
+  db: Database.Database,
+  row: CuratorVerdictRow,
+  memA: MemRef | undefined,
+  memB: { agent_id: string } | undefined,
+): string | null {
+  // 1. self-archive: a record cannot supersede itself.
+  if (row.entry_a_id === row.entry_b_id) {
+    return 'self-archive (entry_a == entry_b)'
+  }
+  // 2. keep target must exist -- a dangling keep is a corrupt mapping.
+  if (!memB) {
+    return 'keep target missing (entry_b not found)'
+  }
+  // 3. cross-agent slip: the archived entry and the keep belong to different
+  //    agents -- the mapping straddled agents and must not fire.
+  if (memA && memA.agent_id !== memB.agent_id) {
+    return `cross-agent slip (archive=${memA.agent_id} keep=${memB.agent_id})`
+  }
+  // 4. repeated archive-id: entry_a was already superseded by a prior
+  //    application -- archiving it again is a double-archive.
+  const prior = db
+    .prepare(`SELECT 1 FROM migration_log WHERE entry_id = ? AND rule = 'SUPERSEDED' LIMIT 1`)
+    .get(row.entry_a_id)
+  if (prior) {
+    return 'repeated archive-id (entry_a already superseded)'
+  }
+  return null
+}
+
 // Nightly applyer: processes APPROVE and REJECT verdicts that have not yet
 // been applied (applied_at IS NULL). PENDING and already-applied rows are
 // counted as skipped.
 //
 // APPROVE: demote entry_a to cold, prepend 'SUPERSEDED:' to its content,
-//          append migration_log row, mark verdict applied.
+//          append migration_log row, mark verdict applied -- UNLESS an
+//          apply-layer ID-integrity guard (card 54013aa4) refuses it, in which
+//          case the row is consumed with a BLOCKED audit row, memory is left
+//          untouched, and it is counted in result.blocked.
 // REJECT:  append migration_log row (reason='curator REJECT'), mark applied.
 //          No memory mutation.
 export function applyPendingCuratorVerdicts(db: Database.Database): ApplyResult {
-  const result: ApplyResult = { approved: 0, rejected: 0, skipped: 0 }
+  const result: ApplyResult = { approved: 0, rejected: 0, skipped: 0, blocked: 0 }
   const now = Math.floor(Date.now() / 1000)
 
   const rows = db
@@ -159,8 +206,22 @@ export function applyPendingCuratorVerdicts(db: Database.Database): ApplyResult 
   const apply = db.transaction((row: CuratorVerdictRow) => {
     if (row.verdict === 'APPROVE') {
       const mem = db
-        .prepare('SELECT category, content FROM memories WHERE id = ?')
-        .get(row.entry_a_id) as { category: string; content: string } | undefined
+        .prepare('SELECT category, content, agent_id FROM memories WHERE id = ?')
+        .get(row.entry_a_id) as MemRef | undefined
+      const keep = db
+        .prepare('SELECT agent_id FROM memories WHERE id = ?')
+        .get(row.entry_b_id) as { agent_id: string } | undefined
+
+      const blockReason = curatorApplyBlockReason(db, row, mem, keep)
+      if (blockReason) {
+        db.prepare(
+          `INSERT INTO migration_log (rule, entry_id, from_cat, to_cat, reason, applier, applied_at)
+           VALUES ('BLOCKED', ?, ?, ?, ?, 'curator-applyer', ?)`,
+        ).run(row.entry_a_id, mem?.category ?? 'unknown', mem?.category ?? 'unknown', blockReason, now)
+        db.prepare(`UPDATE curator_verdicts SET applied_at = ? WHERE id = ?`).run(now, row.id)
+        result.blocked++
+        return
+      }
 
       if (mem) {
         db.prepare(
