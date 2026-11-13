@@ -94,6 +94,25 @@ export function migrateGateTables(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_gate_inv_pr ON gate_invalidations(pr_number, head_sha)`)
+
+  // Card 66cf63ed: derived-risk intake snapshot. OBSERVABILITY ONLY -- this table
+  // is NEVER read by runGateCheck (enforcement always re-derives the risk from
+  // the live head). It records the classifier output per (pr, head_sha) so the
+  // dashboard can badge risk and the §10 weekly FP-metric can count content-tag
+  // over-match. Additive CREATE IF NOT EXISTS, no FK, idempotent on every boot.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gate_pr_risk (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      pr_number    INTEGER NOT NULL,
+      head_sha     TEXT NOT NULL,
+      risk_tags    TEXT NOT NULL,
+      risk_level   TEXT NOT NULL,
+      risk_unknown INTEGER NOT NULL DEFAULT 0,
+      recorded_by  TEXT NOT NULL,
+      recorded_at  INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_gate_risk_pr_sha ON gate_pr_risk(pr_number, head_sha)`)
 }
 
 // Record the opening agent for a PR (card ec818352, MG-SEC5). INSERT OR IGNORE
@@ -386,4 +405,78 @@ export function readGateHistory(
          FROM gate_approvals ORDER BY ${normExpr} DESC, id DESC LIMIT ?`,
     )
     .all(limit) as GateApprovalRow[]
+}
+
+// -- Derived-risk intake snapshot (card 66cf63ed) --------------------------
+//
+// OBSERVABILITY ONLY. runGateCheck never reads this table -- enforcement always
+// re-derives the risk from the live head. These rows exist so the dashboard can
+// badge risk and the §10 FP-metric can measure content-tag over-match.
+
+export interface PrRiskInput {
+  pr_number: number
+  head_sha: string
+  risk_tags: string // sorted comma-joined tag list, '' for none
+  risk_level: string
+  risk_unknown: number // 0 | 1
+  recorded_by: string
+}
+
+export interface GatePrRiskRow {
+  id: number
+  pr_number: number
+  head_sha: string
+  risk_tags: string
+  risk_level: string
+  risk_unknown: number
+  recorded_by: string
+  recorded_at: number
+}
+
+// Append-only INSERT of a risk snapshot. `recorded_at` is server-stamped by the
+// caller (epoch seconds), never caller-supplied.
+export function insertPrRisk(db: Database.Database, input: PrRiskInput, now: number): GatePrRiskRow {
+  const info = db
+    .prepare(
+      `INSERT INTO gate_pr_risk (pr_number, head_sha, risk_tags, risk_level, risk_unknown, recorded_by, recorded_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(input.pr_number, input.head_sha, input.risk_tags, input.risk_level, input.risk_unknown ? 1 : 0, input.recorded_by, now)
+  return {
+    id: Number(info.lastInsertRowid),
+    pr_number: input.pr_number,
+    head_sha: input.head_sha,
+    risk_tags: input.risk_tags,
+    risk_level: input.risk_level,
+    risk_unknown: input.risk_unknown ? 1 : 0,
+    recorded_by: input.recorded_by,
+    recorded_at: now,
+  }
+}
+
+// Latest risk snapshot for a PR (newest recorded_at, tie-broken by id), or null.
+export function readLatestPrRisk(db: Database.Database, pr: number): GatePrRiskRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, pr_number, head_sha, risk_tags, risk_level, risk_unknown, recorded_by, recorded_at
+         FROM gate_pr_risk WHERE pr_number = ? ORDER BY recorded_at DESC, id DESC LIMIT 1`,
+    )
+    .get(pr) as GatePrRiskRow | undefined
+  return row ?? null
+}
+
+// §10 FP/coverage metric: count PRs where chad was auto-required SOLELY by a
+// content tag (destructive/input-parsing/exec) and NOT by any legacy
+// security/credential path, since `sinceEpoch`. If this trends toward "nearly
+// every PR" the anchor set (esp. input-parsing) is re-tuned with data, not vibes.
+export function countChadByContentOnly(db: Database.Database, sinceEpoch: number): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM gate_pr_risk
+        WHERE (risk_tags LIKE '%destructive%' OR risk_tags LIKE '%input-parsing%' OR risk_tags LIKE '%exec%')
+          AND risk_tags NOT LIKE '%security%' AND risk_tags NOT LIKE '%credential%'
+          AND recorded_at >= ?`,
+    )
+    .get(sinceEpoch) as { c: number }
+  return row.c
 }

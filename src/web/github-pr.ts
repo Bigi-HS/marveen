@@ -10,7 +10,7 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { GithubPrInfo } from './gate-check.js'
+import type { GithubPrInfo, PrFileDiff } from './gate-check.js'
 
 // PRs live on the fork that hosts the fleet repo. Overridable for tests / a
 // future repo move, but never needs to be set in normal operation.
@@ -252,7 +252,21 @@ export async function fetchPrAuthorAgentId(pr: number): Promise<string | null> {
   return email.slice(0, email.length - FLEET_EMAIL_DOMAIN.length - 1) || null
 }
 
-// Fetches the current head.sha and the full changed-file path list for a PR.
+// Parse the ADDED lines ('+' hunk lines, leading '+' stripped) from a GitHub
+// unified-diff `patch`. The `+++ b/...` file header is skipped. Used to feed the
+// content-tag classifier (card 66cf63ed).
+export function parseAddedLines(patch: string): string[] {
+  const added: string[] = []
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) added.push(line.slice(1))
+  }
+  return added
+}
+
+// Fetches the current head.sha, the changed-file path list, and the per-file
+// added-lines + patch-presence for a PR. `fileDiffs` feeds the risk classifier;
+// a file whose `patch` is omitted (binary / oversized diff) has
+// patchPresent=false so the classifier fails closed (unknown -> chad).
 export async function fetchPrInfo(pr: number): Promise<GithubPrInfo> {
   const token = readGithubToken()
   const headers = ghHeaders(token)
@@ -266,16 +280,26 @@ export async function fetchPrInfo(pr: number): Promise<GithubPrInfo> {
   }
 
   const files: string[] = []
+  const fileDiffs: PrFileDiff[] = []
   for (let page = 1; page <= FILES_PAGE_CAP; page++) {
     const fRes = await fetch(
       `https://api.github.com/repos/${GATE_REPO}/pulls/${pr}/files?per_page=100&page=${page}`,
       { headers },
     )
     if (!fRes.ok) throw new Error(`GitHub PR files fetch failed (${fRes.status})`)
-    const arr = (await fRes.json()) as Array<{ filename?: string }>
-    for (const f of arr) if (typeof f.filename === 'string') files.push(f.filename)
+    const arr = (await fRes.json()) as Array<{ filename?: string; patch?: string }>
+    for (const f of arr) {
+      if (typeof f.filename !== 'string') continue
+      files.push(f.filename)
+      const patchPresent = typeof f.patch === 'string'
+      fileDiffs.push({
+        filename: f.filename,
+        addedLines: patchPresent ? parseAddedLines(f.patch as string) : [],
+        patchPresent,
+      })
+    }
     if (arr.length < 100) break
   }
 
-  return { headSha, files }
+  return { headSha, files, fileDiffs }
 }
