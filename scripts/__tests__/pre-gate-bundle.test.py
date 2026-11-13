@@ -24,6 +24,7 @@ Static severity (AC#5):
 """
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -42,18 +43,56 @@ def _make_stub(content: str, path: str):
     os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP)
 
 
+def _make_scoped_pytest_dir() -> str:
+    """Create a standalone PGB_PYTEST_DIR holding one trivial passing test.
+
+    check_tests scans ${PGB_PYTEST_DIR:-$INSTALL_DIR/scripts/__tests__}, and
+    INSTALL_DIR is ALWAYS the real repo root (resolved from the script's own
+    path, not cwd). So without this seam, every _run_bundle invocation re-runs
+    the entire LIVE python suite under the test's stubbed PATH -- which is both
+    slow (full suite per call) and fragile: a stub `git` with no real-git
+    fallthrough breaks suite members that shell out to git (e.g.
+    lint-tmux-session-targets.test.py's whole-tree scan), turning an unrelated
+    unit test into a spurious python-tests BLOCK. Scoping check_tests to a
+    trivial noop keeps these units hermetic -- they assert the step under test,
+    not the health of the whole live suite. Same override convention as
+    GITLEAKS_BIN / DA_RUNS_DIR.
+
+    The dir lives OUTSIDE stub_dir (its own tempdir) so it never shows up as a
+    file the bundle 'wrote' into stub_dir (ReadOnlyTests), and _run_bundle
+    removes it after the run so nothing leaks."""
+    py_dir = tempfile.mkdtemp(prefix="pgb_scoped_pytests_")
+    with open(os.path.join(py_dir, "noop.test.py"), "w", encoding="utf-8") as f:
+        f.write("import sys\nsys.exit(0)\n")
+    return py_dir
+
+
 def _run_bundle(stub_dir: str, args: list, env_extra: dict | None = None):
-    """Run the bundle with stub_dir first on PATH so our npx wrapper intercepts."""
+    """Run the bundle with stub_dir first on PATH so our npx wrapper intercepts.
+
+    Unless the caller sets PGB_PYTEST_DIR explicitly (the python-tests tests
+    do), check_tests is scoped to a trivial fixture via _make_scoped_pytest_dir
+    so the unit under test is not entangled with the live suite -- see that
+    helper's docstring for why.
+    """
     env = dict(os.environ, PATH=stub_dir + ":" + os.environ.get("PATH", ""))
     if env_extra:
         env.update(env_extra)
-    return subprocess.run(
-        ["bash", BUNDLE_SCRIPT, "develop", "HEAD"] + args,
-        capture_output=True,
-        text=True,
-        cwd=stub_dir,
-        env=env,
-    )
+    scoped_dir = None
+    if "PGB_PYTEST_DIR" not in env:
+        scoped_dir = _make_scoped_pytest_dir()
+        env["PGB_PYTEST_DIR"] = scoped_dir
+    try:
+        return subprocess.run(
+            ["bash", BUNDLE_SCRIPT, "develop", "HEAD"] + args,
+            capture_output=True,
+            text=True,
+            cwd=stub_dir,
+            env=env,
+        )
+    finally:
+        if scoped_dir is not None:
+            shutil.rmtree(scoped_dir, ignore_errors=True)
 
 
 def _make_npx_stub(d: str, tsc_exit: int = 0, vitest_exit: int = 0,
