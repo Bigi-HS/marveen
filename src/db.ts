@@ -12,6 +12,7 @@ import { migrateAgentTokenTable } from './web/agent-token-registry.js'
 import { migrateAckRegistry } from './web/ack-registry.js'
 import { migrateCuratorVerdicts } from './curator-verdicts.js'
 import { migrateTelemetryTables } from './web/telemetry.js'
+import { migrateReleaseLedger } from './web/release-ledger.js'
 
 let db: Database.Database
 
@@ -491,6 +492,16 @@ export function initDatabase(dbPathOverride?: string): void {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error('[db] telemetry migration failed:', msg)
+  }
+
+  // P9 release-ledger schema + sanctioned-write trigger guard (card 2efcb439).
+  // Additive CREATE IF NOT EXISTS, no FK, idempotent on every boot. The trigger
+  // guard (Inv-7) is recreated via DROP + CREATE so its body stays current.
+  try {
+    migrateReleaseLedger(db)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[db] release_ledger migration failed:', msg)
   }
 
   // Topic-status table (card eaa623a9). Curator-emitted closed/open round
