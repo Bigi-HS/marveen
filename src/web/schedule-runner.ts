@@ -507,4 +507,29 @@ function sendSkipIfBusyExhaustedAlert(taskName: string, agentName: string, first
 }
 
 // Sweep entrypoint moved to noa-scheduler.ts (A4). Re-export so callers are unaffected.
-export { startScheduleRunner } from '../noa-scheduler.js'
+import { startScheduleRunner } from '../noa-scheduler.js'
+export { startScheduleRunner }
+
+// Boot-smoke mode (NOA_BOOT_SMOKE=<port>, see src/index.ts) boots the DB + web
+// listener ONLY to prove the build boots, with no live side effects. The
+// documented index.ts contract is that it starts NO scheduler. This predicate
+// reads the SAME flag so startWebServer can honour that contract (card 29a07a64,
+// Finding A): without it, startScheduleRunner -> migrateFileBasedTasks INSERTs
+// crash on a fresh hermetic DB and would mask the very boot-crash class the smoke
+// exists to catch.
+export function isBootSmokeMode(env: NodeJS.ProcessEnv = process.env): boolean {
+  const port = parseInt(env['NOA_BOOT_SMOKE'] ?? '', 10)
+  return Number.isFinite(port) && port > 0
+}
+
+// Start the schedule runner UNLESS we are in boot-smoke mode. Returns the poll
+// interval, or undefined when skipped, so the caller's clearInterval cleanup is a
+// safe no-op. The runner is injectable purely for tests; production always uses
+// the real startScheduleRunner.
+export function maybeStartScheduleRunner(
+  env: NodeJS.ProcessEnv = process.env,
+  runner: () => NodeJS.Timeout = startScheduleRunner,
+): NodeJS.Timeout | undefined {
+  if (isBootSmokeMode(env)) return undefined
+  return runner()
+}
