@@ -20,7 +20,7 @@ import { startAckClearObserver } from './web/delivery-ack-observer.js'
 import { compactDeliverySentinelsOnBoot, startDeliverySentinelMaintenance } from './web/delivery-sentinel-maintenance.js'
 import { startUpdateChecker } from './web/update-checker.js'
 import { startMcpListChecker } from './web/mcp-list.js'
-import { startScheduleRunner } from './web/schedule-runner.js'
+import { maybeStartScheduleRunner } from './web/schedule-runner.js'
 import { startUsageRefresher } from './web/usage-refresher.js'
 import { applyKanbanMigrations } from './noa-kanban.js'
 import { startChannelPluginMonitor } from './web/channel-monitor.js'
@@ -581,8 +581,10 @@ export function startWebServer(port = 3420): http.Server {
   applyJournalMigrations()
   logger.info('Journal migrations applied (journal_entries)')
 
-  const scheduleInterval = startScheduleRunner()
-  logger.info('Schedule runner started (60s poll)')
+  // Boot-smoke mode (NOA_BOOT_SMOKE, index.ts) must start NO scheduler per its
+  // documented contract -- gate on the same flag (card 29a07a64, Finding A).
+  const scheduleInterval = maybeStartScheduleRunner()
+  logger.info(scheduleInterval ? 'Schedule runner started (60s poll)' : 'Schedule runner SKIPPED (boot-smoke mode)')
 
   // Claude usage refresher (card 7fe5662f). Dormant behind the feature-flag:
   // with no store/.claude-session file it is a no-op that leaves the cache in
@@ -706,7 +708,7 @@ export function startWebServer(port = 3420): http.Server {
     clearInterval(routerInterval)
     clearInterval(ackObserverInterval)
     clearInterval(sentinelMaintenanceInterval)
-    clearInterval(scheduleInterval)
+    if (scheduleInterval) clearInterval(scheduleInterval)
     clearInterval(usageRefresherInterval)
     if (pluginMonitorInterval) clearInterval(pluginMonitorInterval)
     clearInterval(channelHealthInterval)

@@ -136,6 +136,96 @@ def _fetch_pr_head(pr_number: int, head_sha: str) -> None:
     )
 
 
+# --- boot-smoke merge-gate prep (card 29a07a64) -----------------------------
+# Mirror of pgb_boot_path_touched() in scripts/pre-gate-bundle.sh (SOURCE OF
+# TRUTH). A change to these paths can make `node dist/index.js` crash while tsc
+# --noEmit and vitest both stay green (the #972 ESM default-vs-named class, a
+# live outage). check_boot_smoke in the bundle AUTO-triggers on exactly these
+# paths -- but in a fresh PR worktree both dist/index.js and store/noa.db are
+# gitignored/absent, so boot-smoke.sh SKIPs (exit 2) -> WARN and never BLOCKs.
+# We build dist + seed a hermetic DB for exactly these PRs so the smoke runs a
+# real boot and can hard-BLOCK the crash class BEFORE merge (not only at the
+# deploy-preflight C6 gate, which is post-merge).
+_BOOT_PATHS_EXACT = ('src/index.ts', 'package.json')
+_BOOT_PATH_PREFIX = 'src/web/'
+
+
+def _boot_path_touched(changed_files) -> list:
+    """Return the subset of changed_files on the boot path. Pure (no git/IO);
+    mirrors pgb_boot_path_touched in pre-gate-bundle.sh."""
+    out = []
+    for p in changed_files:
+        p = p.strip()
+        if not p:
+            continue
+        if p in _BOOT_PATHS_EXACT or p.startswith(_BOOT_PATH_PREFIX):
+            out.append(p)
+    return out
+
+
+def _seed_boot_smoke_db(wt_dir: Path) -> None:
+    """Create a FRESH-HERMETIC (empty) store/noa.db in the worktree so
+    boot-smoke.sh's precondition passes. initDatabase (src/db.ts) runs
+    CREATE TABLE IF NOT EXISTS for every table at boot, so an empty DB
+    self-initialises a full schema -- no prod data required. (NoA decision:
+    fresh-hermetic for the merge-gate; a prod-copy override is reserved for the
+    cutover/pre-deploy gate where data-dependent crashes matter.) Create-if-
+    absent so a pre-existing DB is never clobbered."""
+    db_path = Path(wt_dir) / 'store' / 'noa.db'
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if not db_path.exists():
+        db_path.touch()
+
+
+def _prepare_boot_smoke(wt_dir: Path, base_branch: str) -> list:
+    """For boot-path PRs, build dist + seed a hermetic DB so check_boot_smoke
+    runs a real `node dist/index.js` boot instead of SKIP->WARN. Returns the
+    list of touched boot paths ([] when the smoke is not needed). Fully fail-
+    open: a build failure leaves dist absent -> boot-smoke.sh SKIP -> WARN, the
+    same optional-tooling convention the bundle already uses; no exception ever
+    aborts the CI run."""
+    base_ref = base_branch if '/' in base_branch else f'origin/{base_branch}'
+    try:
+        # HEAD is the checked-out merge-ref (pull/N/merge) -- guaranteed present
+        # even on a shallow fetch, unlike the raw head_sha. origin/base...HEAD
+        # yields this PR's net change set (the same files the bundle's
+        # check_boot_smoke evaluates). Fail-open on any git error.
+        diff = subprocess.run(
+            ['git', 'diff', '--name-only', f'{base_ref}...HEAD'],
+            cwd=str(wt_dir), capture_output=True, text=True, timeout=30,
+        )
+        touched = _boot_path_touched(diff.stdout.splitlines())
+    except Exception as e:
+        print(f'  [boot-smoke] boot-path diff failed ({e}); skipping prep (fail-open)',
+              file=sys.stderr)
+        return []
+
+    if not touched:
+        return []
+
+    print(f'  [boot-smoke] boot-path touched ({", ".join(touched)}); '
+          'building dist + seeding hermetic DB so the smoke can BLOCK pre-merge')
+    try:
+        build = subprocess.run(
+            ['npm', 'run', 'build'],
+            cwd=str(wt_dir), capture_output=True, text=True, timeout=PR_TIMEOUT_S,
+        )
+        if build.returncode != 0:
+            print(f'  [boot-smoke] build FAILED (rc {build.returncode}); boot-smoke '
+                  f'will WARN (fail-open). tail: {build.stderr.strip()[-200:]}',
+                  file=sys.stderr)
+    except Exception as e:
+        print(f'  [boot-smoke] build error ({e}); boot-smoke will WARN (fail-open)',
+              file=sys.stderr)
+
+    try:
+        _seed_boot_smoke_db(wt_dir)
+    except Exception as e:
+        print(f'  [boot-smoke] DB seed failed ({e}); boot-smoke will SKIP (fail-open)',
+              file=sys.stderr)
+    return touched
+
+
 def _run_bundle_in_worktree(pr_number: int, head_sha: str, base_branch: str,
                              dry_run: bool) -> tuple[str, dict]:
     """Create a detached worktree, run pre-gate-bundle.sh, return (status, payload)."""
@@ -169,6 +259,12 @@ def _run_bundle_in_worktree(pr_number: int, head_sha: str, base_branch: str,
             wt_gl = wt_dir / 'scripts' / 'bin' / 'gitleaks'
             if wt_gl.parent.is_dir() and not wt_gl.exists():
                 os.symlink(str(gl_src), str(wt_gl))
+
+        # Boot-smoke merge-gate prep (card 29a07a64): for boot-path PRs, build
+        # dist + seed a fresh-hermetic noa.db so check_boot_smoke runs a real
+        # `node dist/index.js` boot (not SKIP->WARN) and can hard-BLOCK the #972
+        # ESM boot-crash class BEFORE merge. No-op for non-boot-path PRs.
+        _prepare_boot_smoke(wt_dir, base_branch)
 
         # Run the WORKTREE's own pre-gate-bundle.sh so the bundle's BASH_SOURCE-
         # derived INSTALL_DIR points at the clean merge-ref worktree -- not the
