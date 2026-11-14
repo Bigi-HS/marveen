@@ -25,6 +25,29 @@ def _load_runner():
     return mod
 
 
+def _dispatch_run(bundle_json=None, bundle_rc=0, diff_out='', on_symlink=None):
+    """Build a fake subprocess.run keyed on command content, so inserting new
+    subprocess calls (git diff for boot-path detection, npm build) does not
+    depend on call ORDER. Returns a callable usable as side_effect.
+
+      * pre-gate-bundle.sh -> bundle_json (JSON) or 'not json' when None
+      * git diff --name-only -> diff_out (drives boot-path detection; empty = none)
+      * everything else (worktree add/remove, npm run build) -> rc 0
+    """
+    import json as _json
+
+    def fake_run(cmd, **kwargs):
+        s = ' '.join(str(c) for c in cmd)
+        if 'pre-gate-bundle' in s:
+            out = _json.dumps(bundle_json) if bundle_json is not None else 'not json'
+            return MagicMock(returncode=bundle_rc, stdout=out, stderr='')
+        if 'diff' in s and '--name-only' in s:
+            return MagicMock(returncode=0, stdout=diff_out, stderr='')
+        return MagicMock(returncode=0, stdout='', stderr='')
+
+    return fake_run
+
+
 class TestCiAlreadyDone(unittest.TestCase):
     """_ci_already_done: skip logic must be precise."""
 
@@ -86,18 +109,15 @@ class TestPayloadExtraction(unittest.TestCase):
         }
 
     def _run_bundle_with_fake(self, mod, bundle_json: dict, returncode: int = 0):
-        """Invoke _run_bundle_in_worktree with a mocked subprocess."""
+        """Invoke _run_bundle_in_worktree with a content-keyed mocked subprocess.
+
+        diff_out='' -> boot path untouched -> no build/seed, so this exercises
+        the ordinary (non-boot-path) PR path.
+        """
         import subprocess as sp_module
-        import json as _json
 
-        run_results = [
-            MagicMock(returncode=0, stdout='', stderr=''),   # worktree add
-            MagicMock(returncode=returncode,
-                      stdout=_json.dumps(bundle_json), stderr=''),  # bundle
-            MagicMock(returncode=0, stdout='', stderr=''),   # worktree remove
-        ]
-
-        with patch.object(sp_module, 'run', side_effect=run_results):
+        with patch.object(sp_module, 'run',
+                side_effect=_dispatch_run(bundle_json, bundle_rc=returncode)):
             with patch('tempfile.mkdtemp', return_value='/tmp/fake-wt'):
                 with patch('shutil.rmtree'):
                     with patch('os.symlink'):
@@ -149,12 +169,8 @@ class TestPayloadExtraction(unittest.TestCase):
         """If pre-gate-bundle.sh produces no valid JSON, treat as fail."""
         import subprocess as sp_module
         mod = _load_runner()
-        run_results = [
-            MagicMock(returncode=0, stdout='', stderr=''),      # worktree add
-            MagicMock(returncode=1, stdout='not json', stderr=''), # bundle broken
-            MagicMock(returncode=0, stdout='', stderr=''),      # worktree remove
-        ]
-        with patch.object(sp_module, 'run', side_effect=run_results):
+        with patch.object(sp_module, 'run',
+                side_effect=_dispatch_run(bundle_json=None, bundle_rc=1)):
             with patch('tempfile.mkdtemp', return_value='/tmp/fake-wt'):
                 with patch('shutil.rmtree'):
                     with patch('os.symlink'):
@@ -220,21 +236,14 @@ class TestNodeModulesSymlink(unittest.TestCase):
     def _run_bundle_with_fake(self, mod, bundle_json: dict, returncode: int = 0,
                                capture_symlink_calls=None):
         import subprocess as sp_module
-        import json as _json
-
-        run_results = [
-            MagicMock(returncode=0, stdout='', stderr=''),   # worktree add
-            MagicMock(returncode=returncode,
-                      stdout=_json.dumps(bundle_json), stderr=''),  # bundle
-            MagicMock(returncode=0, stdout='', stderr=''),   # worktree remove
-        ]
 
         symlink_calls = []
 
         def fake_symlink(src, dst, *a, **kw):
             symlink_calls.append((src, dst))
 
-        with patch.object(sp_module, 'run', side_effect=run_results):
+        with patch.object(sp_module, 'run',
+                side_effect=_dispatch_run(bundle_json, bundle_rc=returncode)):
             with patch('tempfile.mkdtemp', return_value='/tmp/fake-wt'):
                 with patch('shutil.rmtree'):
                     with patch('os.symlink', side_effect=fake_symlink):
@@ -611,6 +620,222 @@ class TestMainCheckoutBranchGuard(unittest.TestCase):
                 mod._check_main_checkout_branch()
             except Exception as e:
                 self.fail(f'_check_main_checkout_branch raised unexpectedly: {e}')
+
+
+class TestBootPathDetection(unittest.TestCase):
+    """_boot_path_touched mirrors pgb_boot_path_touched in pre-gate-bundle.sh.
+
+    A change to these paths can make `node dist/index.js` crash while tsc and
+    vitest stay green (the #972 ESM default-vs-named class). check_boot_smoke
+    AUTO-triggers on exactly these paths, so the runner must build + seed the
+    worktree for exactly these paths (and no others). Card 29a07a64.
+    """
+
+    def test_src_index_detected(self):
+        mod = _load_runner()
+        self.assertEqual(mod._boot_path_touched(['src/index.ts']), ['src/index.ts'])
+
+    def test_package_json_detected(self):
+        mod = _load_runner()
+        self.assertEqual(mod._boot_path_touched(['package.json']), ['package.json'])
+
+    def test_src_web_nested_detected(self):
+        """src/web/** (any depth) is boot path -- push.ts lived at src/web/routes/."""
+        mod = _load_runner()
+        self.assertEqual(
+            mod._boot_path_touched(['src/web/routes/push.ts']),
+            ['src/web/routes/push.ts'])
+
+    def test_non_boot_paths_ignored(self):
+        """scripts, docs, even src/db.ts are NOT boot path (mirror the predicate)."""
+        mod = _load_runner()
+        self.assertEqual(
+            mod._boot_path_touched(['scripts/x.py', 'README.md', 'src/db.ts']), [])
+
+    def test_mixed_returns_only_boot_paths(self):
+        mod = _load_runner()
+        self.assertEqual(
+            mod._boot_path_touched(
+                ['README.md', 'src/web/server.ts', 'src/db.ts', 'package.json']),
+            ['src/web/server.ts', 'package.json'])
+
+    def test_empty_and_blank_lines_return_empty(self):
+        mod = _load_runner()
+        self.assertEqual(mod._boot_path_touched([]), [])
+        self.assertEqual(mod._boot_path_touched(['', '  ']), [])
+
+
+class TestBootSmokeDbSeed(unittest.TestCase):
+    """_seed_boot_smoke_db creates a FRESH-HERMETIC (empty) store/noa.db.
+
+    boot-smoke.sh SKIPs when store/noa.db is missing (gitignored, absent from a
+    fresh worktree). initDatabase (src/db.ts) runs CREATE TABLE IF NOT EXISTS at
+    boot, so an empty DB self-initialises a full schema -- no prod data needed.
+    NoA decision: fresh-hermetic for the merge-gate; prod-copy is reserved for
+    the cutover/pre-deploy gate. Card 29a07a64.
+    """
+
+    def test_seed_creates_noa_db(self):
+        import tempfile, shutil
+        mod = _load_runner()
+        tmp = tempfile.mkdtemp()
+        try:
+            mod._seed_boot_smoke_db(Path(tmp))
+            self.assertTrue((Path(tmp) / 'store' / 'noa.db').exists(),
+                            'store/noa.db must be created for boot-smoke precondition')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_seed_db_is_empty_hermetic(self):
+        """The seeded DB carries NO prod data -- it is a 0-byte (empty) SQLite file."""
+        import tempfile, shutil
+        mod = _load_runner()
+        tmp = tempfile.mkdtemp()
+        try:
+            mod._seed_boot_smoke_db(Path(tmp))
+            self.assertEqual((Path(tmp) / 'store' / 'noa.db').stat().st_size, 0,
+                             'merge-gate DB must be hermetic/empty, not a prod copy')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_seed_does_not_clobber_existing_db(self):
+        """Create-if-absent: a pre-existing DB (with data) must be left intact."""
+        import tempfile, shutil
+        mod = _load_runner()
+        tmp = tempfile.mkdtemp()
+        try:
+            db = Path(tmp) / 'store' / 'noa.db'
+            db.parent.mkdir(parents=True, exist_ok=True)
+            db.write_bytes(b'PREEXISTING')
+            mod._seed_boot_smoke_db(Path(tmp))
+            self.assertEqual(db.read_bytes(), b'PREEXISTING',
+                             'existing DB must not be overwritten')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestBootSmokePrep(unittest.TestCase):
+    """_prepare_boot_smoke builds dist + seeds a DB only for boot-path PRs.
+
+    This is what upgrades the merge-gate boot-smoke from SKIP->WARN (dist/db
+    absent in the worktree) to a real `node dist/index.js` boot that can
+    hard-BLOCK. Non-boot-path PRs pay nothing. Card 29a07a64.
+    """
+
+    def _run(self, mod, wt_dir, diff_out, build_rc=0):
+        """Run _prepare_boot_smoke with git-diff + npm-build subprocess faked.
+
+        Returns (touched, build_invoked).
+        """
+        import subprocess as sp_module
+        build_invoked = {'v': False}
+
+        def fake_run(cmd, **kwargs):
+            s = ' '.join(str(c) for c in cmd)
+            if 'diff' in s and '--name-only' in s:
+                return MagicMock(returncode=0, stdout=diff_out, stderr='')
+            if 'run' in cmd and 'build' in cmd:   # npm run build
+                build_invoked['v'] = True
+                return MagicMock(returncode=build_rc, stdout='', stderr='build log')
+            return MagicMock(returncode=0, stdout='', stderr='')
+
+        with patch.object(sp_module, 'run', side_effect=fake_run):
+            touched = mod._prepare_boot_smoke(Path(wt_dir), 'develop')
+        return touched, build_invoked['v']
+
+    def test_boot_path_pr_builds_and_seeds(self):
+        import tempfile, shutil
+        mod = _load_runner()
+        tmp = tempfile.mkdtemp()
+        try:
+            touched, build_invoked = self._run(mod, tmp, 'src/web/routes/push.ts\n')
+            self.assertEqual(touched, ['src/web/routes/push.ts'])
+            self.assertTrue(build_invoked, 'boot-path PR must build dist')
+            self.assertTrue((Path(tmp) / 'store' / 'noa.db').exists(),
+                            'boot-path PR must seed a hermetic noa.db')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_non_boot_path_pr_does_nothing(self):
+        import tempfile, shutil
+        mod = _load_runner()
+        tmp = tempfile.mkdtemp()
+        try:
+            touched, build_invoked = self._run(mod, tmp, 'scripts/x.py\nREADME.md\n')
+            self.assertEqual(touched, [])
+            self.assertFalse(build_invoked, 'non-boot-path PR must NOT build')
+            self.assertFalse((Path(tmp) / 'store' / 'noa.db').exists(),
+                             'non-boot-path PR must NOT seed a DB')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_build_failure_is_fail_open_still_seeds(self):
+        """build rc!=0 must not raise; DB is still seeded (dist absence -> WARN)."""
+        import tempfile, shutil
+        mod = _load_runner()
+        tmp = tempfile.mkdtemp()
+        try:
+            touched, build_invoked = self._run(
+                mod, tmp, 'src/index.ts\n', build_rc=1)
+            self.assertEqual(touched, ['src/index.ts'])
+            self.assertTrue(build_invoked)
+            self.assertTrue((Path(tmp) / 'store' / 'noa.db').exists())
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_diff_failure_is_fail_open(self):
+        """A git-diff error must not raise and must behave as 'no boot path'."""
+        import subprocess as sp_module
+        import tempfile, shutil
+        mod = _load_runner()
+        tmp = tempfile.mkdtemp()
+        try:
+            with patch.object(sp_module, 'run',
+                    side_effect=RuntimeError('git boom')):
+                touched = mod._prepare_boot_smoke(Path(tmp), 'develop')
+            self.assertEqual(touched, [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestBootSmokePrepWiring(unittest.TestCase):
+    """_run_bundle_in_worktree must call _prepare_boot_smoke before the bundle."""
+
+    def _bundle_pass(self):
+        return {
+            'verdict': 'PASS', 'diff_additions': 0,
+            'checks': [
+                {'name': 'typecheck', 'status': 'PASS', 'detail': ''},
+                {'name': 'tests', 'status': 'PASS', 'detail': ''},
+            ],
+        }
+
+    def test_prepare_boot_smoke_invoked_with_worktree_and_base(self):
+        import subprocess as sp_module
+        mod = _load_runner()
+        with patch.object(sp_module, 'run',
+                side_effect=_dispatch_run(self._bundle_pass())):
+            with patch('tempfile.mkdtemp', return_value='/tmp/fake-wt'):
+                with patch('shutil.rmtree'):
+                    with patch('os.symlink'):
+                        with patch.object(mod, '_prepare_boot_smoke',
+                                return_value=[]) as mock_prep:
+                            mod._run_bundle_in_worktree(
+                                pr_number=7, head_sha='c' * 40,
+                                base_branch='develop', dry_run=False)
+        mock_prep.assert_called_once()
+        args = mock_prep.call_args[0]
+        self.assertTrue(str(args[0]).endswith('fake-wt'),
+                        f'worktree dir expected, got {args[0]!r}')
+        self.assertEqual(args[1], 'develop')
+
+    def test_prepare_boot_smoke_not_called_in_dry_run(self):
+        mod = _load_runner()
+        with patch.object(mod, '_prepare_boot_smoke') as mock_prep:
+            with patch('tempfile.mkdtemp', return_value='/tmp/fake-wt'):
+                mod._run_bundle_in_worktree(
+                    7, 'c' * 40, 'develop', dry_run=True)
+        mock_prep.assert_not_called()
 
 
 if __name__ == '__main__':
