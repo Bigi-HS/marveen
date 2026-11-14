@@ -7,6 +7,7 @@ import {
   formatTokens,
   formatUsd,
   sortByCost,
+  spendRatePerHour,
   totalCostUsd,
 } from '@/lib/cost'
 import type { CostBoard as CostBoardData } from '@/types/cost'
@@ -47,6 +48,7 @@ export function CostBoard({ board, nowMs }: { board: CostBoardData; nowMs: numbe
               <th scope="col" className="px-2 py-2 text-right font-medium">Tokenek</th>
               <th scope="col" className="px-2 py-2 text-right font-medium">Cache</th>
               <th scope="col" className="px-2 py-2 text-right font-medium">Költség</th>
+              <th scope="col" className="px-2 py-2 text-right font-medium">Burn/ó</th>
               <th scope="col" className="py-2 pl-2 text-right font-medium">Utolsó</th>
             </tr>
           </thead>
@@ -58,6 +60,7 @@ export function CostBoard({ board, nowMs }: { board: CostBoardData; nowMs: numbe
                 <td className="px-2 py-2 text-right tabular-nums text-text-muted">{formatTokens(agentTotalTokens(a))}</td>
                 <td className="px-2 py-2 text-right tabular-nums text-text-muted">{Math.round(cacheHitRatio(a) * 100)}%</td>
                 <td className="px-2 py-2 text-right font-medium tabular-nums text-text">{formatUsd(a.totalCostUsd)}</td>
+                <td className="px-2 py-2 text-right tabular-nums text-text-muted">{formatUsd(spendRatePerHour(a))}/ó</td>
                 <td className="py-2 pl-2 text-right font-mono text-xs tabular-nums text-text-muted">
                   {relativeTime(secToMs(a.lastSeen), nowMs)}
                 </td>

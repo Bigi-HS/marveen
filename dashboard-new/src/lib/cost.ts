@@ -1,7 +1,7 @@
 // Pure helpers for the cost board (card e230c097 slice 2). No IO, no React --
 // exported for unit tests so the money/token math is pinned independently of the
 // view.
-import type { CostAgent } from '@/types/cost'
+import type { BucketTotal, CostAgent, TimelineBucket } from '@/types/cost'
 
 /** Total tokens across all four components for one agent. */
 export function agentTotalTokens(a: CostAgent): number {
@@ -41,4 +41,32 @@ export function formatTokens(n: number): string {
   if (!Number.isFinite(n) || n < 1000) return String(Math.max(0, Math.round(n || 0)))
   if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`
   return `${(n / 1_000_000).toFixed(1)}M`
+}
+
+/** Spend-rate in USD per hour over the agent's active window (firstSeen..lastSeen,
+ *  epoch seconds). The N1 token-burn signal: a high rate means the agent is spending
+ *  fast relative to how long it has been active. The window is floored to 60s so a
+ *  single-sample / sub-minute burst reads as a high instantaneous rate rather than
+ *  dividing by zero -- an honest burn signal, not a NaN. */
+export function spendRatePerHour(a: CostAgent): number {
+  const windowSec = Math.max(a.lastSeen - a.firstSeen, 60)
+  return a.totalCostUsd / (windowSec / 3600)
+}
+
+/** Collapse timeline rows (one per bucket+agent) into one total per time bucket,
+ *  summing every agent's calls/tokens/cost. Ascending by bucket. Pure -- feeds the
+ *  idősor chart. `tokens` is input+output (the chart's traffic magnitude). */
+export function totalsByBucket(buckets: TimelineBucket[]): BucketTotal[] {
+  const byBucket = new Map<number, BucketTotal>()
+  for (const b of buckets) {
+    let t = byBucket.get(b.bucket)
+    if (!t) {
+      t = { bucket: b.bucket, calls: 0, tokens: 0, costUsd: 0 }
+      byBucket.set(b.bucket, t)
+    }
+    t.calls += b.calls
+    t.tokens += b.inputTokens + b.outputTokens
+    t.costUsd += b.costUsd
+  }
+  return [...byBucket.values()].sort((x, y) => x.bucket - y.bucket)
 }

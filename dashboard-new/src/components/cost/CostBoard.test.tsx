@@ -69,4 +69,18 @@ describe('CostBoard (card e230c097 slice 2)', () => {
     render(<CostBoard board={board({ agents: [] })} nowMs={NOW} />)
     expect(screen.getByText(/Nincs költség-adat/)).toBeInTheDocument()
   })
+
+  it('shows the per-agent spend-rate (burn) column', () => {
+    render(
+      <CostBoard
+        board={board({
+          // $6 over a 2-hour window -> $3.00/ó burn.
+          agents: [agent({ agent: 'thor', totalCostUsd: 6, firstSeen: 1_700_000_000, lastSeen: 1_700_007_200 })],
+        })}
+        nowMs={NOW}
+      />,
+    )
+    expect(screen.getByText('Burn/ó')).toBeInTheDocument()
+    expect(screen.getByText('$3.00/ó')).toBeInTheDocument()
+  })
 })

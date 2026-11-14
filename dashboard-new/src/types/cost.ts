@@ -39,3 +39,24 @@ export interface CostBoard {
   lineage: CostLineage[]
   unrated: CostUnrated[]
 }
+
+/** One timeline bucket from GET /api/token-usage/timeline: usage for a single
+ *  (time-bucket, agent) pair. `bucket` is epoch SECONDS at the start of the bucket;
+ *  `costUsd` is already priced per model server-side. The idősor feeds the Factory
+ *  board's spend-over-time chart (card e230c097 slice 2). */
+export interface TimelineBucket {
+  bucket: number
+  agent: string
+  calls: number
+  inputTokens: number
+  outputTokens: number
+  costUsd: number
+}
+
+/** All agents' usage summed into one time bucket -- the idősor chart grain. */
+export interface BucketTotal {
+  bucket: number
+  calls: number
+  tokens: number
+  costUsd: number
+}
