@@ -21,6 +21,11 @@ function pr(over: Partial<GateBoardPr> = {}): GateBoardPr {
     chad_reviewed: false,
     merge_ready: false,
     last_activity: 1_700_000_000,
+    first_activity: 1_700_000_000,
+    age_seconds: 0,
+    waiting_for: [],
+    stale: false,
+    pre_review_blocked: false,
     ...over,
   }
 }

@@ -16,6 +16,11 @@ function pr(over: Partial<GateBoardPr> = {}): GateBoardPr {
     chad_reviewed: false,
     merge_ready: false,
     last_activity: 1_700_000_000,
+    first_activity: 1_700_000_000,
+    age_seconds: 0,
+    waiting_for: [],
+    stale: false,
+    pre_review_blocked: false,
     ...over,
   }
 }
@@ -83,5 +88,29 @@ describe('GateBoard matrix (card 87c32aa4)', () => {
   it('shows an empty state when there are no PRs at all', () => {
     render(<GateBoard prs={[]} nowMs={NOW} />)
     expect(screen.getByText(/Nincs nyitott PR a gate-en/)).toBeInTheDocument()
+  })
+
+  // Gate-delay + advisory badges (card e230c097).
+  it('badges a stale PR with the waited hours and the awaited seat', () => {
+    render(
+      <GateBoard
+        prs={[pr({ pr_number: 300, stale: true, age_seconds: 7 * 3600, waiting_for: ['dave'], seats: { thor: 'approved', dave: 'none', chad: 'none' } })]}
+        nowMs={NOW}
+      />,
+    )
+    const row = screen.getByText('#300').closest('tr')!
+    expect(within(row).getByText(/7ó — Dave/)).toBeInTheDocument()
+  })
+
+  it('does not badge a non-stale PR', () => {
+    render(<GateBoard prs={[pr({ pr_number: 301, stale: false })]} nowMs={NOW} />)
+    const row = screen.getByText('#301').closest('tr')!
+    expect(within(row).queryByText(/ó —/)).not.toBeInTheDocument()
+  })
+
+  it('badges a pre_review_blocked (CI red) PR', () => {
+    render(<GateBoard prs={[pr({ pr_number: 302, pre_review_blocked: true, ci_status: 'fail' })]} nowMs={NOW} />)
+    const row = screen.getByText('#302').closest('tr')!
+    expect(within(row).getByText('CI piros')).toBeInTheDocument()
   })
 })

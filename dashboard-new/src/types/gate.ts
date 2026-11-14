@@ -24,11 +24,24 @@ export interface GateBoardPr {
   merge_ready: boolean
   /** Newest recorded gate activity for this PR (epoch SECONDS). */
   last_activity: number
+  // Gate-delay surface (card e230c097). Advisory only -- never gates a merge.
+  /** Oldest activity on the latest sha (epoch SECONDS); a re-push resets it. */
+  first_activity: number
+  /** now - first_activity, in seconds. */
+  age_seconds: number
+  /** Required seats still unfilled ('none'); drives the stale nudge. */
+  waiting_for: GateReviewer[]
+  /** A required seat has waited past the threshold (and the PR is not ready/overridden). */
+  stale: boolean
+  /** CI is explicitly red on the live head -> review withheld (card 115dda72 badge). */
+  pre_review_blocked: boolean
 }
 
 export interface GateBoard {
   generated_at: number
   ttl_ms: number
   window_days: number
+  /** Hours a required seat may wait before a PR is flagged stale. */
+  stale_threshold_hours: number
   prs: GateBoardPr[]
 }

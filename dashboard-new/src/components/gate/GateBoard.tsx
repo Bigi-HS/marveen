@@ -9,6 +9,16 @@ import { MergeBadge } from './MergeBadge'
 import { awaitsSeat, MY_SEAT, REVIEWERS, REVIEWER_LABEL } from '@/lib/gate'
 import type { GateBoardPr } from '@/types/gate'
 
+/** Whole hours a required seat has been waiting (gate-delay badge, card e230c097). */
+function staleHours(ageSeconds: number): number {
+  return Math.floor(ageSeconds / 3600)
+}
+
+/** Reviewer labels for the seats a stale PR is still waiting on. */
+function waitingLabel(waitingFor: GateBoardPr['waiting_for']): string {
+  return waitingFor.map((r) => REVIEWER_LABEL[r] ?? r).join(', ')
+}
+
 /** Open-PR x reviewer-seat matrix (card 87c32aa4). Read-only overview of the merge
  *  gate: per-seat verdicts, CI, and a non-authoritative merge-ready badge, with a
  *  "my seats now" filter for the PRs still awaiting this dashboard's seat (dave). */
@@ -87,7 +97,25 @@ export function GateBoard({ prs, nowMs }: { prs: GateBoardPr[]; nowMs: number })
                     <CiCell status={pr.ci_status} required={pr.ci_required} />
                   </td>
                   <td className="px-2 py-2 text-center">
-                    <MergeBadge pr={pr} />
+                    <div className="flex flex-col items-center gap-1">
+                      <MergeBadge pr={pr} />
+                      {pr.stale && (
+                        <span
+                          className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300"
+                          title={`${waitingLabel(pr.waiting_for)} ${staleHours(pr.age_seconds)} órája vár`}
+                        >
+                          ⏳ {staleHours(pr.age_seconds)}ó — {waitingLabel(pr.waiting_for)}
+                        </span>
+                      )}
+                      {pr.pre_review_blocked && (
+                        <span
+                          className="rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-300"
+                          title="CI piros a live head-en — a review visszatartva"
+                        >
+                          CI piros
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="py-2 pl-2 text-right font-mono text-xs tabular-nums text-text-muted">
                     {relativeTime(secToMs(pr.last_activity), nowMs)}

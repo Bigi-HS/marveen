@@ -51,12 +51,28 @@ export interface GateBoardPr {
   merge_ready: boolean
   /** Newest recorded_at across this PR's gate rows (epoch seconds). */
   last_activity: number
+  // Gate-delay surface (card e230c097). Advisory observability only -- never gates
+  // a merge. `first_activity` is the oldest recorded_at ON THE LATEST sha (a re-push
+  // resets the clock, mirroring how a new sha invalidates seats). `age_seconds` is
+  // now - first_activity. `waiting_for` lists REQUIRED seats still unfilled (`none`),
+  // not blocked ones (a block is an acted verdict, not a wait). `stale` is true when
+  // a required seat has waited past the threshold and the PR is neither merge-ready
+  // nor overridden -- the signal NoA/heartbeat consumes to nudge or escalate.
+  first_activity: number
+  age_seconds: number
+  waiting_for: Reviewer[]
+  stale: boolean
+  /** Derived from ci_status (card 115dda72 badge): CI is explicitly red on the live
+   *  head -> review is being withheld. Pure derivation, never an input to merge_ready. */
+  pre_review_blocked: boolean
 }
 
 export interface GateBoard {
   generated_at: number
   ttl_ms: number
   window_days: number
+  /** The GATE_DELAY_ALERT_HOURS threshold used for the per-PR `stale` flag. */
+  stale_threshold_hours: number
   prs: GateBoardPr[]
 }
 
@@ -74,6 +90,15 @@ export const GATE_BOARD_TTL_MS = (() => {
   const raw = Number(process.env.GATE_BOARD_CACHE_TTL_MS)
   return Number.isFinite(raw) && raw > 0 ? raw : 30000
 })()
+
+// Gate-delay alert threshold (card e230c097). A required seat unfilled longer than
+// this marks the PR `stale`. Read at compute-time (like isGateCiRequired) so it is
+// env-tunable and testable. Default 6h = the "genuinely stuck" automatic-alert line;
+// NoA nudges within minutes during active building, this catches the real stalls.
+export function gateDelayThresholdHours(env: Record<string, string | undefined> = process.env): number {
+  const raw = Number(env.GATE_DELAY_ALERT_HOURS)
+  return Number.isFinite(raw) && raw > 0 ? raw : 6
+}
 
 interface ActivityRow {
   pr_number: number
@@ -113,14 +138,21 @@ export function computeGateBoard(db: Database.Database, nowS: number): GateBoard
   // so seats MUST be read at the latest sha -- a new push (newer row, new sha)
   // invalidates approvals recorded against the old sha.
   const latest = new Map<number, { sha: string; lastActivity: number }>()
+  // Oldest recorded_at per (pr, sha), for the gate-delay age clock (card e230c097).
+  // Keyed by `${pr}@${sha}` so a re-push (new sha) starts a fresh clock.
+  const firstBySha = new Map<string, number>()
   for (const r of rows) {
     const cur = latest.get(r.pr_number)
     if (!cur || r.recorded_at >= cur.lastActivity) {
       latest.set(r.pr_number, { sha: r.head_sha, lastActivity: r.recorded_at })
     }
+    const key = `${r.pr_number}@${r.head_sha}`
+    const min = firstBySha.get(key)
+    if (min === undefined || r.recorded_at < min) firstBySha.set(key, r.recorded_at)
   }
 
   const ciRequired = isGateCiRequired()
+  const thresholdS = gateDelayThresholdHours() * 60 * 60
   const prs: GateBoardPr[] = []
   for (const [prNumber, { sha, lastActivity }] of latest) {
     if (lastActivity < cutoff) continue
@@ -144,6 +176,14 @@ export function computeGateBoard(db: Database.Database, nowS: number): GateBoard
     const evaluation = evaluateApprovals(approvals, required)
     const ciSatisfied = ciRequired ? ciStatus === 'pass' : true
     const mergeReady = overrideActive ? true : evaluation.pass && ciSatisfied
+    // Gate-delay surface (card e230c097). Age clock is the latest sha's first
+    // activity (re-push resets it). `waiting_for` = required seats still unfilled
+    // (`none`), never blocked ones. `stale` only when genuinely waiting on a seat
+    // past the threshold -- never for a merge-ready or overridden PR.
+    const firstActivity = firstBySha.get(`${prNumber}@${sha}`) ?? lastActivity
+    const ageSeconds = nowS - firstActivity
+    const waitingFor = required.filter((r) => seats[r] === 'none')
+    const stale = !mergeReady && !overrideActive && waitingFor.length > 0 && ageSeconds >= thresholdS
     prs.push({
       pr_number: prNumber,
       author: prAuthor,
@@ -154,10 +194,21 @@ export function computeGateBoard(db: Database.Database, nowS: number): GateBoard
       chad_reviewed: chadReviewed,
       merge_ready: mergeReady,
       last_activity: lastActivity,
+      first_activity: firstActivity,
+      age_seconds: ageSeconds,
+      waiting_for: waitingFor,
+      stale,
+      pre_review_blocked: ciStatus === 'fail',
     })
   }
   prs.sort((a, b) => b.pr_number - a.pr_number)
-  return { generated_at: nowS, ttl_ms: GATE_BOARD_TTL_MS, window_days: WINDOW_DAYS, prs: prs.slice(0, MAX_PRS) }
+  return {
+    generated_at: nowS,
+    ttl_ms: GATE_BOARD_TTL_MS,
+    window_days: WINDOW_DAYS,
+    stale_threshold_hours: gateDelayThresholdHours(),
+    prs: prs.slice(0, MAX_PRS),
+  }
 }
 
 let cache: { value: GateBoard; expiresAt: number } | null = null
