@@ -4,6 +4,14 @@ import { getNoaDb } from './noa-db.js'
 import { emitDashboardEvent, type DashboardEvent } from './event-bus.js'
 import { MAIN_AGENT_ID, OWNER_NAME, BOT_NAME } from './config.js'
 import { listAgentNames } from './web/agent-config.js'
+import {
+  classifyCardIntake,
+  contentFingerprint,
+  isWeakeningVerdict,
+  INTAKE_VERDICTS,
+  type IntakeResult,
+  type IntakeVerdict,
+} from './web/intake-triage.js'
 import { resolveKanbanDispatchTarget } from './kanban-dispatch.js'
 import { logger } from './logger.js'
 
@@ -226,6 +234,20 @@ export interface KanbanCard {
    * Boss input, not neglected. 0 = not waiting.
    */
   boss_waiting: number
+  /**
+   * Intake risk-triage (card c81ce4bf). All ADVISORY and nullable -- NULL means
+   * not triaged (legacy cards + any card created before this landed). NEVER read
+   * by the gate enforcement path. verdict: accept|rescope|needs-info|reject;
+   * level: low|medium|high (predicted from card text, same RiskLevel vocabulary
+   * as the gate); track: lean|standard|rigorous; tags/reasons are JSON arrays.
+   */
+  triage_verdict: string | null
+  triage_level: string | null
+  triage_track: string | null
+  triage_tags: string | null
+  triage_reasons: string | null
+  triaged_at: number | null
+  triaged_by: string | null
 }
 
 export interface BoardColumn {
@@ -435,6 +457,16 @@ const KANBAN_MIGRATIONS = [
   `ALTER TABLE kanban_cards ADD COLUMN last_moved INTEGER`,
   `ALTER TABLE kanban_cards ADD COLUMN parked_until INTEGER`,
   `ALTER TABLE kanban_cards ADD COLUMN boss_waiting INTEGER NOT NULL DEFAULT 0`,
+  // Intake risk-triage (card c81ce4bf). All nullable + advisory: a card with
+  // every triage_* NULL behaves exactly as before (back-compat). NEVER read by
+  // the gate enforcement path (src/web/gate-check.ts).
+  `ALTER TABLE kanban_cards ADD COLUMN triage_verdict TEXT`,
+  `ALTER TABLE kanban_cards ADD COLUMN triage_level TEXT`,
+  `ALTER TABLE kanban_cards ADD COLUMN triage_track TEXT`,
+  `ALTER TABLE kanban_cards ADD COLUMN triage_tags TEXT`,
+  `ALTER TABLE kanban_cards ADD COLUMN triage_reasons TEXT`,
+  `ALTER TABLE kanban_cards ADD COLUMN triaged_at INTEGER`,
+  `ALTER TABLE kanban_cards ADD COLUMN triaged_by TEXT`,
 ]
 
 // The 07-29 taxonomy-backfill burst rewrote updated_at on 253 cards within
@@ -669,7 +701,7 @@ export function checkAllChildrenDone(parentId: string, db: Database.Database = g
   }
 }
 
-function maybeEmitIntake(card: KanbanCard): void {
+function maybeEmitIntake(card: KanbanCard, triage?: IntakeResult): void {
   if (card.status === PARKED_STATUS) return
   if (card.assignee) {
     const knownAgents = new Set([MAIN_AGENT_ID, ...(_agentNamesOverride ?? listAgentNames())])
@@ -687,6 +719,7 @@ function maybeEmitIntake(card: KanbanCard): void {
       priority: card.priority,
       status: card.status,
     },
+    ...(triage ? { triage: { verdict: triage.verdict, level: triage.level, track: triage.track, tags: triage.tags, reasons: triage.reasons } } : {}),
   })
 }
 
@@ -760,9 +793,33 @@ export function createCard(params: CreateCardParams): KanbanCard {
   // Check the dependency edge before insert (self-ref uses the id we are about to assign)
   if (params.depends_on != null) validateDependsOn(db, params.depends_on, id)
 
-  const sortOrder = params.sort_order !== undefined ? params.sort_order : maxSortOrderInStatus(status) + 1.0
+  // Intake risk-triage (card c81ce4bf): deterministic, advisory, pure. Runs
+  // synchronously (cheap text ops + one fingerprint scan of open cards). It NEVER
+  // blocks creation -- a REJECT auto-parks the card (icebox) instead of refusing
+  // the insert, and fires a distinct notification. Skipped when suppressIntake is
+  // set (breakdown-accept / assigned-to-known-agent), exactly as the bare intake
+  // event is today. The deterministic core is always on (cheap + pure); the
+  // advisory LLM enrichment is a separate async, opt-in layer (not in this path).
+  let triage: IntakeResult | null = null
+  let effectiveStatus = status
+  if (!params.suppressIntake) {
+    const openRows = db.prepare(
+      "SELECT id, title, description FROM kanban_cards WHERE (archived_at IS NULL OR archived_at = 0) AND status != 'done'"
+    ).all() as Array<{ id: string; title: string; description: string | null }>
+    const openCards = openRows
+      .filter((c) => c.id !== id)
+      .map((c) => ({ id: c.id, fingerprint: contentFingerprint(c.title, c.description) }))
+    triage = classifyCardIntake({ title: params.title, description: params.description ?? null }, openCards)
+    // REJECT -> auto-park (non-blocking). Only override an otherwise-active
+    // status; an explicit icebox/park the caller already chose is respected.
+    if (triage.verdict === 'reject' && effectiveStatus !== PARKED_STATUS) {
+      effectiveStatus = PARKED_STATUS
+    }
+  }
+
+  const sortOrder = params.sort_order !== undefined ? params.sort_order : maxSortOrderInStatus(effectiveStatus) + 1.0
   const priority = params.priority ?? 'normal'
-  const priorityScore = resolvePriorityScore(status, priority, params.priority_score)
+  const priorityScore = resolvePriorityScore(effectiveStatus, priority, params.priority_score)
 
   // Assign the immutable taxonomy code from the project prefix (card cf0d1bfe S2).
   // Allocated last, after every validation has passed, so a rejected create does
@@ -770,25 +827,116 @@ export function createCard(params: CreateCardParams): KanbanCard {
   const code = project != null ? allocateCode(db, project) : null
 
   db.prepare(
-    `INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, priority_score, depends_on, code, parked_until, boss_waiting)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_cards (id, title, description, status, assignee, priority, project, parent_id, due_date, sort_order, created_at, updated_at, priority_score, depends_on, code, parked_until, boss_waiting, triage_verdict, triage_level, triage_track, triage_tags, triage_reasons, triaged_at, triaged_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
-    id, params.title, params.description ?? null, status,
+    id, params.title, params.description ?? null, effectiveStatus,
     params.assignee ?? null, priority,
     project, params.parent_id ?? null, params.due_date ?? null,
     sortOrder, now, now, priorityScore, params.depends_on ?? null, code,
     params.parked_until ?? null, params.boss_waiting ?? 0,
+    triage ? triage.verdict : null,
+    triage ? triage.level : null,
+    triage ? triage.track : null,
+    triage ? JSON.stringify(triage.tags) : null,
+    triage ? JSON.stringify(triage.reasons) : null,
+    triage ? now : null,
+    triage ? 'intake-core' : null,
   )
 
   emitOrDefer({ type: 'kanban', id, action: 'created' })
 
   const card = getCard(id)!
 
-  if (!params.suppressIntake) {
-    maybeEmitIntake(card)
+  if (triage && triage.verdict === 'reject') {
+    // Distinct, non-silent "triage-rejected, review this" signal (marveen Q3).
+    // The card lands in the icebox lane it SHARES with policy-parked cards, so
+    // the queryable distinguisher is triage_verdict='reject', NOT the status.
+    // Deliberately a separate action from the policy-park sweep.
+    emitOrDefer({
+      type: 'kanban',
+      id,
+      action: 'triage_rejected',
+      card: {
+        id: card.id,
+        title: card.title,
+        description: card.description ?? null,
+        assignee: card.assignee ?? null,
+        priority: card.priority,
+        status: card.status,
+      },
+      triage: { verdict: triage.verdict, level: triage.level, track: triage.track, tags: triage.tags, reasons: triage.reasons },
+    })
+  } else if (!params.suppressIntake) {
+    maybeEmitIntake(card, triage ?? undefined)
   }
 
   return card
+}
+
+// Patch a card's triage fields (card c81ce4bf). Used by the ADVISORY enrichment
+// layer (async, opt-in) to attach an LLM feasibility judgment + rationale. The
+// verdict may only move STRICTER (accept < rescope < needs-info < reject) --
+// isWeakeningVerdict is enforced HERE in code (chad obligation c-MEDIUM), not by
+// prompt discipline, so the advisory layer can never clear a deterministic
+// reject. Throws TriageWeakenError on a weakening transition; the route maps it
+// to 400. This path does NOT dispatch builds (chad obligation c-LOW): it only
+// writes triage_* columns -- see the route caller for the no-build-tool note.
+export class TriageWeakenError extends Error {
+  constructor(public readonly current: IntakeVerdict, public readonly next: IntakeVerdict) {
+    super(`triage verdict may not weaken: ${current} -> ${next}`)
+    this.name = 'TriageWeakenError'
+  }
+}
+
+export interface PatchTriageParams {
+  verdict?: IntakeVerdict
+  level?: string
+  track?: string
+  tags?: string[]
+  reasons?: string[]
+  by: string
+}
+
+export function patchTriage(id: string, params: PatchTriageParams): boolean {
+  const db = getNoaDb()
+  const card = getCard(id)
+  if (!card) return false
+  const now = Math.floor(Date.now() / 1000)
+
+  if (params.verdict !== undefined) {
+    if (!INTAKE_VERDICTS.includes(params.verdict)) {
+      throw new TriageWeakenError((card.triage_verdict as IntakeVerdict) ?? 'accept', params.verdict)
+    }
+    // Monotonicity: never weaken an existing verdict. A fresh (NULL) verdict can
+    // take any value; thereafter only equal-or-stricter is accepted.
+    const current = card.triage_verdict as IntakeVerdict | null
+    if (current !== null && isWeakeningVerdict(current, params.verdict)) {
+      throw new TriageWeakenError(current, params.verdict)
+    }
+  }
+
+  db.prepare(
+    `UPDATE kanban_cards SET
+       triage_verdict = COALESCE(?, triage_verdict),
+       triage_level   = COALESCE(?, triage_level),
+       triage_track   = COALESCE(?, triage_track),
+       triage_tags    = COALESCE(?, triage_tags),
+       triage_reasons = COALESCE(?, triage_reasons),
+       triaged_at = ?, triaged_by = ?
+     WHERE id = ?`
+  ).run(
+    params.verdict ?? null,
+    params.level ?? null,
+    params.track ?? null,
+    params.tags ? JSON.stringify(params.tags) : null,
+    params.reasons ? JSON.stringify(params.reasons) : null,
+    now,
+    params.by,
+    id,
+  )
+  emitOrDefer({ type: 'kanban', id, action: 'triage_patched' })
+  return true
 }
 
 export { getCard }

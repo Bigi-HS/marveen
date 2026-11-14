@@ -38,6 +38,8 @@ describe('codetree-impact-io: production wiring uses noa-kanban + noa-memory', (
       created_at: 0, updated_at: 0, archived_at: null, dispatched_at: null,
       priority_score: 4, depends_on: null, code: null, last_moved: null,
       parked_until: null, boss_waiting: 0,
+      triage_verdict: null, triage_level: null, triage_track: null,
+      triage_tags: null, triage_reasons: null, triaged_at: null, triaged_by: null,
     })
     const deps = realImpactDeps()
     const result = deps.getCard('abc123')

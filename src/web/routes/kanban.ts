@@ -4,6 +4,7 @@ import {
   listComments, addComment, listProjects, getCard, getChildCards, runInTransaction,
   InvalidTransitionError, InvalidStatusError, InvalidSortOrderError, HasActiveChildrenError,
   ParentNotFoundError, InvalidProjectError, assertProjectPresent,
+  patchTriage, TriageWeakenError,
 } from '../../noa-kanban.js'
 import { getNoaDb } from '../../noa-memory.js'
 import { OWNER_NAME, BOT_NAME } from '../../config.js'
@@ -207,6 +208,34 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       if (deleteCard(id)) { json(res, { ok: true }); return true }
     } catch (err) {
       if (err instanceof HasActiveChildrenError) { json(res, { error: err.message }, 409); return true }
+      throw err
+    }
+    json(res, { error: 'Kártya nem található' }, 404)
+    return true
+  }
+
+  // Intake risk-triage enrichment (card c81ce4bf). The ADVISORY layer (async,
+  // opt-in) PATCHes a card's triage fields with an LLM feasibility judgment.
+  // NO-AUTO-BUILD (chad obligation c-LOW): this endpoint only writes triage_*
+  // columns -- it never dispatches a build, and the advisory consumer must run in
+  // a context WITHOUT a build-dispatch tool. Verdict monotonicity (c-MEDIUM) is
+  // enforced in patchTriage (TriageWeakenError -> 400), not by prompt discipline.
+  const kanbanTriageMatch = path.match(/^\/api\/kanban\/([^/]+)\/triage$/)
+  if (kanbanTriageMatch && method === 'POST') {
+    const id = decodeURIComponent(kanbanTriageMatch[1])
+    const body = await readBody(req)
+    const data = JSON.parse(body.toString())
+    const KNOWN_TRIAGE_FIELDS = new Set(['verdict', 'level', 'track', 'tags', 'reasons'])
+    const unknown = Object.keys(data).filter((k) => !KNOWN_TRIAGE_FIELDS.has(k))
+    if (unknown.length > 0) {
+      json(res, { error: `Unknown fields: ${unknown.join(', ')}`, unknown }, 400)
+      return true
+    }
+    const by = ctx.identity?.agentId ?? 'triage-advisory'
+    try {
+      if (patchTriage(id, { ...data, by })) { json(res, { ok: true }); return true }
+    } catch (err) {
+      if (err instanceof TriageWeakenError) { json(res, { error: err.message }, 400); return true }
       throw err
     }
     json(res, { error: 'Kártya nem található' }, 404)

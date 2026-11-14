@@ -132,7 +132,20 @@ CREATE TABLE kanban_cards (
   parked_until INTEGER,
   -- Non-zero when the card awaits a Boss decision (fc574fb3).
   -- While set the card is NOT stale -- it is legitimately Boss-gated.
-  boss_waiting INTEGER NOT NULL DEFAULT 0
+  boss_waiting INTEGER NOT NULL DEFAULT 0,
+  -- Intake risk-triage (card c81ce4bf). All ADVISORY + nullable: a card with
+  -- every triage_* NULL behaves exactly as before (back-compat). NEVER read by
+  -- the gate enforcement path (src/web/gate-check.ts). verdict in
+  -- accept|rescope|needs-info|reject; level in low|medium|high (predicted from
+  -- card text, same RiskLevel vocabulary as the gate); track in
+  -- lean|standard|rigorous; tags/reasons are JSON arrays.
+  triage_verdict TEXT,
+  triage_level TEXT,
+  triage_track TEXT,
+  triage_tags TEXT,
+  triage_reasons TEXT,
+  triaged_at INTEGER,
+  triaged_by TEXT
 );
 
 -- Per-prefix monotonic counter backing the card `code` auto-sequence (card
