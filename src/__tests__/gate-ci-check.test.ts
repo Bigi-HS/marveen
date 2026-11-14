@@ -147,3 +147,83 @@ describe('runGateCheck folds CI into the gate (card 0c166e48)', () => {
     expect(r.ci_status).toBe('none')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Gate-before-reviewers advisory signal (card 115dda72). A derived, read-only
+// field on the gate result: `pre_review_blocked` is true IFF the independent CI
+// is explicitly red on the live head (`ci_status === 'fail'`), so the
+// orchestrator can skip spending expensive reviewer-seat tokens on known-broken
+// work. It is FAIL-OPEN (only an explicit `fail` blocks; `none`/`pass` never do)
+// and purely ADVISORY: it is NEVER an input to `pass`. These tests pin that the
+// field tracks ci_status alone, is independent of ci_required, and that adding
+// it leaves every existing `pass` decision byte-identical.
+// ---------------------------------------------------------------------------
+describe('pre_review_blocked advisory signal (card 115dda72)', () => {
+  const approved = [approval('thor', 'approved'), approval('dave', 'approved')]
+
+  it('is true ONLY for ci_status === fail; false for none/pass', async () => {
+    const fail = await runGateCheck(800, deps({ files: ['src/db.ts'], approvals: approved, ci: 'fail' }))
+    expect(fail.pre_review_blocked).toBe(true)
+    expect(fail.pre_review_block_reason).toBe('ci_fail')
+
+    const none = await runGateCheck(800, deps({ files: ['src/db.ts'], approvals: approved, ci: 'none' }))
+    expect(none.pre_review_blocked).toBe(false)
+    expect(none.pre_review_block_reason).toBeNull()
+
+    const pass = await runGateCheck(800, deps({ files: ['src/db.ts'], approvals: approved, ci: 'pass' }))
+    expect(pass.pre_review_blocked).toBe(false)
+    expect(pass.pre_review_block_reason).toBeNull()
+  })
+
+  it('backward-compat: no ci deps -> not blocked (fail-open on missing signal)', async () => {
+    const r = await runGateCheck(800, deps({ files: ['src/db.ts'], approvals: approved }))
+    expect(r.ci_status).toBe('none')
+    expect(r.pre_review_blocked).toBe(false)
+    expect(r.pre_review_block_reason).toBeNull()
+  })
+
+  it('tracks ci_status ALONE, independent of ci_required (both values)', async () => {
+    for (const ciRequired of [true, false]) {
+      const fail = await runGateCheck(800, deps({ files: ['src/db.ts'], approvals: approved, ci: 'fail', ciRequired }))
+      expect(fail.pre_review_blocked).toBe(true)
+      const pass = await runGateCheck(800, deps({ files: ['src/db.ts'], approvals: approved, ci: 'pass', ciRequired }))
+      expect(pass.pre_review_blocked).toBe(false)
+    }
+  })
+
+  it('is deterministic for the same inputs', async () => {
+    const mk = () => runGateCheck(800, deps({ files: ['src/db.ts'], approvals: approved, ci: 'fail', ciRequired: true }))
+    const a = await mk()
+    const b = await mk()
+    expect(a.pre_review_blocked).toBe(b.pre_review_blocked)
+    expect(a.pre_review_block_reason).toBe(b.pre_review_block_reason)
+  })
+
+  // The load-bearing security invariant (Chad §7.1): the new field is NEVER an
+  // input to `pass`. Proven by recomputing the expected pass from the documented
+  // rule over the FULL {ci_status} x {ci_required} x {approvals} matrix and
+  // asserting the live result matches in every cell -- while pre_review_blocked
+  // varies orthogonally with ci_status only.
+  it('pass is byte-identical across the full {ci_status} x {ci_required} x {approvals} matrix', async () => {
+    const seatSets: Array<{ label: string; rows: ApprovalRow[]; reviewersPass: boolean }> = [
+      { label: 'full', rows: approved, reviewersPass: true },
+      { label: 'partial', rows: [approval('thor', 'approved')], reviewersPass: false },
+      { label: 'none', rows: [], reviewersPass: false },
+      { label: 'blocked', rows: [...approved, approval('chad', 'blocked')], reviewersPass: false },
+    ]
+    for (const ci of ['none', 'pass', 'fail'] as CiStatus[]) {
+      for (const ciRequired of [true, false]) {
+        for (const seat of seatSets) {
+          const r = await runGateCheck(800, deps({ files: ['src/db.ts'], approvals: seat.rows, ci, ciRequired }))
+          // Documented rule, independent of the new field:
+          // pass = reviewersPass && (!ciRequired || ci === 'pass').
+          const ciSatisfied = !ciRequired || ci === 'pass'
+          const expectedPass = seat.reviewersPass && ciSatisfied
+          expect(r.pass, `pass for ci=${ci} ciRequired=${ciRequired} seats=${seat.label}`).toBe(expectedPass)
+          // Orthogonality: the advisory field depends on ci_status ALONE.
+          expect(r.pre_review_blocked, `blocked for ci=${ci} ciRequired=${ciRequired} seats=${seat.label}`).toBe(ci === 'fail')
+        }
+      }
+    }
+  })
+})

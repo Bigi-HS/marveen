@@ -519,6 +519,15 @@ export interface GateCheckResult {
   risk_tags: string[]
   risk_level: string
   risk_unknown: boolean
+  // Gate-before-reviewers advisory signal (card 115dda72). A read-only field
+  // derived PURELY from ci_status: true IFF the independent CI is explicitly red
+  // on the live head, so the orchestrator can skip delegating expensive
+  // reviewer-seat tokens on known-broken work and route the PR back to the
+  // author. FAIL-OPEN: only an explicit `fail` blocks; `none`/`pass` never do.
+  // ADVISORY ONLY -- it is NEVER an input to `pass`; the merge decision is
+  // unchanged. `pre_review_block_reason` is 'ci_fail' when blocked, else null.
+  pre_review_blocked: boolean
+  pre_review_block_reason: 'ci_fail' | null
 }
 
 // MG-AC3 / MG-AC6 -- the gate check. Always evaluates against the CURRENT
@@ -553,6 +562,12 @@ export async function runGateCheck(pr: number, deps: GateCheckDeps): Promise<Gat
   const ciRequired = deps.ciRequired ?? false
   const ciSatisfied = !ciRequired || ciPass
 
+  // Gate-before-reviewers advisory signal (card 115dda72). Derived PURELY from
+  // ci_status, fail-open: only an explicit red CI raises it; `none`/`pass` do
+  // not. Deliberately NOT folded into `pass` below -- it reorders when review
+  // tokens are spent, never whether the PR may merge.
+  const preReviewBlocked = ciStatus === 'fail'
+
   return {
     pr_number: pr,
     head_sha: headSha,
@@ -570,5 +585,7 @@ export async function runGateCheck(pr: number, deps: GateCheckDeps): Promise<Gat
     risk_tags: risk.tags,
     risk_level: risk.level,
     risk_unknown: risk.unknown,
+    pre_review_blocked: preReviewBlocked,
+    pre_review_block_reason: preReviewBlocked ? 'ci_fail' : null,
   }
 }
