@@ -13,7 +13,7 @@ const TABS: TabDef[] = [
   { key: 'home', label: 'Mission Control', enabled: true },
   { key: 'kanban', label: 'Kanban', enabled: true },
   { key: 'gate', label: 'Gate Board', enabled: true },
-  { key: 'cost', label: 'Költség', enabled: true },
+  { key: 'cost', label: 'Factory', enabled: true }, // tab key kept 'cost'; Factory is the display name (card e230c097 slice 2)
   { key: 'hooks', label: 'Hook Stream', enabled: true },
   { key: 'usage', label: 'Usage', enabled: true }, // card 7fe5662f (dormant until store/.claude-session)
   { key: 'brain', label: 'Brain', enabled: false }, // F1
