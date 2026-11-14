@@ -182,6 +182,105 @@ describe('computeGateBoard -- aggregation', () => {
   })
 })
 
+describe('gate-delay + advisory badges (card e230c097)', () => {
+  const HOUR = 3600
+
+  it('derives pre_review_blocked only for ci_status === fail', () => {
+    const db = getDb()
+    const t = nowS()
+    insertApproval(db, { pr_number: 70, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, t)
+    insertCiRun(db, { pr_number: 70, head_sha: SHA_A, status: 'fail', recorded_by: 'buster' }, t + 1)
+    const failPr = computeGateBoard(db, nowS()).prs[0]
+    expect(failPr.ci_status).toBe('fail')
+    expect(failPr.pre_review_blocked).toBe(true)
+
+    insertCiRun(db, { pr_number: 70, head_sha: SHA_A, status: 'pass', recorded_by: 'buster' }, t + 2)
+    const passPr = computeGateBoard(db, nowS()).prs[0]
+    expect(passPr.ci_status).toBe('pass')
+    expect(passPr.pre_review_blocked).toBe(false)
+
+    insertApproval(db, { pr_number: 71, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, t)
+    const nonePr = computeGateBoard(db, nowS()).prs.find((p) => p.pr_number === 71)!
+    expect(nonePr.ci_status).toBe('none')
+    expect(nonePr.pre_review_blocked).toBe(false)
+  })
+
+  it('computes age_seconds from the oldest activity on the latest sha (epoch seconds)', () => {
+    const db = getDb()
+    const t = nowS()
+    insertApproval(db, { pr_number: 72, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, t - 2 * HOUR)
+    insertCiRun(db, { pr_number: 72, head_sha: SHA_A, status: 'pass', recorded_by: 'buster' }, t - 1 * HOUR)
+    const pr = computeGateBoard(db, t).prs[0]
+    expect(pr.first_activity).toBe(t - 2 * HOUR)
+    expect(pr.age_seconds).toBe(2 * HOUR)
+  })
+
+  it('a re-push resets the age clock to the latest sha first activity', () => {
+    const db = getDb()
+    const t = nowS()
+    // old sha activity 5h ago; a new push (SHA_B) 1h ago -> clock is from the NEW sha
+    insertApproval(db, { pr_number: 73, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, t - 5 * HOUR)
+    insertCiRun(db, { pr_number: 73, head_sha: SHA_B, status: 'pass', recorded_by: 'buster' }, t - 1 * HOUR)
+    const pr = computeGateBoard(db, t).prs[0]
+    expect(pr.first_activity).toBe(t - 1 * HOUR)
+    expect(pr.age_seconds).toBe(1 * HOUR)
+  })
+
+  it('waiting_for lists required seats still unfilled (none), not blocked ones', () => {
+    const db = getDb()
+    const t = nowS()
+    // thor approved, dave still none -> required=[thor,dave], waiting_for=[dave]
+    insertApproval(db, { pr_number: 74, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, t)
+    const pr = computeGateBoard(db, nowS()).prs[0]
+    expect(pr.waiting_for).toEqual(['dave'])
+  })
+
+  it('flags stale when a required seat is unfilled beyond the threshold', () => {
+    const db = getDb()
+    const t = nowS()
+    // thor approved 7h ago, dave never acted -> waiting on dave for 7h > 6h default
+    insertApproval(db, { pr_number: 75, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, t - 7 * HOUR)
+    const pr = computeGateBoard(db, t).prs[0]
+    expect(pr.waiting_for).toEqual(['dave'])
+    expect(pr.stale).toBe(true)
+    expect(pr.age_seconds).toBe(7 * HOUR)
+  })
+
+  it('is not stale within the threshold', () => {
+    const db = getDb()
+    const t = nowS()
+    insertApproval(db, { pr_number: 76, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, t - 1 * HOUR)
+    const pr = computeGateBoard(db, t).prs[0]
+    expect(pr.stale).toBe(false)
+  })
+
+  it('a merge-ready PR is never stale (no required seat is waiting)', () => {
+    const db = getDb()
+    const t = nowS()
+    insertApproval(db, { pr_number: 77, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, t - 9 * HOUR)
+    insertApproval(db, { pr_number: 77, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved', recorded_by: 'dave' }, t - 9 * HOUR)
+    const pr = computeGateBoard(db, t).prs[0]
+    expect(pr.merge_ready).toBe(true)
+    expect(pr.waiting_for).toEqual([])
+    expect(pr.stale).toBe(false)
+  })
+
+  it('an overridden PR is never stale', () => {
+    const db = getDb()
+    const t = nowS()
+    insertOverride(db, { pr_number: 78, head_sha: SHA_A, reason: 'boss', recorded_by: 'marveen' }, t - 9 * HOUR)
+    const pr = computeGateBoard(db, t).prs[0]
+    expect(pr.override_active).toBe(true)
+    expect(pr.stale).toBe(false)
+  })
+
+  it('the board reports the stale threshold (default 6h, env-tunable)', () => {
+    const db = getDb()
+    const board = computeGateBoard(db, nowS())
+    expect(board.stale_threshold_hours).toBe(6)
+  })
+})
+
 describe('GET /api/gate/board -- TTL cache', () => {
   it('serves a cached board within the TTL window (a later DB write is not reflected)', async () => {
     const db = getDb()
