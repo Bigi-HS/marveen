@@ -3,6 +3,7 @@ import { NavShell, type TabKey } from '@/components/NavShell'
 import { Home } from '@/pages/Home'
 import { KanbanPage } from '@/pages/KanbanPage'
 import { GateBoardPage } from '@/pages/GateBoardPage'
+import { CostBoardPage } from '@/pages/CostBoardPage'
 import { HookStreamPage } from '@/pages/HookStreamPage'
 import { UsagePage } from '@/pages/UsagePage'
 import { AppHome } from '@/pages/app/AppHome'
@@ -29,6 +30,7 @@ export default function App() {
       {tab === 'home' && <Home />}
       {tab === 'kanban' && <KanbanPage />}
       {tab === 'gate' && <GateBoardPage />}
+      {tab === 'cost' && <CostBoardPage />}
       {tab === 'hooks' && <HookStreamPage />}
       {tab === 'usage' && <UsagePage />}
       {tab === 'app-home' && <AppHome />}
