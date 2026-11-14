@@ -322,6 +322,19 @@ export function contentTags(addedLines: string[]): Tag[] {
 const HIGH_TAGS: readonly Tag[] = ['security', 'credential', 'destructive']
 const MEDIUM_TAGS: readonly Tag[] = ['input-parsing', 'exec']
 
+// The tag -> risk-level rule (max-wins). Extracted as the SINGLE SOURCE of the
+// level derivation (card c81ce4bf): both classifyDiffRisk (diff-derived tags)
+// and the card-intake triage predictor (text-predicted tags, src/web/intake-
+// triage.ts) call THIS function, so the level definition lives in exactly one
+// place and there is no parallel second risk concept. Pure refactor of the
+// inline logic that classifyDiffRisk used before -- a verbatim-equivalence test
+// (gate-check-leveltags) pins that classifyDiffRisk output is unchanged.
+export function levelForTags(tags: readonly Tag[]): RiskLevel {
+  if (tags.some((t) => HIGH_TAGS.includes(t))) return 'high'
+  if (tags.some((t) => MEDIUM_TAGS.includes(t))) return 'medium'
+  return 'low'
+}
+
 // Pure classifier: (diff) -> matrix. No clock, no network, no randomness. Same
 // diff -> same matrix, always. Empty file list -> unknown (fail-closed).
 export function classifyDiffRisk(files: PrFileDiff[]): DiffRisk {
@@ -336,11 +349,7 @@ export function classifyDiffRisk(files: PrFileDiff[]): DiffRisk {
     }
   }
   const tagList = [...tags].sort()
-  const level: RiskLevel = tagList.some((t) => HIGH_TAGS.includes(t))
-    ? 'high'
-    : tagList.some((t) => MEDIUM_TAGS.includes(t))
-      ? 'medium'
-      : 'low'
+  const level = levelForTags(tagList)
   return { tags: tagList, level, unknown }
 }
 

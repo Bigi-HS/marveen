@@ -21,6 +21,12 @@ export interface DashboardEvent {
   action?: string
   /** Intake event payload (AC-7a): card snapshot for orchestrator clarification check. */
   card?: { id: string; title: string; description: string | null; assignee: string | null; priority: string; status: string }
+  /**
+   * Intake risk-triage verdict snapshot (card c81ce4bf). ADVISORY. Rides the
+   * 'intake' event and the distinct 'triage_rejected' event so a consumer can
+   * act on the verdict without a re-fetch. Never an enforcement input.
+   */
+  triage?: { verdict: string; level: string; track: string; tags: string[]; reasons: string[] }
 }
 
 const EVENT = 'dashboard-event'
