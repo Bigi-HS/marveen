@@ -474,6 +474,49 @@ export function riskForPrInfo(info: GithubPrInfo): DiffRisk {
   return { tags: tagList, level: tagList.length > 0 ? 'high' : 'low', unknown: false }
 }
 
+// -- SHA-drift auto-notify detector (card 1d1a856e) --------------------------------
+//
+// Pure, IO-free: takes the seat list (from readApprovedSeatsByPr) and the live
+// head SHA, returns the set of reviewers whose latest approval sits on a stale
+// SHA. Called from the /api/gate/check handler after runGateCheck returns the
+// live head.
+
+export interface DriftEntry {
+  reviewer: string
+  old_sha: string
+}
+
+// A seat slice as returned by readApprovedSeatsByPr (gate-db.ts). Redeclared
+// here so gate-check.ts stays IO-free (no import from gate-db).
+export interface SeatByOldSha {
+  head_sha: string
+  reviewer: string
+}
+
+// Returns one DriftEntry per reviewer whose latest approved seat is on a SHA
+// that is NOT equal to `liveHeadSha`, AND who does NOT have a latest approved
+// seat on `liveHeadSha` itself.
+//
+// Latest-wins within the input list (same as evaluateApprovals): if the same
+// reviewer appears on multiple SHAs the LAST appearance (by array position, as
+// returned by readApprovedSeatsByPr ordered by recorded_at ASC) is the one
+// that counts. If the latest SHA for a reviewer IS `liveHeadSha`, they already
+// re-approved and are NOT notified.
+export function computeDriftNotifications(seats: SeatByOldSha[], liveHeadSha: string): DriftEntry[] {
+  // Build latest SHA per reviewer (last occurrence wins, mirroring latest-wins).
+  const latestSha = new Map<string, string>()
+  for (const { head_sha, reviewer } of seats) {
+    latestSha.set(reviewer, head_sha)
+  }
+  const result: DriftEntry[] = []
+  for (const [reviewer, sha] of latestSha) {
+    if (sha !== liveHeadSha) {
+      result.push({ reviewer, old_sha: sha })
+    }
+  }
+  return result
+}
+
 export interface GateCheckDeps {
   // Fetches the LIVE head.sha and changed-file list from GitHub. Injected so the
   // pure check orchestration is testable without network access.

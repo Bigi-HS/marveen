@@ -113,6 +113,24 @@ export function migrateGateTables(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_gate_risk_pr_sha ON gate_pr_risk(pr_number, head_sha)`)
+
+  // Card 1d1a856e: SHA-drift auto-notify dedup. When the live head moves to a new
+  // commit AFTER a reviewer has already approved the previous SHA, the gate check
+  // notifies that reviewer exactly once. This table deduplicates those messages so
+  // repeated /api/gate/check calls on the same live head produce at most one
+  // notification per (pr, old_sha, new_sha, reviewer). INSERT OR IGNORE on the
+  // UNIQUE index gives atomic dedup. No FK, additive, idempotent on every boot.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gate_drift_notifications (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      pr_number   INTEGER NOT NULL,
+      old_sha     TEXT NOT NULL,
+      new_sha     TEXT NOT NULL,
+      reviewer    TEXT NOT NULL,
+      recorded_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_gate_drift_dedup ON gate_drift_notifications(pr_number, old_sha, new_sha, reviewer)`)
 }
 
 // Record the opening agent for a PR (card ec818352, MG-SEC5). INSERT OR IGNORE
@@ -463,6 +481,80 @@ export function readLatestPrRisk(db: Database.Database, pr: number): GatePrRiskR
     )
     .get(pr) as GatePrRiskRow | undefined
   return row ?? null
+}
+
+// -- SHA-drift auto-notify dedup (card 1d1a856e) ------------------------------------
+//
+// OBSERVABILITY ONLY. The dedup table ensures a given (pr, old_sha, new_sha,
+// reviewer) tuple notifies at most once, regardless of how many times the
+// /api/gate/check endpoint is called against the same live head. Pure IO
+// helpers; the detection logic is in gate-check.ts (computeDriftNotifications).
+
+// Returns ALL approved seats for a PR grouped by head_sha (all SHAs, not just
+// the live one). Latest-wins per reviewer within each SHA: a reviewer who
+// block->approved ends up approved; approve->blocked ends up not included.
+// Used by computeDriftNotifications (gate-check.ts) to find reviewers whose
+// approval sits on a stale SHA.
+export interface ApprovedSeatByOldSha {
+  head_sha: string
+  reviewer: string
+}
+
+export function readApprovedSeatsByPr(db: Database.Database, pr: number): ApprovedSeatByOldSha[] {
+  // For each reviewer per SHA, pick the row with the latest normalised timestamp
+  // (same normalisation as readApprovals: ms-era values divided by 1000). Only
+  // rows whose latest verdict is 'approved' are returned.
+  const normExpr = `CASE WHEN recorded_at > 1000000000000 THEN recorded_at / 1000 ELSE recorded_at END`
+  return db
+    .prepare(
+      `SELECT head_sha, reviewer
+         FROM (
+           SELECT head_sha, reviewer, verdict,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY head_sha, reviewer
+                    ORDER BY ${normExpr} DESC, id DESC
+                  ) AS rn
+             FROM gate_approvals
+            WHERE pr_number = ?
+         )
+        WHERE rn = 1 AND verdict = 'approved'`,
+    )
+    .all(pr) as ApprovedSeatByOldSha[]
+}
+
+// Record that a drift notification was sent for (pr, old_sha, new_sha, reviewer).
+// INSERT OR IGNORE on the UNIQUE index atomically deduplicates concurrent calls.
+export function recordDriftNotified(
+  db: Database.Database,
+  pr: number,
+  oldSha: string,
+  newSha: string,
+  reviewer: string,
+  now: number,
+): void {
+  db
+    .prepare(
+      `INSERT OR IGNORE INTO gate_drift_notifications (pr_number, old_sha, new_sha, reviewer, recorded_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(pr, oldSha, newSha, reviewer, now)
+}
+
+// Returns true if a drift notification was already recorded for this tuple.
+export function wasDriftNotified(
+  db: Database.Database,
+  pr: number,
+  oldSha: string,
+  newSha: string,
+  reviewer: string,
+): boolean {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM gate_drift_notifications
+        WHERE pr_number = ? AND old_sha = ? AND new_sha = ? AND reviewer = ?`,
+    )
+    .get(pr, oldSha, newSha, reviewer) as { c: number }
+  return row.c > 0
 }
 
 // §10 FP/coverage metric: count PRs where chad was auto-required SOLELY by a
