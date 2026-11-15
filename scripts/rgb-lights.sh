@@ -33,6 +33,10 @@ case "$action" in
   *)   echo "usage: $0 off | on [RRGGBB]" >&2; exit 2 ;;
 esac
 
+# Defense-in-depth: reject any hex that is not exactly 6 hex chars before it
+# reaches the PowerShell -Command string interpolation (Chad #1004 MEDIUM).
+[[ $hex =~ ^[0-9A-Fa-f]{6}$ ]] || { echo "invalid hex: $hex" >&2; exit 2; }
+
 ts="$(date '+%F %T %Z')"
 # Fire the color command. Non-elevated reaches USB (kbd/mouse); SMBus fans need Phase 2 + elevation.
 "$PS" -NoProfile -Command "Start-Process -FilePath '$OPENRGB' -ArgumentList '--mode','static','--color','$hex' -NoNewWindow -Wait" >/dev/null 2>&1 || true
