@@ -65,3 +65,23 @@ describe('generateClaudeMd: stranger-sender ARANYSZABÁLY block is bot-name agno
     expect(src).toMatch(/import\s*{[^}]*\bBOT_NAME\b[^}]*}\s*from\s*'\.\.\/config\.js'/)
   })
 })
+
+describe('generateClaudeMd: Folyamatos tanulás ALAPELV subsection', () => {
+  const src = readFileSync(SCAFFOLD_PATH, 'utf-8')
+
+  const promptStart = src.indexOf('export async function generateClaudeMd')
+  const promptEnd = src.indexOf('export async function generateSoulMd')
+  const promptBody = src.slice(promptStart, promptEnd)
+
+  it('contains the tanulasi esemeny phrase (incidens = learning event)', () => {
+    expect(promptBody).toContain('tanulási esemény')
+  })
+
+  it('contains DREAM (idle deepening channel)', () => {
+    expect(promptBody).toContain('DREAM')
+  })
+
+  it('contains megosztott (knowledge must be shared)', () => {
+    expect(promptBody).toContain('megosztott')
+  })
+})
