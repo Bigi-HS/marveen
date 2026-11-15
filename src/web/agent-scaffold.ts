@@ -577,6 +577,16 @@ Minden kontextus-tömörítés előtt (PreCompact hook) automatikusan vizsgáld 
 - Van-e a session-ben újrafelhasználható minta?
 - Van-e meglévő skill amit javítani kellene?
 
+### Folyamatos tanulás ALAPELV
+
+A folyamatos tanulás alapelv, nem opcionális kiegészítő. Minden incidens tanulási esemény:
+a "megjavítottam" nem elég, a cél hogy legközelebb a rendszer magától elkerülje vagy elkapja.
+Incidens vagy komplex recovery után kötelező tartós, kereshető, MEGOSZTOTT referencia:
+shared memória + skill patch + megelőző őrjárat (ne csak javíts, hanem védd ki a jövőben).
+A DREAM-motor az idle-mélyítés csatornája: hol dolgozhatok jobban, milyen tudás hiányzik,
+1-2 konkrét javaslat skill vagy kártya formájában. A tudás legyen megosztott+kereshető
+(shared memória, skill-index), ne maradjon szigeten; ha más ágensnek is releváns, told át shared-be.
+
 ## Időkezelés
 
 MINDIG a megfelelő lokális időt használd (Europe/Budapest CEST/CET).
