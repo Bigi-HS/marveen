@@ -34,6 +34,50 @@ KEEPALIVE_LOG = "/tmp/keepalive-marveen.log"
 GAP_RECOVERY_MIN = 40  # >= 2 missed */15 cycles (or >=4 missed */10) = stall
 NUDGE_MIN_PRIORITY = {"high", "urgent"}  # only high/urgent delegated-stale escalate QUIET->ACT
 
+# Regex to parse the counts line emitted by tick.py:
+#   counts: mine=N nudgeable=M parked=P
+_COUNTS_RE = re.compile(r"counts:\s+mine=(\d+)\s+nudgeable=(\d+)\s+parked=(\d+)")
+
+
+def tick_reason(tick_out: str, nudge_hi: int) -> list:
+    """Pure helper: derive tick-related reason tokens from tick stdout + kanban nudge_hi.
+
+    Decision table (evaluated top to bottom, first match wins):
+      1. STUCK-GATE TRIPPED present           -> ["TICK_STUCK"]
+      2. idle=false present:
+         a. counts line parseable:
+            - nudgeable > 0 OR nudge_hi > 0   -> ["TICK_DRIVE"]
+            - nudgeable == 0, nudge_hi == 0,
+              mine > 0 (backlog only)          -> []  (AC1: no false QUIET->ACT)
+            - otherwise (mine == 0 too)        -> []  (truly idle)
+         b. counts line NOT parseable          -> ["TICK_DRIVE"]  (AC4 fail-safe)
+      3. idle=true / nothing                  -> []
+    """
+    if "STUCK-GATE TRIPPED" in tick_out:
+        return ["TICK_STUCK"]
+
+    if "idle=false" not in tick_out:
+        return []
+
+    # idle=false: must parse the counts line to decide safely
+    m = _COUNTS_RE.search(tick_out)
+    if m is None:
+        # AC4: parse failure -> fail toward ACT, never swallow to QUIET
+        return ["TICK_DRIVE"]
+
+    try:
+        nudgeable = int(m.group(2))
+    except (ValueError, AttributeError):
+        # AC4: non-int field -> fail toward ACT
+        return ["TICK_DRIVE"]
+
+    if nudgeable > 0 or nudge_hi > 0:
+        return ["TICK_DRIVE"]
+
+    # nudgeable == 0 and nudge_hi == 0: MINE-only backlog, no actionable delegated work
+    # AC1: do NOT force ACT for boss-pending / known-blocked big feature cards
+    return []
+
 
 def run(cmd, timeout=60):
     """Run a sub-step; return (exit_code, stdout+stderr). Never raises."""
@@ -89,14 +133,11 @@ def main():
     if gap is not None and gap > GAP_RECOVERY_MIN:
         reasons.append("GAP_RECOVERY")
 
-    # 3. Autopilot tick
+    # 3. Autopilot tick (subprocess runs here for side-effects; reason appended after
+    #    step 5 once nudge_hi is known -- tick_reason() needs both values).
     tick_code, tick_out = run([sys.executable, "scripts/autopilot/tick.py", "marveen"])
     tick_head = tick_out.strip().splitlines()[0] if tick_out.strip() else ""
     lines.append(f"[tick]  exit={tick_code} :: {tick_head}")
-    if "STUCK-GATE TRIPPED" in tick_out:
-        reasons.append("TICK_STUCK")
-    elif "idle=false" in tick_out:
-        reasons.append("TICK_DRIVE")
 
     # 3b. Token-usage collect (folded in from the standalone token-usage-collect
     #     heartbeat -- it was a type=heartbeat LLM session 4x/hour just to run a
@@ -148,6 +189,10 @@ def main():
         if "STALE" in ln and "parked" in ln:
             kb_summary = ln.strip()
             break
+
+    # Tick reason computed here (after nudge_hi is known from step 5 above).
+    # tick_reason() is a pure helper: AC1 fix -- only ACT when genuinely drivable.
+    reasons += tick_reason(tick_out, nudge_hi)
     lines.append(f"[kanban] {kb_summary} | delegated-stale high/urgent nudgeable={nudge_hi}")
     if nudge_hi > 0:
         reasons.append(f"NUDGE_STALE:{nudge_hi}")
