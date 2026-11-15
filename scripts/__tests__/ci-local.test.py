@@ -136,6 +136,16 @@ class TestFormatEvidence(unittest.TestCase):
         sheet = c.format_evidence({}, 'dave')
         self.assertIn('dave', sheet)
 
+    def test_head_sha_provenance(self):
+        # The checked commit SHA is recorded for provenance when provided.
+        sheet = c.format_evidence(self.bundle, 'dave', head_sha='abc1234def')
+        self.assertIn('abc1234def', sheet)
+
+    def test_no_head_sha_omits_checked_line(self):
+        # Backward-compatible: no SHA -> no 'checked:' line, no crash.
+        sheet = c.format_evidence(self.bundle, 'dave')
+        self.assertNotIn('checked:', sheet)
+
 
 if __name__ == '__main__':
     unittest.main()

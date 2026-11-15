@@ -113,14 +113,17 @@ def compute_drift(local_verdict, posted_ci_status):
             'message': f'DRIFT: local {local_ci} vs live {posted_ci_status}'}
 
 
-def format_evidence(bundle, agent):
+def format_evidence(bundle, agent, head_sha=None):
     """Render a PGB bundle dict into a human evidence sheet. Tolerant of a
-    missing/empty bundle (a failed/unparseable run must not crash the sheet)."""
+    missing/empty bundle (a failed/unparseable run must not crash the sheet).
+    head_sha, when given, is recorded for provenance (which commit was checked)."""
     verdict = (bundle or {}).get('verdict', 'UNKNOWN')
     lines = [
         f'CI-local evidence sheet (agent: {agent})',
-        f'verdict: {verdict}',
     ]
+    if head_sha:
+        lines.append(f'checked: {head_sha}')
+    lines.append(f'verdict: {verdict}')
     adds = (bundle or {}).get('diff_additions')
     files = (bundle or {}).get('diff_files')
     if adds is not None or files is not None:
@@ -238,7 +241,7 @@ def main(argv=None):
     if args['json_out']:
         print(json.dumps(bundle, indent=2))
     else:
-        print(format_evidence(bundle, args['agent']))
+        print(format_evidence(bundle, args['agent'], head_sha))
 
     if args['compare_live'] and args['pr'] is not None:
         posted = _fetch_live_ci_status(args['pr'])
