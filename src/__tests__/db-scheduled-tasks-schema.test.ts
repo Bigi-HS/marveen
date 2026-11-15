@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
+import Database from 'better-sqlite3'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -78,8 +79,58 @@ describe('scheduled_tasks fresh-DB schema reconciliation (card b38c3231)', () =>
     const db = initFresh()
     expect(() => { applyBBlockColumns(db); applyBBlockColumns(db) }).not.toThrow()
     const names = new Set((db.prepare('PRAGMA table_info(scheduled_tasks)').all() as Array<{ name: string }>).map(r => r.name))
-    for (const c of ['skip_if_busy', 'force_send', 'direct_send', 'layer2', 'target_session', 'card_id']) {
+    for (const c of ['skip_if_busy', 'force_send', 'direct_send', 'layer2', 'target_session', 'card_id', 'one_shot']) {
       expect(names.has(c)).toBe(true)
     }
+  })
+
+  it('one_shot column exists in fresh schema with DEFAULT 0 (card 9b8708d8)', () => {
+    const db = initFresh()
+    const cols = db.prepare('PRAGMA table_info(scheduled_tasks)').all() as Array<{ name: string; dflt_value: string | null; notnull: number }>
+    const col = cols.find(c => c.name === 'one_shot')
+    expect(col).toBeDefined()
+    expect(col!.dflt_value).toBe('0')
+    expect(col!.notnull).toBe(1)
+  })
+
+  it('one_shot column added idempotently by applyBBlockColumns on a DB missing it', () => {
+    // Simulate an older DB that was created before the one_shot column was added.
+    // Use better-sqlite3 directly to build an old-schema table (no one_shot),
+    // then verify applyBBlockColumns adds it cleanly and idempotently.
+    const { path, cleanup } = freshDb()
+    cleanups.push(cleanup)
+    const oldDb = new Database(path)
+    oldDb.exec(`
+      CREATE TABLE IF NOT EXISTS scheduled_tasks (
+        id TEXT PRIMARY KEY,
+        agent TEXT NOT NULL,
+        type TEXT NOT NULL,
+        description TEXT,
+        prompt TEXT NOT NULL,
+        schedule TEXT NOT NULL,
+        next_run INTEGER NOT NULL,
+        last_run INTEGER,
+        last_result TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at INTEGER NOT NULL,
+        skip_if_busy INTEGER NOT NULL DEFAULT 0,
+        force_send INTEGER NOT NULL DEFAULT 0,
+        direct_send INTEGER NOT NULL DEFAULT 0,
+        layer2 INTEGER NOT NULL DEFAULT 0,
+        target_session TEXT,
+        card_id TEXT
+      )
+    `)
+    // Verify one_shot is absent before migration
+    const before = new Set((oldDb.prepare('PRAGMA table_info(scheduled_tasks)').all() as Array<{ name: string }>).map(r => r.name))
+    expect(before.has('one_shot')).toBe(false)
+    // Apply B-block columns (should add one_shot without throwing)
+    expect(() => applyBBlockColumns(oldDb as unknown as ReturnType<typeof getDb>)).not.toThrow()
+    // Verify one_shot is now present
+    const after = new Set((oldDb.prepare('PRAGMA table_info(scheduled_tasks)').all() as Array<{ name: string }>).map(r => r.name))
+    expect(after.has('one_shot')).toBe(true)
+    // Idempotent: second apply must not throw
+    expect(() => applyBBlockColumns(oldDb as unknown as ReturnType<typeof getDb>)).not.toThrow()
+    oldDb.close()
   })
 })

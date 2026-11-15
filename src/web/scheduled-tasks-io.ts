@@ -59,6 +59,11 @@ export interface ScheduledTask {
   // and are read by the Python client directly. directSend takes precedence:
   // a task with directSend:true never falls through to Layer 2 (AC-1c).
   layer2?: boolean
+  // When true, the sweep auto-disables this task (status -> 'paused') after a
+  // single successful fire instead of rolling next_run forward. The row is kept
+  // for audit and is operator-re-enableable. Use for dated reminders, one-time
+  // bootstraps, etc. that must fire exactly once and never become yearly ghosts.
+  oneShot?: boolean
 }
 
 function readFileOr(path: string, fallback: string): string {
@@ -88,7 +93,7 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
   const skillContent = readFileOr(skillPath, '')
   const { name, description, body } = parseSkillMdFrontmatter(skillContent)
 
-  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; directSend?: boolean; cardId?: string; layer2?: boolean } = {}
+  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; directSend?: boolean; cardId?: string; layer2?: boolean; oneShot?: boolean } = {}
   try {
     config = JSON.parse(readFileOr(configPath, '{}'))
   } catch { /* use defaults */ }
@@ -108,6 +113,7 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
     directSend: config.directSend === true,
     cardId: (typeof config.cardId === 'string' && config.cardId.trim()) ? config.cardId.trim() : undefined,
     layer2: config.layer2 === true,
+    oneShot: config.oneShot === true,
   }
 }
 
@@ -126,7 +132,7 @@ export function listScheduledTasks(): ScheduledTask[] {
 
 export function writeScheduledTask(
   taskName: string,
-  data: { description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; directSend?: boolean; cardId?: string; layer2?: boolean },
+  data: { description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; directSend?: boolean; cardId?: string; layer2?: boolean; oneShot?: boolean },
 ): void {
   const dir = join(SCHEDULED_TASKS_DIR, taskName)
   mkdirSync(dir, { recursive: true })
@@ -156,6 +162,7 @@ export function writeScheduledTask(
   if (data.directSend !== undefined) config.directSend = data.directSend
   if (data.cardId !== undefined) config.cardId = data.cardId
   if (data.layer2 !== undefined) config.layer2 = data.layer2
+  if (data.oneShot !== undefined) config.oneShot = data.oneShot
   if (!config.createdAt) config.createdAt = Math.floor(Date.now() / 1000)
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
 }

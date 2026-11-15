@@ -540,6 +540,133 @@ describe('runSweepTick', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Card 9b8708d8: one_shot flag -- auto-disable after first successful fire
+// ---------------------------------------------------------------------------
+
+describe('runSweepTick: one_shot auto-disable (card 9b8708d8)', () => {
+  beforeEach(() => {
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+    vi.mocked(sendPromptToSession).mockReset()
+  })
+
+  it('AC2: createTask with oneShot:true persists one_shot=1; default omitted -> 0', () => {
+    const db = getNoaDb()
+    const t1 = createTask({ id: 'oneshot-create', agent: 'marveen', type: 'task', prompt: 'x', schedule: '0 9 * * *', oneShot: true }, db)
+    expect(t1.one_shot).toBe(1)
+    const t2 = createTask({ id: 'recurring-create', agent: 'marveen', type: 'task', prompt: 'x', schedule: '0 9 * * *' }, db)
+    expect(t2.one_shot).toBe(0)
+  })
+
+  it('AC3 (Step 2): one-shot fires once then auto-disables to paused; next_run unchanged', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    const originalNextRun = nowS - 10
+    db.prepare(`
+      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at, one_shot)
+      VALUES ('os-step2', 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?, 1)
+    `).run(originalNextRun, nowS - 100)
+
+    runSweepTick(60000, db)
+
+    const after = getTask('os-step2', db)!
+    // Auto-disabled to paused
+    expect(after.status).toBe('paused')
+    expect(after.last_result).toBe('fired')
+    expect(after.last_run).toBeGreaterThan(0)
+    // next_run must NOT have been advanced (stays at originalNextRun)
+    expect(after.next_run).toBe(originalNextRun)
+    expect(vi.mocked(sendPromptToSession)).toHaveBeenCalledOnce()
+  })
+
+  it('AC3 (recurring control): one_shot=0 task still rolls next_run forward and stays active', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    db.prepare(`
+      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at, one_shot)
+      VALUES ('recurring-ctrl', 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?, 0)
+    `).run(nowS - 10, nowS - 100)
+
+    runSweepTick(60000, db)
+
+    const after = getTask('recurring-ctrl', db)!
+    expect(after.status).toBe('active')
+    expect(after.next_run).toBeGreaterThan(nowS)
+  })
+
+  it('AC4: one-shot stays active when session is busy (non-fire result)', () => {
+    const db = getNoaDb()
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(false)
+    const nowS = Math.floor(Date.now() / 1000)
+    db.prepare(`
+      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at, one_shot)
+      VALUES ('os-busy', 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?, 1)
+    `).run(nowS - 10, nowS - 100)
+
+    runSweepTick(60000, db)
+
+    const after = getTask('os-busy', db)!
+    // Must remain active (not auto-disabled) since it did NOT fire
+    expect(after.status).toBe('active')
+    // A pending retry row must have been enqueued (dangerous-direction assert: busy -> retry)
+    const retries = db.prepare(`SELECT * FROM pending_task_retries WHERE task_name='os-busy'`).all()
+    expect(retries).toHaveLength(1)
+  })
+
+  it('AC5 (Step 1): one-shot in pending retry fires once and auto-disables via retry path', () => {
+    const db = getNoaDb()
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+    const nowS = Math.floor(Date.now() / 1000)
+    const originalNextRun = nowS + 3600
+    db.prepare(`
+      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at, one_shot)
+      VALUES ('os-retry', 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?, 1)
+    `).run(originalNextRun, nowS - 100)
+    // Seed a pending retry row (simulates the task was busy on its last due tick)
+    db.prepare(`
+      INSERT INTO pending_task_retries (task_name, agent_name, first_attempt, last_attempt, attempt_count, last_reason)
+      VALUES ('os-retry', 'marveen', ?, ?, 1, 'busy')
+    `).run(nowS - 120, nowS - 120)
+
+    runSweepTick(60000, db)
+
+    const after = getTask('os-retry', db)!
+    // Auto-disabled via retry path (Step 1)
+    expect(after.status).toBe('paused')
+    expect(after.last_result).toBe('fired')
+    // next_run NOT advanced (one-shot expiry path skips computeNextRun)
+    expect(after.next_run).toBe(originalNextRun)
+    // Pending row cleaned up
+    const retries = db.prepare(`SELECT * FROM pending_task_retries WHERE task_name='os-retry'`).all()
+    expect(retries).toHaveLength(0)
+  })
+
+  it('AC7: fired+paused one-shot is excluded from second sweep tick (no second fire)', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    const originalNextRun = nowS - 10
+    db.prepare(`
+      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at, one_shot)
+      VALUES ('os-ac7', 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?, 1)
+    `).run(originalNextRun, nowS - 100)
+
+    // First tick: fires and auto-disables
+    runSweepTick(60000, db)
+    expect(vi.mocked(sendPromptToSession)).toHaveBeenCalledOnce()
+    const afterFirst = getTask('os-ac7', db)!
+    expect(afterFirst.status).toBe('paused')
+
+    // Advance clock a full cron period (1 day = 86400s): the original cron slot would fire again
+    vi.mocked(sendPromptToSession).mockReset()
+    runSweepTick(60000, db, (nowS + 86400) * 1000)
+
+    // No second fire: task is paused and excluded from the WHERE status='active' query
+    expect(vi.mocked(sendPromptToSession)).not.toHaveBeenCalled()
+    const afterSecond = getTask('os-ac7', db)!
+    expect(afterSecond.status).toBe('paused')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Card 8af09fa0: a missing session (wedged / absent agent) must not silently
 // lose its scheduled fires. Before this fix a 'missing' verdict left ZERO
 // durable trace -- next_run frozen, no retry row -- so the only backstop was
@@ -1211,6 +1338,7 @@ function makeTask(over: Partial<{ id: string; agent: string; type: 'task' | 'hea
     layer2: 0,
     target_session: null,
     card_id: null,
+    one_shot: 0,
     ...over,
   }
 }
