@@ -124,17 +124,39 @@ export function initDatabase(dbPathOverride?: string): void {
   db.pragma('synchronous = NORMAL')
   if (!useOverride) tightenDbPermissions(dbPath)
 
+  // scheduled_tasks mirrors the LIVE prod schema byte-for-byte (card b38c3231).
+  // This DDL is the CANONICAL definition: the running scheduler
+  // (noa-scheduler.ts) INSERTs rows shaped (id, agent, type, description,
+  // prompt, schedule, next_run, status, created_at) and later the B-block
+  // columns. Prod accreted the agent/type schema via a manual rebuild years
+  // ago, so a fresh clean-room noa.db used to be born with the RETIRED
+  // Telegram-era schema here (chat_id NOT NULL, no agent/type, a narrow status
+  // CHECK) and boot-crashed on the first scheduler INSERT with "no column named
+  // agent". Keeping this identical to live is what lets a clean-room deploy boot.
+  // Deliberately NO CHECK on status: live carries 'deleted' alongside
+  // 'active'/'paused', and a CHECK prod lacks would re-introduce the very
+  // fresh-vs-prod drift this card removes. The B-block columns
+  // (skip_if_busy..card_id) are also applied idempotently by
+  // applyBBlockColumns() at scheduler start for older DBs created before them.
   db.exec(`
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
-      chat_id TEXT NOT NULL,
+      agent TEXT NOT NULL,
+      type TEXT NOT NULL,
+      description TEXT,
       prompt TEXT NOT NULL,
       schedule TEXT NOT NULL,
       next_run INTEGER NOT NULL,
       last_run INTEGER,
       last_result TEXT,
-      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','paused')),
-      created_at INTEGER NOT NULL
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at INTEGER NOT NULL,
+      skip_if_busy INTEGER NOT NULL DEFAULT 0,
+      force_send INTEGER NOT NULL DEFAULT 0,
+      direct_send INTEGER NOT NULL DEFAULT 0,
+      layer2 INTEGER NOT NULL DEFAULT 0,
+      target_session TEXT,
+      card_id TEXT
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_status_next ON scheduled_tasks(status, next_run)`)
@@ -679,77 +701,14 @@ export function markOrphanedTasksFailed(): number {
   return info.changes
 }
 
-// --- Ütemezett feladatok ---
-
-export interface ScheduledTask {
-  id: string
-  chat_id: string
-  prompt: string
-  schedule: string
-  next_run: number
-  last_run: number | null
-  last_result: string | null
-  status: 'active' | 'paused'
-  created_at: number
-}
-
-export function createTask(
-  id: string,
-  chatId: string,
-  prompt: string,
-  schedule: string,
-  nextRun: number
-): void {
-  db.prepare(
-    'INSERT INTO scheduled_tasks (id, chat_id, prompt, schedule, next_run, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(id, chatId, prompt, schedule, nextRun, Math.floor(Date.now() / 1000))
-}
-
-export function getDueTasks(): ScheduledTask[] {
-  const now = Math.floor(Date.now() / 1000)
-  return db
-    .prepare("SELECT * FROM scheduled_tasks WHERE status = 'active' AND next_run <= ?")
-    .all(now) as ScheduledTask[]
-}
-
-export function updateTaskAfterRun(id: string, nextRun: number, result: string): void {
-  const now = Math.floor(Date.now() / 1000)
-  db.prepare(
-    'UPDATE scheduled_tasks SET last_run = ?, next_run = ?, last_result = ? WHERE id = ?'
-  ).run(now, nextRun, result, id)
-}
-
-export function listTasks(): ScheduledTask[] {
-  return db
-    .prepare('SELECT * FROM scheduled_tasks ORDER BY created_at DESC')
-    .all() as ScheduledTask[]
-}
-
-export function deleteTask(id: string): boolean {
-  return db.prepare('DELETE FROM scheduled_tasks WHERE id = ?').run(id).changes > 0
-}
-
-export function pauseTask(id: string): boolean {
-  return (
-    db.prepare("UPDATE scheduled_tasks SET status = 'paused' WHERE id = ?").run(id).changes > 0
-  )
-}
-
-export function resumeTask(id: string): boolean {
-  return (
-    db.prepare("UPDATE scheduled_tasks SET status = 'active' WHERE id = ?").run(id).changes > 0
-  )
-}
-
-export function getTask(id: string): ScheduledTask | undefined {
-  return db.prepare('SELECT * FROM scheduled_tasks WHERE id = ?').get(id) as
-    | ScheduledTask
-    | undefined
-}
-
-export function updateTask(id: string, prompt: string, schedule: string, nextRun: number): boolean {
-  return db.prepare('UPDATE scheduled_tasks SET prompt = ?, schedule = ?, next_run = ? WHERE id = ?').run(prompt, schedule, nextRun, id).changes > 0
-}
+// NOTE (card b38c3231): the retired Telegram-era scheduled-task CRUD
+// (createTask/getDueTasks/updateTaskAfterRun/listTasks/deleteTask/pauseTask/
+// resumeTask/getTask/updateTask + a chat_id-shaped ScheduledTask interface)
+// lived here and was removed. It was dead code -- no production caller imported
+// it from db.js -- and every statement targeted the obsolete chat_id schema,
+// so it would have thrown against the reconciled agent/type table. The LIVE
+// scheduler CRUD is noa-scheduler.ts (agent/type shape); getActiveScheduledTaskCount
+// below is the only task-table reader db.ts still owns.
 
 // Start of the current calendar day in the server's local TZ (Europe/Budapest).
 // Done cards last touched before this are auto-archived, so the board's "Kész"
