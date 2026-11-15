@@ -158,10 +158,19 @@ def main() -> int:
         for r in mine[:8]:
             print(f'  {r["age_d"]:5.1f}d {str(r["priority"]):7} {r["id"]} {r["title"]}')
     if nudge:
-        print("\nNUDGEABLE (stale/delegated -- poke responsible, max 1x/24h then escalate):")
-        for r in nudge[:8]:
-            print(f'  {r["age_d"]:5.1f}d {str(r["priority"]):7} {r["id"]} '
-                  f'{r["assignee"]:10} {r["title"]}')
+        sliced = nudge[:8]
+        boss_stale = [r for r in sliced if r.get("bucket") == "boss-waiting-stale"]
+        owner_nudge = [r for r in sliced if r.get("bucket") != "boss-waiting-stale"]
+        if owner_nudge:
+            print("\nNUDGEABLE (stale/delegated -- poke responsible, max 1x/24h then escalate):")
+            for r in owner_nudge:
+                print(f'  {r["age_d"]:5.1f}d {str(r["priority"]):7} {r["id"]} '
+                      f'{r["assignee"]:10} {r["title"]}')
+        if boss_stale:
+            print("\nBOSS-WAITING-STALE (-> SURFACE TO BOSS, do NOT owner-nudge):")
+            for r in boss_stale:
+                print(f'  {r["age_d"]:5.1f}d {str(r["priority"]):7} {r["id"]} '
+                      f'{r["assignee"]:10} {r["title"]}')
 
     # --- Rotation directive (section 5 SL-01), persistent counter (FLAG-5) ---
     if mine:
