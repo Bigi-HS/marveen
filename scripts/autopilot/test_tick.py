@@ -160,6 +160,42 @@ def main():
     ok &= check("env unset + agent only under 'throttle' -> tick inert (capability isolation)",
                 rc == 0 and inert(out, called))
 
+    # L. NUDGEABLE bucket split: boss-waiting-stale rows rendered under SURFACE TO BOSS
+    #    header; delegated-stale rows rendered under existing owner-nudge header.
+    #    idle_ok and counts must be unaffected (driven by classify response, not render).
+    mixed_nudge = {
+        "idle_ok": False,
+        "counts": {"mine": 0, "nudgeable": 2, "parked": 0},
+        "mine": [],
+        "nudgeable": [
+            {"id": "aabbccdd", "priority": "high",   "title": "boss gated card",
+             "age_d": 10.0, "assignee": "dave", "bucket": "boss-waiting-stale"},
+            {"id": "11223344", "priority": "normal",  "title": "delegated card",
+             "age_d": 5.0,  "assignee": "forge", "bucket": "delegated-stale"},
+        ],
+    }
+    rc, out, called = run_with({"stuck": {}, "classify": mixed_nudge})
+    ok &= check(
+        "boss-waiting-stale card -> SURFACE TO BOSS section (not owner-nudge)",
+        rc == 0
+        and "BOSS-WAITING-STALE" in out
+        and "SURFACE TO BOSS" in out
+        and "aabbccdd" in out,
+    )
+    ok &= check(
+        "delegated-stale card -> owner-nudge NUDGEABLE section",
+        "NUDGEABLE (stale/delegated" in out and "11223344" in out,
+    )
+    ok &= check(
+        "boss-waiting-stale card does NOT appear under owner-nudge header",
+        # aabbccdd must come AFTER the BOSS-WAITING-STALE line, not under NUDGEABLE
+        out.index("BOSS-WAITING-STALE") < out.index("aabbccdd"),
+    )
+    ok &= check(
+        "counts line unchanged -- idle_ok and counts driven by classify, not render",
+        "nudgeable=2" in out and "idle=false" in out,
+    )
+
     print("\n" + ("ALL PASS" if ok else "SOME FAILED"))
     return 0 if ok else 1
 
