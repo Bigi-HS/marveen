@@ -94,25 +94,41 @@ def is_read_only(argv):
 
 def _api_is_get(rest):
     """gh api defaults to GET; reject an explicit non-GET method or any
-    request-body flag (which forces a POST)."""
+    request-body flag (which forces a POST).
+
+    gh uses cobra/pflag, which accepts a shorthand flag with its value either
+    separated or GLUED -- all forms are handled fail-closed here:
+      -X POST   --method POST      (flag + next arg)
+      -XPOST                         (glued shorthand; verified empirically:
+                                      `gh api -XPOST` parses as -X POST, NOT a
+                                      syntax error -- so it must be caught)
+      -X=POST   --method=POST        (attached value)
+    The same glued form applies to the body shorthands -f/-F (field/raw-field),
+    so ANY token starting with -f/-F is refused (no read-safe gh api shorthand
+    starts with those)."""
     i = 0
     while i < len(rest):
         tok = rest[i]
-        if tok in _API_METHOD_FLAGS:
+        method = None
+        if tok in _API_METHOD_FLAGS:                     # '-X' / '--method' + arg
             method = rest[i + 1] if i + 1 < len(rest) else ''
-            if method.upper() != 'GET':
-                return False, f'gh api non-GET method refused: {method or "(missing)"}'
             i += 2
-            continue
-        if tok.startswith('--method='):
-            if tok.split('=', 1)[1].upper() != 'GET':
-                return False, f'gh api non-GET method refused: {tok}'
+        elif tok.startswith('--method='):
+            method = tok.split('=', 1)[1]
+            i += 1
+        elif tok.startswith('-X') and tok != '-X':       # glued '-XPOST'/'-X=POST'
+            method = tok[2:].lstrip('=')
+            i += 1
+        else:
+            # Body-producing flags (any form, incl. glued shorthand) -> write.
+            if tok in _API_BODY_FLAGS or tok.startswith('-f') or \
+                    tok.startswith('-F') or tok.startswith('--field=') or \
+                    tok.startswith('--raw-field=') or tok.startswith('--input='):
+                return False, 'gh api request-body flag refused (implies write)'
             i += 1
             continue
-        if tok in _API_BODY_FLAGS or tok.startswith('--field=') or \
-                tok.startswith('--raw-field=') or tok.startswith('--input='):
-            return False, 'gh api request-body flag refused (implies write)'
-        i += 1
+        if method.upper() != 'GET':
+            return False, f'gh api non-GET method refused: {method or "(missing)"}'
     return True, ''
 
 
