@@ -30,6 +30,7 @@ CREATE TABLE memories (
   keywords    TEXT,
   topic_key   TEXT,
   access_scope TEXT,                     -- null = no restriction
+  source      TEXT    NOT NULL DEFAULT 'legacy', -- provenance: user|agent-self|system=trusted; email|web|calendar|inter-agent|legacy=untrusted
   embedding   BLOB,                      -- sqlite-vec FLOAT32 binary; NULL until embedded
   created_at  INTEGER NOT NULL,
   accessed_at INTEGER NOT NULL

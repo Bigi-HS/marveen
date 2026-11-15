@@ -50,6 +50,44 @@ export class InvalidCategoryError extends Error {
   }
 }
 
+// --- Memory source provenance (card 8ec56f1f) ---
+// Code constant: the trusted set is NEVER widened by a caller-supplied parameter.
+const TRUSTED_MEMORY_SOURCES = new Set(['user', 'agent-self', 'system'])
+
+/** Classify a source value as trusted or untrusted.
+ *  Trusted: user, agent-self, system.
+ *  Untrusted: email, web, calendar, inter-agent, legacy, empty, absent, or any unknown value.
+ *  Normalises with trim+toLowerCase before the membership test, closing the
+ *  'User' / ' user ' casing/whitespace bypass class.
+ */
+export function classifyMemorySource(source: string | null | undefined): 'trusted' | 'untrusted' {
+  if (source == null || source === '') return 'untrusted'
+  return TRUSTED_MEMORY_SOURCES.has(source.trim().toLowerCase()) ? 'trusted' : 'untrusted'
+}
+
+export class UntrustedMemorySourceError extends Error {
+  readonly source: string | null | undefined
+  constructor(source: string | null | undefined) {
+    super(`Untrusted memory source: "${source}". Only user/agent-self/system are trusted.`)
+    this.name = 'UntrustedMemorySourceError'
+    this.source = source
+  }
+}
+
+// --- Memory schema migrations (additive, idempotent -- mirrors KANBAN_MIGRATIONS) ---
+const MEMORY_MIGRATIONS = [
+  // card 8ec56f1f: source provenance column; DEFAULT 'legacy' marks all pre-existing rows
+  // as requiring explicit re-provenance. 'legacy' is intentionally untrusted so old rows
+  // are never silently promoted to trusted status.
+  `ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'`,
+]
+
+export function applyMemoryMigrations(db = getNoaDb()): void {
+  for (const stmt of MEMORY_MIGRATIONS) {
+    try { db.exec(stmt) } catch { /* column already exists -- ok */ }
+  }
+}
+
 export class ScopedSharedError extends Error {
   // Card MEM/8ad3a1c9: the old message named `access_scope` unconditionally, which
   // sent the reader looking at a field they had never sent -- Hibiki bisected the
@@ -163,6 +201,11 @@ export interface NoaMemory {
   keywords: string | null
   topic_key: string | null
   access_scope: string | null
+  // provenance: user|agent-self|system=trusted; email|web|calendar|inter-agent|legacy=untrusted
+  // Optional in the interface so pre-migration rows from tests that construct literal
+  // NoaMemory objects without the column remain valid. DB always supplies a value via
+  // DEFAULT 'legacy' + migration.
+  source?: string
   embedding: Buffer | null
   created_at: number
   accessed_at: number
@@ -333,19 +376,35 @@ export function saveMemory(
   category: 'hot' | 'warm' | 'cold' | 'shared',
   keywords?: string,
   accessScope?: string | null,
-): { id: number; access_scope: string | null } {
+  source?: string,
+): { id: number; access_scope: string | null; source: string } {
   if (!VALID_CATEGORIES.has(category)) throw new InvalidCategoryError(category)
+  // card 8ec56f1f: source provenance guard -- external untrusted sources (email, web,
+  // calendar, inter-agent) and absent/unknown sources are rejected so new internal
+  // callers cannot save untrusted-origin content. Exception: 'legacy' is the
+  // migration-exemption value (AC-7) used by the import paths to mark pre-existing
+  // content that already lived in the trusted store; it passes through saveMemory but
+  // is still blocked by the public route guard. Only the route blocks 'legacy' writes
+  // from new callers; the function itself allows it for the migration path.
+  const resolvedSource = source ?? 'legacy'
+  const EXTERNAL_UNTRUSTED = new Set(['email', 'web', 'calendar', 'inter-agent'])
+  if (resolvedSource === '' || resolvedSource == null || EXTERNAL_UNTRUSTED.has(resolvedSource.trim().toLowerCase())) {
+    throw new UntrustedMemorySourceError(resolvedSource)
+  }
+  // Any other unknown (non-empty, non-legacy, non-trusted) value is also rejected.
+  const isKnown = classifyMemorySource(resolvedSource) === 'trusted' || resolvedSource.trim().toLowerCase() === 'legacy'
+  if (!isKnown) throw new UntrustedMemorySourceError(resolvedSource)
   const scope = resolveAccessScope(agentId, category, keywords, content, accessScope)
   const now = Math.floor(Date.now() / 1000)
   const info = getNoaDb().prepare(
-    'INSERT INTO memories (agent_id, category, content, keywords, topic_key, access_scope, created_at, accessed_at) VALUES (?, ?, ?, ?, NULL, ?, ?, ?)'
-  ).run(agentId, category, content, keywords ?? null, scope, now, now)
+    'INSERT INTO memories (agent_id, category, content, keywords, topic_key, access_scope, source, created_at, accessed_at) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)'
+  ).run(agentId, category, content, keywords ?? null, scope, resolvedSource, now, now)
   const id = Number(info.lastInsertRowid)
   kickOffEmbedding(content + (keywords ? ' ' + keywords : ''), id)
   // Card MEM/8ad3a1c9: report the scope that was WRITTEN. Content-derived scoping
   // used to happen with no trace in the response at all, so a caller could not
   // tell an unscoped write from one the classifier had quietly restricted.
-  return { id, access_scope: scope }
+  return { id, access_scope: scope, source: resolvedSource }
 }
 
 // --- Read path: hybrid FTS5 + vector rerank (AC-4) ---
@@ -520,7 +579,8 @@ export function saveAgentMemory(
   keywords?: string,
   autoGenerated?: boolean,
   accessScope?: string | null,
-): { id: number; access_scope: string | null } {
+  source?: string,
+): { id: number; access_scope: string | null; source: string } {
   void autoGenerated  // slim schema: no auto_generated column
   return saveMemory(
     agentId,
@@ -528,6 +588,7 @@ export function saveAgentMemory(
     category as 'hot' | 'warm' | 'cold' | 'shared',
     keywords,
     accessScope,
+    source,
   )
 }
 

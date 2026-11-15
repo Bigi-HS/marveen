@@ -4,6 +4,7 @@ import {
   hybridSearch, backfillEmbeddings,
   searchAgentMemories as searchMemoriesGlobal, applyScopeFilter, ScopedSharedError,
   deleteMemory, getNoaDb, type NoaMemory,
+  classifyMemorySource, UntrustedMemorySourceError,
 } from '../../noa-memory.js'
 import { MAIN_AGENT_ID, OLLAMA_URL } from '../../config.js'
 import { isKnownAgent } from '../agent-config.js'
@@ -109,7 +110,7 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     const body = await readBody(req)
     // `access_scope` is read with `'access_scope' in data` semantics below so we
     // can tell "field absent" (=> PII auto-scope) from "explicit null" (opt-out).
-    const data = JSON.parse(body.toString()) as { agent_id?: string; content: string; tier?: string; category?: string; keywords?: string; access_scope?: string | null }
+    const data = JSON.parse(body.toString()) as { agent_id?: string; content: string; tier?: string; category?: string; keywords?: string; access_scope?: string | null; source?: string }
     if (!data.content?.trim()) { json(res, { error: 'Content is required' }, 400); return true }
     const filterResult = scanMemoryContent(data.content.trim())
     // Only critical-severity patterns block (actual injection vectors). High-severity
@@ -130,6 +131,27 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     if (willBlock) {
       logger.warn({ agent: data.agent_id }, 'Memory content rejected: critical injection pattern')
       json(res, { error: 'Content rejected by security filter' }, 400)
+      return true
+    }
+    // card 8ec56f1f: source provenance guard -- reject any write whose source is untrusted
+    // (email, web, calendar, inter-agent, legacy, absent, or any unrecognised value).
+    // Only user/agent-self/system turns may write memories via this route.
+    const sourceValue = 'source' in data ? data.source : undefined
+    if (classifyMemorySource(sourceValue) === 'untrusted') {
+      // 'memory-provenance' extends the mechanism union; cast until the type is widened.
+      recordGuardEvent({
+        mechanism: 'memory-provenance' as 'memories-filter',
+        route: '/api/memories',
+        verdict: 'BLOCK',
+        fromAgent: data.agent_id ?? null,
+        toAgent: null,
+        patternIds: null,
+        maxSeverity: null,
+        findingCount: 0,
+        content: data.content.trim(),
+      })
+      logger.warn({ agent: data.agent_id, source: sourceValue }, 'Memory write rejected: untrusted source')
+      json(res, { error: `Memory source not trusted: only user/agent-self/system turns may be saved (got ${JSON.stringify(sourceValue)})` }, 400)
       return true
     }
     if (data.tier && !data.category) {
@@ -161,13 +183,22 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
         data.keywords || undefined,
         true,
         accessScope,
+        sourceValue,
       )
       // Card MEM/8ad3a1c9: report the scope that was actually applied. Content-derived
       // scoping used to leave no trace here at all, so a caller could not tell an
       // unscoped write from one the classifier had quietly restricted to them.
-      json(res, { ok: true, id: result.id, access_scope: result.access_scope })
+      // card 8ec56f1f: echo source so callers can verify the provenance that was stored.
+      json(res, { ok: true, id: result.id, access_scope: result.access_scope, source: result.source })
     } catch (err) {
       if (err instanceof ScopedSharedError) {
+        json(res, { error: err.message }, 400)
+        return true
+      }
+      // Defence-in-depth: UntrustedMemorySourceError should not reach here (the route
+      // guard above rejects untrusted writes first), but catch it in case saveMemory is
+      // called directly in a future refactor.
+      if (err instanceof UntrustedMemorySourceError) {
         json(res, { error: err.message }, 400)
         return true
       }
@@ -266,7 +297,9 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
       const chunk = chunks[i]
 
       if (!categorizeModel) {
-        saveAgentMemory(agentId, chunk, 'warm', '', true)
+        // source: 'legacy' -- migration exemption (AC-7): import path ingests content
+        // already in the trusted store; this is not an untrusted external ingest.
+        saveAgentMemory(agentId, chunk, 'warm', '', true, undefined, 'legacy')
         stats.warm++
         imported++
         continue
@@ -314,7 +347,9 @@ Respond ONLY with JSON, nothing else:
           // Default to warm if parsing fails
         }
 
-        saveAgentMemory(agentId, chunk, tier, keywords, true)
+        // source: 'legacy' -- migration exemption (AC-7): import path ingests content
+        // already in the trusted store; this is not an untrusted external ingest.
+        saveAgentMemory(agentId, chunk, tier, keywords, true, undefined, 'legacy')
         stats[tier as keyof typeof stats]++
         imported++
 
@@ -322,7 +357,8 @@ Respond ONLY with JSON, nothing else:
           await new Promise(r => setTimeout(r, 200))
         }
       } catch {
-        saveAgentMemory(agentId, chunk, 'warm', '', true)
+        // source: 'legacy' -- migration exemption (AC-7): fallback path for already-trusted content.
+        saveAgentMemory(agentId, chunk, 'warm', '', true, undefined, 'legacy')
         stats.warm++
         imported++
       }

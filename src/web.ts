@@ -23,6 +23,7 @@ import { startMcpListChecker } from './web/mcp-list.js'
 import { maybeStartScheduleRunner } from './web/schedule-runner.js'
 import { startUsageRefresher } from './web/usage-refresher.js'
 import { applyKanbanMigrations } from './noa-kanban.js'
+import { applyMemoryMigrations } from './noa-memory.js'
 import { startChannelPluginMonitor } from './web/channel-monitor.js'
 import { startInboundProber } from './web/inbound-probe.js'
 import { startChannelHealthMonitor } from './web/channel-health-monitor.js'
@@ -547,6 +548,11 @@ export function startWebServer(port = 3420): http.Server {
   // someday->icebox parked-lane reconcile + bucket-centre backfill. Idempotent.
   applyKanbanMigrations()
   logger.info('Kanban migrations applied (priority_score + icebox lane)')
+
+  // Memory provenance migration (card 8ec56f1f): additive source column.
+  // DEFAULT 'legacy' marks all pre-existing rows; idempotent via try/catch.
+  applyMemoryMigrations()
+  logger.info('Memory migrations applied (source provenance column)')
 
   // Analytics snapshot storage (card 54df4c8f, A-layer): additive analytics_snapshots
   // table + index. Idempotent CREATE IF NOT EXISTS so a live noa.db gains the table
