@@ -251,6 +251,30 @@ fi
 echo
 
 # ---------------------------------------------------------------------------
+# Step 4b: Build dashboard-new (/v2 SPA frontend) -- card 6b977440
+# The root build (step 4) only compiles the BACKEND. The /v2 SPA is a separate
+# Vite build served from PROJECT_ROOT/dashboard-new/dist; without this step the
+# frontend ships STALE after every deploy (incident 2026-11-12). In isolated
+# mode we build from the target-ref worktree and rsync into the served repo
+# dist; in the standard path we build in place (main tree already at target).
+# ---------------------------------------------------------------------------
+step "4b. Build dashboard-new (/v2 SPA frontend)"
+if [ ! -f "$SCRIPT_DIR/deploy-build-frontend.sh" ]; then
+  abort "scripts/deploy-build-frontend.sh missing -- cannot build the /v2 frontend (card 6b977440)"
+fi
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/deploy-build-frontend.sh"
+if [ "$ISOLATED" -eq 1 ]; then
+  build_dashboard_new "$REPO" "$WT_PATH" 1 \
+    || abort "dashboard-new /v2 frontend build failed (isolated worktree path)"
+else
+  build_dashboard_new "$REPO" "" 0 \
+    || abort "dashboard-new /v2 frontend build failed"
+fi
+pass "dashboard-new /v2 frontend built -> $REPO/dashboard-new/dist"
+echo
+
+# ---------------------------------------------------------------------------
 # Step 5: Hook-presence gate (hard stop if any hook script is missing)
 # Hook scripts run from the SOURCE TREE at their absolute paths; if a newly
 # added hook is absent from disk, Python exits 2 = deny-block fleet-wide.
