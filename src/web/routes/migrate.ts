@@ -103,7 +103,9 @@ export async function tryHandleMigrate(ctx: RouteContext): Promise<boolean> {
     for (const f of findings.filter(fi => fi.type === 'personality')) {
       try {
         const content = readFileSync(f.path, 'utf-8').slice(0, 3000)
-        saveAgentMemory(agentId, `[Importált személyiség] ${content}`, 'warm', 'személyiség, soul, import', true)
+        // source: 'legacy' -- migration exemption (AC-7): content already lived in the
+        // trusted store; this is a provenance-preserving import, not an untrusted ingest.
+        saveAgentMemory(agentId, `[Importált személyiség] ${content}`, 'warm', 'személyiség, soul, import', true, undefined, 'legacy')
         stats.warm++
         imported++
         details.push(`Személyiség: ${f.name}`)
@@ -113,7 +115,9 @@ export async function tryHandleMigrate(ctx: RouteContext): Promise<boolean> {
     for (const f of findings.filter(fi => fi.type === 'profile')) {
       try {
         const content = readFileSync(f.path, 'utf-8').slice(0, 3000)
-        saveAgentMemory(agentId, `[Importált felhasználói profil] ${content}`, 'warm', 'felhasználó, profil, import', true)
+        // source: 'legacy' -- migration exemption (AC-7): content already lived in the
+        // trusted store; this is a provenance-preserving import, not an untrusted ingest.
+        saveAgentMemory(agentId, `[Importált felhasználói profil] ${content}`, 'warm', 'felhasználó, profil, import', true, undefined, 'legacy')
         stats.warm++
         imported++
         details.push(`Profil: ${f.name}`)
@@ -123,7 +127,9 @@ export async function tryHandleMigrate(ctx: RouteContext): Promise<boolean> {
     for (const f of findings.filter(fi => fi.type === 'heartbeat')) {
       try {
         const content = readFileSync(f.path, 'utf-8').slice(0, 2000)
-        saveAgentMemory(agentId, `[Importált heartbeat konfig] ${content}`, 'warm', 'heartbeat, konfig, import', true)
+        // source: 'legacy' -- migration exemption (AC-7): content already lived in the
+        // trusted store; this is a provenance-preserving import, not an untrusted ingest.
+        saveAgentMemory(agentId, `[Importált heartbeat konfig] ${content}`, 'warm', 'heartbeat, konfig, import', true, undefined, 'legacy')
         stats.warm++
         imported++
         details.push(`Heartbeat: ${f.name}`)
@@ -197,7 +203,9 @@ export async function tryHandleMigrate(ctx: RouteContext): Promise<boolean> {
             }
           }
 
-          saveAgentMemory(agentId, chunk, tier, keywords, true)
+          // source: 'legacy' -- migration exemption (AC-7): content already lived in the
+          // trusted store; this is a provenance-preserving import, not an untrusted ingest.
+          saveAgentMemory(agentId, chunk, tier, keywords, true, undefined, 'legacy')
           stats[tier as keyof typeof stats]++
           imported++
 
@@ -205,7 +213,8 @@ export async function tryHandleMigrate(ctx: RouteContext): Promise<boolean> {
             await new Promise(r => setTimeout(r, 200))
           }
         } catch {
-          saveAgentMemory(agentId, chunk, 'warm', '', true)
+          // source: 'legacy' -- migration exemption (AC-7): fallback path for already-trusted content.
+          saveAgentMemory(agentId, chunk, 'warm', '', true, undefined, 'legacy')
           stats.warm++
           imported++
         }
