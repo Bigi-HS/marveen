@@ -156,7 +156,8 @@ export function initDatabase(dbPathOverride?: string): void {
       direct_send INTEGER NOT NULL DEFAULT 0,
       layer2 INTEGER NOT NULL DEFAULT 0,
       target_session TEXT,
-      card_id TEXT
+      card_id TEXT,
+      one_shot INTEGER NOT NULL DEFAULT 0
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_status_next ON scheduled_tasks(status, next_run)`)

@@ -85,6 +85,7 @@ export interface ScheduledTask {
   layer2: number
   target_session: string | null
   card_id: string | null
+  one_shot: number
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +99,7 @@ const BBLOCK_COLUMNS = [
   `ALTER TABLE scheduled_tasks ADD COLUMN layer2        INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE scheduled_tasks ADD COLUMN target_session TEXT`,
   `ALTER TABLE scheduled_tasks ADD COLUMN card_id        TEXT`,
+  `ALTER TABLE scheduled_tasks ADD COLUMN one_shot       INTEGER NOT NULL DEFAULT 0`,
 ]
 
 export function applyBBlockColumns(db = getNoaDb()): void {
@@ -250,6 +252,7 @@ export interface CreateTaskParams {
   schedule: string
   description?: string
   status?: 'active' | 'paused'
+  oneShot?: boolean
 }
 
 export function createTask(params: CreateTaskParams, db = getNoaDb()): ScheduledTask {
@@ -266,11 +269,12 @@ export function createTask(params: CreateTaskParams, db = getNoaDb()): Scheduled
   const nextRun = computeNextRun(params.schedule)
   const status = params.status ?? 'active'
   const description = params.description ?? ''
+  const oneShot = params.oneShot === true ? 1 : 0
 
   db.prepare(`
-    INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(params.id, params.agent, params.type, description, params.prompt, params.schedule, nextRun, status, now)
+    INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at, one_shot)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(params.id, params.agent, params.type, description, params.prompt, params.schedule, nextRun, status, now, oneShot)
 
   return db.prepare('SELECT * FROM scheduled_tasks WHERE id = ?').get(params.id) as ScheduledTask
 }
@@ -284,6 +288,7 @@ export interface UpdateTaskPatch {
   status?: 'active' | 'paused'
   skipIfBusy?: boolean
   forceSend?: boolean
+  oneShot?: boolean
 }
 
 export function updateTask(id: string, patch: UpdateTaskPatch, db = getNoaDb()): ScheduledTask {
@@ -312,6 +317,7 @@ export function updateTask(id: string, patch: UpdateTaskPatch, db = getNoaDb()):
   if (patch.status !== undefined) { sets.push('status=?'); values.push(patch.status) }
   if (patch.skipIfBusy !== undefined) { sets.push('skip_if_busy=?'); values.push(patch.skipIfBusy ? 1 : 0) }
   if (patch.forceSend !== undefined) { sets.push('force_send=?'); values.push(patch.forceSend ? 1 : 0) }
+  if (patch.oneShot !== undefined) { sets.push('one_shot=?'); values.push(patch.oneShot ? 1 : 0) }
 
   if (sets.length > 0) {
     values.push(id)
@@ -342,18 +348,19 @@ export function syncTaskToNoa(params: CreateTaskParams, db = getNoaDb()): Schedu
   const nextRun = computeNextRun(params.schedule)
   const status = params.status ?? 'active'
   const description = params.description ?? ''
+  const oneShot = params.oneShot === true ? 1 : 0
 
   if (!existing) {
     db.prepare(`
-      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(params.id, params.agent, params.type, description, params.prompt, params.schedule, nextRun, status, now)
+      INSERT INTO scheduled_tasks (id, agent, type, description, prompt, schedule, next_run, status, created_at, one_shot)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(params.id, params.agent, params.type, description, params.prompt, params.schedule, nextRun, status, now, oneShot)
   } else {
     db.prepare(`
       UPDATE scheduled_tasks
-      SET agent = ?, type = ?, description = ?, prompt = ?, schedule = ?, status = ?, next_run = ?
+      SET agent = ?, type = ?, description = ?, prompt = ?, schedule = ?, status = ?, next_run = ?, one_shot = ?
       WHERE id = ?
-    `).run(params.agent, params.type, description, params.prompt, params.schedule, status, nextRun, params.id)
+    `).run(params.agent, params.type, description, params.prompt, params.schedule, status, nextRun, oneShot, params.id)
   }
 
   return db.prepare('SELECT * FROM scheduled_tasks WHERE id = ?').get(params.id) as ScheduledTask
@@ -381,6 +388,23 @@ function rollForwardFired(
   db.prepare(
     `UPDATE scheduled_tasks SET last_run=?, last_result='fired', next_run=? WHERE id=?`
   ).run(nowS, computeNextRun(task.schedule, basisMs), task.id)
+}
+
+// Auto-disable a one-shot task after a successful fire. Sets status='paused' and
+// records the fire timestamp/result. Does NOT advance next_run (the task will
+// never be evaluated again once paused; the existing sweep query WHERE status='active'
+// excludes it with zero new predicates). The row is kept for audit visibility and
+// can be re-enabled by an operator. NOTE: 'unknown'/'unconfirmed' fires are NOT
+// auto-disabled here (we cannot prove the task ran); only a confirmed 'fired' result
+// triggers expiry (AC4 -- non-fire outcomes leave the task active for retry).
+function expireOneShotFired(
+  task: ScheduledTask,
+  nowS: number,
+  db: ReturnType<typeof getNoaDb>,
+): void {
+  db.prepare(
+    `UPDATE scheduled_tasks SET last_run=?, last_result='fired', status='paused' WHERE id=?`
+  ).run(nowS, task.id)
 }
 
 // Roll next_run forward after an unconfirmable (unknown) send on an effect-bearing
@@ -655,7 +679,7 @@ export function migrateFileBasedTasks(db = getNoaDb(), tasksDir = SCHEDULED_TASK
         let config: {
           schedule?: string; agent?: string; enabled?: boolean; createdAt?: number
           type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string
-          directSend?: boolean; cardId?: string; layer2?: boolean
+          directSend?: boolean; cardId?: string; layer2?: boolean; oneShot?: boolean
         } = {}
         try { config = JSON.parse(readFileSafe(configPath)) } catch { /* use defaults */ }
 
@@ -675,6 +699,7 @@ export function migrateFileBasedTasks(db = getNoaDb(), tasksDir = SCHEDULED_TASK
           layer2: config.layer2 === true,
           targetSession: config.targetSession,
           cardId: config.cardId,
+          oneShot: config.oneShot === true,
         }
 
         if (!isValidCronShape(task.schedule)) {
@@ -689,8 +714,8 @@ export function migrateFileBasedTasks(db = getNoaDb(), tasksDir = SCHEDULED_TASK
         const info = db.prepare(`
           INSERT OR IGNORE INTO scheduled_tasks
             (id, agent, type, description, prompt, schedule, next_run, status, created_at,
-             skip_if_busy, force_send, direct_send, layer2, target_session, card_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             skip_if_busy, force_send, direct_send, layer2, target_session, card_id, one_shot)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           task.name,
           task.agent,
@@ -707,6 +732,7 @@ export function migrateFileBasedTasks(db = getNoaDb(), tasksDir = SCHEDULED_TASK
           task.layer2 ? 1 : 0,
           task.targetSession ?? null,
           task.cardId ?? null,
+          task.oneShot ? 1 : 0,
         )
         if (info.changes > 0) imported++
       } catch (err) {
@@ -757,7 +783,11 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb(), nowMsOverride?:
 
     const result = attemptFireTask(taskDef, row.agent_name, sessions, db)
     if (result === 'fired') {
-      rollForwardFired(taskDef, nowMs, nowS, db)
+      if (taskDef.one_shot) {
+        expireOneShotFired(taskDef, nowS, db)
+      } else {
+        rollForwardFired(taskDef, nowMs, nowS, db)
+      }
       deletePendingRetry(row.task_name, row.agent_name, db)
     } else {
       // 'missing' falls through here too (card 8af09fa0). It used to DELETE the
@@ -798,7 +828,11 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb(), nowMsOverride?:
     const result = attemptFireTask(task, agentName, sessions, db)
 
     if (result === 'fired') {
-      rollForwardFired(task, nowMs, nowS, db)
+      if (task.one_shot) {
+        expireOneShotFired(task, nowS, db)
+      } else {
+        rollForwardFired(task, nowMs, nowS, db)
+      }
     } else if (result === 'budget-paused') {
       // Roll next_run forward so the task is not perpetually due during the
       // pause week. It re-fires at its regular cadence after the marker expires
