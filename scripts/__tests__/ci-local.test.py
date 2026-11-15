@@ -58,6 +58,20 @@ class TestParseArgs(unittest.TestCase):
         self.assertTrue(a['dry_run'])
 
 
+class TestRevGuard(unittest.TestCase):
+    """reject_option_like_rev: a '-'-prefixed head must not reach git as a flag
+    (Chad PR #997 hardening; the git call also uses --verify --end-of-options)."""
+
+    def test_rejects_leading_dash(self):
+        for rev in ('--foo', '-X', '--output=/etc/passwd'):
+            with self.assertRaises(ValueError):
+                c.reject_option_like_rev(rev)
+
+    def test_allows_normal_revs(self):
+        for rev in ('HEAD', 'develop', 'abc1234', 'origin/main', 'HEAD~3'):
+            self.assertEqual(c.reject_option_like_rev(rev), rev)
+
+
 class TestVerdictMapping(unittest.TestCase):
     """Parity with pre-gate-bundle.sh / buster-ci-runner: PASS|WARN -> pass,
     BLOCK -> fail; exit 1 only on BLOCK."""

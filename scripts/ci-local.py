@@ -95,6 +95,15 @@ def verdict_to_exit(verdict):
     return 1 if verdict not in ('PASS', 'WARN') else 0
 
 
+def reject_option_like_rev(rev):
+    """Guard a user-supplied revision: one starting with '-' could be misread by
+    git as an option (Chad PR #997 hardening). Reject it with a clear error.
+    Defense in depth -- the git call also passes --verify --end-of-options."""
+    if rev.startswith('-'):
+        raise ValueError(f'refusing option-like revision: {rev!r}')
+    return rev
+
+
 def compute_drift(local_verdict, posted_ci_status):
     """Compare the local verdict against the posted live ci_status (read-only).
 
@@ -165,10 +174,12 @@ def _resolve_head(args):
                              cwd=str(INSTALL_DIR), capture_output=True,
                              text=True, check=True, timeout=15)
         return 'FETCH_HEAD', out.stdout.strip()
-    out = subprocess.run(['git', 'rev-parse', args['head']],
-                         cwd=str(INSTALL_DIR), capture_output=True,
-                         text=True, check=True, timeout=15)
-    return args['head'], out.stdout.strip()
+    head = reject_option_like_rev(args['head'])
+    out = subprocess.run(
+        ['git', 'rev-parse', '--verify', '--end-of-options', head],
+        cwd=str(INSTALL_DIR), capture_output=True, text=True,
+        check=True, timeout=15)
+    return head, out.stdout.strip()
 
 
 def _run_bundle(checkout_ref, base_branch, dry_run):
