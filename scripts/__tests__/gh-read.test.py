@@ -97,6 +97,29 @@ class TestApiGetOnly(unittest.TestCase):
             ok, _ = g.is_read_only(argv)
             self.assertFalse(ok, f'{argv} must be rejected (implies write body)')
 
+    def test_api_glued_method_rejected(self):
+        # pflag glued/attached shorthand -- verified `gh api -XPOST` parses as a
+        # POST, so these MUST be caught (Thor PR #998 finding, fail-closed).
+        for argv in (['api', '-XPOST', 'repos/x/y/issues'],
+                     ['api', '-X=POST', 'repos/x/y'],
+                     ['api', '-Xpost', 'repos/x/y'],
+                     ['api', '--method=DELETE', 'repos/x/y']):
+            ok, reason = g.is_read_only(argv)
+            self.assertFalse(ok, f'{argv} must be rejected (glued non-GET)')
+            self.assertTrue(reason)
+
+    def test_api_glued_body_rejected(self):
+        # Glued body shorthand -ftitle=hi / -Fa=b also force a request body.
+        for argv in (['api', 'repos/x/y/issues', '-ftitle=hi'],
+                     ['api', 'repos/x/y', '-Fa=b']):
+            ok, _ = g.is_read_only(argv)
+            self.assertFalse(ok, f'{argv} must be rejected (glued write body)')
+
+    def test_api_glued_get_allowed(self):
+        # The legitimate glued GET form must still pass (no over-blocking).
+        ok, _ = g.is_read_only(['api', '-XGET', 'repos/x/y/commits'])
+        self.assertTrue(ok)
+
 
 class TestBuildEnv(unittest.TestCase):
     def test_token_injected_without_mutating_base(self):
