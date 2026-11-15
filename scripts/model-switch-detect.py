@@ -32,6 +32,7 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 DASH = "http://localhost:3420"
@@ -85,8 +86,19 @@ def _read_token(token_file: Path) -> str:
 
 def _read_config_model(agent_id: str) -> str | None:
     """Read model from agents/<agent_id>/agent-config.json, or root agent-config.json."""
+    agents_root = (ROOT / "agents").resolve()
+    agent_config = ROOT / "agents" / agent_id / "agent-config.json"
+    # Guard against path traversal: verify the resolved path stays under agents_root.
+    try:
+        resolved = agent_config.resolve()
+        if not str(resolved).startswith(str(agents_root) + "/"):
+            # Traversal detected (e.g. agent_id contains '../'); skip to fallback.
+            agent_config = None
+    except (OSError, ValueError):
+        agent_config = None
+
     candidates = [
-        ROOT / "agents" / agent_id / "agent-config.json",
+        *([] if agent_config is None else [agent_config]),
         ROOT / "agent-config.json",
     ]
     for path in candidates:
@@ -101,21 +113,31 @@ def _read_config_model(agent_id: str) -> str | None:
 
 def _fetch_stored_model(token: str, agent_id: str) -> str | None:
     """GET warm memory for config.last_model; returns stored value or None."""
-    url = f"{DASH}/api/memories?agent={agent_id}&q={MEMORY_KEY}&category=warm&limit=5"
+    url = f"{DASH}/api/memories?agent={quote(agent_id, safe='')}&q={MEMORY_KEY}&category=warm&limit=5"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             records = json.loads(r.read().decode())
     except Exception:  # noqa: BLE001
         return None
-    # Records returned by keyword search; find the exact config.last_model entry.
+    # Records returned by keyword search; find the config.last_model entry.
+    # Prefer an exact-prefix match ("config.last_model=<value>") over a looser
+    # substring match for determinism when multiple records are returned.
+    exact_prefix = MEMORY_KEY + "="
+    exact_matches: list[str] = []
+    substring_matches: list[str] = []
     for rec in records:
         kw = rec.get("keywords", "")
         content = rec.get("content", "")
-        if MEMORY_KEY in kw or MEMORY_KEY in content:
-            # Content format: "config.last_model=<model>"
+        if content.startswith(exact_prefix):
+            exact_matches.append(content)
+        elif MEMORY_KEY in kw or MEMORY_KEY in content:
             if "=" in content:
-                return content.split("=", 1)[1].strip()
+                substring_matches.append(content)
+    # Return the first exact-prefix match; fall back to first substring match.
+    for content in exact_matches + substring_matches:
+        if "=" in content:
+            return content.split("=", 1)[1].strip()
     return None
 
 
