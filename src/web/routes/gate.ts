@@ -25,6 +25,7 @@ import {
   isGateCiRequired,
   resolveCiStatus,
   runGateCheck,
+  computeDriftNotifications,
   type GithubPrInfo,
 } from '../gate-check.js'
 import {
@@ -40,6 +41,9 @@ import {
   readGateHistory,
   recordInvalidation,
   insertPrRisk,
+  readApprovedSeatsByPr,
+  recordDriftNotified,
+  wasDriftNotified,
 } from '../gate-db.js'
 import { createAgentMessage } from '../../db.js'
 import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
@@ -287,6 +291,30 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
         )
       } catch (riskErr) {
         logger.warn({ pr, err: riskErr }, 'gate check: risk intake write failed (non-fatal)')
+      }
+      // Card 1d1a856e: SHA-drift auto-notify. After every live-head check, find
+      // reviewers who approved a stale SHA and notify them exactly once. This is
+      // OBSERVABILITY ONLY -- it does not alter the gate result. Wrapped so any
+      // failure (message write or dedup insert) cannot change the HTTP response.
+      try {
+        const allSeats = readApprovedSeatsByPr(db, pr)
+        const drifted = computeDriftNotifications(allSeats, result.head_sha)
+        const now = nowEpoch()
+        for (const { reviewer, old_sha } of drifted) {
+          if (!wasDriftNotified(db, pr, old_sha, result.head_sha, reviewer)) {
+            createAgentMessage(
+              'gate',
+              reviewer,
+              `PR #${pr}: your approval on ${old_sha.slice(0, 8)} was invalidated by a new commit (${result.head_sha.slice(0, 8)}). Please re-review.`,
+              false,
+              'high',
+              null,
+            )
+            recordDriftNotified(db, pr, old_sha, result.head_sha, reviewer, now)
+          }
+        }
+      } catch (driftErr) {
+        logger.warn({ pr, err: driftErr }, 'gate check: drift notify failed (non-fatal)')
       }
       json(res, result)
     } catch (err) {
