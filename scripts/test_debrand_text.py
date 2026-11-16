@@ -208,5 +208,83 @@ class ApplyAndHelperTests(unittest.TestCase):
         self.assertFalse(dt.contains_blocklist_token("no token here"))
 
 
+# ---------------------------------------------------------------------------
+# partial_rewrite() -- the 'mixed'-row per-occurrence path (card ec4a775e).
+# Protected spans (blocklist / M3 historical / provenance sentinel) stay
+# verbatim; everything else gets the M1 path + case-preserving bare rewrite.
+# NOT wired into classify/apply (those stay fail-closed).
+# ---------------------------------------------------------------------------
+class PartialRewriteTests(unittest.TestCase):
+    def test_mixed_row_rewrites_bare_keeps_blocklist(self):
+        new, v = dt.partial_rewrite("marveen handles X via com.marveen.channels")
+        self.assertEqual(new, "noa handles X via com.marveen.channels")
+        self.assertEqual(v.action, dt.REWRITE)
+        self.assertEqual(v.tag, "mixed-partial")
+        self.assertEqual(v.new_value, "noa handles X via com.marveen.channels")
+
+    def test_m1_path_and_blocklist_in_one_row(self):
+        new, v = dt.partial_rewrite(
+            "/home/domin/marveen/x references com.marveen.channels"
+        )
+        self.assertEqual(
+            new, "/home/domin/noa/x references com.marveen.channels"
+        )
+        self.assertEqual(v.action, dt.REWRITE)
+        self.assertEqual(v.tag, "mixed-partial")
+        self.assertIn("com.marveen.channels", new)
+
+    def test_m3_span_preserved_inside_partial(self):
+        new, v = dt.partial_rewrite("marveen runs X, formerly marveen")
+        self.assertEqual(new, "noa runs X, formerly marveen")
+        self.assertEqual(v.action, dt.REWRITE)
+        self.assertTrue(v.needs_glance)
+
+    def test_pure_blocklist_row_refuses_unchanged(self):
+        new, v = dt.partial_rewrite("com.marveen.channels")
+        self.assertEqual(new, "com.marveen.channels")
+        self.assertEqual(v.action, dt.REFUSE)
+        self.assertEqual(v.tag, "coordinated-infra")
+
+    def test_pure_m3_row_refuses_unchanged(self):
+        new, v = dt.partial_rewrite("formerly marveen")
+        self.assertEqual(new, "formerly marveen")
+        self.assertEqual(v.action, dt.REFUSE)
+        self.assertEqual(v.tag, "coordinated-infra")
+
+    def test_case_preservation_outside_protected(self):
+        new, v = dt.partial_rewrite("Marveen handles routing")
+        self.assertEqual(new, "Noa handles routing")
+        self.assertEqual(v.action, dt.REWRITE)
+
+    def test_provenance_sentinel_span_preserved(self):
+        new, v = dt.partial_rewrite(
+            "marveen is live but marveen<!--debrand:keep--> stays"
+        )
+        self.assertEqual(
+            new, "noa is live but marveen<!--debrand:keep--> stays"
+        )
+        self.assertEqual(v.action, dt.REWRITE)
+        self.assertEqual(v.tag, "mixed-partial")
+
+
+# ---------------------------------------------------------------------------
+# Thor M1+M3 fold-forward: an M1 path rewrite in _classify_memory must set
+# needs_glance when a residual M3 historical token remains in the new value.
+# ---------------------------------------------------------------------------
+class M1ResidualM3Tests(unittest.TestCase):
+    def test_m1_path_with_residual_m3_needs_glance(self):
+        v = dt.classify(
+            "/home/domin/marveen/x, formerly marveen", context="memory"
+        )
+        self.assertEqual(v.action, dt.REWRITE)
+        self.assertEqual(v.new_value, "/home/domin/noa/x, formerly marveen")
+        self.assertTrue(v.needs_glance)
+
+    def test_m1_path_without_m3_no_glance(self):
+        v = dt.classify("/home/domin/marveen/store", context="memory")
+        self.assertEqual(v.action, dt.REWRITE)
+        self.assertFalse(v.needs_glance)
+
+
 if __name__ == "__main__":
     unittest.main()

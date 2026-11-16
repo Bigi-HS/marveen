@@ -177,9 +177,11 @@ def _classify_memory(value: str, key: str | None) -> Verdict:
     if _matches_blocklist(value):
         return Verdict(REFUSE, tag="coordinated-infra")
 
-    # 4. M1 embedded path prefix.
+    # 4. M1 embedded path prefix. Thor M1+M3 fold-forward: if a residual historical
+    # token survives the path rewrite, flag needs_glance so it is surfaced.
     if _A1_PATH.search(value):
-        return Verdict(REWRITE, new_value=_A1_PATH.sub("/home/domin/noa", value))
+        nv = _A1_PATH.sub("/home/domin/noa", value)
+        return Verdict(REWRITE, new_value=nv, needs_glance=_matches_historical(nv))
 
     # 5. M3 historical marker -> KEEP (conservative; false-keep safer than false-rewrite).
     if _matches_historical(value):
@@ -235,6 +237,68 @@ def apply(value: str, context: str = "code", key: str | None = None):
     if v.action == REWRITE:
         return v.new_value, v
     return value, v
+
+
+def _protected_spans(value: str):
+    """Collect-and-merge the verbatim-keep char ranges of `value`.
+
+    Union of every match span of each blocklist pattern, each M3 historical pattern,
+    and each literal occurrence of the provenance sentinel. Overlapping/adjacent spans
+    are coalesced into a sorted non-overlapping list of (start, end) tuples.
+    """
+    spans = []
+    for pat in _BLOCKLIST_PATTERNS + _M3_HISTORICAL:
+        for m in pat.finditer(value):
+            spans.append((m.start(), m.end()))
+    start = value.find(_PROVENANCE_SENTINEL)
+    while start != -1:
+        spans.append((start, start + len(_PROVENANCE_SENTINEL)))
+        start = value.find(_PROVENANCE_SENTINEL, start + 1)
+    spans.sort()
+    merged = []
+    for s, e in spans:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def partial_rewrite(value: str):
+    """Per-occurrence partial rewrite for a 'mixed' memory row. Returns (new_value, Verdict).
+
+    For the prod-run 'mixed' path ONLY -- NOT wired into classify/apply, which stay
+    fail-closed (a whole-value blocklist match there still REFUSES). Here instead we
+    keep the coordinated-infra / M3-historical / provenance-sentinel spans verbatim and
+    rewrite only the UNPROTECTED text, so a value like
+    "marveen handles X via com.marveen.channels" migrates the bare `marveen` while
+    leaving `com.marveen.channels` intact.
+
+    Each unprotected segment is transformed M1-path-first then case-preservingly
+    (case_map(_A1_PATH.sub(...))). If nothing outside the protected spans changed, the
+    row is effectively pure-protected -> REFUSE(coordinated-infra), value unchanged.
+    Otherwise REWRITE(mixed-partial), with needs_glance set when a historical marker is
+    present (the kept span warrants a human glance).
+    """
+    spans = _protected_spans(value)
+    parts = []
+    pos = 0
+    for s, e in spans:
+        seg = value[pos:s]
+        parts.append(case_map(_A1_PATH.sub("/home/domin/noa", seg)))
+        parts.append(value[s:e])
+        pos = e
+    tail = value[pos:]
+    parts.append(case_map(_A1_PATH.sub("/home/domin/noa", tail)))
+    result = "".join(parts)
+    if result == value:
+        return value, Verdict(REFUSE, tag="coordinated-infra")
+    return result, Verdict(
+        REWRITE,
+        tag="mixed-partial",
+        new_value=result,
+        needs_glance=_matches_historical(value),
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover -- thin CLI shell (dry-run report)

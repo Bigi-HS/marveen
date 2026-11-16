@@ -219,6 +219,60 @@ class ContentTransformTests(unittest.TestCase):
             self.assertEqual(n, 3)
 
 
+class MixedManifestTests(unittest.TestCase):
+    def test_mixed_row_partial_rewrite_keeps_blocklist(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "src.db")
+            tgt = os.path.join(d, "noa.db")
+            manifest = os.path.join(d, "review.json")
+            # A 'mixed' row: a migratable bare `marveen` plus a blocklist token.
+            _make_source(
+                src,
+                [{"id": 1, "content": "marveen routes via com.marveen.channels"}],
+            )
+            with open(manifest, "w") as f:
+                json.dump({"1": "mixed"}, f)
+            r = _run_cli(
+                ["--source", src, "--target", tgt, "--review-manifest", manifest]
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            conn = sqlite3.connect(tgt)
+            content = conn.execute(
+                "SELECT content FROM memories WHERE id=1"
+            ).fetchone()[0]
+            conn.close()
+            self.assertEqual(content, "noa routes via com.marveen.channels")
+            self.assertIn("com.marveen.channels", content)
+            self.assertNotIn("com.noa.channels", content)
+
+    def test_row_count_parity_with_mixed_row(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "src.db")
+            tgt = os.path.join(d, "noa.db")
+            manifest = os.path.join(d, "review.json")
+            _make_source(
+                src,
+                [
+                    {"id": 1, "content": "marveen routes via com.marveen.channels"},
+                    {"id": 2, "content": "plain note"},
+                    {"id": 3, "content": "formerly marveen"},
+                ],
+            )
+            # id 1 is the mixed row; id 3 is a blocklist-free M3 historical row
+            # (no gate needed). The gate only fires on blocklist-token rows, so
+            # review id 1 (it has com.marveen.channels).
+            with open(manifest, "w") as f:
+                json.dump({"1": "mixed"}, f)
+            r = _run_cli(
+                ["--source", src, "--target", tgt, "--review-manifest", manifest]
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            conn = sqlite3.connect(tgt)
+            n = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            conn.close()
+            self.assertEqual(n, 3)
+
+
 class ReportModeTests(unittest.TestCase):
     def test_report_does_not_create_target(self):
         with tempfile.TemporaryDirectory() as d:
