@@ -37,6 +37,7 @@ from debrand_text import (  # noqa: E402
     apply as debrand_apply,
     classify as debrand_classify,
     contains_blocklist_token,
+    partial_rewrite as debrand_partial_rewrite,
 )
 
 # Tables with a custom transform (everything else is copied verbatim).
@@ -190,6 +191,8 @@ def migrate_memories(src, dst, manifest=None):
         # (REWRITE applies; REFUSE/NOOP leave content unchanged).
         if manifest.get(str(r["id"])) == "keep":
             content = raw
+        elif manifest.get(str(r["id"])) == "mixed":
+            content, _verdict = debrand_partial_rewrite(raw)
         else:
             content, _verdict = debrand_apply(raw, context="memory")
         out.append(
