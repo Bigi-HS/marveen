@@ -40,6 +40,8 @@ describe('canary - healthy', () => {
       nowMs: 1700000010000,
       executor: async () => {},
       canary: healthy,
+      rollback: async () => {},
+      alert: async () => {},
     })
     expect(res.deployed).toBe(true)
     expect(res.rolledBack).toBeUndefined()
@@ -54,6 +56,8 @@ describe('canary - healthy', () => {
       nowMs: 1700000011000,
       executor: async () => { throw new Error('build failed') },
       canary: async () => { canaryRan = true; return { healthy: true, detail: 'x' } },
+      rollback: async () => {},
+      alert: async () => {},
     })
     expect(res.deployed).toBe(false)
     expect(res.error).toMatch(/build failed/)
@@ -68,6 +72,7 @@ describe('canary - unhealthy -> deterministic auto-rollback (Inv-10)', () => {
     const first = approvedGreenCandidate('v1.0.0+a')
     await deployRelease(db, first, { trigger: 'window' }, {
       nowMs: 1700000020000, executor: async () => {}, canary: healthy,
+      rollback: async () => {}, alert: async () => {},
     })
 
     const second = approvedGreenCandidate('v1.1.0+b')
@@ -158,5 +163,70 @@ describe('Inv-10 enforcement: auto fix-window deploy requires a canary', () => {
     })
     expect(res.deployed).toBe(true)
     expect(getReleaseRow(db, id)?.deploy_result).toBe('ok')
+  })
+})
+
+describe('Inv-10 enforcement: auto fix-window requires the COMPLETE safety net (slice 4a)', () => {
+  // D2=AUTO removed the closing human, so an unattended window deploy must be able
+  // to DETECT (canary), REVERT (rollback), and ANNOUNCE (alert) a failure before it
+  // starts -- otherwise an auto-rollback could happen silently, or a failed canary
+  // could leave a broken build live with no way to revert. All three are required.
+
+  it('throws (before the executor) if a window deploy has a canary + rollback but NO alert -- an auto-rollback must never be silent', async () => {
+    const id = approvedGreenCandidate()
+    let ran = false
+    await expect(
+      deployRelease(db, id, { trigger: 'window' }, {
+        nowMs: 1700000040000,
+        executor: async () => { ran = true },
+        canary: healthy,
+        rollback: async () => {},
+        // no alert
+      })
+    ).rejects.toThrow(/alert.*Inv-10/i)
+    expect(ran).toBe(false)
+    expect(getReleaseRow(db, id)?.deployed_at).toBeNull()
+  })
+
+  it('throws (before the executor) if a window deploy has a canary + alert but NO rollback -- a failed canary could not actually revert', async () => {
+    const id = approvedGreenCandidate()
+    let ran = false
+    await expect(
+      deployRelease(db, id, { trigger: 'window' }, {
+        nowMs: 1700000041000,
+        executor: async () => { ran = true },
+        canary: healthy,
+        alert: async () => {},
+        // no rollback
+      })
+    ).rejects.toThrow(/rollback.*Inv-10/i)
+    expect(ran).toBe(false)
+    expect(getReleaseRow(db, id)?.deployed_at).toBeNull()
+  })
+
+  it('deploys a window release once canary + rollback + alert are ALL present', async () => {
+    const id = approvedGreenCandidate()
+    const res = await deployRelease(db, id, { trigger: 'window' }, {
+      nowMs: 1700000042000,
+      executor: async () => {},
+      canary: healthy,
+      rollback: async () => {},
+      alert: async () => {},
+    })
+    expect(res.deployed).toBe(true)
+    expect(getReleaseRow(db, id)?.deploy_result).toBe('ok')
+  })
+
+  it('does NOT mandate rollback/alert for a manual quick-build (Boss-GO click is its net)', async () => {
+    const id = approvedGreenCandidate()
+    // A manual deploy with only a (failing) canary and no rollback/alert still runs;
+    // the missing best-effort deps are tolerated, the revert is recorded.
+    const res = await deployRelease(db, id, { trigger: 'manual', manualBossGoClick: true }, {
+      nowMs: 1700000043000,
+      executor: async () => {},
+      canary: unhealthy,
+    })
+    expect(res.rolledBack).toBe(true)
+    expect(getReleaseRow(db, id)?.deploy_result).toBe('rolled_back')
   })
 })
