@@ -146,6 +146,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "mcp__.*|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/egress-pii-scan.py",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "SessionEnd": [

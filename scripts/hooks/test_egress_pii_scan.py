@@ -145,6 +145,29 @@ class IsBashEgressTests(unittest.TestCase):
             "curl http://127.0.0.1:5678/api/status"
         ))
 
+    def test_localhost_5678_webhook_is_egress(self):
+        """GAP-FIX: the `localhost` host-spelling of the n8n webhook is egress.
+        v1 only matched 127.0.0.1, so `curl http://localhost:5678/webhook/...`
+        slipped the scan -- a real exfil hole (n8n forwards the webhook outward).
+        """
+        self.assertTrue(hook._is_bash_egress(
+            "curl -X POST http://localhost:5678/webhook/abc123 -d '{}'"
+        ))
+
+    def test_ipv6_loopback_5678_webhook_is_egress(self):
+        """GAP-FIX: the `[::1]` IPv6-loopback spelling of the n8n webhook is egress."""
+        self.assertTrue(hook._is_bash_egress(
+            "curl -X POST http://[::1]:5678/webhook/abc123 -d '{}'"
+        ))
+
+    def test_localhost_5678_non_webhook_is_not_egress(self):
+        """Path-anchor holds for the localhost spelling too: :5678 but NOT the
+        /webhook/ path is still not egress (n8n REST/UI is not the webhook surface).
+        """
+        self.assertFalse(hook._is_bash_egress(
+            "curl http://localhost:5678/rest/workflows"
+        ))
+
 
 # ---------------------------------------------------------------------------
 # Subprocess integration tests (exit codes via main())
@@ -193,6 +216,16 @@ class PositiveBlockTests(unittest.TestCase):
             "-d '{\"phone\": \"+36701234567\"}'"
         ))
         self.assertEqual(r.returncode, 2, "n8n webhook with phone must block")
+
+    def test_n8n_webhook_localhost_spelling_with_phone_blocked(self):
+        """GAP-FIX end-to-end: the `localhost:5678/webhook/` spelling carrying a
+        phone number must BLOCK (exit 2), same as the 127.0.0.1 spelling.
+        """
+        r = _run(_bash(
+            "curl -X POST http://localhost:5678/webhook/zepp-data "
+            "-d '{\"phone\": \"+36701234567\"}'"
+        ))
+        self.assertEqual(r.returncode, 2, "localhost:5678 webhook with phone must block")
 
     def test_nonlocal_https_curl_with_email_blocked(self):
         """Bash curl to a non-local https target carrying an email -> exit 2."""

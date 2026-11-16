@@ -36,6 +36,13 @@ const DESTRUCTIVE_BASH_HOOK_MARKER = 'guardrail-destructive-bash.py'
 // directory deny, .env file read deny, external curl mutating-method deny.
 const PERMISSION_RULES_HOOK_MARKER = 'guardrail-permission-rules.py'
 
+// And the PreToolUse outbound PII/content egress-filter (SEC-119, card 821488ac):
+// scans data-carrying MCP sends (gmail_send / drive_upload) and Bash curl/wget to
+// egress surfaces (n8n webhook, non-local http) for PII before the send. Agent-
+// generic -- it no-ops (exit 0) for every tool that is not a matched egress
+// surface, so it is safe to backfill fleet-wide like the other guards.
+const EGRESS_PII_HOOK_MARKER = 'egress-pii-scan.py'
+
 // And the SessionStart per-agent enforcement reminder (card 03a4f57d): the hook is
 // agent-generic (it no-ops for agents without a configured check) so it is safe to
 // backfill fleet-wide -- hibiki gets the inbox-check, claudia the email ask-first.
@@ -152,6 +159,20 @@ export function ensurePermissionRulesHook(target: HooksBlock, template: HooksBlo
   if (entries.length === 0) return false
   const existing = target.PreToolUse ?? []
   if (existing.some(e => entryReferences(e, PERMISSION_RULES_HOOK_MARKER))) return false
+  target.PreToolUse = [...existing, ...entries]
+  return true
+}
+
+// Targeted idempotent merge of the PreToolUse egress-PII filter (SEC-119, card
+// 821488ac): backfills the egress-pii-scan.py guard into every existing agent at
+// the next boot so the fleet-wide egress surface (MCP gmail/drive sends + Bash
+// curl/wget to n8n-webhook / non-local hosts) is PII-scanned. ADD-only; never
+// removes or rewrites an agent's own PreToolUse hooks.
+export function ensureEgressPiiHook(target: HooksBlock, template: HooksBlock): boolean {
+  const entries = (template.PreToolUse ?? []).filter(e => entryReferences(e, EGRESS_PII_HOOK_MARKER))
+  if (entries.length === 0) return false  // template has no egress-PII hook -> nothing to merge
+  const existing = target.PreToolUse ?? []
+  if (existing.some(e => entryReferences(e, EGRESS_PII_HOOK_MARKER))) return false  // already present
   target.PreToolUse = [...existing, ...entries]
   return true
 }
@@ -348,6 +369,7 @@ export function ensureAgentHooks(name: string): boolean {
     const askFirstChanged = ensureAskFirstHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const destructiveBashChanged = ensureDestructiveBashHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const permRulesChanged = ensurePermissionRulesHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
+    const egressPiiChanged = ensureEgressPiiHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const sessionEnforceChanged = ensureSessionEnforceHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const freshnessNudgeChanged = ensureFreshnessNudgeHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
     const gaugeReceiveChanged = ensureGaugeReceiveHook(existing.hooks as HooksBlock, tpl.hooks as HooksBlock)
@@ -363,6 +385,7 @@ export function ensureAgentHooks(name: string): boolean {
     // without a manual file-edit, and is a no-op when the flag is ON.
     const gateHealedChanged = applyFlagGate(existing.hooks as HooksBlock)
     changed = memChanged || guardChanged || askFirstChanged || destructiveBashChanged || permRulesChanged
+      || egressPiiChanged
       || sessionEnforceChanged || freshnessNudgeChanged || gaugeReceiveChanged || sessionEndMarkerChanged
       || checkpointReplayChanged || checkpointWriteChanged || gateHealedChanged
   }
