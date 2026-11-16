@@ -74,8 +74,11 @@ PII_PATTERNS = {
 #     does not make it safe: cover every loopback form (127.0.0.1 / localhost /
 #     [::1]) on :5678/webhook/. (v1 matched only 127.0.0.1, letting the
 #     `localhost:5678/webhook/` spelling slip the scan -- a real exfil hole.)
+#     `/+webhook/` matches one OR MORE slashes: `//webhook/` (double-slash) is a
+#     valid URL that n8n normalizes to the same route, so it must not slip the
+#     scan (a single `/webhook/` anchor let `localhost:5678//webhook/` bypass).
 _N8N_WEBHOOK_RX = re.compile(
-    r"https?://(?:127\.0\.0\.1|localhost|\[::1\]):5678/webhook/",
+    r"https?://(?:127\.0\.0\.1|localhost|\[::1\]):5678/+webhook/",
     re.IGNORECASE,
 )
 # (b) Non-local http(s) target via curl or wget.

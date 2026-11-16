@@ -168,6 +168,23 @@ class IsBashEgressTests(unittest.TestCase):
             "curl http://localhost:5678/rest/workflows"
         ))
 
+    def test_double_slash_5678_webhook_is_egress(self):
+        """GAP-FIX (Chad #1019): a double-slash `//webhook/` is a valid URL that
+        n8n normalizes to the same route, so it is egress. A single `/webhook/`
+        anchor let `localhost:5678//webhook/` bypass BOTH checks (the n8n RX
+        missed the extra slash and _CURL_NONLOCAL_RX excludes localhost) -- a
+        real exfil hole. `/+webhook/` (one or more slashes) closes it.
+        """
+        self.assertTrue(hook._is_bash_egress(
+            "curl -X POST http://localhost:5678//webhook/secret -d user@example.com"
+        ))
+
+    def test_double_slash_127_5678_webhook_is_egress(self):
+        """GAP-FIX (Chad #1019): double-slash on the 127.0.0.1 spelling too."""
+        self.assertTrue(hook._is_bash_egress(
+            "curl -X POST http://127.0.0.1:5678//webhook/secret -d user@example.com"
+        ))
+
 
 # ---------------------------------------------------------------------------
 # Subprocess integration tests (exit codes via main())
@@ -226,6 +243,17 @@ class PositiveBlockTests(unittest.TestCase):
             "-d '{\"phone\": \"+36701234567\"}'"
         ))
         self.assertEqual(r.returncode, 2, "localhost:5678 webhook with phone must block")
+
+    def test_n8n_webhook_double_slash_with_email_blocked(self):
+        """GAP-FIX end-to-end (Chad #1019): the double-slash `//webhook/` bypass
+        carrying an email must BLOCK (exit 2). Before `/+webhook/` this slipped
+        both checks and the PII-scan never ran.
+        """
+        r = _run(_bash(
+            "curl -X POST http://localhost:5678//webhook/exfil "
+            "-d 'user@example.com'"
+        ))
+        self.assertEqual(r.returncode, 2, "double-slash n8n webhook with email must block")
 
     def test_nonlocal_https_curl_with_email_blocked(self):
         """Bash curl to a non-local https target carrying an email -> exit 2."""
