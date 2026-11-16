@@ -255,29 +255,92 @@ export function deployGate(
 // wrap it without changing this convergence point.
 export type DeployExecutor = () => void | Promise<void>
 
+// Inv-10 post-deploy canary. Returns healthy=false to trigger auto-rollback. The
+// real implementation runs the fleet-deploy-verify 4-point check + the P0
+// error-rate over a fixed observation window; it is injected so the rollback
+// logic is testable without touching the live system.
+export interface CanaryResult {
+  healthy: boolean
+  detail: string
+}
+export type CanaryCheck = () => CanaryResult | Promise<CanaryResult>
+
+// Restores the previous live version (dist.backup-*). Injected; the real one
+// shells out to rollback.sh.
+export type RollbackFn = (prevVersion: string | null) => void | Promise<void>
+
+// Boss notification. Auto-rollback is the explicit exception to quiet-mode, so
+// this always fires on a rollback.
+export type DeployAlert = (message: string) => void | Promise<void>
+
+export interface DeployDeps {
+  nowMs: number
+  executor: DeployExecutor
+  // Inv-10: REQUIRED for the automatic fix-window trigger (it replaces the human
+  // removed by D2=AUTO). Optional for a manual quick-build whose primary safety
+  // net is the Boss-GO click; honored when present. When supplied it runs after a
+  // successful executor and drives auto-rollback on failure.
+  canary?: CanaryCheck
+  rollback?: RollbackFn
+  alert?: DeployAlert
+}
+
 export interface DeployResult {
   deployed: boolean
   gate: DeployGateDecision
   // Set only when the gate passed but the deploy executor itself failed. The
   // ledger row carries deploy_result='error' in that case.
   error?: string
+  // Set when the canary failed and the deploy was automatically reverted. The
+  // ledger row carries deploy_result='rolled_back'.
+  rolledBack?: boolean
+  // The canary outcome when a canary ran.
+  canary?: CanaryResult
+}
+
+// Best-effort call of an optional async dep; never throws (an alert/rollback
+// failure must not mask the deploy outcome). Returns the thrown error, if any.
+async function safeCall(fn: (() => void | Promise<void>) | undefined): Promise<string | null> {
+  if (!fn) return null
+  try {
+    await fn()
+    return null
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err)
+  }
 }
 
 // The single deploy convergence point (Inv-5). Enforces the gate; on pass, runs
-// the executor and stamps the ledger (deployed_at, deploy_result, deploy_kind,
-// prev_version) through the sanctioned write-path. On executor failure, records
-// deploy_result='error' and leaves deployed_at NULL (the attempt is not live and
-// may be retried). The canary/auto-rollback (Inv-10) wraps the executor next
-// slice, able to flip a stamped 'ok' to 'rolled_back'.
+// the executor, then (Inv-10) the canary over its observation window and, on an
+// unhealthy canary, AUTOMATICALLY rolls back to prev_version. Every ledger write
+// goes through the sanctioned write-path.
+//
+// deploy_result outcomes: 'ok' (deployed + canary healthy), 'rolled_back' (deployed
+// then auto-reverted on an unhealthy canary), 'error' (executor failed, never went
+// live, deployed_at stays NULL, retryable).
+//
+// Inv-10 enforcement: the automatic fix-window trigger ('window') MUST supply a
+// canary -- it replaces the human the D2=AUTO decision removed. Deploying auto
+// without a canary is a misconfiguration and throws BEFORE the executor runs. A
+// manual quick-build may omit the canary (its net is the Boss-GO click) but a
+// supplied canary is still honored.
 export async function deployRelease(
   db: Database.Database,
   ledgerId: number,
   input: DeployGateInput,
-  deps: { nowMs: number; executor: DeployExecutor }
+  deps: DeployDeps
 ): Promise<DeployResult> {
   const gate = deployGate(db, ledgerId, input)
   if (!gate.deployable) {
     return { deployed: false, gate }
+  }
+
+  // Inv-10: an automatic deploy without a canary has no safety net -- refuse it
+  // before anything goes live.
+  if (input.trigger === 'window' && !deps.canary) {
+    throw new Error(
+      `release-pipeline: auto fix-window deploy of id=${ledgerId} requires a canary (Inv-10)`
+    )
   }
 
   // The version currently live (if any) becomes this deploy's rollback target.
@@ -304,6 +367,40 @@ export async function deployRelease(
     return { deployed: false, gate, error: msg }
   }
 
+  // Inv-10 canary: observe the just-deployed build; an unhealthy signal triggers
+  // deterministic auto-rollback (no human/LLM judgement).
+  if (deps.canary) {
+    const canary = await deps.canary()
+    if (!canary.healthy) {
+      // Best-effort restore of the previous live version, then record the revert
+      // and alert the Boss (the explicit exception to quiet-mode).
+      const rollbackErr = await safeCall(deps.rollback ? () => deps.rollback!(prevVersion) : undefined)
+      sanctioned(db, () => {
+        db.prepare(
+          `UPDATE release_ledger
+           SET deployed_at = ?, deploy_result = 'rolled_back', deploy_kind = ?, prev_version = ?
+           WHERE id = ?`
+        ).run(deps.nowMs, input.trigger, prevVersion, ledgerId)
+      })
+      const alertMsg =
+        `P9 auto-rollback: deploy of ledger id=${ledgerId} failed canary (${canary.detail}); ` +
+        `reverted to ${prevVersion ?? 'no previous version'}` +
+        (rollbackErr ? ` -- WARNING rollback itself errored: ${rollbackErr}` : '')
+      await safeCall(deps.alert ? () => deps.alert!(alertMsg) : undefined)
+      return { deployed: false, gate, rolledBack: true, canary }
+    }
+    // Healthy canary -> confirmed deploy.
+    sanctioned(db, () => {
+      db.prepare(
+        `UPDATE release_ledger
+         SET deployed_at = ?, deploy_result = 'ok', deploy_kind = ?, prev_version = ?
+         WHERE id = ?`
+      ).run(deps.nowMs, input.trigger, prevVersion, ledgerId)
+    })
+    return { deployed: true, gate, canary }
+  }
+
+  // No canary (manual quick-build) -> the Boss-GO click is the net.
   sanctioned(db, () => {
     db.prepare(
       `UPDATE release_ledger

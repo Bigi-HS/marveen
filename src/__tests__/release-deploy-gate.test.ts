@@ -26,6 +26,9 @@ import {
 
 let db: Database.Database
 const validMeta = { suite_test_count: 56, min_required_tests: 10 }
+// The window trigger now requires a canary (Inv-10, slice 3); a healthy stub
+// keeps these gate/skeleton tests focused on deployability, not canary behavior.
+const healthyCanary = async () => ({ healthy: true, detail: 'ok' })
 
 beforeEach(() => {
   db = new Database(':memory:')
@@ -97,7 +100,7 @@ describe('deployGate', () => {
 
   it('blocks an already-deployed row (idempotency)', async () => {
     const id = approvedGreenCandidate()
-    await deployRelease(db, id, { trigger: 'window' }, { nowMs: 1700000001000, executor: async () => {} })
+    await deployRelease(db, id, { trigger: 'window' }, { nowMs: 1700000001000, executor: async () => {}, canary: healthyCanary })
     const d = deployGate(db, id, { trigger: 'window' })
     expect(d.deployable).toBe(false)
     expect(d.code).toBe('already_deployed')
@@ -145,7 +148,7 @@ describe('deployRelease', () => {
       db,
       id,
       { trigger: 'window' },
-      { nowMs: 1700000003000, executor: async () => { ran = true } }
+      { nowMs: 1700000003000, executor: async () => { ran = true }, canary: healthyCanary }
     )
     expect(ran).toBe(true)
     expect(res.deployed).toBe(true)
@@ -169,9 +172,9 @@ describe('deployRelease', () => {
 
   it('sets prev_version to the previously-deployed version (rollback target, Inv-6)', async () => {
     const first = approvedGreenCandidate('v1.0.0+a')
-    await deployRelease(db, first, { trigger: 'window' }, { nowMs: 1700000005000, executor: async () => {} })
+    await deployRelease(db, first, { trigger: 'window' }, { nowMs: 1700000005000, executor: async () => {}, canary: healthyCanary })
     const second = approvedGreenCandidate('v1.1.0+b')
-    await deployRelease(db, second, { trigger: 'window' }, { nowMs: 1700000006000, executor: async () => {} })
+    await deployRelease(db, second, { trigger: 'window' }, { nowMs: 1700000006000, executor: async () => {}, canary: healthyCanary })
     expect(getReleaseRow(db, second)?.prev_version).toBe('v1.0.0+a')
   })
 
@@ -181,7 +184,7 @@ describe('deployRelease', () => {
       db,
       id,
       { trigger: 'window' },
-      { nowMs: 1700000007000, executor: async () => { throw new Error('build failed') } }
+      { nowMs: 1700000007000, executor: async () => { throw new Error("build failed") }, canary: healthyCanary }
     )
     expect(res.deployed).toBe(false)
     expect(res.error).toMatch(/build failed/)
@@ -192,7 +195,7 @@ describe('deployRelease', () => {
 
   it('stamps the ledger through the sanctioned path (no flag leak afterwards)', async () => {
     const id = approvedGreenCandidate()
-    await deployRelease(db, id, { trigger: 'window' }, { nowMs: 1700000008000, executor: async () => {} })
+    await deployRelease(db, id, { trigger: 'window' }, { nowMs: 1700000008000, executor: async () => {}, canary: healthyCanary })
     // A raw INSERT must still abort -> the deploy stamp cleared its sentinel.
     expect(() => {
       db.prepare("INSERT INTO release_ledger (version, git_sha, built_at) VALUES ('leak', 'l', 1)").run()
