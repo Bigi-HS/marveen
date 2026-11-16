@@ -276,10 +276,12 @@ export type DeployAlert = (message: string) => void | Promise<void>
 export interface DeployDeps {
   nowMs: number
   executor: DeployExecutor
-  // Inv-10: REQUIRED for the automatic fix-window trigger (it replaces the human
-  // removed by D2=AUTO). Optional for a manual quick-build whose primary safety
-  // net is the Boss-GO click; honored when present. When supplied it runs after a
-  // successful executor and drives auto-rollback on failure.
+  // Inv-10 safety net. ALL THREE are REQUIRED for the automatic fix-window trigger
+  // (D2=AUTO removed the closing human): the canary detects a bad deploy, the
+  // rollback reverts it, and the alert surfaces it to the Boss. For a manual
+  // quick-build they are optional -- its net is the Boss-GO click -- but any that
+  // are supplied are still honored. The canary runs after a successful executor
+  // and drives auto-rollback on an unhealthy signal.
   canary?: CanaryCheck
   rollback?: RollbackFn
   alert?: DeployAlert
@@ -320,10 +322,12 @@ async function safeCall(fn: (() => void | Promise<void>) | undefined): Promise<s
 // live, deployed_at stays NULL, retryable).
 //
 // Inv-10 enforcement: the automatic fix-window trigger ('window') MUST supply a
-// canary -- it replaces the human the D2=AUTO decision removed. Deploying auto
-// without a canary is a misconfiguration and throws BEFORE the executor runs. A
-// manual quick-build may omit the canary (its net is the Boss-GO click) but a
-// supplied canary is still honored.
+// COMPLETE safety net -- canary (detect) + rollback (revert) + alert (surface) --
+// because D2=AUTO removed the closing human. A window deploy that cannot detect,
+// revert, OR announce a failure is a misconfiguration and throws BEFORE the
+// executor runs (an auto-rollback must never happen silently, and a failed canary
+// with no rollback could not actually revert). A manual quick-build may omit them
+// (its net is the Boss-GO click) but any supplied dep is still honored.
 export async function deployRelease(
   db: Database.Database,
   ledgerId: number,
@@ -335,12 +339,24 @@ export async function deployRelease(
     return { deployed: false, gate }
   }
 
-  // Inv-10: an automatic deploy without a canary has no safety net -- refuse it
-  // before anything goes live.
-  if (input.trigger === 'window' && !deps.canary) {
-    throw new Error(
-      `release-pipeline: auto fix-window deploy of id=${ledgerId} requires a canary (Inv-10)`
-    )
+  // Inv-10: an automatic (window) deploy must carry its COMPLETE safety net before
+  // anything goes live -- the canary that detects a bad deploy, the rollback that
+  // reverts it, and the Boss alert that surfaces it. D2=AUTO removed the closing
+  // human, so a window deploy missing any of the three cannot be safely aborted
+  // and is refused BEFORE the executor runs. (A manual quick-build is exempt: its
+  // net is the Boss-GO click.)
+  if (input.trigger === 'window') {
+    const missing: string[] = []
+    if (!deps.canary) missing.push('canary')
+    if (!deps.rollback) missing.push('rollback')
+    if (!deps.alert) missing.push('alert')
+    if (missing.length > 0) {
+      throw new Error(
+        `release-pipeline: auto fix-window deploy of id=${ledgerId} requires ${missing.join(' + ')} ` +
+          `(Inv-10) -- an unattended auto-deploy must have a complete safety net ` +
+          `(canary detect + deterministic rollback + Boss alert)`
+      )
+    }
   }
 
   // The version currently live (if any) becomes this deploy's rollback target.
