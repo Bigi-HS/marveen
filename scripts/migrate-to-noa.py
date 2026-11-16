@@ -30,6 +30,15 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCHEMA_PATH = os.path.join(HERE, "schema-noa.sql")
 
+# The de-brand engine lives in the same scripts/ dir; make it importable whether this
+# script is run as `python3 scripts/migrate-to-noa.py` or from elsewhere.
+sys.path.insert(0, HERE)
+from debrand_text import (  # noqa: E402
+    apply as debrand_apply,
+    classify as debrand_classify,
+    contains_blocklist_token,
+)
+
 # Tables with a custom transform (everything else is copied verbatim).
 REDESIGNED = {"memories", "agent_messages", "sessions", "scheduled_tasks"}
 # Source-only tables that are never migrated as base tables.
@@ -37,7 +46,7 @@ SKIP = {"sqlite_sequence"}
 
 PRIORITY_MAP = {"urgent": 100, "high": 75, "normal": 50, "low": 25}
 DEFAULT_PRIORITY = 50
-DEFAULT_AGENT = "marveen"
+DEFAULT_AGENT = "noa"  # DA-5 flip (was "marveen"): fallback agent_id for defaulted rows
 BATCH = 1000  # rows per insert transaction (OQ-3)
 
 warnings = []
@@ -123,17 +132,72 @@ def build_chat_to_agent(src, src_tabs):
     return mapping
 
 
-def migrate_memories(src, dst):
+def blocklist_prescan(src):
+    """Return [{id, content}] for every memories row whose content carries a blocklist
+    (coordinated-infra) `marveen` token. These rows must be human-reviewed BEFORE the
+    rewrite transform runs (AM-3): a historical memory quoting com.marveen.channels must
+    not silently become com.noa.channels.
+    """
+    cols = table_columns(src, "memories")
+    hits = []
+    for row in src.execute("SELECT * FROM memories"):
+        r = dict(zip(cols, row))
+        content = r.get("content")
+        if content is not None and contains_blocklist_token(content):
+            hits.append({"id": r["id"], "content": content})
+    return hits
+
+
+def load_review_manifest(path):
+    """Load the review-manifest sidecar: {"<row-id>": "keep"|"skip"|"mixed"}.
+
+    Missing file => empty manifest (every row unreviewed). Keys are stringified ids.
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        data = json.load(f)
+    return {str(k): v for k, v in data.items()}
+
+
+def assert_prescan_reviewed(prescan_rows, manifest):
+    """HARD GATE (AM-3): every blocklist-token row id must be a key in the manifest.
+
+    If ANY prescan row is unreviewed, print the list to stderr and sys.exit(3) -- zero
+    unreviewed blocklist-token rows may enter the transform.
+    """
+    unreviewed = [r for r in prescan_rows if str(r["id"]) not in manifest]
+    if unreviewed:
+        print(
+            "ERROR: blocklist-token rows not reviewed (set them in the review manifest "
+            "before migrating):",
+            file=sys.stderr,
+        )
+        for r in unreviewed:
+            snippet = (r["content"] or "")[:80].replace("\n", " ")
+            print(f"  id={r['id']}: {snippet}", file=sys.stderr)
+        sys.exit(3)
+
+
+def migrate_memories(src, dst, manifest=None):
+    manifest = manifest or {}
     cols = table_columns(src, "memories")
     out = []
     for row in src.execute("SELECT * FROM memories"):
         r = dict(zip(cols, row))
+        raw = r.get("content") if r.get("content") is not None else ""
+        # Content transform (Pass 4): manifest 'keep' -> verbatim; else run the engine
+        # (REWRITE applies; REFUSE/NOOP leave content unchanged).
+        if manifest.get(str(r["id"])) == "keep":
+            content = raw
+        else:
+            content, _verdict = debrand_apply(raw, context="memory")
         out.append(
             (
                 r["id"],
                 r.get("agent_id") or DEFAULT_AGENT,
                 r.get("category") or "general",
-                r.get("content") if r.get("content") is not None else "",
+                content,
                 r.get("keywords"),
                 r.get("topic_key"),
                 r.get("access_scope"),
@@ -235,15 +299,81 @@ def migrate_verbatim(src, dst, table):
         dst.executemany(sql, batch)
 
 
+def run_report(src):
+    """NON-MUTATING audit pass (--report). Open source read-only, classify every memory
+    content, print a human-readable summary. MUST NOT create or modify noa.db or any tmp.
+    """
+    prescan = blocklist_prescan(src)
+    cols = table_columns(src, "memories")
+    counts = {"REWRITE": 0, "NOOP": 0}
+    refuse_by_tag = {}
+    glance = []  # M2/M3 needs_glance candidates
+    for row in src.execute("SELECT * FROM memories"):
+        r = dict(zip(cols, row))
+        content = r.get("content")
+        if content is None:
+            content = ""
+        v = debrand_classify(content, context="memory")
+        if v.action == "REWRITE":
+            counts["REWRITE"] += 1
+        elif v.action == "NOOP":
+            counts["NOOP"] += 1
+        else:  # REFUSE
+            refuse_by_tag[v.tag] = refuse_by_tag.get(v.tag, 0) + 1
+        if v.needs_glance:
+            snippet = content[:80].replace("\n", " ")
+            glance.append((r["id"], v.action, v.tag, snippet))
+
+    print("=== Pass-4 memory de-brand report (NON-MUTATING) ===")
+    print(f"REWRITE: {counts['REWRITE']}")
+    print(f"NOOP:    {counts['NOOP']}")
+    print("REFUSE by tag:")
+    for tag in sorted(refuse_by_tag):
+        print(f"  {tag}: {refuse_by_tag[tag]}")
+    print(f"\nBlocklist-token rows needing review ({len(prescan)}):")
+    for r in prescan:
+        snippet = (r["content"] or "")[:80].replace("\n", " ")
+        print(f"  id={r['id']}: {snippet}")
+    print(f"\nM2/M3 needs-glance candidates ({len(glance)}):")
+    for rid, action, tag, snippet in glance:
+        print(f"  id={rid} [{action}/{tag}]: {snippet}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", default="store/claudeclaw.db")
     ap.add_argument("--target", default="store/noa.db")
+    ap.add_argument("--review-manifest", default="store/debrand-review.json")
+    ap.add_argument(
+        "--report",
+        action="store_true",
+        help="NON-MUTATING audit: classify memory content, print summary, create nothing.",
+    )
     args = ap.parse_args()
 
     if not os.path.exists(args.source):
         print(f"ERROR: source DB not found: {args.source}", file=sys.stderr)
         sys.exit(2)
+
+    manifest = load_review_manifest(args.review_manifest)
+
+    # --report: read-only audit, create/modify nothing, exit 0.
+    if args.report:
+        src = sqlite3.connect(f"file:{args.source}?mode=ro", uri=True)
+        src.execute("PRAGMA query_only = ON")
+        try:
+            prescan = blocklist_prescan(src)
+            run_report(src)
+            unreviewed = [r for r in prescan if str(r["id"]) not in manifest]
+            if unreviewed:
+                print(
+                    f"\nNOTE: {len(unreviewed)} blocklist-token row(s) unreviewed "
+                    "(real migration would exit 3 until reviewed).",
+                    file=sys.stderr,
+                )
+        finally:
+            src.close()
+        sys.exit(0)
 
     tmp = args.target + ".tmp"
     for sidecar in (tmp, tmp + "-wal", tmp + "-shm"):
@@ -256,6 +386,11 @@ def main():
     src = sqlite3.connect(f"file:{args.source}?mode=ro", uri=True)
     src.execute("PRAGMA query_only = ON")
     src_tabs = source_tables(src)
+
+    # HARD GATE (AM-3): zero unreviewed blocklist-token memory rows may enter the
+    # transform. Runs BEFORE building noa.db so nothing is written on a gate failure.
+    if "memories" in src_tabs:
+        assert_prescan_reviewed(blocklist_prescan(src), manifest)
 
     dst = sqlite3.connect(tmp)
     dst.execute("PRAGMA foreign_keys = OFF")  # load order independent; verified after
@@ -271,7 +406,7 @@ def main():
 
     dst.execute("BEGIN")
     if "memories" in src_tabs:
-        migrate_memories(src, dst)
+        migrate_memories(src, dst, manifest)
     if "agent_messages" in src_tabs:
         migrate_agent_messages(src, dst)
     if "sessions" in src_tabs:

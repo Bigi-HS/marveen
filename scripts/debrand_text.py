@@ -56,6 +56,38 @@ _BLOCKLIST_PATTERNS = (
 _A1_PATH = re.compile(r"/home/domin/marveen\b")
 _A3_ROUTE = re.compile(r"/(?:api/)?marveen\b")
 
+# Provenance opt-out sentinel (memory tier, Thor-F2): a single literal inside an
+# otherwise-migratable value kept verbatim.
+_PROVENANCE_SENTINEL = "marveen<!--debrand:keep-->"
+
+# M3 historical markers (memory tier, DA-9). CONSERVATIVE on purpose: a false-keep is
+# safer than a false-rewrite here (a wrongly-kept historical name is surfaced by
+# --report, a wrongly-rewritten one silently corrupts the record). Each regex documents
+# the tight past-tense / rename shape it recognises, immediately adjacent to a `marveen`
+# token. All case-insensitive.
+_M3_HISTORICAL = (
+    re.compile(r"\bformerly\s+marveen\b", re.IGNORECASE),        # "formerly marveen"
+    re.compile(r"\bex-marveen\b", re.IGNORECASE),                # "ex-marveen"
+    re.compile(r"\bwas\s+marveen\b", re.IGNORECASE),             # "was marveen"
+    re.compile(r"\brenamed\b[\w\s]*\bmarveen\b", re.IGNORECASE), # "renamed ... marveen"
+    re.compile(r"\bmarveen\b[\w\s]*\brenamed\b", re.IGNORECASE), # "marveen ... renamed"
+    re.compile(r"\bmarveen\s+incident\b", re.IGNORECASE),        # "marveen incident"
+    # "the <date-ish> marveen" e.g. "the 09-18 marveen" -- a date token between `the`
+    # and `marveen` marks a past-event reference.
+    re.compile(r"\bthe\s+[\d][\d\-/.]*\s+marveen\b", re.IGNORECASE),
+)
+
+# M2 prose live-identity signals (memory tier, DA-9): a `marveen` token used AS the live
+# agent identity via an adjacent identity verb/preposition. Case-insensitive. These are
+# the "would-rewrite" proposals; real per-occurrence opt-out happens via sentinels at
+# apply time.
+_M2_PROSE = (
+    re.compile(r"\bmarveen\s+(?:handles|will|runs|owns|routes)\b", re.IGNORECASE),
+    re.compile(r"\bfrom\s+marveen\b", re.IGNORECASE),
+    re.compile(r"\bto\s+marveen\b", re.IGNORECASE),
+    re.compile(r"\bmarveen\s+is\s+the\b", re.IGNORECASE),
+)
+
 
 class Verdict:
     """Classification result. action in {REWRITE, REFUSE, NOOP}."""
@@ -106,6 +138,62 @@ def _matches_blocklist(value: str) -> bool:
     return any(p.search(value) for p in _BLOCKLIST_PATTERNS)
 
 
+def contains_blocklist_token(value: str) -> bool:
+    """Public thin wrapper over `_matches_blocklist` for the migration pre-scan.
+
+    True iff the value contains a coordinated-infra (blocklist) `marveen` token.
+    """
+    return _matches_blocklist(value)
+
+
+def _matches_historical(value: str) -> bool:
+    return any(p.search(value) for p in _M3_HISTORICAL)
+
+
+def _matches_m2_prose(value: str) -> bool:
+    return any(p.search(value) for p in _M2_PROSE)
+
+
+def _classify_memory(value: str, key: str | None) -> Verdict:
+    """Memory-context precedence (FAIL-CLOSED), in this exact order (spec s4 DA-9):
+
+      1. no `marveen` token              -> NOOP   (handled by caller)
+      2. provenance sentinel present     -> REFUSE(provenance-keep)
+      3. blocklist pattern (wins all)    -> REFUSE(coordinated-infra)
+      4. M1 embedded path                -> REWRITE (reuse _A1_PATH)
+      5. M3 historical marker            -> REFUSE(historical-keep, needs_glance)
+      6. M2 agent-id (key-gated) OR prose live-identity -> REWRITE (case_map)
+      7. otherwise                       -> REFUSE(unclassified)
+
+    M3 is checked BEFORE M2 so a value carrying a historical marker (e.g.
+    "formerly marveen") classifies KEEP even if it also has an M2-ish verb
+    (DA-9 precedence; the historical marker forces KEEP).
+    """
+    # 2. Provenance opt-out sentinel -- keep the literal verbatim.
+    if _PROVENANCE_SENTINEL in value:
+        return Verdict(REFUSE, tag="provenance-keep")
+
+    # 3. Blocklist wins over every rewrite shape.
+    if _matches_blocklist(value):
+        return Verdict(REFUSE, tag="coordinated-infra")
+
+    # 4. M1 embedded path prefix.
+    if _A1_PATH.search(value):
+        return Verdict(REWRITE, new_value=_A1_PATH.sub("/home/domin/noa", value))
+
+    # 5. M3 historical marker -> KEEP (conservative; false-keep safer than false-rewrite).
+    if _matches_historical(value):
+        return Verdict(REFUSE, tag="historical-keep", needs_glance=True)
+
+    # 6. M2 live agent-id reference: key-gated bare literal OR prose live-identity use.
+    key_gated = key in A2_AGENTID_KEYS and value.strip().lower() == "marveen"
+    if key_gated or _matches_m2_prose(value):
+        return Verdict(REWRITE, new_value=case_map(value), needs_glance=True)
+
+    # 7. Fail-closed.
+    return Verdict(REFUSE, tag="unclassified")
+
+
 def classify(value: str, context: str = "code", key: str | None = None) -> Verdict:
     """Classify a single `marveen`-bearing value. Fail-closed.
 
@@ -117,6 +205,9 @@ def classify(value: str, context: str = "code", key: str | None = None) -> Verdi
     """
     if not _MARVEEN.search(value):
         return Verdict(NOOP)
+
+    if context == "memory":
+        return _classify_memory(value, key)
 
     # 2. Blocklist wins over everything, even an agent-id key context.
     if _matches_blocklist(value):
