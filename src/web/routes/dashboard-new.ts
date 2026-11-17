@@ -28,7 +28,10 @@ export function tryHandleDashboardNew(ctx: RouteContext, distDir: string): boole
     return true
   }
   if (path.startsWith('/v2/')) {
-    res.writeHead(301, { Location: '/' + path.slice('/v2/'.length) })
+    // Strip leading slashes from the remainder: /v2//evil.com would otherwise
+    // produce Location: //evil.com (protocol-relative open-redirect).
+    const remainder = path.slice('/v2/'.length).replace(/^\/+/, '')
+    res.writeHead(301, { Location: '/' + remainder })
     res.end()
     return true
   }

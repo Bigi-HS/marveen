@@ -104,6 +104,21 @@ describe('tryHandleDashboardNew -- ROOT FLIP: SPA on /', () => {
     expect(r.headers['Location']).toBe('/gate')
   })
 
+  it('/v2// does NOT produce a protocol-relative open-redirect (Thor SEC)', () => {
+    // /v2//evil.com/phishing must NOT produce Location: //evil.com/phishing
+    // which browsers treat as protocol-relative (https://evil.com/phishing).
+    const r = call('/v2//evil.com/phishing')
+    expect(r.handled).toBe(true)
+    expect(r.status).toBe(301)
+    expect(r.headers['Location']).not.toMatch(/^\/\//)
+    expect(r.headers['Location']).toBe('/evil.com/phishing')
+  })
+
+  it('/v2/// triple-slash is also normalised (leading-slash class)', () => {
+    const r = call('/v2///x/y')
+    expect(r.headers['Location']).toBe('/x/y')
+  })
+
   it('/v2extra is NOT a /v2 boundary -- treated as SPA client route', () => {
     const r = call('/v2extra')
     expect(r.handled).toBe(true)
