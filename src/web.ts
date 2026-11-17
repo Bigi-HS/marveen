@@ -429,8 +429,8 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleWorkout(routeCtx)) return
       if (await tryHandleAppCalendar(routeCtx)) return
       if (await tryHandleVoice(routeCtx)) return
-      // dashboard-new SPA on /v2, side-by-side with the legacy web/ app on '/'.
-      // Mounted before the legacy static handler so the /v2 prefix is claimed first.
+      // ROOT FLIP (card 2d70c06e): dashboard-new SPA now serves '/'. /v2 -> / redirect.
+      // tryHandleStatic (legacy web/) kept as unreachable fallback; can be removed later.
       if (tryHandleDashboardNew(routeCtx, DASHBOARD_NEW_DIST)) return
       if (await tryHandleStatic(routeCtx, WEB_DIR)) return
 
