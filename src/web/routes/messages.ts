@@ -103,7 +103,7 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       return true
     }
     // Persist every verdict (PASS included) so block-rate denominators survive
-    // the 7-day agent_messages sweep. guard_events has its own 90-day retention.
+    // the 7-day agent_messages sweep. guard_events has its own 180-day retention.
     const SEVERITY_RANK: Record<Severity, number> = { low: 0, medium: 1, high: 2, critical: 3 }
     const maxSev = guard.findings.reduce<Severity | null>(
       (best, f) => best === null || SEVERITY_RANK[f.severity] > SEVERITY_RANK[best] ? f.severity : best,

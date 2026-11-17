@@ -407,8 +407,9 @@ export function initDatabase(dbPathOverride?: string): void {
   // false-positive question can be answered from data. Content is NEVER stored
   // (excerpt field explicitly excluded); only a keyed HMAC of the trimmed content
   // is kept (so equality can be tested without the content being recoverable).
-  // Retention: 90 days (separate sweep -- must NOT be caught by the 7-day
-  // agent_messages sweep, which would destroy the denominator).
+  // Retention: 180 days (card SEC-100b, raised from 90; separate sweep -- must
+  // NOT be caught by the 7-day agent_messages sweep, which would destroy the
+  // denominator).
   db.exec(`
     CREATE TABLE IF NOT EXISTS guard_events (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1578,7 +1579,7 @@ export function insertGuardEvent(row: InsertGuardEventInput): void {
   )
 }
 
-export const GUARD_EVENT_RETENTION_SECS = 90 * 24 * 60 * 60
+export const GUARD_EVENT_RETENTION_SECS = 180 * 24 * 60 * 60
 
 export function deleteOldGuardEvents(nowSec: number, retentionSec = GUARD_EVENT_RETENTION_SECS): number {
   return db.prepare('DELETE FROM guard_events WHERE created_at < ?').run(nowSec - retentionSec).changes
