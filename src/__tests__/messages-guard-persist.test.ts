@@ -2,7 +2,7 @@
 // fires at POST /api/messages must be persisted as a guard_events row.
 //
 // The RECORDER exists (guard-event-recorder.ts, insertGuardEvent, HMAC key).
-// The RETAINER exists (index.ts 90-day cron, separate from 7-day message sweep).
+// The RETAINER exists (index.ts daily sweep, 180-day retention, separate from the 7-day message sweep).
 // What was missing: messages.ts did not call recordGuardEvent at all.
 //
 // These tests exercise the route directly and verify that a row appears in the

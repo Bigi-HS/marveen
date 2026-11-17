@@ -194,9 +194,13 @@ describe('AC7 -- guard_events immune to agent_messages sweep', () => {
     expect(rows.some(r => r.content_hash === 'oldhash')).toBe(true)
   })
 
-  it('deleteOldGuardEvents uses its own 90-day retention', () => {
+  it('GUARD_EVENT_RETENTION_SECS is 180 days', () => {
+    expect(GUARD_EVENT_RETENTION_SECS).toBe(180 * 24 * 60 * 60)
+  })
+
+  it('deleteOldGuardEvents uses its own 180-day retention', () => {
     const now = Math.floor(Date.now() / 1000)
-    const ancient = now - GUARD_EVENT_RETENTION_SECS - 3600 // just over 90 days
+    const ancient = now - GUARD_EVENT_RETENTION_SECS - 3600 // just over the retention window
     const recent = now - 3600 // 1 hour ago
     insertGuardEvent({ created_at: ancient, mechanism: 'messages-guard', route: '/api/messages', verdict: 'PASS', from_agent: null, to_agent: null, pattern_ids: null, max_severity: null, finding_count: 0, content_hash: 'old', content_len: 1 })
     insertGuardEvent({ created_at: recent, mechanism: 'messages-guard', route: '/api/messages', verdict: 'PASS', from_agent: null, to_agent: null, pattern_ids: null, max_severity: null, finding_count: 0, content_hash: 'new', content_len: 1 })
