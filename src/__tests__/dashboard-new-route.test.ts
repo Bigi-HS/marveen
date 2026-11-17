@@ -38,6 +38,11 @@ function call(path: string) {
 
 // ROOT FLIP (card 2d70c06e): SPA now serves '/', /v2 -> / redirect.
 describe('tryHandleDashboardNew -- ROOT FLIP: SPA on /', () => {
+  it('passes through unmatched /api/* so web.ts returns 404 (not SPA html)', () => {
+    expect(call('/api/bogus').handled).toBe(false)
+    expect(call('/api/').handled).toBe(false)
+  })
+
   it('serves index.html at / (with and without trailing slash)', () => {
     for (const p of ['/', '']) {
       const r = call(p)

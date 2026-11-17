@@ -16,6 +16,11 @@ import type { RouteContext } from './types.js'
 export function tryHandleDashboardNew(ctx: RouteContext, distDir: string): boolean {
   const { res, path } = ctx
 
+  // Let unhandled /api/* paths fall through to the final 404 in web.ts.
+  // Without this guard the SPA catch-all would swallow elided or mistyped
+  // API endpoints and return index.html 200 instead of 404.
+  if (path.startsWith('/api/')) return false
+
   // /v2 backward-compat redirect.
   if (path === '/v2' || path === '/v2/') {
     res.writeHead(301, { Location: '/' })
