@@ -36,16 +36,15 @@ function call(path: string) {
   return { handled, ...captured }
 }
 
-describe('tryHandleDashboardNew -- /v2 side-by-side serving', () => {
-  it('ignores non-/v2 paths (lets the legacy web/ handler run)', () => {
-    expect(call('/').handled).toBe(false)
-    expect(call('/index.html').handled).toBe(false)
-    expect(call('/v2extra').handled).toBe(false) // not a real /v2 boundary
-    expect(call('/api/agents/health').handled).toBe(false)
+// ROOT FLIP (card 2d70c06e): SPA now serves '/', /v2 -> / redirect.
+describe('tryHandleDashboardNew -- ROOT FLIP: SPA on /', () => {
+  it('passes through unmatched /api/* so web.ts returns 404 (not SPA html)', () => {
+    expect(call('/api/bogus').handled).toBe(false)
+    expect(call('/api/').handled).toBe(false)
   })
 
-  it('serves index.html at the /v2 root (with and without trailing slash)', () => {
-    for (const p of ['/v2', '/v2/']) {
+  it('serves index.html at / (with and without trailing slash)', () => {
+    for (const p of ['/', '']) {
       const r = call(p)
       expect(r.handled).toBe(true)
       expect(r.status).toBe(200)
@@ -54,8 +53,8 @@ describe('tryHandleDashboardNew -- /v2 side-by-side serving', () => {
     }
   })
 
-  it('serves a real hashed asset with the correct content-type', () => {
-    const r = call('/v2/assets/index-abc123.js')
+  it('serves a real hashed asset at /assets/* with the correct content-type', () => {
+    const r = call('/assets/index-abc123.js')
     expect(r.handled).toBe(true)
     expect(r.status).toBe(200)
     expect(r.body).toBe('console.log("app")')
@@ -63,29 +62,67 @@ describe('tryHandleDashboardNew -- /v2 side-by-side serving', () => {
   })
 
   it('serves woff2 fonts with a font mime (not octet-stream)', () => {
-    const r = call('/v2/assets/font-xyz.woff2')
+    const r = call('/assets/font-xyz.woff2')
     expect(r.handled).toBe(true)
     expect(r.status).toBe(200)
     expect(r.headers['Content-Type']).toBe('font/woff2')
   })
 
   it('SPA-fallback: an extension-less client route serves index.html', () => {
-    const r = call('/v2/gate')
+    const r = call('/gate')
     expect(r.handled).toBe(true)
     expect(r.status).toBe(200)
     expect(r.body).toContain('NoA v2')
   })
 
   it('a missing asset request (has extension) is 404, NOT an html fallback', () => {
-    const r = call('/v2/assets/missing-deadbeef.js')
+    const r = call('/assets/missing-deadbeef.js')
     expect(r.handled).toBe(true)
     expect(r.status).toBe(404)
     expect(r.body).not.toContain('NoA v2')
   })
 
   it('blocks path traversal outside dist', () => {
-    const r = call('/v2/../../../etc/passwd')
+    const r = call('/../../../etc/passwd')
     expect(r.handled).toBe(true)
     expect(r.status).toBe(403)
+  })
+
+  it('/v2 and /v2/ redirect 301 to /', () => {
+    for (const p of ['/v2', '/v2/']) {
+      const r = call(p)
+      expect(r.handled).toBe(true)
+      expect(r.status).toBe(301)
+      expect(r.headers['Location']).toBe('/')
+    }
+  })
+
+  it('/v2/* redirects 301 to the equivalent / path', () => {
+    const r = call('/v2/gate')
+    expect(r.handled).toBe(true)
+    expect(r.status).toBe(301)
+    expect(r.headers['Location']).toBe('/gate')
+  })
+
+  it('/v2// does NOT produce a protocol-relative open-redirect (Thor SEC)', () => {
+    // /v2//evil.com/phishing must NOT produce Location: //evil.com/phishing
+    // which browsers treat as protocol-relative (https://evil.com/phishing).
+    const r = call('/v2//evil.com/phishing')
+    expect(r.handled).toBe(true)
+    expect(r.status).toBe(301)
+    expect(r.headers['Location']).not.toMatch(/^\/\//)
+    expect(r.headers['Location']).toBe('/evil.com/phishing')
+  })
+
+  it('/v2/// triple-slash is also normalised (leading-slash class)', () => {
+    const r = call('/v2///x/y')
+    expect(r.headers['Location']).toBe('/x/y')
+  })
+
+  it('/v2extra is NOT a /v2 boundary -- treated as SPA client route', () => {
+    const r = call('/v2extra')
+    expect(r.handled).toBe(true)
+    expect(r.status).toBe(200)
+    expect(r.body).toContain('NoA v2')
   })
 })
