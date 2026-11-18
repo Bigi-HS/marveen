@@ -16,8 +16,14 @@ Design (CONTINUITY-FIRST):
     explicit column-mapping transforms; every other table is copied verbatim.
 
 Usage:
-  python3 scripts/migrate-to-noa.py [--source store/claudeclaw.db] [--target store/noa.db]
+  python3 scripts/migrate-to-noa.py --source <src.db> [--target store/noa.db] [--allow-overwrite]
 Exits non-zero if any row-count parity check fails or a FK violation is found.
+
+Safety (card c80cede3):
+  * --source is REQUIRED and must be explicit. The old implicit store/claudeclaw.db
+    default is revoked (ENG-024); migrating from that dead DB would destroy live data.
+  * An existing --target is NOT overwritten in place unless --allow-overwrite is given;
+    the safe default leaves the live DB untouched.
 """
 import argparse
 import base64
@@ -49,6 +55,15 @@ PRIORITY_MAP = {"urgent": 100, "high": 75, "normal": 50, "low": 25}
 DEFAULT_PRIORITY = 50
 DEFAULT_AGENT = "noa"  # DA-5 flip (was "marveen"): fallback agent_id for defaulted rows
 BATCH = 1000  # rows per insert transaction (OQ-3)
+
+# SAFETY GUARDS (card c80cede3).
+#   1. REVOKED_SOURCE: store/claudeclaw.db was frozen & revoked 2026-06-28 (ENG-024).
+#      Running migration from it rebuilds the live DB from a dead source. We refuse to
+#      touch it unless the operator passes it EXPLICITLY via --source.
+#   2. The live target (store/noa.db) must never be overwritten in-place by accident.
+#      If --target already exists, refuse unless --allow-overwrite is given.
+REVOKED_SOURCE = os.path.join("store", "claudeclaw.db")
+DEFAULT_TARGET = os.path.join("store", "noa.db")
 
 warnings = []
 
@@ -344,15 +359,64 @@ def run_report(src):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source", default="store/claudeclaw.db")
-    ap.add_argument("--target", default="store/noa.db")
+    # NOTE (card c80cede3): --source/--target default to None sentinels so we can
+    # reliably tell whether the operator passed them EXPLICITLY. The safety guards
+    # below depend on this distinction; do not restore literal-path defaults here.
+    ap.add_argument(
+        "--source",
+        default=None,
+        help="Source DB (read-only). REQUIRED: must be given explicitly -- the old "
+        "store/claudeclaw.db default was revoked (ENG-024).",
+    )
+    ap.add_argument(
+        "--target",
+        default=None,
+        help="Target DB to build (defaults to store/noa.db). Refuses to overwrite an "
+        "existing target unless --allow-overwrite is passed.",
+    )
     ap.add_argument("--review-manifest", default="store/debrand-review.json")
     ap.add_argument(
         "--report",
         action="store_true",
         help="NON-MUTATING audit: classify memory content, print summary, create nothing.",
     )
+    ap.add_argument(
+        "--allow-overwrite",
+        action="store_true",
+        help="Opt-in to overwrite an EXISTING target DB in place. Without this flag the "
+        "migration refuses to clobber an existing (possibly live) target DB.",
+    )
     args = ap.parse_args()
+
+    # GUARD 1 (card c80cede3): refuse the revoked claudeclaw.db default.
+    # --source must be passed EXPLICITLY; there is no implicit source any more. Falling
+    # back to store/claudeclaw.db (frozen/revoked 2026-06-28, ENG-024) would rebuild the
+    # target from a dead source and destroy live data.
+    if args.source is None:
+        print(
+            "ERROR: --source is required and must be given explicitly.\n"
+            f"       The old implicit default ({REVOKED_SOURCE}) is REVOKED (ENG-024, "
+            "frozen 2026-06-28);\n"
+            "       migrating from it would rebuild the target from a dead DB and lose "
+            "live data.\n"
+            "       Pass an explicit --source <path> to the DB you really intend to "
+            "migrate from.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if os.path.normpath(args.source) == os.path.normpath(REVOKED_SOURCE):
+        print(
+            f"ERROR: refusing to migrate from the REVOKED source {REVOKED_SOURCE} "
+            "(ENG-024, frozen 2026-06-28).\n"
+            "       This DB is dead; migrating from it would destroy live data. Pass a "
+            "live/intended source instead.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # Resolve the (possibly defaulted) target now that the source guard has passed.
+    if args.target is None:
+        args.target = DEFAULT_TARGET
 
     if not os.path.exists(args.source):
         print(f"ERROR: source DB not found: {args.source}", file=sys.stderr)
@@ -378,12 +442,30 @@ def main():
             src.close()
         sys.exit(0)
 
+    # GUARD 2 (card c80cede3): never overwrite an EXISTING target DB in place.
+    # The final step of the build is os.replace(tmp, target), an atomic in-place
+    # overwrite. If the target already exists (e.g. the live store/noa.db) refuse unless
+    # the operator explicitly opted in with --allow-overwrite. The safe default leaves
+    # the live DB byte-for-byte untouched.
+    if os.path.exists(args.target) and not args.allow_overwrite:
+        print(
+            f"ERROR: target DB already exists: {args.target}\n"
+            "       Refusing to overwrite it in place (it may be the LIVE DB; an "
+            "overwrite from a\n"
+            "       smaller/older source would destroy memories, kanban and messages).\n"
+            "       Either write to a NEW target path (--target <new-path>) or, if you "
+            "REALLY mean\n"
+            "       to rebuild this DB in place, pass --allow-overwrite explicitly.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     tmp = args.target + ".tmp"
     for sidecar in (tmp, tmp + "-wal", tmp + "-shm"):
         if os.path.exists(sidecar):
             os.remove(sidecar)
     if os.path.exists(args.target):
-        print(f"INFO: {args.target} exists, rebuilding atomically (idempotent)")
+        print(f"INFO: {args.target} exists, rebuilding atomically (--allow-overwrite given)")
 
     # Source: strictly read-only.
     src = sqlite3.connect(f"file:{args.source}?mode=ro", uri=True)
