@@ -4,7 +4,7 @@
 //
 // SEC-030 / card 90c8c74b
 
-import { getGuardEvents, getGuardEventSummary } from '../../db.js'
+import { getGuardEvents, getGuardEventSummary, GUARD_EVENT_RETENTION_SECS } from '../../db.js'
 import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
 import { json } from '../http-helpers.js'
 import { runAiDefenceProbe } from '../aidefence-probe.js'
@@ -30,8 +30,12 @@ export async function tryHandleGuardEvents(ctx: RouteContext): Promise<boolean> 
 
   // GET /api/guard-events/summary -- aggregate counts, no raw content, open to any authed token
   if (path === '/api/guard-events/summary') {
+    // Cap the query window at the guard_events retention horizon -- no point
+    // asking for more days than we keep rows for. Derived from
+    // GUARD_EVENT_RETENTION_SECS (=180 days) in db.ts so the two stay aligned.
+    const maxDays = Math.floor(GUARD_EVENT_RETENTION_SECS / (24 * 60 * 60))
     const daysRaw = parseInt(url.searchParams.get('days') ?? '14')
-    const days = Math.min(Math.max(1, isNaN(daysRaw) ? 14 : daysRaw), 90)
+    const days = Math.min(Math.max(1, isNaN(daysRaw) ? 14 : daysRaw), maxDays)
     json(res, getGuardEventSummary(days))
     return true
   }
