@@ -226,6 +226,30 @@ describe('GET /api/guard-events/summary', () => {
     expect(captured.body.byMechanismVerdict).toBeDefined()
   })
 
+  // SEC-100b (card 7c8a1675): the summary days-cap is 180, aligned with
+  // GUARD_EVENT_RETENTION_SECS (=180 days). A row ~150 days old MUST be counted
+  // when days=180 is requested -- at the old 90-day cap the window would clamp
+  // to 90 days and this event would be excluded, FAILING this assertion.
+  it('SEC-100b: days-cap is 180 so a ~150-day-old event is included (would FAIL at a 90 cap)', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const oneForty = now - 150 * 24 * 60 * 60 // 150 days ago -- inside 180, outside 90
+    insertGuardEvent({
+      created_at: oneForty, mechanism: 'messages-guard', route: '/api/messages',
+      verdict: 'BLOCK', from_agent: 'x', to_agent: 'y',
+      pattern_ids: 'email', max_severity: 'medium', finding_count: 1,
+      content_hash: 'sec100b-old', content_len: 5,
+    })
+    const { ctx, captured } = fakeRouteCtx('GET', '/api/guard-events/summary?days=180')
+    await tryHandleGuardEvents(ctx)
+    expect(captured.status).toBe(200)
+    // bySender only counts BLOCK rows; the 150-day-old block must be present,
+    // which it only is if the window extended past 90 days.
+    const senders = (captured.body.bySender as Array<{ from_agent: string }>).map(s => s.from_agent)
+    expect(senders).toContain('x')
+    // Pin the derived cap to the retention constant so drift is caught.
+    expect(Math.floor(GUARD_EVENT_RETENTION_SECS / (24 * 60 * 60))).toBe(180)
+  })
+
   it('SEC-068: highSevPass field counts PASS+high-sev events in the window', async () => {
     // High-sev PASS events are the detective-logging gap (SEC-055/068):
     // persisted but not surfaced in the summary -- "theater" without active alerting.
