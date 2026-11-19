@@ -17,7 +17,19 @@ export type CardCodeResolver = (id: string) => { code: string | null } | null
 // Word-boundary 8-hex: matches a standalone `[0-9a-f]{8}` token. A 40-char SHA has
 // no internal word boundary, so this never matches inside it; a 7-char short SHA is
 // too short to match. Card-ids in this system are exactly 8 lowercase-hex chars.
-const CARD_ID_RE = /\b[0-9a-f]{8}\b/g
+//
+// Grey-zone decisions (card 930bba69, per NoA membership-principle; no scope-creep):
+//  - UPPERCASE (`930BBA69`): matched case-insensitively and lowercased before the
+//    lookup -- an uppercase form of a real card-id is the SAME card and must not
+//    leak as raw hex. Unresolved tokens keep their original case.
+//  - 0x-PREFIX (`0x930bba69`): NOT matched -- the `0x` binds the run so there is no
+//    word boundary before the 8-hex, making it a distinct token. Accepted: no fleet
+//    caller emits 0x-prefixed card-ids; stripping the prefix would risk false hits.
+//  - URL PATH (`/card/930bba69/detail`): matched and rewritten -- the `/` delimiters
+//    are word boundaries, so the invariant (no raw card-id in the payload) holds even
+//    inside a link. No URL special-casing (that would be scope-creep); a clickable
+//    card link should be built from the code, not a raw id.
+const CARD_ID_RE = /\b[0-9a-f]{8}\b/gi
 
 const PLACEHOLDER = '[card]'
 
@@ -41,7 +53,9 @@ export function sanitizeCardIds(
   parseMode?: string,
 ): string {
   return text.replace(CARD_ID_RE, (token) => {
-    const card = resolve(token)
+    // Lowercase for the lookup (card-ids are stored lowercase) but keep the original
+    // token when it does not resolve, so non-card hex is returned byte-for-byte.
+    const card = resolve(token.toLowerCase())
     if (!card) return token // not a known card -> legitimate same-shaped data, untouched
     return escapeForParseMode(card.code ?? PLACEHOLDER, parseMode)
   })

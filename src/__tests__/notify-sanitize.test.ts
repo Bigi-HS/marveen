@@ -59,6 +59,30 @@ describe('sanitizeCardIds (membership-resolve, not blind strip)', () => {
   })
 })
 
+describe('sanitizeCardIds -- grey-zone decisions (card 930bba69, membership-principle)', () => {
+  it('UPPERCASE: an uppercase form of a known card-id is lowercased, resolved, and rewritten', () => {
+    // 930BBA69 is the same card as 930bba69 -- it must not leak as raw hex.
+    expect(sanitizeCardIds('Card 930BBA69 ready', resolve)).toBe('Card ENG-042 ready')
+    expect(sanitizeCardIds('Card 930BBA69 ready', resolve)).not.toContain('930BBA69')
+  })
+
+  it('UPPERCASE non-card hex stays unchanged (resolve-negative, original case preserved)', () => {
+    expect(sanitizeCardIds('token DEADBEEF here', resolve)).toBe('token DEADBEEF here')
+  })
+
+  it('0x-PREFIX: a 0x-prefixed id is NOT matched -> left as-is (documented boundary)', () => {
+    // The `0x` binds the run (no word boundary before the 8-hex), so it is a distinct
+    // token, not a card-id. Accepted: no fleet caller emits 0x-prefixed card-ids.
+    expect(sanitizeCardIds('hex 0x930bba69 value', resolve)).toBe('hex 0x930bba69 value')
+  })
+
+  it('URL PATH: a known card-id inside a link path IS rewritten (invariant holds in links)', () => {
+    expect(sanitizeCardIds('open https://d/card/930bba69/detail', resolve)).toBe(
+      'open https://d/card/ENG-042/detail',
+    )
+  })
+})
+
 describe('sanitizeCardIds -- MarkdownV2 escaping of the injected replacement', () => {
   // The caller formats the surrounding text for its parse_mode and escapes its own
   // specials. When we INJECT a replacement, the code (ENG-042 has a '-') and the
