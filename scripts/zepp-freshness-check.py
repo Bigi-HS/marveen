@@ -174,6 +174,23 @@ def main(argv: list[str]) -> int:
     elif dm["silent"]:
         print(f"[deadman] silent {dm['silent_seconds']}s -> suppressed")
 
+    # 1b) Snooze gate -- skip the freshness alert entirely while an explicit snooze is
+    # active.  The last_alert-in-future trick is fragile (the unreachable-endpoint path
+    # bypasses decide() suppression and re-alerts regardless of last_alert value). An
+    # explicit snooze_until_epoch check here covers both the normal and unreachable paths.
+    snooze_until = float(state.get("snooze_until_epoch", 0) or 0)
+    if snooze_until > 0 and now < snooze_until:
+        days_left = (snooze_until - now) / 86400
+        msg = (
+            f"[snooze] active, {days_left:.1f}d remaining "
+            f"(reason: {state.get('snooze_reason', 'n/a')}) -- freshness alert suppressed"
+        )
+        print(msg)
+        if not args.dry_run:
+            state["last_ok_run"] = now
+            _persist(state_path, state)
+        return 0
+
     # 2) Poll the freshness endpoint and surface a real alert.
     try:
         freshness = _fetch_freshness(args.url, token())
