@@ -3,27 +3,29 @@
 #
 # Starts ttyd on a UNIX socket (no network binding) and registers the
 # socket with tailscale serve for Tailscale-HTTPS-only access.
-# Read-only by default; --writable flag requires Chad gate PASS (slice 3).
 #
-# SETUP (one-time):
-#   echo 'username:password' > store/.ttyd-credential && chmod 600 store/.ttyd-credential
+# Auth: UNIX socket 0660 (domin-only) + Tailscale ACL (tailnet-isolated single-user).
+# No --credential flag: credential plaintext leaks in ps aux (Chad MEDIUM, resolved).
 #
-# START (via tmux, so it survives terminal close):
+# Read-only (default): direct tmux attach to DEFAULT_SESSION, no interactive selector.
+# Writable (slice 3): selector UI -- requires separate Chad gate PASS (not yet).
+#
+# START (via tmux so it survives terminal close):
 #   tmux new-window -t fleet-view: "cd /home/domin/marveen && bash scripts/ttyd-fleet-start.sh"
 #
 # Or foreground: bash scripts/ttyd-fleet-start.sh [--writable]
 #
-# Access: https://bigi.tail1a5fa5.ts.net:8443/terminal (tailnet only, HTTPS, basic-auth)
+# Access: https://bigi.tail1a5fa5.ts.net:8443/terminal  (tailnet only, HTTPS)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="$(dirname "$SCRIPT_DIR")"
-CRED_FILE="$INSTALL_DIR/store/.ttyd-credential"
 SOCK="/tmp/ttyd-fleet.sock"
 SERVE_PORT=8443
 SERVE_PATH="/terminal"
 WRITABLE=0
+# Default read-only view session; override with DEFAULT_SESSION env var.
+DEFAULT_SESSION="${DEFAULT_SESSION:-marveen}"
 
 for arg in "$@"; do
     case "$arg" in
@@ -31,34 +33,27 @@ for arg in "$@"; do
     esac
 done
 
-if [ ! -f "$CRED_FILE" ]; then
-    echo "ERROR: $CRED_FILE not found."
-    echo "Create: echo 'user:password' > $CRED_FILE && chmod 600 $CRED_FILE"
-    exit 1
-fi
-chmod 600 "$CRED_FILE"
-CREDENTIAL=$(cat "$CRED_FILE")
-CREDENTIAL="${CREDENTIAL%$'\n'}"
-if [ -z "$CREDENTIAL" ] || [[ "$CREDENTIAL" != *:* ]]; then
-    echo "ERROR: credential must be 'username:password' format."
-    exit 1
-fi
-
 if [ "$WRITABLE" -eq 1 ]; then
-    echo "[ttyd-fleet] WARNING: WRITABLE mode -- requires Chad gate PASS (slice 3)"
+    echo "[ttyd-fleet] WARNING: WRITABLE mode -- separate Chad gate PASS required (slice 3)"
 fi
 
 # Clean up any prior socket and ttyd instance
 rm -f "$SOCK"
-pgrep -f "ttyd.*ttyd-fleet-selector" > /dev/null 2>&1 && \
-    pgrep -f "ttyd.*ttyd-fleet-selector" | xargs kill 2>/dev/null || true
+pgrep -f "ttyd.*ttyd-fleet" > /dev/null 2>&1 && \
+    pgrep -f "ttyd.*ttyd-fleet" | xargs kill 2>/dev/null || true
 sleep 0.3
 
-# Build ttyd args: UNIX socket, basic auth, selector command
-TTYD_ARGS=(-i "$SOCK" -p 0 -c "$CREDENTIAL" "$SCRIPT_DIR/ttyd-fleet-selector.sh")
-[ "$WRITABLE" -eq 1 ] && TTYD_ARGS=(-W "${TTYD_ARGS[@]}")
+# Build ttyd command:
+#   Read-only: direct attach to DEFAULT_SESSION with tmux -r flag (belt+suspenders).
+#   Writable (slice 3): interactive selector script.
+if [ "$WRITABLE" -eq 0 ]; then
+    TTYD_CMD=(tmux attach -t "$DEFAULT_SESSION" -r)
+    TTYD_ARGS=(-i "$SOCK" -p 0 "${TTYD_CMD[@]}")
+else
+    TTYD_ARGS=(-W -i "$SOCK" -p 0 "$SCRIPT_DIR/ttyd-fleet-selector.sh")
+fi
 
-echo "[ttyd-fleet] Starting ttyd on unix:$SOCK (readonly=$((1 - WRITABLE)))"
+echo "[ttyd-fleet] Starting ttyd on unix:$SOCK (readonly=$((1 - WRITABLE)), session=${DEFAULT_SESSION})"
 ttyd "${TTYD_ARGS[@]}" &
 TTYD_PID=$!
 
@@ -68,13 +63,22 @@ for i in 1 2 3 4 5 6; do
     sleep 0.5
 done
 if [ ! -S "$SOCK" ]; then
-    echo "ERROR: ttyd socket did not appear. Check ttyd logs."
-    kill $TTYD_PID 2>/dev/null
+    echo "ERROR: ttyd socket did not appear."
+    kill "$TTYD_PID" 2>/dev/null
     exit 1
 fi
 echo "[ttyd-fleet] ttyd up (PID $TTYD_PID, socket OK)"
 
-# Cleanup function: kill ttyd + remove tailscale serve route on exit
+# Guard: verify no TCP port was opened (ttyd must stay on UNIX socket only)
+if ss -tlnp 2>/dev/null | grep -q "ttyd"; then
+    echo "ERROR: ttyd opened a TCP port -- unexpected. Aborting."
+    kill "$TTYD_PID" 2>/dev/null
+    rm -f "$SOCK"
+    exit 1
+fi
+
+# Cleanup: kill ttyd + remove tailscale serve route on EXIT/INT/TERM.
+# MUST be set before the tailscale serve call (not after exec) so the trap survives.
 cleanup() {
     echo "[ttyd-fleet] Shutting down..."
     kill "$TTYD_PID" 2>/dev/null || true
@@ -83,6 +87,9 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Register UNIX socket with tailscale serve (tailnet-only HTTPS)
+# Register UNIX socket with tailscale serve (tailnet-only HTTPS).
+# Run as background + wait (NOT exec) so the trap above survives tailscale exit.
 echo "[ttyd-fleet] Registering tailscale serve https:$SERVE_PORT$SERVE_PATH -> unix:$SOCK"
-exec tailscale serve --https="$SERVE_PORT" --set-path="$SERVE_PATH" unix://"$SOCK"
+tailscale serve --https="$SERVE_PORT" --set-path="$SERVE_PATH" unix://"$SOCK" &
+TS_PID=$!
+wait "$TS_PID"
