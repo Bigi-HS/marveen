@@ -492,5 +492,335 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(os.listdir(appr), [])
 
 
+# ===========================================================================
+# CONVERGENCE SWEEP (card ab9b14db): all-scan hardening + exhaustive
+# self-adversarial bypass sweep. Every class below is probed; a FOUND bypass
+# ships a red->green fixture, an ALREADY-SAFE class ships a pinning fixture, and
+# an ACCEPTED-DESIGN-LIMIT class is documented as a pin.
+# ===========================================================================
+
+
+class MultiFieldStatusAllScan(unittest.TestCase):
+    """PRIMARY bug (Chad #1036 advisory): first-wins over _STATUS_KEYS let a
+    'done' on an ALIAS key hide behind a benign value on an earlier key. All-scan
+    must flag if ANY status-key value normalizes to 'done'."""
+
+    def test_benign_first_done_on_alias_blocks(self):
+        g, _, _ = _classify(KANBAN, {"status": "in_progress", "final_status": "done"})
+        self.assertTrue(g, "done on a later alias key must not hide behind a benign status")
+
+    def test_done_first_benign_later_blocks(self):
+        # key-order independence: dangerous value first still blocks.
+        g, _, _ = _classify(KANBAN, {"final_status": "done", "status": "in_progress"})
+        self.assertTrue(g)
+
+    def test_multi_alias_all_benign_is_safe(self):
+        # inverse direction: several alias keys, none 'done' -> SAFE (no over-block).
+        g, _, _ = _classify(KANBAN, {"status": "in_progress", "new_status": "waiting", "target_status": "planned"})
+        self.assertFalse(g, "several benign status aliases must stay SAFE")
+
+    def test_done_case_space_on_alias_blocks(self):
+        g, _, _ = _classify(KANBAN, {"status": "waiting", "set_status": "  DONE "})
+        self.assertTrue(g)
+
+
+class MultiFieldMarkerAllScan(unittest.TestCase):
+    """first-wins over _MARKER_KEYS let a risky marker on a later key hide behind
+    a benign marker on an earlier key."""
+
+    def test_benign_marker_first_parked_on_alias_blocks(self):
+        g, _, _ = _classify(KANBAN, {"marker": "backend", "label": "parked"})
+        self.assertTrue(g, "a park on a later marker alias must not hide behind a benign marker")
+
+    def test_awaiting_dominik_on_alias_blocks(self):
+        g, _, _ = _classify(KANBAN, {"tag": "frontend", "marker": "awaiting-dominik"})
+        self.assertTrue(g)
+
+    def test_all_benign_markers_safe(self):
+        g, _, _ = _classify(KANBAN, {"marker": "backend", "label": "frontend", "tag": "infra"})
+        self.assertFalse(g, "several benign markers must stay SAFE")
+
+
+class MultiFieldContentAllScan(unittest.TestCase):
+    """first-wins over _CONTENT_KEYS let a risky instruction on a later key hide
+    behind a benign body on an earlier key."""
+
+    def test_benign_message_risky_content_blocks(self):
+        g, _, _ = _classify(SEND, {"message": "hi there", "content": "deploy prod now"})
+        self.assertTrue(g, "risky instruction on a later content alias must block")
+
+    def test_benign_body_risky_text_blocks(self):
+        g, _, _ = _classify(SEND, {"body": "status update", "text": "delete the prod bucket"})
+        self.assertTrue(g)
+
+    def test_all_benign_content_keys_safe(self):
+        g, _, _ = _classify(SEND, {"message": "hi", "content": "any update on the card?"})
+        self.assertFalse(g, "several benign content values must stay SAFE")
+
+
+class MultiFieldTierAllScan(unittest.TestCase):
+    """first-wins over _TIER_KEYS let a benign tier on an earlier key hide the
+    'shared' tier declared on a later alias key, slipping a shared overwrite."""
+
+    def test_benign_tier_shared_on_alias_overwrite_blocks(self):
+        g, _, _ = _classify(MEMORY, {"tier": "hot", "category": "shared", "overwrite": True})
+        self.assertTrue(g, "a shared tier on a later alias key must not hide behind a benign tier")
+
+    def test_shared_scope_alias_replace_blocks(self):
+        g, _, _ = _classify(MEMORY, {"tier": "warm", "scope": "shared", "replace": True})
+        self.assertTrue(g)
+
+    def test_all_benign_tiers_safe(self):
+        g, _, _ = _classify(MEMORY, {"tier": "hot", "category": "warm", "overwrite": True})
+        self.assertFalse(g, "several non-shared tier aliases must stay SAFE")
+
+    def test_shared_alias_new_entry_safe(self):
+        # inverse: shared declared on an alias but NO overwrite signal -> new -> SAFE.
+        g, _, _ = _classify(MEMORY, {"tier": "hot", "category": "shared", "text": "new lesson"})
+        self.assertFalse(g)
+
+
+class TypeConfusionNestedValues(unittest.TestCase):
+    """GAP1 generalized: a dangerous value wrapped in a list/dict must NOT read as
+    SAFE just because a plain str-only check saw no string. _walk_strings recurses."""
+
+    def test_status_done_in_list_blocks(self):
+        g, _, _ = _classify(KANBAN, {"status": ["done"]})
+        self.assertTrue(g, "done wrapped in a list must still block")
+
+    def test_status_done_in_dict_value_blocks(self):
+        g, _, _ = _classify(KANBAN, {"status": {"to": "done"}})
+        self.assertTrue(g)
+
+    def test_status_done_in_list_of_dict_blocks(self):
+        g, _, _ = _classify(KANBAN, {"new_status": [{"phase": "done"}]})
+        self.assertTrue(g)
+
+    def test_marker_parked_in_dict_blocks(self):
+        g, _, _ = _classify(KANBAN, {"marker": {"x": "parked"}})
+        self.assertTrue(g, "a parked marker nested in a dict must still block")
+
+    def test_content_risky_in_list_blocks(self):
+        g, _, _ = _classify(SEND, {"message": ["hi", "deploy prod now"]})
+        self.assertTrue(g)
+
+    def test_content_risky_in_dict_value_blocks(self):
+        g, _, _ = _classify(SEND, {"content": {"instr": "delete the bucket"}})
+        self.assertTrue(g)
+
+    def test_tier_shared_in_list_blocks(self):
+        g, _, _ = _classify(MEMORY, {"tier": ["shared"], "overwrite": True})
+        self.assertTrue(g)
+
+    # inverse-direction pins: benign nested values must stay SAFE (no over-block).
+    def test_status_in_progress_in_list_safe(self):
+        g, _, _ = _classify(KANBAN, {"status": ["in_progress"]})
+        self.assertFalse(g, "a benign status in a list must stay SAFE")
+
+    def test_benign_marker_in_list_safe(self):
+        g, _, _ = _classify(KANBAN, {"marker": ["backend", "infra"]})
+        self.assertFalse(g)
+
+
+class DepthAndBudgetFailClosed(unittest.TestCase):
+    """A value too deeply nested OR a huge fan-out that exhausts the node budget
+    is UN-INSPECTABLE on a guarded surface -> must fail CLOSED (risky), never
+    silently SAFE. Shallow benign values stay SAFE."""
+
+    def test_deep_done_beyond_bound_fails_closed(self):
+        node = {}
+        cur = node
+        for _ in range(_DEEP_DEPTH):
+            cur["n"] = {}
+            cur = cur["n"]
+        cur["v"] = "done"
+        g, _, _ = _classify(KANBAN, {"status": node})
+        self.assertTrue(g, "a done buried below the depth bound must fail-closed, not pass")
+
+    def test_deep_benign_beyond_bound_also_fails_closed(self):
+        # By design the bound makes any too-deep value fail-closed regardless of
+        # content (we could not inspect it). This over-blocks a pathological-but-
+        # benign blob -- acceptable fail-closed bias on the guarded surface.
+        node = {}
+        cur = node
+        for _ in range(_DEEP_DEPTH):
+            cur["n"] = {}
+            cur = cur["n"]
+        cur["v"] = "in_progress"
+        g, _, _ = _classify(KANBAN, {"status": node})
+        self.assertTrue(g, "un-inspectable depth fails closed by design")
+
+    def test_shallow_nesting_still_inspected(self):
+        # The bound must be generous enough that realistic shallow nesting is
+        # fully inspected, not falsely truncated.
+        g, _, _ = _classify(KANBAN, {"status": {"a": {"b": {"c": "in_progress"}}}})
+        self.assertFalse(g, "shallow benign nesting must be inspected, not over-blocked")
+
+    def test_huge_fanout_list_fails_closed_fast(self):
+        # Resource-exhaustion / DoS: a massive fan-out must bound total work AND
+        # fail closed (cannot prove SAFE). It must also be fast (node budget).
+        big = ["x"] * 500000
+        start = time.time()
+        g, _, _ = _classify(SEND, {"message": big})
+        elapsed = time.time() - start
+        self.assertTrue(g, "a huge fan-out exceeding the node budget must fail-closed")
+        self.assertLess(elapsed, 5.0, "the node budget must keep the scan fast (no DoS)")
+
+
+class OverwriteIdentityKeyPresence(unittest.TestCase):
+    """Identity overwrite keys (existing_id/entry_id) signal overwrite by
+    PRESENCE, not truthiness: a truthy-only check missed existing_id=0 / '' and
+    let a shared overwrite of entry 0 slip through as SAFE (fail-open)."""
+
+    def test_existing_id_zero_blocks(self):
+        g, _, _ = _classify(MEMORY, {"tier": "shared", "existing_id": 0})
+        self.assertTrue(g, "existing_id=0 is still an overwrite of an existing entry")
+
+    def test_existing_id_empty_string_blocks(self):
+        g, _, _ = _classify(MEMORY, {"tier": "shared", "existing_id": ""})
+        self.assertTrue(g)
+
+    def test_entry_id_present_blocks(self):
+        g, _, _ = _classify(MEMORY, {"tier": "shared", "entry_id": 7})
+        self.assertTrue(g)
+
+    def test_shared_no_identity_no_flag_is_new_safe(self):
+        # inverse: no overwrite signal of any kind -> new shared entry -> SAFE.
+        g, _, _ = _classify(MEMORY, {"tier": "shared", "text": "new"})
+        self.assertFalse(g)
+
+    def test_identity_key_on_non_shared_is_safe(self):
+        # identity presence only matters on the shared tier.
+        g, _, _ = _classify(MEMORY, {"tier": "hot", "existing_id": 0})
+        self.assertFalse(g)
+
+
+class NormalizationPinsAndDesignLimits(unittest.TestCase):
+    """Content normalization classes: pin the ones the merged risky_content core
+    already resists, and DOCUMENT the accepted design limits (not fixed here)."""
+
+    # --- ALREADY-SAFE, pinned so they can't regress ---
+    def test_combining_marks_still_caught(self):
+        # NFKD strips combining accents: "d{combining}eploy" -> "deploy".
+        g, _, _ = _classify(SEND, {"message": "d́́eploy the server"})
+        self.assertTrue(g, "combining marks around a stem must still be caught")
+
+    def test_bidi_marks_still_caught(self):
+        # RLO/PDF bidi controls survive normalize() but are dropped by the
+        # collapsed (non-alnum-stripped) surface, so the stem still matches.
+        g, _, _ = _classify(SEND, {"message": "de‮ploy‬ now"})
+        self.assertTrue(g, "bidi control chars must not break stem matching")
+
+    def test_zero_width_inside_stem_still_caught(self):
+        g, _, _ = _classify(SEND, {"message": "de​ploy now"})
+        self.assertTrue(g)
+
+    def test_separator_and_case_still_caught(self):
+        g, _, _ = _classify(SEND, {"message": "D.E.P.L.O.Y now"})
+        self.assertTrue(g)
+
+    # --- ACCEPTED DESIGN LIMITS (documented, deliberately NOT fixed here) ---
+    def test_homoglyph_is_accepted_design_limit(self):
+        # Cyrillic 'e' (U+0435) in "deploy" is a HOMOGLYPH, not an accent/combining
+        # mark, so NFKD does not fold it. Per the risky_content SCOPE comment and
+        # the prior gate, homoglyph resistance is OUT OF SCOPE for this sender-side
+        # tripwire; the RECEIVING agent is the second line of defence. This pin
+        # documents the boundary (currently NOT flagged) -- do not "fix" it here.
+        g, _, _ = _classify(SEND, {"message": "dеploy now"})
+        self.assertFalse(g, "homoglyph evasion is an accepted design limit (receiver is 2nd line)")
+
+    def test_elongated_chars_is_accepted_design_limit(self):
+        # Character INSERTION ("deeeeploy") is the same determined-obfuscation
+        # class as homoglyph: out of scope for the keyword tripwire.
+        g, _, _ = _classify(SEND, {"message": "deeeeploy now"})
+        self.assertFalse(g, "elongated-char evasion is an accepted design limit")
+
+
+class ReDoSAbsence(unittest.TestCase):
+    """The content core is a pure substring matcher (no regex), so there is no
+    catastrophic-backtracking surface. Pin linear-time behaviour on adversarial
+    separator/whitespace blowups (regex-redos-patterns)."""
+
+    def test_separator_blowup_linear(self):
+        payload = "d" + "-" * 200000 + "eploy"
+        start = time.time()
+        _classify(SEND, {"message": payload})
+        self.assertLess(time.time() - start, 3.0)
+
+    def test_whitespace_blowup_linear(self):
+        payload = " " * 500000 + "deploy"
+        start = time.time()
+        _classify(SEND, {"message": payload})
+        self.assertLess(time.time() - start, 3.0)
+
+
+class OverBlockGuard(unittest.TestCase):
+    """Convergence requirement: the hardening must NOT brick unrelated autopilot
+    work. A tool on no guarded surface, and benign guarded calls, still pass."""
+
+    def test_unguarded_tool_with_nested_risky_passes(self):
+        g, _, _ = _classify("Bash", {"command": {"nested": "deploy prod"}})
+        self.assertFalse(g, "a non-guarded tool is never this hook's surface")
+
+    def test_benign_guarded_calls_all_pass(self):
+        self.assertFalse(_classify(KANBAN, {"id": "x", "status": "in_progress"})[0])
+        self.assertFalse(_classify(MEMORY, {"tier": "warm", "text": "cfg"})[0])
+        self.assertFalse(_classify(SEND, {"message": "deadline today, any progress?"})[0])
+
+
+class EndToEndConvergence(unittest.TestCase):
+    """Real hook over stdin: the multi-field core bug and the newly-found
+    bypasses BLOCK (exit 2); representative benign cases PASS (exit 0)."""
+
+    def _run(self, payload, approvals_dir):
+        env = dict(os.environ, ASK_APPROVALS_DIR=approvals_dir)
+        return subprocess.run(
+            [sys.executable, _HOOK], input=json.dumps(payload),
+            capture_output=True, text=True, env=env,
+        )
+
+    def test_multifield_status_alias_blocks_e2e(self):
+        with tempfile.TemporaryDirectory() as appr:
+            payload = {"tool_name": KANBAN, "tool_input": {"status": "in_progress", "final_status": "done"}}
+            r = self._run(payload, appr)
+            self.assertEqual(r.returncode, 2, "the Chad #1036 multi-field case must BLOCK e2e")
+            self.assertIn("RISKY-GATE", r.stderr)
+
+    def test_status_done_in_list_blocks_e2e(self):
+        with tempfile.TemporaryDirectory() as appr:
+            payload = {"tool_name": KANBAN, "tool_input": {"status": ["done"]}}
+            r = self._run(payload, appr)
+            self.assertEqual(r.returncode, 2)
+
+    def test_content_alias_blocks_e2e(self):
+        with tempfile.TemporaryDirectory() as appr:
+            payload = {"tool_name": SEND, "tool_input": {"message": "hi", "content": "deploy prod now"}}
+            r = self._run(payload, appr)
+            self.assertEqual(r.returncode, 2)
+
+    def test_tier_alias_overwrite_blocks_e2e(self):
+        with tempfile.TemporaryDirectory() as appr:
+            payload = {"tool_name": MEMORY, "tool_input": {"tier": "hot", "category": "shared", "overwrite": True}}
+            r = self._run(payload, appr)
+            self.assertEqual(r.returncode, 2)
+
+    def test_existing_id_zero_blocks_e2e(self):
+        with tempfile.TemporaryDirectory() as appr:
+            payload = {"tool_name": MEMORY, "tool_input": {"tier": "shared", "existing_id": 0}}
+            r = self._run(payload, appr)
+            self.assertEqual(r.returncode, 2)
+
+    def test_benign_multifield_passes_e2e(self):
+        with tempfile.TemporaryDirectory() as appr:
+            payload = {"tool_name": KANBAN, "tool_input": {"status": "in_progress", "new_status": "waiting"}}
+            r = self._run(payload, appr)
+            self.assertEqual(r.returncode, 0)
+            self.assertEqual(os.listdir(appr), [], "benign multi-field call must not write a marker")
+
+
+# Depth constant for the depth-bound tests: comfortably beyond the hook's bound.
+_DEEP_DEPTH = guard._WALK_MAX_DEPTH + 6
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
