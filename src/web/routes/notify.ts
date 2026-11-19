@@ -10,6 +10,8 @@
 import { logger } from '../../logger.js'
 import { readEnvValue } from '../../env.js'
 import { readBody, json } from '../http-helpers.js'
+import { getCard } from '../../noa-kanban.js'
+import { sanitizeCardIds, type CardCodeResolver } from './notify-sanitize.js'
 import type { RouteContext } from './types.js'
 
 function readBotToken(): string | null {
@@ -22,6 +24,18 @@ function readBotToken(): string | null {
 let botTokenReader: () => string | null = readBotToken
 export function __setBotTokenReader(fn: (() => string | null) | null): void {
   botTokenReader = fn ?? readBotToken
+}
+
+// Card 930bba69 AC-P1-1: resolve a candidate 8-hex token to its card (code may be
+// null). Default binds the live kanban lookup; a test seam keeps the route hermetic
+// so an integration test can assert the outgoing payload without real DB rows.
+const defaultCardResolver: CardCodeResolver = (id) => {
+  const card = getCard(id)
+  return card ? { code: card.code } : null
+}
+let cardResolver: CardCodeResolver = defaultCardResolver
+export function __setCardResolver(fn: CardCodeResolver | null): void {
+  cardResolver = fn ?? defaultCardResolver
 }
 
 export async function tryHandleNotify(ctx: RouteContext): Promise<boolean> {
@@ -55,7 +69,12 @@ export async function tryHandleNotify(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
-  const payload: Record<string, unknown> = { chat_id: chatId, text }
+  // Card 930bba69 AC-P1-1: rewrite any known card-id to its code before the payload
+  // leaves the server, so no raw 8-hex card-id reaches the Boss-facing chat. Non-card
+  // hex (git SHA, colour) is resolved-negative and passes through untouched.
+  const safeText = sanitizeCardIds(text!, cardResolver, parse_mode)
+
+  const payload: Record<string, unknown> = { chat_id: chatId, text: safeText }
   if (parse_mode) payload.parse_mode = parse_mode
   if (reply_to) payload.reply_to_message_id = reply_to
 

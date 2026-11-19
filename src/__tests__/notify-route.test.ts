@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { Readable } from 'node:stream'
-import { tryHandleNotify, __setBotTokenReader } from '../web/routes/notify.js'
+import { tryHandleNotify, __setBotTokenReader, __setCardResolver } from '../web/routes/notify.js'
 
 // Drives the route handler with a fake req/res (same pattern as gate-route.test.ts).
 // Covers only the network-free branches: path/method guard, JSON parse, field
@@ -130,5 +130,58 @@ describe('POST /api/notify/telegram -- 409 pass-through (FIX-001)', () => {
     } finally {
       globalThis.fetch = origFetch
     }
+  })
+})
+
+// Card 930bba69 AC-P1-1: the OUTGOING Telegram payload must carry no raw 8-char hex
+// card-id. The rewrite is membership-resolve -- a known card-id becomes its code, a
+// non-card hex (git SHA) passes through. Asserted on the body actually sent upstream.
+describe('POST /api/notify/telegram -- card-id rewrite in the outgoing payload (AC-P1-1)', () => {
+  afterEach(() => {
+    __setBotTokenReader(null)
+    __setCardResolver(null)
+  })
+
+  async function sentPayload(bodyJson: string) {
+    __setBotTokenReader(() => 'test-token')
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ ok: true, result: { message_id: 7 } }),
+    })
+    const origFetch = globalThis.fetch
+    globalThis.fetch = mockFetch as typeof fetch
+    try {
+      await call('POST', '/api/notify/telegram', bodyJson)
+      const init = mockFetch.mock.calls[0]?.[1] as { body: string }
+      return JSON.parse(init.body) as { text: string; parse_mode?: string }
+    } finally {
+      globalThis.fetch = origFetch
+    }
+  }
+
+  it('rewrites a known card-id to its code and leaves a non-card SHA untouched', async () => {
+    __setCardResolver((id) => (id === '930bba69' ? { code: 'ENG-042' } : null))
+    const p = await sentPayload(
+      JSON.stringify({ chat_id: 8643929442, text: 'Card 930bba69 done, fixed in deadbeef' }),
+    )
+    expect(p.text).toBe('Card ENG-042 done, fixed in deadbeef')
+    expect(p.text).not.toMatch(/\b930bba69\b/)
+  })
+
+  it('never emits a raw card-id even when the card has no code (placeholder)', async () => {
+    __setCardResolver((id) => (id === 'feedcafe' ? { code: null } : null))
+    const p = await sentPayload(JSON.stringify({ chat_id: '123', text: 'See feedcafe' }))
+    expect(p.text).toBe('See [card]')
+    expect(p.text).not.toContain('feedcafe')
+  })
+
+  it('escapes the injected code under MarkdownV2 so the Boss message still renders', async () => {
+    __setCardResolver((id) => (id === '930bba69' ? { code: 'ENG-042' } : null))
+    const p = await sentPayload(
+      JSON.stringify({ chat_id: '123', text: 'Card 930bba69', parse_mode: 'MarkdownV2' }),
+    )
+    expect(p.text).toBe('Card ENG\\-042')
+    expect(p.parse_mode).toBe('MarkdownV2')
   })
 })
