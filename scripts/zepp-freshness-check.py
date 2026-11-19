@@ -78,6 +78,17 @@ def decide(freshness: dict, state: dict, now: float, suppress_seconds: int) -> d
     return {"action": "alert", "clear_alert": False, "content": content}
 
 
+def is_snoozed(state: dict, now: float) -> bool:
+    """Pure: is there an active explicit snooze suppressing Zepp staleness alerts?
+
+    Returns True only while ``snooze_until_epoch`` is set, non-zero, and in the future.
+    The snooze gates ONLY genuine Zepp staleness (freshness["alert"] is True in main).
+    Unreachable-endpoint and malformed-response fail-safes are NOT gated.
+    """
+    snooze_until = float(state.get("snooze_until_epoch", 0) or 0)
+    return snooze_until > 0 and now < snooze_until
+
+
 def deadman_verdict(
     state: dict,
     now: float,
@@ -174,23 +185,6 @@ def main(argv: list[str]) -> int:
     elif dm["silent"]:
         print(f"[deadman] silent {dm['silent_seconds']}s -> suppressed")
 
-    # 1b) Snooze gate -- skip the freshness alert entirely while an explicit snooze is
-    # active.  The last_alert-in-future trick is fragile (the unreachable-endpoint path
-    # bypasses decide() suppression and re-alerts regardless of last_alert value). An
-    # explicit snooze_until_epoch check here covers both the normal and unreachable paths.
-    snooze_until = float(state.get("snooze_until_epoch", 0) or 0)
-    if snooze_until > 0 and now < snooze_until:
-        days_left = (snooze_until - now) / 86400
-        msg = (
-            f"[snooze] active, {days_left:.1f}d remaining "
-            f"(reason: {state.get('snooze_reason', 'n/a')}) -- freshness alert suppressed"
-        )
-        print(msg)
-        if not args.dry_run:
-            state["last_ok_run"] = now
-            _persist(state_path, state)
-        return 0
-
     # 2) Poll the freshness endpoint and surface a real alert.
     try:
         freshness = _fetch_freshness(args.url, token())
@@ -212,6 +206,25 @@ def main(argv: list[str]) -> int:
     v = decide(freshness, state, now, args.suppress)
     if v["clear_alert"]:
         state.pop("last_alert", None)
+
+    # Snooze gate (staleness-scoped): suppress ONLY genuine Zepp staleness while
+    # snooze_until_epoch is active. Three conditions must ALL hold: (a) decide() returned
+    # alert, (b) the freshness endpoint itself said alert=True (genuine staleness, not a
+    # malformed-response fail-safe), (c) is_snoozed(). The unreachable-endpoint path
+    # (exception above) calls decide({}) -> freshness.get("alert") is not True, so that
+    # fail-safe is never gated here -- a new problem surfaces even during a snooze window.
+    if v["action"] == "alert" and freshness.get("alert") is True and is_snoozed(state, now):
+        snooze_until = float(state.get("snooze_until_epoch", 0))
+        days_left = (snooze_until - now) / 86400
+        msg = (
+            f"[snooze] active, {days_left:.1f}d remaining "
+            f"(reason: {state.get('snooze_reason', 'n/a')}) -- staleness alert suppressed"
+        )
+        print(msg)
+        if not args.dry_run:
+            state["last_ok_run"] = now
+            _persist(state_path, state)
+        return 0
 
     if args.dry_run:
         print(f"[freshness] action={v['action']} alert={freshness.get('alert')}")
