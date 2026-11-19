@@ -155,6 +155,28 @@ class KanbanDoneRisky(unittest.TestCase):
         g, _, _ = _classify(KANBAN, {"id": "abc", "to_status": "done"})
         self.assertTrue(g)
 
+    # --- GAP 2 (Chad A2): non-standard status-key aliases must still catch
+    # a ->done transition. Each covers the status-key-coverage bypass class. ---
+    def test_final_status_done_blocks(self):
+        g, _, _ = _classify(KANBAN, {"id": "abc", "final_status": "done"})
+        self.assertTrue(g)
+
+    def test_target_status_done_blocks(self):
+        g, _, _ = _classify(KANBAN, {"id": "abc", "target_status": "done"})
+        self.assertTrue(g)
+
+    def test_new_status_done_blocks(self):
+        g, _, _ = _classify(KANBAN, {"id": "abc", "new_status": "done"})
+        self.assertTrue(g)
+
+    def test_set_status_done_case_space_blocks(self):
+        g, _, _ = _classify(KANBAN, {"id": "abc", "set_status": " DONE "})
+        self.assertTrue(g)
+
+    def test_status_to_done_blocks(self):
+        g, _, _ = _classify(KANBAN, {"id": "abc", "status_to": "done"})
+        self.assertTrue(g)
+
 
 class KanbanParkedMarkerRisky(unittest.TestCase):
     def test_parked_marker_blocks(self):
@@ -168,6 +190,26 @@ class KanbanParkedMarkerRisky(unittest.TestCase):
     def test_parked_marker_with_safe_status_still_blocks(self):
         # Adversarial: hide a park behind a benign status advance.
         g, _, _ = _classify(KANBAN, {"id": "abc", "status": "in_progress", "label": "parked: waiting on boss"})
+        self.assertTrue(g)
+
+    # --- GAP 1 (Thor FLAG): boolean/numeric park bypass. _first_str returns
+    # None for a non-string value, so a {park: True} park signal must be caught
+    # by the _any_truthy pre-check, not slip through as SAFE. ---
+    def test_boolean_park_true_blocks(self):
+        g, _, _ = _classify(KANBAN, {"id": "abc", "park": True})
+        self.assertTrue(g, "boolean park flag must fail-closed to risky")
+
+    def test_boolean_parked_true_blocks(self):
+        g, _, _ = _classify(KANBAN, {"id": "abc", "parked": True})
+        self.assertTrue(g)
+
+    def test_numeric_park_one_blocks(self):
+        g, _, _ = _classify(KANBAN, {"id": "abc", "park": 1})
+        self.assertTrue(g)
+
+    def test_boolean_park_hidden_behind_safe_status_blocks(self):
+        # Adversarial: pair the boolean park with a benign status advance.
+        g, _, _ = _classify(KANBAN, {"id": "abc", "status": "in_progress", "park": True})
         self.assertTrue(g)
 
 
@@ -194,6 +236,29 @@ class KanbanSafe(unittest.TestCase):
     def test_benign_tag(self):
         g, _, _ = _classify(KANBAN, {"id": "abc", "tag": "backend"})
         self.assertFalse(g)
+
+    # --- GAP 2 inverse-direction pin: a benign (non-done) value on a NEWLY
+    # covered status-key alias must stay SAFE (the widened key set must not
+    # over-block an ordinary status write). ---
+    def test_final_status_in_progress_is_safe(self):
+        g, _, _ = _classify(KANBAN, {"id": "abc", "final_status": "in_progress"})
+        self.assertFalse(g, "benign value on an aliased status key must stay SAFE")
+
+    def test_target_status_waiting_is_safe(self):
+        g, _, _ = _classify(KANBAN, {"id": "abc", "target_status": "waiting"})
+        self.assertFalse(g)
+
+    # --- GAP 2 false-positive boundary: a PROSE field that merely contains the
+    # word "done" is NOT a status key and must NOT be flagged. ---
+    def test_prose_note_containing_done_is_safe(self):
+        g, _, _ = _classify(KANBAN, {"id": "abc", "note": "marked the subtask as done in the comment"})
+        self.assertFalse(g, "the word 'done' in prose is not a status transition")
+
+    # --- GAP 1 inverse-direction pin: a FALSY park flag does not establish a
+    # park -> with no other risky signal the write stays SAFE. ---
+    def test_park_false_flag_is_safe(self):
+        g, _, _ = _classify(KANBAN, {"id": "abc", "park": False, "status": "in_progress"})
+        self.assertFalse(g, "a falsy park flag must not fail-closed")
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +411,29 @@ class EndToEndTests(unittest.TestCase):
             payload = {"tool_name": MEMORY, "tool_input": {"tier": "shared", "text": "x", "overwrite": True}}
             r = self._run(payload, appr)
             self.assertEqual(r.returncode, 2)
+
+    def test_boolean_park_blocks_e2e(self):
+        # GAP 1 over real stdin-JSON: {park: True} now BLOCKS (exit 2).
+        with tempfile.TemporaryDirectory() as appr:
+            payload = {"tool_name": KANBAN, "tool_input": {"id": "abc", "park": True}}
+            r = self._run(payload, appr)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("RISKY-GATE", r.stderr)
+
+    def test_final_status_done_blocks_e2e(self):
+        # GAP 2 over real stdin-JSON: a non-standard status key now BLOCKS.
+        with tempfile.TemporaryDirectory() as appr:
+            payload = {"tool_name": KANBAN, "tool_input": {"id": "abc", "final_status": "done"}}
+            r = self._run(payload, appr)
+            self.assertEqual(r.returncode, 2)
+
+    def test_park_false_passes_e2e(self):
+        # GAP 1 benign boundary over real stdin-JSON: a falsy park flag passes.
+        with tempfile.TemporaryDirectory() as appr:
+            payload = {"tool_name": KANBAN, "tool_input": {"id": "abc", "park": False, "status": "in_progress"}}
+            r = self._run(payload, appr)
+            self.assertEqual(r.returncode, 0)
+            self.assertEqual(os.listdir(appr), [])
 
     def test_benign_send_passes(self):
         with tempfile.TemporaryDirectory() as appr:

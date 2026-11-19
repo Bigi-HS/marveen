@@ -84,9 +84,27 @@ KANBAN_WRITE_TOOLS = frozenset(
         "kanban_update",
     }
 )
-# Arg keys that may carry the target status / marker.
-_STATUS_KEYS = ("status", "to_status", "new_status")
+# Arg keys that may carry the target status / marker. Status aliases are
+# over-inclusive on purpose: a non-standard status-key name (final_status,
+# target_status, to_status, ...) must NOT let a ->done transition slip past the
+# RK-02 scan (Chad A2 fail-open hole). The RISKY decision still hinges on the
+# normalized VALUE == "done", so a benign status on any of these keys stays SAFE.
+_STATUS_KEYS = (
+    "status",
+    "to_status",
+    "new_status",
+    "final_status",
+    "target_status",
+    "set_status",
+    "status_to",
+)
 _MARKER_KEYS = ("marker", "park", "parked", "tag", "label")
+# Boolean/truthy park-signal keys. _first_str only sees STRING values, so a
+# caller sending {park: True} (bool, or 1) would evade the string marker-check
+# below (Thor FLAG RK-02 boolean-park bypass). Mirror RK-03's _OVERWRITE_KEYS
+# _any_truthy pattern: any truthy value on one of these keys is a park -> RISKY,
+# regardless of type. The string-case marker-check still runs afterwards.
+_PARK_TRUTHY_KEYS = ("park", "parked")
 # Marker substrings that make an assignment RISKY (autonomous park / done-adjacent).
 _RISKY_MARKER_TOKENS = ("parked", "awaiting-dominik", "awaiting_dominik")
 # The one status value that is RISKY. Status ADVANCE (planned->in_progress->
@@ -221,7 +239,11 @@ def _surface_is_risky(tool_name, tool_input):
 
     if tool_name in KANBAN_WRITE_TOOLS:
         # A PARKED / awaiting-dominik marker assignment is risky regardless of
-        # status.
+        # status. FIRST catch a boolean/numeric park flag ({park: True}, park: 1):
+        # _first_str below only inspects STRING values, so a non-string park
+        # signal would evade it (Thor FLAG). This mirrors RK-03's _any_truthy use.
+        if _any_truthy(tool_input, _PARK_TRUTHY_KEYS):
+            return True
         marker = _first_str(tool_input, _MARKER_KEYS)
         if marker is not None:
             low = marker.strip().lower()
