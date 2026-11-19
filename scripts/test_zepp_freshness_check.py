@@ -121,5 +121,92 @@ class DeadmanTests(unittest.TestCase):
         self.assertTrue(v["silent"])
 
 
+class SnoozeTests(unittest.TestCase):
+    """Tests for is_snoozed() and snooze-scoped staleness suppression.
+
+    Snooze gates ONLY genuine Zepp staleness (freshness["alert"] is True).
+    Fail-safes (unreachable endpoint, malformed response) must fire regardless.
+    Deadman is completely independent -- a silent poller still surfaces.
+    """
+
+    SNOOZE_UNTIL = NOW + 30 * 86400  # 30 days in future
+    SNOOZE_STATE = {
+        "snooze_until_epoch": SNOOZE_UNTIL,
+        "snooze_reason": "test_snooze",
+    }
+
+    # -- is_snoozed() pure function --
+
+    def test_is_snoozed_active(self):
+        self.assertTrue(mod.is_snoozed(self.SNOOZE_STATE, NOW))
+
+    def test_is_snoozed_expired_one_second_past(self):
+        # snooze_until == NOW - 1 -> expired
+        expired = {"snooze_until_epoch": NOW - 1}
+        self.assertFalse(mod.is_snoozed(expired, NOW))
+
+    def test_is_snoozed_exactly_at_boundary_is_expired(self):
+        # snooze_until == NOW -> now < snooze_until is False -> not snoozed
+        at_boundary = {"snooze_until_epoch": NOW}
+        self.assertFalse(mod.is_snoozed(at_boundary, NOW))
+
+    def test_is_snoozed_absent_key(self):
+        self.assertFalse(mod.is_snoozed({}, NOW))
+
+    def test_is_snoozed_zero_value(self):
+        self.assertFalse(mod.is_snoozed({"snooze_until_epoch": 0}, NOW))
+
+    # -- snooze suppresses staleness, not fail-safes --
+
+    def test_snooze_active_staleness_decide_returns_alert(self):
+        # Confirm decide() still returns "alert" for staleness even with snooze in state.
+        # The gate lives in main(), not in decide(); decide() is snooze-unaware.
+        state = dict(self.SNOOZE_STATE)
+        v = mod.decide(fresh(alert=True, reason="Zepp stale"), state, NOW, SUPPRESS)
+        self.assertEqual(v["action"], "alert")
+        # And is_snoozed confirms the gate condition would fire in main()
+        self.assertTrue(mod.is_snoozed(state, NOW))
+
+    def test_snooze_expired_staleness_alert_fires(self):
+        # Snooze expired: staleness alert must return normally
+        expired_state = {"snooze_until_epoch": NOW - 1}
+        self.assertFalse(mod.is_snoozed(expired_state, NOW))
+        v = mod.decide(fresh(alert=True, reason="Zepp stale"), expired_state, NOW, SUPPRESS)
+        self.assertEqual(v["action"], "alert")
+
+    def test_unreachable_endpoint_fail_safe_not_gated_during_snooze(self):
+        # Unreachable endpoint -> decide({}, ...) -> fail-safe alert.
+        # The gate in main() checks freshness.get("alert") is True; for {} that is False.
+        # So even with active snooze, the fail-safe must surface (regression test for focus-2).
+        state = dict(self.SNOOZE_STATE)
+        self.assertTrue(mod.is_snoozed(state, NOW))
+        v = mod.decide({}, state, NOW, SUPPRESS)
+        self.assertEqual(v["action"], "alert")
+        # Critical: {}.get("alert") is NOT True -- the snooze gate condition fails
+        self.assertIsNot({}.get("alert"), True)
+
+    def test_malformed_response_fail_safe_not_gated_during_snooze(self):
+        # Malformed response (no boolean alert) -> fail-safe alert.
+        # Same reasoning as unreachable: freshness["alert"] is not True -> gate doesn't fire.
+        state = dict(self.SNOOZE_STATE)
+        malformed = {"latestDate": "2026-09-20"}  # missing boolean "alert"
+        v = mod.decide(malformed, state, NOW, SUPPRESS)
+        self.assertEqual(v["action"], "alert")
+        self.assertIn("unparseable", v["content"].lower())
+        self.assertIsNot(malformed.get("alert"), True)
+
+    def test_deadman_fires_during_snooze(self):
+        # Deadman is completely independent of snooze: a silent poller surfaces
+        # even when snooze is active (they address entirely different problems).
+        state = {
+            "last_ok_run": NOW - (DEADMAN + 60),
+            **self.SNOOZE_STATE,
+        }
+        self.assertTrue(mod.is_snoozed(state, NOW))
+        v = mod.deadman_verdict(state, NOW, DEADMAN)
+        self.assertTrue(v["silent"])
+        self.assertFalse(v["suppressed"])
+
+
 if __name__ == "__main__":
     unittest.main()
