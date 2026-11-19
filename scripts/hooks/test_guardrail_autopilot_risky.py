@@ -666,6 +666,19 @@ class DepthAndBudgetFailClosed(unittest.TestCase):
         self.assertTrue(g, "a huge fan-out exceeding the node budget must fail-closed")
         self.assertLess(elapsed, 5.0, "the node budget must keep the scan fast (no DoS)")
 
+    def test_huge_int_value_dict_keys_fail_closed_fast(self):
+        # Chad #1037 (HIGH): dict KEYS were appended with no per-iteration budget
+        # break. With int values (which recurse at cost 1 and early-return WITHOUT
+        # signalling truncation), a 500k-key dict accumulated every key, left
+        # truncated=False, and ran the per-string content check ~57s. The key loop
+        # must break on an exhausted node budget -> fail-closed AND fast.
+        big = {str(i): 0 for i in range(500000)}
+        start = time.time()
+        g, _, _ = _classify(SEND, {"message": big})
+        elapsed = time.time() - start
+        self.assertTrue(g, "a huge int-value dict (key fan-out) must fail-closed, not slip SAFE")
+        self.assertLess(elapsed, 0.5, "dict-key accumulation must be node-budget-bounded (no DoS)")
+
 
 class OverwriteIdentityKeyPresence(unittest.TestCase):
     """Identity overwrite keys (existing_id/entry_id) signal overwrite by

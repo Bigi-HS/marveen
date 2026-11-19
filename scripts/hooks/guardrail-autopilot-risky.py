@@ -206,12 +206,23 @@ def _walk_strings(value, acc, budget, _depth=0):
     truncated = False
     if isinstance(value, dict):
         for k, v in value.items():
+            # Budget guard BEFORE the key-append: int/non-str values recurse at
+            # cost 1 and early-return without signalling truncation, so without
+            # this break a 500k-key dict would append every key (truncated stays
+            # False) and blow the per-string content check up to ~57s. Breaking
+            # here fails the walk closed once the node budget is spent (Chad #1037).
+            if budget[0] <= 0:
+                truncated = True
+                break
             if isinstance(k, str) and k.strip():
                 acc.append(k)
             truncated = _walk_strings(v, acc, budget, _depth + 1) or truncated
         return truncated
     if isinstance(value, (list, tuple, set, frozenset)):
         for v in value:
+            if budget[0] <= 0:
+                truncated = True
+                break
             truncated = _walk_strings(v, acc, budget, _depth + 1) or truncated
         return truncated
     # Scalars that are not strings (bool/int/float/None) carry no inspectable
