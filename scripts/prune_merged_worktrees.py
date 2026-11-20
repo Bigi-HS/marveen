@@ -1,20 +1,38 @@
 #!/usr/bin/env python3
-"""Prune git worktrees whose branch is provably merged into develop (card 678c1e82).
+"""Safe fleet-wide worktree prune: merged/0-diff only, owner-check, dry-run-first.
+
+Cards: 678c1e82 (original), 42192e2c (owner-check + 0-diff + git-cherry hardening).
 
 Fleet hygiene: the fleet accumulates dozens of per-task worktrees under
-/home/domin/marveen-wt/ (and /tmp). Once a worktree's branch is merged, the
-worktree is dead weight (disk + `git worktree list` noise). This sweep removes
-ONLY worktrees that are provably merged and carry no uncommitted work.
+/home/domin/marveen-wt/ (and /tmp). Once a worktree's branch is merged or
+carries no unique work, the worktree is dead weight (disk + `git worktree list`
+noise). This sweep removes ONLY worktrees that are provably safe to remove.
 
 Safety (dry-run by default; pass --apply to actually remove):
-  - "merged" == the worktree HEAD commit is an ancestor of origin/develop
-    (works for merge-commit merges; conservatively KEEPS squash/unmerged tips).
+  - Prune criterion (either A or B):
+    A. "merged" == the worktree HEAD commit is an ancestor of origin/develop
+       (works for merge-commit merges; conservatively KEEPS squash-only tips).
+    B. "0-diff" == NOT an ancestor (squash/rebased) BUT the branch carries no
+       uncommitted changes (dirty=False) AND no unpushed commits vs develop
+       (`git cherry origin/develop <branch>` has no `+` lines).
+       A worktree that is clean and has no unique commits is safe even if its
+       branch was squash-merged, because there is nothing that would be lost.
+  - OWNER-CHECK: if the worktree's owning agent tmux session is alive, KEEP it
+    regardless of merge status. The agent may be mid-task.
+    Owner is inferred from the worktree path prefix (see OWNER_SESSION_MAP).
   - HARD-EXCLUDE: the main checkout, /home/domin/marveen-wt-privacy (uncommitted
     governance WIP), and everything under .claude/worktrees/ (harness-managed,
     live agent/workflow worktrees).
-  - KEEP any worktree with uncommitted changes (WIP protected), even if merged.
-  - KEEP any worktree whose tip is not an ancestor of develop (unmerged/active).
+  - KEEP any worktree with uncommitted changes (WIP protected).
+  - KEEP any worktree that is neither merged nor 0-diff.
   - Branch deletion uses `git branch -d` (refuses unmerged) as a second guard.
+
+Owner -> tmux session mapping (OWNER_SESSION_MAP below):
+  - Paths under /home/domin/dave-wt-* belong to agent "dave" (session: agent-dave).
+  - Paths under /home/domin/marveen-wt* belong to agent "marveen" (session: marveen).
+  - Paths under /home/domin/marveen/.worktrees/* are also marveen's.
+  - /tmp/* and other paths: owner unknown (conservative: skip owner-check, treat
+    as no session alive so eligible for prune if otherwise safe).
 
 Usage:
   python3 scripts/prune_merged_worktrees.py            # dry-run (default)
@@ -31,6 +49,15 @@ MAIN_PATH = "/home/domin/marveen"
 EXCLUDE_PATHS = {"/home/domin/marveen-wt-privacy"}
 HARNESS_DIR = "/home/domin/marveen/.claude/worktrees"
 BASE_REF = "origin/develop"
+
+# Map worktree path prefix -> agent session name.
+# Checked in order; first prefix match wins.
+# Value is the exact tmux session target (passed to `tmux has-session -t "=<val>"`).
+OWNER_SESSION_MAP = [
+    ("/home/domin/dave-wt", "agent-dave"),
+    ("/home/domin/marveen-wt", "marveen"),
+    ("/home/domin/marveen/.worktrees", "marveen"),
+]
 
 
 def parse_worktrees(porcelain):
@@ -63,9 +90,47 @@ def parse_worktrees(porcelain):
     return worktrees
 
 
-def classify_worktree(*, path, branch, detached, is_ancestor, dirty,
+def infer_owner(path, owner_map=None):
+    """Return the tmux session name for the agent owning this worktree path.
+
+    Returns None if no prefix matches (owner unknown -> skip session check).
+    """
+    if owner_map is None:
+        owner_map = OWNER_SESSION_MAP
+    for prefix, session in owner_map:
+        # Match exact prefix or prefix + separator (avoid "marveen-wt" matching
+        # "marveen-wt-privacy" only via the more-specific entry).
+        if path == prefix or path.startswith(prefix + os.sep) or path.startswith(prefix + "-"):
+            return session
+    return None
+
+
+def is_session_alive(session_name):
+    """Return True if tmux reports the named session as alive.
+
+    Uses exact-match syntax (`=<name>`) so "marveen-channels" does not match
+    a check for "marveen".  Returns False on any error (tmux absent, no server).
+    """
+    r = subprocess.run(
+        ["tmux", "has-session", "-t", f"={session_name}"],
+        capture_output=True,
+    )
+    return r.returncode == 0
+
+
+def classify_worktree(*, path, branch, detached, is_ancestor, dirty, has_unpushed,
+                       owner_session_alive,
                        main_path, exclude_paths, harness_dir):
-    """Decide whether a worktree is safe to prune. Return (action, reason)."""
+    """Decide whether a worktree is safe to prune. Return (action, reason).
+
+    Decision order (fail-CLOSED: each keep beats the next):
+      1. Hard excludes (main, exclude_paths, harness).
+      2. Uncommitted changes -> keep (WIP protected).
+      3. Owner session alive -> keep (agent mid-task).
+      4. Merged (ancestor of develop) -> prune.
+      5. 0-diff (clean + no unpushed commits) -> prune.
+      6. Everything else -> keep.
+    """
     if path == main_path:
         return ("keep", "main checkout")
     if path in exclude_paths:
@@ -74,10 +139,14 @@ def classify_worktree(*, path, branch, detached, is_ancestor, dirty,
         return ("keep", "harness-managed worktree (.claude/worktrees)")
     if dirty:
         return ("keep", "uncommitted changes (WIP protected)")
+    if owner_session_alive:
+        return ("keep", "owner session alive (agent may be mid-task)")
     label = branch if branch else "(detached)"
-    if not is_ancestor:
-        return ("keep", f"{label} not merged into develop")
-    return ("prune", f"{label} merged into develop")
+    if is_ancestor:
+        return ("prune", f"{label} merged into develop")
+    if not has_unpushed:
+        return ("prune", f"{label} 0-diff vs develop (no unpushed commits, clean tree)")
+    return ("keep", f"{label} not merged into develop")
 
 
 # ---- git IO ---------------------------------------------------------------
@@ -92,6 +161,21 @@ def _git(repo, *args):
 def is_ancestor_of_base(repo, commit, base=BASE_REF):
     r = _git(repo, "merge-base", "--is-ancestor", commit, base)
     return r.returncode == 0
+
+
+def has_unpushed_commits(repo, branch, base=BASE_REF):
+    """Return True if the branch has commits not in base.
+
+    Uses `git cherry <base> <branch>`: lines starting with `+` are unpushed.
+    Returns True (conservative: has unpushed) if the command fails or branch
+    is None/detached.
+    """
+    if not branch:
+        return True  # detached HEAD: can't cherry-check; treat as has-unpushed
+    r = _git(repo, "cherry", base, branch)
+    if r.returncode != 0:
+        return True  # error -> conservative keep
+    return any(line.startswith("+") for line in r.stdout.splitlines())
 
 
 def is_dirty(path):
@@ -131,9 +215,13 @@ def main(argv):
     for wt in worktrees:
         anc = is_ancestor_of_base(repo, wt["head"], args.base) if wt["head"] else False
         dirty = is_dirty(wt["path"]) if os.path.isdir(wt["path"]) else False
+        unpushed = has_unpushed_commits(repo, wt["branch"], args.base)
+        owner_session = infer_owner(wt["path"])
+        owner_alive = is_session_alive(owner_session) if owner_session else False
         action, reason = classify_worktree(
             path=wt["path"], branch=wt["branch"], detached=wt["detached"],
-            is_ancestor=anc, dirty=dirty,
+            is_ancestor=anc, dirty=dirty, has_unpushed=unpushed,
+            owner_session_alive=owner_alive,
             main_path=MAIN_PATH, exclude_paths=EXCLUDE_PATHS, harness_dir=HARNESS_DIR,
         )
         (to_prune if action == "prune" else kept).append((wt, reason))
