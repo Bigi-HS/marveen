@@ -42,6 +42,16 @@
         ]
       },
       {
+        "matcher": "mcp__plugin.telegram.telegram__reply|mcp__plugin.telegram.telegram__edit_message",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/guardrail-blanket-go.py\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "matcher": "mcp__plugin.telegram.telegram__reply",
         "hooks": [
           {
