@@ -59,9 +59,9 @@ BLANKET_GO_EXPIRES = date(2027, 2, 1)
 # kerul, false negative megengedi a behavior-t ami a card-ot kivalto volt).
 PERMISSION_PATTERNS = [
     r'\bGO[-\s]?dra\s+var',          # "GO-dra var", "GOdra var"
-    r'\beles[ií]t\w*\b',              # "elesithet", "Elesithed", "elesitheti", "elesits"
+    r'\beles[ií]t(?!ett)\w*\b',       # "elesithet", "Elesithed", "elesitheti"; NOT past-tense (-ettem/-ette)
     r'\bjovahagyod',                  # "jovahagyod"
-    r'\bjov[aá]hagy',                 # "jovahagyd", "jovahagysz"
+    r'\bjov[aá]hagy(?:od|sz|d|j|hatod|hatsz)\b',  # 2nd-person/imperative only; NOT past-tense (-yta/-ytam)
     r'\benged[eé]lyezed',             # "engedelyezed"
     r'\benged[eé]lyezz',              # "engedelyezz"
     r'\bk[eé]rdelek\b',              # "kerdezlek"
@@ -83,7 +83,7 @@ PERMISSION_PATTERNS = [
     r'\bdo\s+(?:i\s+)?have\s+(?:your\s+)?(?:permission|ok|go)',
     r'\bplease\s+(?:approve|confirm|authorize)',
     r'\bshould\s+i\s+proceed\b',
-    r'\bis\s+it\s+ok\s+(?:if\s+i|to)\b',
+    r'\bis\s+it\s+ok\s+(?:if\s+i\b|to\s+(?:deploy|run|send|delete|publish|proceed|merge|push|release)\b)',
     r'\bcan\s+i\s+(?:go\s+ahead|proceed|deploy|run)\b',
     r'\bok\s+(?:to|if\s+i)\b.*(?:deploy|send|run|delete|publish)',
 ]

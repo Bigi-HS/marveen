@@ -242,6 +242,66 @@ class TestContainsPermissionRequestSafe(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Grey-zone: false-positive fixtures (Chad F-1/F-2/F-3, card f8e81574)
+# These are REPORTING / past-tense / social messages -- must NOT warn (False).
+# ---------------------------------------------------------------------------
+class TestGreyZoneFalsePositives(unittest.TestCase):
+    """Chad MEDIUM FLAG fix: past-tense and social messages must not trigger."""
+
+    # F-1: past-tense "elesit" -- reporter says "I/they activated it"
+    def test_f1_past_tense_first_person_elesitettem(self):
+        # "I activated the production deployment." -- reporting, not asking
+        self.assertFalse(_hook.contains_permission_request(
+            "Elesitettem a production deploymentet."
+        ))
+
+    def test_f1_past_tense_third_person_elesitette(self):
+        # "They activated the system." -- reporting, not asking
+        self.assertFalse(_hook.contains_permission_request(
+            "Elesitette a rendszert."
+        ))
+
+    # F-2: past-tense "jovahagy" -- reporter says "Dave/I approved it"
+    def test_f2_past_third_person_jovahagyta(self):
+        # "Dave approved the PR." -- reporting
+        self.assertFalse(_hook.contains_permission_request(
+            "Jovahagyta Dave a PR-t."
+        ))
+
+    def test_f2_past_first_person_jovahagytam(self):
+        # "I approved the card change." -- reporting
+        self.assertFalse(_hook.contains_permission_request(
+            "Jovahagytam a kartya-valtoztatast."
+        ))
+
+    # F-3: social scheduling -- "Is it ok to call you at 10:00?" is NOT a deploy-GO request
+    def test_f3_social_scheduling_is_it_ok_to_call(self):
+        # "Is it ok to call you at 10:00?" -- scheduling question, not permission to deploy
+        self.assertFalse(_hook.contains_permission_request(
+            "Is it ok to call you at 10:00?"
+        ))
+
+    # Confirm genuine permission-REQUESTS still MATCH after the FP fix
+    def test_genuine_go_dra_elesithed(self):
+        # "Waiting for your GO, can you activate?" -- true 2nd-person interrogative
+        self.assertTrue(_hook.contains_permission_request(
+            "GO-dra varok, elesithed?"
+        ))
+
+    def test_genuine_jovahagyod(self):
+        # "Do you approve the PR?" -- true 2nd-person interrogative
+        self.assertTrue(_hook.contains_permission_request(
+            "Jovahagyod a PR-t?"
+        ))
+
+    def test_genuine_is_it_ok_if_i_deploy(self):
+        # "Is it ok if I deploy now?" -- English permission request with action verb
+        self.assertTrue(_hook.contains_permission_request(
+            "Is it ok if I deploy now?"
+        ))
+
+
+# ---------------------------------------------------------------------------
 # Fail-open: edge/error inputs must never raise
 # ---------------------------------------------------------------------------
 class TestFailOpen(unittest.TestCase):
