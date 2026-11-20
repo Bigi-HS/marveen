@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Adversarial tests for the migrate-to-noa.py SAFETY GUARDS (card c80cede3).
+"""Adversarial tests for the migrate-to-noa.py SAFETY GUARDS (card c80cede3 + 9346ee6a).
 
 Run: python3 -m pytest scripts/test_migrate_guard.py -q
  or: python3 scripts/test_migrate_guard.py
@@ -21,6 +21,13 @@ Covers two guards (card c80cede3):
       and the existing file is left BYTE-IDENTICAL (asserts the dangerous direction:
       the overwrite does NOT happen).
     * WITH --allow-overwrite the migration proceeds (overwrite is permitted).
+
+Additional adversarial fixtures (card 9346ee6a -- realpath-canonicalize bypass):
+  REALPATH BYPASS:
+    * Passing an ABSOLUTE PATH to the revoked claudeclaw.db is REFUSED (exit 2).
+      (os.path.normpath could not catch this -- os.path.realpath can.)
+    * Passing a SYMLINK that points to the revoked claudeclaw.db is REFUSED (exit 2).
+      (os.path.normpath does not follow symlinks -- os.path.realpath does.)
 """
 import hashlib
 import os
@@ -157,6 +164,72 @@ class LiveTargetOverwriteGuard(unittest.TestCase):
             n = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
             conn.close()
             self.assertEqual(n, 1)
+
+
+class RealpathBypassGuard(unittest.TestCase):
+    """Card 9346ee6a: adversarial fixtures for the abs-path and symlink bypass vectors.
+
+    Both tests assert the DANGEROUS direction: an absolute path / symlink alias that
+    resolves to store/claudeclaw.db must be REFUSED with exit 2 and must NOT produce
+    any output file.  The subprocess inherits cwd=repo-root so realpath('store/claudeclaw.db')
+    == realpath('<abs-path-to-repo-root>/store/claudeclaw.db').
+    """
+
+    # Repo root is the parent of the directory this file lives in.
+    _REPO_ROOT = os.path.dirname(_HERE)
+
+    def _revoked_abs(self):
+        """Absolute path to store/claudeclaw.db in the repo root."""
+        return os.path.join(self._REPO_ROOT, "store", "claudeclaw.db")
+
+    def test_abs_path_to_revoked_source_is_refused(self):
+        """Passing an ABSOLUTE path to the revoked claudeclaw.db is refused (exit 2).
+
+        Before card 9346ee6a the guard used os.path.normpath which does NOT expand
+        a relative path to an absolute one, so the absolute form slipped through.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            tgt = os.path.join(d, "out.db")
+            abs_revoked = self._revoked_abs()
+            r = _run_cli(["--source", abs_revoked, "--target", tgt])
+            self.assertNotEqual(
+                r.returncode, 0,
+                msg=f"absolute-path bypass: CLI accepted the revoked source.\n"
+                    f"stdout: {r.stdout}\nstderr: {r.stderr}"
+            )
+            self.assertIn("REVOKED", r.stderr,
+                          msg="Expected 'REVOKED' in stderr; got: " + r.stderr)
+            self.assertFalse(
+                os.path.exists(tgt),
+                msg="Guard should not produce any output file when it refuses."
+            )
+
+    def test_symlink_to_revoked_source_is_refused(self):
+        """Passing a SYMLINK that points to the revoked claudeclaw.db is refused (exit 2).
+
+        Before card 9346ee6a the guard used os.path.normpath which does NOT follow
+        symlinks, so a symlink alias slipped through.  os.path.realpath resolves the
+        chain, so both sides land on the same canonical absolute path.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            tgt = os.path.join(d, "out.db")
+            # Symlink alias.db -> <abs-path-to-revoked-source>
+            # The target file need not exist; realpath compares path strings, not inodes.
+            link = os.path.join(d, "alias.db")
+            abs_revoked = self._revoked_abs()
+            os.symlink(abs_revoked, link)
+            r = _run_cli(["--source", link, "--target", tgt])
+            self.assertNotEqual(
+                r.returncode, 0,
+                msg=f"symlink bypass: CLI accepted the revoked source via symlink.\n"
+                    f"stdout: {r.stdout}\nstderr: {r.stderr}"
+            )
+            self.assertIn("REVOKED", r.stderr,
+                          msg="Expected 'REVOKED' in stderr; got: " + r.stderr)
+            self.assertFalse(
+                os.path.exists(tgt),
+                msg="Guard should not produce any output file when it refuses."
+            )
 
 
 if __name__ == "__main__":

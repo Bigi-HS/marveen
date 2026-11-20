@@ -404,7 +404,24 @@ def main():
             file=sys.stderr,
         )
         sys.exit(2)
-    if os.path.normpath(args.source) == os.path.normpath(REVOKED_SOURCE):
+    # GUARD 1 (card 9346ee6a harden): realpath-canonicalize both sides so that an
+    # ABSOLUTE path (/abs/.../store/claudeclaw.db) or a SYMLINK pointing at the revoked
+    # file are both caught.  os.path.normpath only normalises "." / ".." and does NOT
+    # resolve symlinks or expand to absolute -- bypass was possible with either vector.
+    # os.path.realpath resolves symlinks and makes the path absolute (cwd-anchored for
+    # relative inputs), so both sides land on the same canonical string when they refer
+    # to the same physical location.
+    # Belt-and-suspenders: if the supplied source already exists on disk, also use
+    # os.path.samefile which compares inodes (catches hardlinks and any other alias).
+    _revoked_real = os.path.realpath(REVOKED_SOURCE)
+    _source_real = os.path.realpath(args.source)
+    _same_realpath = (_source_real == _revoked_real)
+    _same_inode = (
+        os.path.exists(args.source)
+        and os.path.exists(REVOKED_SOURCE)
+        and os.path.samefile(args.source, REVOKED_SOURCE)
+    )
+    if _same_realpath or _same_inode:
         print(
             f"ERROR: refusing to migrate from the REVOKED source {REVOKED_SOURCE} "
             "(ENG-024, frozen 2026-06-28).\n"
@@ -541,6 +558,17 @@ def main():
         print(f"ERROR: parity mismatch in: {mismatches}", file=sys.stderr)
         os.remove(tmp)
         sys.exit(1)
+
+    # TOCTOU note (card 9346ee6a, INFO / Chad SEC advisory, NOT fixed here):
+    # There is a narrow race window between the GUARD-2 exists()-check above and this
+    # os.replace().  An adversary with filesystem-write access could create/replace
+    # args.target in that window.  Exploitation requires local filesystem-write, which
+    # is out of scope for the CLI threat model (operator-run tool).  Mitigations would
+    # be: (a) open/lock the target path with O_CREAT|O_EXCL before the migration run,
+    # (b) add a final re-check immediately before os.replace, or (c) use a target-side
+    # file-descriptor lock held for the full run.  Deferred; document here so it is not
+    # silently forgotten.  Threat-model reference: shared-redirect-strip-must-normalize
+    # + shared-egress-path-anchor (same path-normalisation bypass class).
 
     # Atomic swap into place, then enable WAL on the final-named file (AC-5).
     os.chmod(tmp, 0o600)
