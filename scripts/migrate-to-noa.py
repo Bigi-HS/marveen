@@ -62,8 +62,24 @@ BATCH = 1000  # rows per insert transaction (OQ-3)
 #      touch it unless the operator passes it EXPLICITLY via --source.
 #   2. The live target (store/noa.db) must never be overwritten in-place by accident.
 #      If --target already exists, refuse unless --allow-overwrite is given.
-REVOKED_SOURCE = os.path.join("store", "claudeclaw.db")
+REVOKED_SOURCE = os.path.join("store", "claudeclaw.db")  # display string (messages only)
 DEFAULT_TARGET = os.path.join("store", "noa.db")
+
+# Canonical, cwd-INDEPENDENT path to the revoked DB used by GUARD 1's comparison.
+# Anchored to THIS script's directory (HERE) via the repo root (HERE/..), NOT to the
+# process cwd.  os.path.realpath() on the RELATIVE REVOKED_SOURCE constant would resolve
+# against the current working directory, so the guard would only work when invoked from
+# repo-root and would FAIL OPEN from any other cwd (card 9346ee6a reroll:
+# `cd /tmp && migrate-to-noa.py --source /abs/.../store/claudeclaw.db` sailed past the
+# cwd-anchored guard). Computed once at import, independent of caller cwd.
+try:
+    REVOKED_SOURCE_CANON = os.path.realpath(
+        os.path.join(HERE, os.pardir, "store", "claudeclaw.db")
+    )
+except OSError:
+    # Fail-CLOSED: if we cannot canonicalize the revoked reference we cannot prove any
+    # --source is NOT the revoked DB; the guard refuses rather than risk a live-data wipe.
+    REVOKED_SOURCE_CANON = None
 
 warnings = []
 
@@ -404,22 +420,31 @@ def main():
             file=sys.stderr,
         )
         sys.exit(2)
-    # GUARD 1 (card 9346ee6a harden): realpath-canonicalize both sides so that an
-    # ABSOLUTE path (/abs/.../store/claudeclaw.db) or a SYMLINK pointing at the revoked
+    # GUARD 1 (card 9346ee6a harden + reroll): realpath-canonicalize both sides so that
+    # an ABSOLUTE path (/abs/.../store/claudeclaw.db) or a SYMLINK pointing at the revoked
     # file are both caught.  os.path.normpath only normalises "." / ".." and does NOT
     # resolve symlinks or expand to absolute -- bypass was possible with either vector.
-    # os.path.realpath resolves symlinks and makes the path absolute (cwd-anchored for
-    # relative inputs), so both sides land on the same canonical string when they refer
-    # to the same physical location.
+    # The revoked side is pre-canonicalized to REVOKED_SOURCE_CANON, anchored to this
+    # script's directory (NOT the process cwd); realpath'ing the RELATIVE constant here
+    # would re-introduce the cwd-dependent fail-open (see REVOKED_SOURCE_CANON note).
     # Belt-and-suspenders: if the supplied source already exists on disk, also use
     # os.path.samefile which compares inodes (catches hardlinks and any other alias).
-    _revoked_real = os.path.realpath(REVOKED_SOURCE)
+    if REVOKED_SOURCE_CANON is None:
+        # Fail-CLOSED: revoked reference could not be canonicalized -> cannot prove the
+        # source is safe, so refuse rather than risk migrating from the dead DB.
+        print(
+            "ERROR: cannot canonicalize the REVOKED source reference; refusing to "
+            "migrate (fail-closed).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    _revoked_real = REVOKED_SOURCE_CANON
     _source_real = os.path.realpath(args.source)
     _same_realpath = (_source_real == _revoked_real)
     _same_inode = (
         os.path.exists(args.source)
-        and os.path.exists(REVOKED_SOURCE)
-        and os.path.samefile(args.source, REVOKED_SOURCE)
+        and os.path.exists(_revoked_real)
+        and os.path.samefile(args.source, _revoked_real)
     )
     if _same_realpath or _same_inode:
         print(
