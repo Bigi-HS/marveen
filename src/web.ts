@@ -47,6 +47,7 @@ import { tryHandleAgentActions } from './web/routes/agent-actions.js'
 import { tryHandleAgentTaskState } from './web/routes/agent-taskstate.js'
 import { tryHandleAgentCheckpoint } from './web/routes/agent-checkpoint.js'
 import { applyCheckpointMigrations } from './web/agent-checkpoint.js'
+import { tryHandleAgentContinuityBudget } from './web/routes/agent-continuity-budget.js'
 import { startWalMaintenance } from './noa-db.js'
 import { tryHandleShutdownMarker } from './web/routes/shutdown-marker.js'
 import { sweepOrphanTaskStates } from './web/agent-taskstate.js'
@@ -381,6 +382,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleAgentActions(routeCtx)) return
       if (await tryHandleAgentTaskState(routeCtx)) return
       if (await tryHandleAgentCheckpoint(routeCtx)) return
+      if (await tryHandleAgentContinuityBudget(routeCtx)) return
       if (await tryHandleShutdownMarker(routeCtx)) return
       if (await tryHandleAgentCategories(routeCtx)) return
       if (await tryHandleAdmin(routeCtx)) return

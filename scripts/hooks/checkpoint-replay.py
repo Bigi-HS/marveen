@@ -49,11 +49,31 @@ def _agent_id_from_cwd(cwd):
     return None
 
 
-def _req(method, path, token):
-    req = urllib.request.Request(API + path, method=method)
+def _req(method, path, token, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(API + path, method=method, data=data)
     req.add_header("Authorization", "Bearer " + token)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
     with urllib.request.urlopen(req, timeout=5) as r:
         return json.load(r)
+
+
+def _claim_budget(agent, chars, token):
+    """Register chars with the cross-source continuity budget accumulator.
+    Returns True iff allowed (or if the endpoint is unavailable -- fail-open).
+    Fail-open: if the endpoint is unreachable the hook proceeds as before;
+    the budget is a HARDENING layer, not a critical path gate."""
+    try:
+        res = _req(
+            "POST",
+            "/agent-continuity-budget/%s/claim" % agent,
+            token,
+            {"source": "checkpoint", "chars": chars},
+        )
+        return (res or {}).get("allowed", True)
+    except Exception:
+        return True  # fail-open: proceed even if the endpoint is unreachable
 
 
 def main():
@@ -79,6 +99,13 @@ def main():
     inject = (res or {}).get("additionalContext")
     if not inject:
         sys.exit(0)  # nothing to replay
+
+    # HARD CROSS-SOURCE BUDGET CHECK: register with the combined continuity
+    # accumulator before emitting. If the combined budget is exhausted (another
+    # source already claimed the full 8k), skip injection. Fail-open on network
+    # errors so the endpoint is not a critical path gate.
+    if not _claim_budget(agent, len(inject), token):
+        sys.exit(0)  # budget exhausted -- skip to avoid over-injection
 
     print(json.dumps({
         "hookSpecificOutput": {

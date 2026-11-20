@@ -21,12 +21,15 @@ import os
 import sqlite3
 import sys
 import time
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ledger_lib  # noqa: E402  (reuse agent_id_from_cwd + store path)
 import memory_rank  # noqa: E402
 
 INJECT_SOURCES = {"startup"}
+
+API = "http://localhost:3420/api"
 
 HEADER = (
     "MEMÓRIA AUTO-INJECT (SessionStart). A munkád szempontjából legfontosabb "
@@ -40,6 +43,39 @@ HEADER = (
 def _db_path():
     override = os.environ.get("MEMORY_DB_PATH")
     return override if override else ledger_lib.db_path()
+
+
+def _token():
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(root, "store", ".dashboard-token"), "r") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def _claim_budget(agent_id, chars):
+    """Register chars with the cross-source continuity budget accumulator.
+    Returns True iff allowed (or if the endpoint is unavailable -- fail-open).
+    Fail-open: if the endpoint is unreachable the hook proceeds as before;
+    the budget is a HARDENING layer, not a critical path gate."""
+    token = _token()
+    if not token:
+        return True  # no token -> proceed (fail-open)
+    try:
+        data = json.dumps({"source": "memory", "chars": chars}).encode()
+        req = urllib.request.Request(
+            API + "/agent-continuity-budget/%s/claim" % agent_id,
+            method="POST",
+            data=data,
+        )
+        req.add_header("Authorization", "Bearer " + token)
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=3) as r:
+            res = json.load(r)
+            return (res or {}).get("allowed", True)
+    except Exception:
+        return True  # fail-open: proceed even if the endpoint is unreachable
 
 
 def _candidates(agent_id):
@@ -81,10 +117,19 @@ def main():
         sys.exit(0)  # nothing to inject
 
     block = memory_rank.format_block(ranked, int(time.time()))
+    inject = HEADER + "\n\n" + block
+
+    # HARD CROSS-SOURCE BUDGET CHECK: register with the combined continuity
+    # accumulator before emitting. If the combined budget is exhausted (other
+    # sources already claimed the full 8k), skip injection. Fail-open on network
+    # errors so the endpoint is not a critical path gate.
+    if agent_id and not _claim_budget(agent_id, len(inject)):
+        sys.exit(0)  # budget exhausted -- skip to avoid over-injection
+
     out = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": HEADER + "\n\n" + block,
+            "additionalContext": inject,
         }
     }
     print(json.dumps(out, ensure_ascii=False))
