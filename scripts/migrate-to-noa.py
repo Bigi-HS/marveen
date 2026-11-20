@@ -62,8 +62,24 @@ BATCH = 1000  # rows per insert transaction (OQ-3)
 #      touch it unless the operator passes it EXPLICITLY via --source.
 #   2. The live target (store/noa.db) must never be overwritten in-place by accident.
 #      If --target already exists, refuse unless --allow-overwrite is given.
-REVOKED_SOURCE = os.path.join("store", "claudeclaw.db")
+REVOKED_SOURCE = os.path.join("store", "claudeclaw.db")  # display string (messages only)
 DEFAULT_TARGET = os.path.join("store", "noa.db")
+
+# Canonical, cwd-INDEPENDENT path to the revoked DB used by GUARD 1's comparison.
+# Anchored to THIS script's directory (HERE) via the repo root (HERE/..), NOT to the
+# process cwd.  os.path.realpath() on the RELATIVE REVOKED_SOURCE constant would resolve
+# against the current working directory, so the guard would only work when invoked from
+# repo-root and would FAIL OPEN from any other cwd (card 9346ee6a reroll:
+# `cd /tmp && migrate-to-noa.py --source /abs/.../store/claudeclaw.db` sailed past the
+# cwd-anchored guard). Computed once at import, independent of caller cwd.
+try:
+    REVOKED_SOURCE_CANON = os.path.realpath(
+        os.path.join(HERE, os.pardir, "store", "claudeclaw.db")
+    )
+except OSError:
+    # Fail-CLOSED: if we cannot canonicalize the revoked reference we cannot prove any
+    # --source is NOT the revoked DB; the guard refuses rather than risk a live-data wipe.
+    REVOKED_SOURCE_CANON = None
 
 warnings = []
 
@@ -404,7 +420,33 @@ def main():
             file=sys.stderr,
         )
         sys.exit(2)
-    if os.path.normpath(args.source) == os.path.normpath(REVOKED_SOURCE):
+    # GUARD 1 (card 9346ee6a harden + reroll): realpath-canonicalize both sides so that
+    # an ABSOLUTE path (/abs/.../store/claudeclaw.db) or a SYMLINK pointing at the revoked
+    # file are both caught.  os.path.normpath only normalises "." / ".." and does NOT
+    # resolve symlinks or expand to absolute -- bypass was possible with either vector.
+    # The revoked side is pre-canonicalized to REVOKED_SOURCE_CANON, anchored to this
+    # script's directory (NOT the process cwd); realpath'ing the RELATIVE constant here
+    # would re-introduce the cwd-dependent fail-open (see REVOKED_SOURCE_CANON note).
+    # Belt-and-suspenders: if the supplied source already exists on disk, also use
+    # os.path.samefile which compares inodes (catches hardlinks and any other alias).
+    if REVOKED_SOURCE_CANON is None:
+        # Fail-CLOSED: revoked reference could not be canonicalized -> cannot prove the
+        # source is safe, so refuse rather than risk migrating from the dead DB.
+        print(
+            "ERROR: cannot canonicalize the REVOKED source reference; refusing to "
+            "migrate (fail-closed).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    _revoked_real = REVOKED_SOURCE_CANON
+    _source_real = os.path.realpath(args.source)
+    _same_realpath = (_source_real == _revoked_real)
+    _same_inode = (
+        os.path.exists(args.source)
+        and os.path.exists(_revoked_real)
+        and os.path.samefile(args.source, _revoked_real)
+    )
+    if _same_realpath or _same_inode:
         print(
             f"ERROR: refusing to migrate from the REVOKED source {REVOKED_SOURCE} "
             "(ENG-024, frozen 2026-06-28).\n"
@@ -541,6 +583,17 @@ def main():
         print(f"ERROR: parity mismatch in: {mismatches}", file=sys.stderr)
         os.remove(tmp)
         sys.exit(1)
+
+    # TOCTOU note (card 9346ee6a, INFO / Chad SEC advisory, NOT fixed here):
+    # There is a narrow race window between the GUARD-2 exists()-check above and this
+    # os.replace().  An adversary with filesystem-write access could create/replace
+    # args.target in that window.  Exploitation requires local filesystem-write, which
+    # is out of scope for the CLI threat model (operator-run tool).  Mitigations would
+    # be: (a) open/lock the target path with O_CREAT|O_EXCL before the migration run,
+    # (b) add a final re-check immediately before os.replace, or (c) use a target-side
+    # file-descriptor lock held for the full run.  Deferred; document here so it is not
+    # silently forgotten.  Threat-model reference: shared-redirect-strip-must-normalize
+    # + shared-egress-path-anchor (same path-normalisation bypass class).
 
     # Atomic swap into place, then enable WAL on the final-named file (AC-5).
     os.chmod(tmp, 0o600)
