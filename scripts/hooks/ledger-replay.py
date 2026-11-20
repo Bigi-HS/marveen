@@ -13,9 +13,13 @@ JSON. No history -> no-op. Never breaks session start (always exit 0).
 import sys
 import os
 import json
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ledger_lib  # noqa: E402
+
+
+API = "http://localhost:3420/api"
 
 
 def _project_root():
@@ -46,6 +50,38 @@ def _consume_ledger_suppressed(agent_id):
     except Exception:
         pass
     return False
+
+
+def _token():
+    try:
+        with open(os.path.join(_project_root(), "store", ".dashboard-token"), "r") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def _claim_budget(agent_id, chars):
+    """Register chars with the cross-source continuity budget accumulator.
+    Returns True iff allowed (or if the endpoint is unavailable -- fail-open).
+    Fail-open: if the endpoint is unreachable the hook proceeds as before;
+    the budget is a HARDENING layer, not a critical path gate."""
+    token = _token()
+    if not token:
+        return True  # no token -> proceed (fail-open)
+    try:
+        data = json.dumps({"source": "ledger", "chars": chars}).encode()
+        req = urllib.request.Request(
+            API + "/agent-continuity-budget/%s/claim" % agent_id,
+            method="POST",
+            data=data,
+        )
+        req.add_header("Authorization", "Bearer " + token)
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=3) as r:
+            res = json.load(r)
+            return (res or {}).get("allowed", True)
+    except Exception:
+        return True  # fail-open: proceed even if the endpoint is unreachable
 
 # Roughly 4000 tokens of transcript context (~4 chars/token). If the recent
 # window exceeds this, the OLDEST turns are dropped so the injected context
@@ -120,10 +156,29 @@ def main():
             f'meghívásával a megfelelő chat_id-re, a fenti kontextusból folytatva.'
         )
 
+    inject = "\n\n".join(parts)
+
+    # HARD CROSS-SOURCE BUDGET CHECK: register the transcript portion with the
+    # combined continuity accumulator. The transcript window is what can STACK
+    # with the checkpoint lastTurns in a degenerate case (reversed hook order
+    # or suppress-marker failure). Fail-open: if the endpoint is unreachable,
+    # proceed as before (no regression vs. the pre-hardening behavior).
+    # NOTE: the open_q signal is NOT accounted for here -- it is a distinct
+    # signal the checkpoint does not carry and must always be surfaced.
+    if transcript and agent_id:
+        # Claim only the transcript portion of the inject (not open_q).
+        transcript_chars = sum(len(line) + 1 for line in transcript)
+        if not _claim_budget(agent_id, transcript_chars):
+            # Budget exhausted: drop the transcript window but keep open_q.
+            inject_parts = [p for p in parts if p not in ["\n".join(transcript)]]
+            inject = "\n\n".join(inject_parts) if inject_parts else ""
+            if not inject:
+                sys.exit(0)
+
     out = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": "\n\n".join(parts),
+            "additionalContext": inject,
         }
     }
     print(json.dumps(out, ensure_ascii=False))
