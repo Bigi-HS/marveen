@@ -65,6 +65,15 @@ abort() { echo -e "${RED}ABORT: $*${RESET}" >&2; exit 1; }
 # each one; abort if the target contains the held commit AND the conditions
 # are not satisfied (to be judged by the operator; the script only detects
 # the hold is present and prints its content).
+#
+# VERIFIED-INERT holds (card c2f0557a):
+# A sentinel may carry a machine-readable header:
+#   HOLD-TYPE: inert-activation-gated FLAG=<relative-path>
+# This signals that the held code is live-but-inert (activation gated by the
+# named flag file). When this header is present AND the named flag file is
+# ABSENT, the hold is in its documented inert state: WARN and continue instead
+# of hard-aborting. If the flag IS present (activation has been enabled), the
+# hold condition is live and hard-abort is still required.
 # ---------------------------------------------------------------------------
 step "0. DEPLOY-HOLD sentinel check"
 shopt -s nullglob
@@ -81,7 +90,29 @@ if [ "${#hold_files[@]}" -gt 0 ]; then
       echo "  HOLD ACTIVE -- held commit ${held_sha:0:8} is in target $TARGET:"
       cat "$hf" | sed 's/^/    /'
       echo ""
-      hold_hit=$((hold_hit + 1))
+
+      # Check for verified-inert hold: HOLD-TYPE: inert-activation-gated FLAG=<path>
+      inert_flag_path=""
+      if grep -qE "^HOLD-TYPE:[[:space:]]*inert-activation-gated" "$hf" 2>/dev/null; then
+        inert_flag_path=$(grep -E "^HOLD-TYPE:[[:space:]]*inert-activation-gated" "$hf" \
+          | grep -oE "FLAG=[^[:space:]]+" | sed 's/FLAG=//' | head -1)
+      fi
+
+      if [ -n "$inert_flag_path" ]; then
+        flag_abs="$REPO/$inert_flag_path"
+        if [ ! -f "$flag_abs" ]; then
+          warn "HOLD-TYPE: inert-activation-gated (flag absent: $inert_flag_path)"
+          warn "Held code is live-but-inert -- activation flag not set. Continuing deploy."
+          warn "DO NOT touch $inert_flag_path without the activation pre-conditions met."
+          # Do not increment hold_hit: verified-inert hold does not block deploy.
+        else
+          warn "HOLD-TYPE: inert-activation-gated BUT flag IS present: $inert_flag_path"
+          warn "Activation flag exists -- the held feature is active. Treating as a blocking hold."
+          hold_hit=$((hold_hit + 1))
+        fi
+      else
+        hold_hit=$((hold_hit + 1))
+      fi
     fi
   done
   if [ "$hold_hit" -gt 0 ]; then
