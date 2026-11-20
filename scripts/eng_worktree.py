@@ -6,10 +6,11 @@ ephemeral build:
 
   git worktree add -B eng/<key> <path> origin/develop
   ln -sfn /home/domin/marveen/node_modules <path>/node_modules
+  ln -sfn /home/domin/marveen/dashboard-new/node_modules <path>/dashboard-new/node_modules
   ... work, commit, push ...
   git worktree remove --force <path> && git worktree prune && git branch -D eng/<key>
 
-This wraps CREATE (add + node_modules symlink + stale-base verify) and REMOVE
+This wraps CREATE (add + node_modules symlinks + stale-base guard) and REMOVE
 (remove --force + prune + branch delete). The bulk orphan/merged sweep is NOT
 reimplemented here -- `sweep` delegates to the existing
 scripts/prune_merged_worktrees.py (card 678c1e82), which already classifies and
@@ -18,7 +19,8 @@ with WIP/main/harness safety.
 
 Conventions follow the git-worktree-manager skill: branch = eng/<key>, path =
 /home/domin/marveen-wt/<key>, base pinned to origin/<base> via -B, node_modules
-symlinked (never reinstalled).
+symlinked (never reinstalled). Both node_modules directories are auto-linked:
+root (/) and dashboard-new/ (card e27fb5e6).
 
 Usage:
   python3 scripts/eng_worktree.py create <key> [--base develop]
@@ -76,6 +78,20 @@ def create_plan(key, base="develop", repo=REPO_DEFAULT, wt_base=WT_BASE_DEFAULT)
     path = worktree_path(key, wt_base)
     branch = branch_name(key)
     ref = base_ref(base)
+    # Both node_modules directories are linked so the worktree is ready without
+    # running npm install: (1) root node_modules, (2) dashboard-new/node_modules.
+    symlinks = [
+        {
+            "src": os.path.join(repo, "node_modules"),
+            "dst": os.path.join(path, "node_modules"),
+            "label": "node_modules",
+        },
+        {
+            "src": os.path.join(repo, "dashboard-new", "node_modules"),
+            "dst": os.path.join(path, "dashboard-new", "node_modules"),
+            "label": "dashboard-new/node_modules",
+        },
+    ]
     return {
         "key": key,
         "branch": branch,
@@ -84,8 +100,11 @@ def create_plan(key, base="develop", repo=REPO_DEFAULT, wt_base=WT_BASE_DEFAULT)
         "base_ref": ref,
         "fetch": ["git", "-C", repo, "fetch", "origin", base],
         "add": ["git", "-C", repo, "worktree", "add", "-B", branch, path, ref],
-        "symlink_src": os.path.join(repo, "node_modules"),
-        "symlink_dst": os.path.join(path, "node_modules"),
+        # Legacy single-symlink keys kept for backward compat with existing callers.
+        "symlink_src": symlinks[0]["src"],
+        "symlink_dst": symlinks[0]["dst"],
+        # Full list (card e27fb5e6): root + dashboard-new.
+        "symlinks": symlinks,
     }
 
 
@@ -163,25 +182,50 @@ def run_create(args):
         print(f"FAIL fetch origin {plan['base']}: {f.stderr.strip()}", file=sys.stderr)
         return 1
 
+    # Base-freshness guard (card e27fb5e6): verify origin/<base> is locally
+    # up-to-date BEFORE creating the worktree.  A stale local ref means the
+    # worktree would start from outdated commits -> dirty-PR re-heads.  The
+    # fetch above already refreshed origin/<base>; if the resolved SHA is still
+    # unresolvable the remote is unreachable -> fail early.
+    want = _run(["git", "-C", args.repo, "rev-parse", plan["base_ref"]]).stdout.strip()
+    if not want:
+        print(f"FAIL base-freshness: cannot resolve {plan['base_ref']} -- "
+              "is the remote reachable?", file=sys.stderr)
+        return 1
+
     a = _run(plan["add"])
     if a.returncode != 0:
         print(f"FAIL worktree add: {a.stderr.strip()}", file=sys.stderr)
         return 1
 
-    linked = _symlink_force(plan["symlink_src"], plan["symlink_dst"])
-    if not linked:
-        print(f"  note: {plan['symlink_dst']} already a real dir, left as-is")
-
-    # stale-base guard: HEAD must equal origin/<base> right after creation
+    # Post-add freshness check: HEAD in the new worktree must equal origin/<base>.
+    # If they differ the -B reset did not point to the fetched tip (e.g. a local
+    # branch with the same name shadowed the ref) -> tear down and refuse.
     head = _run(["git", "-C", plan["path"], "rev-parse", "HEAD"]).stdout.strip()
-    want = _run(["git", "-C", args.repo, "rev-parse", plan["base_ref"]]).stdout.strip()
     if head != want:
-        print(f"WARN stale base: HEAD {head[:10]} != {plan['base_ref']} {want[:10]}",
-              file=sys.stderr)
+        _run(["git", "-C", args.repo, "worktree", "remove", "--force", plan["path"]])
+        _run(["git", "-C", args.repo, "worktree", "prune"])
+        print(
+            f"FAIL stale base: HEAD {head[:10]} != {plan['base_ref']} {want[:10]}. "
+            "Run `git fetch origin` and retry.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Link every node_modules directory so the worktree is ready without npm
+    # install: root node_modules + dashboard-new/node_modules (card e27fb5e6).
+    linked_labels = []
+    for sl in plan["symlinks"]:
+        linked = _symlink_force(sl["src"], sl["dst"])
+        if linked:
+            linked_labels.append(sl["label"])
+        else:
+            print(f"  note: {sl['dst']} already a real dir, left as-is")
 
     print(f"created  {plan['path']}")
     print(f"  branch {plan['branch']}  @ {plan['base_ref']} ({head[:10]})")
-    print(f"  node_modules -> {plan['symlink_src']}")
+    for label in linked_labels:
+        print(f"  {label} -> (symlinked)")
     print(f"\ncd {plan['path']}")
     return 0
 
