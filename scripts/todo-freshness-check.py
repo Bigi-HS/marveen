@@ -43,6 +43,15 @@ THRESHOLD_SECONDS = 129600  # 36h (FS-AC4; widened from 26h: 24h cycle + 12h mar
 # If an agent sent a message or had a conversation_log entry within this window, it is
 # considered alive even without a todo_items write (card cbaa66fa).
 LIVENESS_THRESHOLD_SECONDS = 18 * 3600  # 18h -- one full daily cycle + 6h margin
+# Need-aware gate (card 24e1829c): the owner's daily `todo-write-<owner>` task runs at
+# 07:00. If it fired successfully within this window, the write pipeline executed (the
+# agent woke and ran it); a stale todo write is then an empty valid day, not an outage.
+# One daily cycle (24h) + 6h margin so a single on-time fire still counts if the monitor
+# runs just before the next 07:00; a genuinely wedged scheduler (no fire > 30h) falls
+# through to the liveness check and a real 'stale' alert.
+WRITE_TASK_FRESH_SECONDS = 30 * 3600  # 30h
+# Scheduler result token that means the task actually executed (vs 'budget-paused'/None).
+WRITE_TASK_OK_RESULT = "fired"
 # Suppress a repeat alert for the same ongoing outage within this window.
 REALERT_SUPPRESS_SECONDS = 23 * 3600
 MESSAGES_URL = "http://localhost:3420/api/messages"
@@ -92,19 +101,55 @@ def last_activity_ago_seconds(conn: sqlite3.Connection, owner: str, now: int) ->
     return now - int(row[0])
 
 
+def write_task_fired_ago_seconds(conn: sqlite3.Connection, owner: str, now: int) -> int | None:
+    """Return seconds since the owner's daily todo-write task last fired successfully.
+
+    The write pipeline is the `todo-write-<owner>` scheduled task (daily 07:00). A recent
+    successful fire is positive evidence the agent woke and executed the write, so a stale
+    todo write is an empty valid day rather than an outage (card 24e1829c / OPS-343).
+
+    Returns None -- i.e. "no proof the pipeline ran", which must NOT suppress the alert --
+    when the task is absent, inactive (status != 'active'), never ran (last_run NULL), or
+    last completed with a non-success result (e.g. 'budget-paused'). The task is matched by
+    the stable id convention first, then by its description, so an id rename still resolves.
+    """
+    try:
+        row = conn.execute(
+            """SELECT last_run, last_result FROM scheduled_tasks
+                WHERE status = 'active'
+                  AND ( id = ? OR (agent = ? AND description LIKE '%To-Do widget write%') )
+                ORDER BY last_run DESC
+                LIMIT 1""",
+            (f"todo-write-{owner}", owner),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # scheduled_tasks table absent (fresh deploy / incomplete migration) -- no proof.
+        return None
+    if row is None:
+        return None
+    last_run, last_result = row
+    if last_run is None or last_result != WRITE_TASK_OK_RESULT:
+        return None
+    return now - int(last_run)
+
+
 def evaluate(
     conn: sqlite3.Connection,
     now: int,
     threshold: int,
     liveness_threshold: int = LIVENESS_THRESHOLD_SECONDS,
+    write_task_fresh: int = WRITE_TASK_FRESH_SECONDS,
 ) -> list[dict]:
     """Pure evaluation: one verdict dict per owner (no IO side effects).
 
     States:
-      ok        -- write is within threshold.
-      no-rows   -- no write record at all; treated as benign (spec FS-AC4 edge).
-      ok-alive  -- write is stale but agent has recent fleet activity; no alert.
-      stale     -- write is stale AND no recent activity; alert warranted.
+      ok            -- write is within threshold.
+      no-rows       -- no write record at all; treated as benign (spec FS-AC4 edge).
+      ok-empty-day  -- write is stale but the daily write-task fired recently; the
+                       pipeline ran and had nothing to write (empty valid day). No alert.
+      ok-alive      -- write is stale but agent has recent fleet activity; no alert.
+      stale         -- write is stale AND no proof the pipeline ran AND no recent
+                       activity; alert warranted.
     """
     out = []
     for owner in OWNERS:
@@ -114,6 +159,17 @@ def evaluate(
         elif ago <= threshold:
             out.append({"owner": owner, "state": "ok", "ago": ago})
         else:
+            # Need-aware gate: did the write pipeline actually run? A recently-fired
+            # write-task means a missing write is by-design (empty day), not an outage.
+            task_ago = write_task_fired_ago_seconds(conn, owner, now)
+            if task_ago is not None and task_ago < write_task_fresh:
+                out.append({
+                    "owner": owner,
+                    "state": "ok-empty-day",
+                    "ago": ago,
+                    "task_fired_ago": task_ago,
+                })
+                continue
             activity_ago = last_activity_ago_seconds(conn, owner, now)
             if activity_ago is not None and activity_ago < liveness_threshold:
                 out.append({
@@ -190,6 +246,8 @@ def main(argv: list[str]) -> int:
             suffix = f" (ago={ago}s" if ago is not None else ""
             if st == "ok-alive" and "activity_ago" in v:
                 suffix += f", last_activity={v['activity_ago']}s"
+            if st == "ok-empty-day" and "task_fired_ago" in v:
+                suffix += f", write_task_fired={v['task_fired_ago']}s ago"
             if suffix:
                 suffix += ")"
             print(f"[{owner}] {st}{suffix}")
