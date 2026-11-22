@@ -257,6 +257,54 @@ else
 fi
 echo
 
+# ---------------------------------------------------------------------------
+# Case F: sentinel named with PR# (not a commit SHA) -> git cat-file fails ->
+# hold is SILENTLY BYPASSED (card a255abf1 regression fixture).
+#
+# The hold-check logic extracts held_sha from the filename suffix, then calls
+# `git cat-file -e "${held_sha}^{commit}"`. A PR number such as "651" is not a
+# valid git object reference, so cat-file exits non-zero and the whole `&&` chain
+# short-circuits: the sentinel is never inspected, hold_hit stays 0, deploy
+# continues as if no hold exists.
+#
+# This is the documented bug. The operational fix (card a255abf1 Option A) is to
+# rename the sentinel file from .deploy-hold-<PR#> to .deploy-hold-<merge-sha>,
+# as done for store/.deploy-hold-651 -> store/.deploy-hold-ae2baaed4cb82d5ea..
+# ---------------------------------------------------------------------------
+echo "--- Case F: PR#-named sentinel (not a commit SHA) -> silently bypassed ---"
+REPO_F="$WORK/repo_f"
+read -r held_f target_f <<< "$(make_repo "$REPO_F")"
+
+# Sentinel named with a PR number, not the held commit SHA.
+cat > "$REPO_F/store/.deploy-hold-651" <<EOF
+DEPLOY HOLD (PR#651 - session-end hook activation)
+Held until c12 sign-off. Merge commit: ae2baae.
+EOF
+
+out_f=$(check_step0 "$REPO_F" "$target_f")
+rc_f=$?
+
+if [ "$rc_f" -eq 0 ]; then
+  pass "Case F: PR#-named sentinel -> bypassed (rc=0, hold_hit=0)"
+else
+  fail "Case F: expected bypass (rc=0), got rc=$rc_f. Got: $out_f"
+fi
+if ! echo "$out_f" | grep -q "ABORT:"; then
+  pass "Case F: no ABORT emitted (bypass confirmed)"
+else
+  fail "Case F: ABORT should not appear for PR#-named sentinel (bypass expected). Got: $out_f"
+fi
+# Confirm SHA-named sentinel IS detected (the fix works)
+mv "$REPO_F/store/.deploy-hold-651" "$REPO_F/store/.deploy-hold-$held_f"
+out_f2=$(check_step0 "$REPO_F" "$target_f")
+rc_f2=$?
+if [ "$rc_f2" -ne 0 ]; then
+  pass "Case F: SHA-renamed sentinel -> correctly detected (hard-abort)"
+else
+  fail "Case F: SHA-renamed sentinel should abort, got rc=0. Got: $out_f2"
+fi
+echo
+
 echo "=========================="
 if [ "$FAIL" -eq 0 ]; then
   echo "ALL PASSED"
