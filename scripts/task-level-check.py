@@ -42,6 +42,10 @@ LEVEL_TIER = {"L0": 0, "L1": 1, "L2": 2}
 _MODEL_SUBSTR_TIER = (("haiku", 0), ("sonnet", 1), ("opus", 2))
 _UNKNOWN_MODEL_TIER = 1  # conservative middle (Sonnet) when the model is unknown
 
+# Size cap on the kanban helper output, checked BEFORE json.loads so a hostile
+# or buggy oversized response is rejected without being parsed (card d59c8e20).
+MAX_RESPONSE_BYTES = 2_000_000  # 2 MB -- far above any real board, below OOM range
+
 
 def model_tier(model):
     """Map a model id / alias to a tier 0 (Haiku) / 1 (Sonnet) / 2 (Opus).
@@ -113,13 +117,39 @@ def task_level_check(agent_id, *, current_model=None, in_progress_count=0,
     }
 
 
+def _count_in_progress_from_payload(payload, agent_id, max_bytes=MAX_RESPONSE_BYTES):
+    """Pure: count the agent's in_progress cards in a raw kanban payload (str).
+
+    Fail-closed to 0 on an empty, oversized, or invalid payload. The size cap is
+    checked BEFORE json.loads, so a hostile/huge response is rejected without
+    being parsed -- this bounds the parse cost and the resulting object graph (no
+    OOM). Cards key the owning agent on ``assignee`` (NOT ``owner``) -- see the
+    reference memory ref-kanban-card-assignee-field-not-owner.
+    """
+    if not payload or len(payload) > max_bytes:
+        return 0
+    try:
+        data = json.loads(payload)
+    except Exception:  # noqa: BLE001 -- advisory path must never raise
+        return 0
+    cards = data.get("cards", data) if isinstance(data, dict) else data
+    if not isinstance(cards, list):
+        return 0
+    return sum(
+        1 for c in cards
+        if isinstance(c, dict)
+        and c.get("assignee") == agent_id
+        and c.get("status") == "in_progress"
+    )
+
+
 def live_in_progress_count(agent_id):
     """Best-effort count of the agent's in_progress kanban cards.
 
-    Reads the live board via the read-only helper. Any failure returns 0 (the
-    verdict degrades to L0, which is advisory-only and never harmful). Cards key
-    the owning agent on ``assignee`` (NOT ``owner``) -- see the reference memory
-    ref-kanban-card-assignee-field-not-owner.
+    Reads the live board via the read-only helper (localhost API, 20s timeout),
+    then size-bounds the raw output before parsing (see
+    _count_in_progress_from_payload). Any failure returns 0 -- the verdict
+    degrades to L0, which is advisory-only and never harmful.
     """
     try:
         import subprocess
@@ -128,18 +158,9 @@ def live_in_progress_count(agent_id):
              "/api/kanban"],
             capture_output=True, text=True, timeout=20, cwd=ROOT,
         )
-        if p.returncode != 0 or not p.stdout.strip():
+        if p.returncode != 0:
             return 0
-        data = json.loads(p.stdout)
-        cards = data.get("cards", data) if isinstance(data, dict) else data
-        if not isinstance(cards, list):
-            return 0
-        return sum(
-            1 for c in cards
-            if isinstance(c, dict)
-            and c.get("assignee") == agent_id
-            and c.get("status") == "in_progress"
-        )
+        return _count_in_progress_from_payload(p.stdout, agent_id)
     except Exception:  # noqa: BLE001 -- advisory path must never raise
         return 0
 
