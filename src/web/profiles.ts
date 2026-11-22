@@ -74,8 +74,17 @@ export const OUTWARD_DESTRUCTIVE_DENY: string[] = [
   // as belt-and-suspenders documentation.
   'mcp__*',
   'mcp__plugin_telegram_telegram__*',
-  // share -- data leaving the box
+  // share -- data leaving the box. WebFetch + wget are pure external fetch/egress
+  // and are denied outright. KNOWN GAP (Chad #1057 F-2, closed in §10 slice-2):
+  // `Bash(curl ...)` external POST can still exfiltrate, but a static glob cannot
+  // separate external curl from the LEGITIMATE localhost api-get monitoring
+  // (http://127.0.0.1:3420) the server agent relies on -- a blind Bash(curl:*)
+  // deny would break monitoring, and `curl *http*` catches localhost too. The
+  // external-vs-localhost egress policy belongs in slice-2's launch-time
+  // enforcement (a wrapper/egress-proxy that can inspect the target host), not in
+  // a pattern that only looks complete. Documented, not silently dropped.
   'WebFetch(*)',
+  'Bash(wget:*)',
   // delete -- irreversible destruction
   'Bash(rm:*)',
   'Bash(pkill:*)',

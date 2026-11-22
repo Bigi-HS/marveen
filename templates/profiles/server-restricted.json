@@ -1,7 +1,7 @@
 {
   "id": "server-restricted",
   "label": "Szerver / heartbeat (kifelé-tiltott)",
-  "description": "Always-on szerver- és heartbeat-ágensekhez (card 2efcb439 §10). Permissive módban fut, hogy a háttér-monitorozás (helyi olvasás, api-get) ne akadjon el megválaszolhatatlan prompton, DE a kifelé-ható/destruktív tool-osztály (send/share/delete/publish) a permission-rétegben TILTVA van, nem CLAUDE.md-prózában kérve. A deny permissive módban is érvényesül (a --dangerously-skip-permissions az ASK-promptokat hagyja jóvá, nem az explicit deny-t). A default profil visszafordíthatatlan-alapvonalát is hordozza (pkill, access.json, token-olvasás, önmódosítás).",
+  "description": "Always-on szerver- és heartbeat-ágensekhez (card 2efcb439 §10). Permissive módban fut, hogy a háttér-monitorozás (helyi olvasás, api-get) ne akadjon el megválaszolhatatlan prompton, DE a kifelé-ható/destruktív tool-osztály (send/share/delete/publish) a permission-rétegben TILTVA van, nem CLAUDE.md-prózában kérve. A deny permissive módban is érvényesül (a --dangerously-skip-permissions az ASK-promptokat hagyja jóvá, nem az explicit deny-t). A default profil visszafordíthatatlan-alapvonalát is hordozza (pkill, access.json, token-olvasás, önmódosítás). KNOWN GAP (Chad #1057 F-2, slice-2): a Bash(curl ...) external POST egress NINCS tiltva, mert statikus glob nem választja el a legitim localhost api-get monitoringtól; az external-vs-localhost egress a slice-2 launch-idő enforcement dolga.",
   "permissionMode": "permissive",
   "filesystem": {
     "allow": [],
@@ -9,6 +9,7 @@
       "mcp__*",
       "mcp__plugin_telegram_telegram__*",
       "WebFetch(*)",
+      "Bash(wget:*)",
       "Bash(rm:*)",
       "Bash(pkill:*)",
       "Bash(killall:*)",

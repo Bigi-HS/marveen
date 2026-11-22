@@ -61,9 +61,22 @@ describe('server-restricted profile -- §10 server-side write-block', () => {
     const hasAxis = (needles: string[]) =>
       needles.some(n => deny.some(d => d.includes(n)))
     expect(hasAxis(['mcp__'])).toBe(true) // send (all MCP integration tools)
-    expect(hasAxis(['WebFetch'])).toBe(true) // share / egress
+    expect(hasAxis(['WebFetch', 'wget'])).toBe(true) // share / egress
     expect(hasAxis(['rm', 'pkill', 'killall'])).toBe(true) // delete / destructive
     expect(hasAxis(['git push', 'npm publish', 'gh'])).toBe(true) // publish
+  })
+
+  it('denies wget but documents curl external-egress as an intentional slice-2 gap (Chad #1057 F-2)', () => {
+    const deny = loadProfileTemplate('server-restricted').filesystem.deny
+    // wget is pure external fetch -> denied outright.
+    expect(deny).toContain('Bash(wget:*)')
+    // curl is deliberately NOT blind-denied: a static glob cannot separate an
+    // external exfil POST from the legitimate localhost api-get monitoring the
+    // server agent needs (http://127.0.0.1:3420), and `curl *http*` would catch
+    // localhost too. The external-vs-localhost egress policy is slice-2's
+    // launch-time enforcement. This asserts the decision is deliberate -- if a
+    // future change adds a blind Bash(curl:*) deny it should be a conscious one.
+    expect(deny).not.toContain('Bash(curl:*)')
   })
 
   it('actually glob-MATCHES the real outbound MCP tool names (Chad #1057 regression)', () => {
