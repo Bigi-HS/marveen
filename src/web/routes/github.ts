@@ -1,4 +1,4 @@
-// Server-side GitHub routes (cards 5bfe0e1f + be1f3711).
+// Server-side GitHub routes (cards 5bfe0e1f + be1f3711 + e0afd7e9).
 //
 // POST /api/github/pr   {head, base?, title, body?}
 //   Opens a PR on GATE_REPO with the fleet PAT.
@@ -8,6 +8,12 @@
 //   The 40-char head_sha guard ensures the caller has the live head; if the
 //   PR gained a new commit since the caller checked, 409 is returned.
 //
+// POST /api/github/branch-protection {branch}
+//   Sets force_pushes=false + deletions=false on main or develop (ONLY).
+//   Fail-closed: branch must be in PROTECTED_BRANCHES allowlist. This is NOT
+//   a general branch-protection-writer; it enforces a fixed security baseline.
+//   Boss-GO required to extend PROTECTED_BRANCHES (new PR + Chad SEC gate).
+//
 // The PAT never crosses these boundaries -- read in-process, returned to no one.
 
 import { logger } from '../../logger.js'
@@ -16,6 +22,7 @@ import { openPullRequest, closePullRequest, PrRequestError, fetchPrInfo, type Cl
 import { mergePullRequest, MergeRequestError, validateMergeParams } from '../github-merge.js'
 import { runGateCheck, resolveCiStatus, isGateCiRequired, type GithubPrInfo } from '../gate-check.js'
 import { readApprovals, readValidSeats, hasActiveOverride, consumeOverride, insertPrAuthor, readPrAuthor, readLatestCiRun } from '../gate-db.js'
+import { setBranchProtection, BranchProtectionError, validateBranchProtectionParams } from '../github-branch-protection.js'
 import { getDb } from '../../db.js'
 import type { RouteContext } from './types.js'
 
@@ -58,6 +65,15 @@ export function __setGithubPrDeps(deps: {
 export function __resetGithubPrDeps(): void {
   prOpener = openPullRequest
   prAuthorRecorder = (n, a, t) => insertPrAuthor(getDb(), n, a, t)
+}
+
+// Branch protection seam -- injectable for tests to avoid real network calls.
+let branchProtector: typeof setBranchProtection = setBranchProtection
+export function __setGithubBranchProtectionDeps(deps: { protect?: typeof setBranchProtection }): void {
+  if (deps.protect !== undefined) branchProtector = deps.protect
+}
+export function __resetGithubBranchProtectionDeps(): void {
+  branchProtector = setBranchProtection
 }
 
 export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
@@ -185,6 +201,42 @@ export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
       const status = err instanceof PrRequestError ? err.status : 500
       const message = err instanceof PrRequestError ? err.message : 'PR close failed'
       logger.warn({ caller: identity.agentId, pr: prNum, status }, 'GitHub PR close failed')
+      json(res, { error: message }, status)
+    }
+    return true
+  }
+
+  // -------------------------------------------------------------------------
+  // POST /api/github/branch-protection -- enforce baseline on main/develop
+  // (card e0afd7e9, SEC T1 mitigation)
+  // -------------------------------------------------------------------------
+  if (path === '/api/github/branch-protection' && method === 'POST') {
+    let bpBody: Record<string, unknown>
+    try {
+      const raw = (await readBody(req, { maxBytes: 1024 })).toString('utf-8')
+      bpBody = raw ? JSON.parse(raw) : {}
+    } catch {
+      json(res, { error: 'invalid request body' }, 400)
+      return true
+    }
+
+    const bpV = validateBranchProtectionParams(bpBody)
+    if (!bpV.ok) {
+      json(res, { error: bpV.error }, 400)
+      return true
+    }
+
+    try {
+      const result = await branchProtector(bpV.branch)
+      logger.info(
+        { caller: identity.agentId, branch: result.branch },
+        'branch protection applied server-side',
+      )
+      json(res, { branch: result.branch, applied: result.applied }, 200)
+    } catch (err) {
+      const status = err instanceof BranchProtectionError ? err.status : 500
+      const message = err instanceof BranchProtectionError ? err.message : 'branch protection failed'
+      logger.warn({ caller: identity.agentId, branch: bpV.branch, status }, 'GitHub branch protection failed')
       json(res, { error: message }, status)
     }
     return true
