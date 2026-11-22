@@ -3,7 +3,6 @@
   "securityProfile": "researcher",
   "displayName": "Dr. Stone",
   "env": {
-    "API_ANYTHING_MAX_BYTES": "51200",
     "API_ANYTHING_LOCAL_ONLY": "1",
     "API_ANYTHING_KEY": "<PLACEHOLDER_SET_AT_DEPLOY>"
   }

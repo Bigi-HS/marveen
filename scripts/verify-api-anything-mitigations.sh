@@ -53,6 +53,19 @@ else
         "file does not exist: $SCOUT_CLAUDE"
 fi
 
+# M2/M4: maxChars no-override constraint in scout CLAUDE.md
+if [ -f "$SCOUT_CLAUDE" ]; then
+    if grep -q "maxChars\|no-override\|SOHA ne adj meg.*maxChars\|maxChars.*SOHA" "$SCOUT_CLAUDE" 2>/dev/null; then
+        check "M4 maxChars no-override constraint in agents/scout/CLAUDE.md" "ok" ""
+    else
+        check "M4 maxChars no-override constraint in agents/scout/CLAUDE.md" "fail" \
+            "maxChars no-override constraint text not found -- M4 not applied"
+    fi
+else
+    check "M4 maxChars no-override constraint in agents/scout/CLAUDE.md" "fail" \
+        "file does not exist: $SCOUT_CLAUDE"
+fi
+
 # MCP wiring: api-anything entry in scout .mcp.json
 if [ -f "$SCOUT_MCP" ]; then
     if grep -q "api-anything" "$SCOUT_MCP" 2>/dev/null; then
@@ -63,6 +76,19 @@ if [ -f "$SCOUT_MCP" ]; then
     fi
 else
     check "MCP wiring: api-anything entry in agents/scout/.mcp.json" "fail" \
+        "file does not exist: $SCOUT_MCP"
+fi
+
+# M3 (MCP): --no-learn flag in .mcp.json args
+if [ -f "$SCOUT_MCP" ]; then
+    if grep -q "\-\-no-learn" "$SCOUT_MCP" 2>/dev/null; then
+        check "M3 --no-learn flag in agents/scout/.mcp.json args" "ok" ""
+    else
+        check "M3 --no-learn flag in agents/scout/.mcp.json args" "fail" \
+            "'--no-learn' not found in .mcp.json -- learn_site MCP tool not disabled"
+    fi
+else
+    check "M3 --no-learn flag in agents/scout/.mcp.json args" "fail" \
         "file does not exist: $SCOUT_MCP"
 fi
 

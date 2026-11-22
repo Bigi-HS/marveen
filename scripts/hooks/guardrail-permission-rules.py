@@ -1417,8 +1417,13 @@ def match_api_anything_learn(command: str) -> bool:
 # this flag, regardless of subcommand.
 
 def match_api_anything_allow_writes(command: str) -> bool:
-    """M5: True when any api-anything invocation carries --allow-writes.
-    Fail-OPEN on parse errors (permission-rules fail-open contract)."""
+    """M5: True when any api-anything invocation carries --allow-writes (any form).
+
+    Matches both '--allow-writes' (bare) and '--allow-writes=<value>' (=value form).
+    The =value form is a distinct token and would bypass a simple `in tokens` check.
+    Prefix-match covers both: any token that starts with '--allow-writes' is blocked.
+    Fail-OPEN on parse errors (permission-rules fail-open contract).
+    """
     try:
         for piece in _split_subcommands(command):
             tokens = _tokenize(piece)
@@ -1426,7 +1431,7 @@ def match_api_anything_allow_writes(command: str) -> bool:
                 continue
             if not _is_api_anything_invocation(tokens):
                 continue
-            if _API_ANYTHING_ALLOW_WRITES_FLAG in tokens:
+            if any(t.startswith(_API_ANYTHING_ALLOW_WRITES_FLAG) for t in tokens):
                 return True
         return False
     except Exception:
