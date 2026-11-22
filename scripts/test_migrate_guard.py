@@ -236,6 +236,64 @@ class RealpathBypassGuard(unittest.TestCase):
             )
 
 
+class HardlinkBypassGuard(unittest.TestCase):
+    """Card 1f781314: adversarial fixture for the hardlink bypass vector.
+
+    A hardlink created in a FOREIGN directory has a different canonical path
+    (os.path.realpath returns the link's own path, not the target's) so the
+    realpath-based guard does NOT catch it -- this is the documented advisory from
+    card 1f781314.  The inode/samefile check was explicitly REFUSED during card
+    9346ee6a (adds complexity, realpath already handles symlinks; samefile in a
+    separate dir is a trust-model question).  TOCTOU is deferred.
+
+    This fixture asserts the CURRENT behavior (bypass allowed) as a regression
+    marker: if a future pass adds inode/samefile detection, this test must be
+    updated to assert refusal instead (rc != 0, 'REVOKED' in stderr).
+    """
+
+    _REPO_ROOT = os.path.dirname(_HERE)
+
+    def _revoked_abs(self):
+        return os.path.join(self._REPO_ROOT, "store", "claudeclaw.db")
+
+    def test_hardlink_in_foreign_dir_currently_bypasses_guard(self):
+        """Hardlink in /tmp to store/claudeclaw.db bypasses the realpath guard.
+
+        os.path.realpath(link) == /tmp/.../hardlink.db which does NOT equal
+        os.path.realpath(revoked_source) == /path/to/marveen/store/claudeclaw.db.
+        The guard compares canonicalized paths; different paths -> guard skips.
+
+        ADVISORY: this is fail-open for the hardlink-in-other-dir vector.  The
+        trust model requires write access to the foreign directory (attacker already
+        has filesystem access), so the risk is LOW and accepted.
+        """
+        revoked_abs = self._revoked_abs()
+        if not os.path.exists(revoked_abs):
+            self.skipTest("store/claudeclaw.db absent; cannot create hardlink")
+        with tempfile.TemporaryDirectory() as d:
+            link = os.path.join(d, "hardlink.db")
+            tgt = os.path.join(d, "out.db")
+            try:
+                os.link(revoked_abs, link)
+            except OSError as e:
+                self.skipTest(f"os.link failed (cross-device or permissions): {e}")
+            r = _run_cli(["--source", link, "--target", tgt])
+            # Assert CURRENT behavior: hardlink-in-foreign-dir bypasses realpath guard.
+            # If this ever starts failing (rc != 0 + REVOKED), inode detection was added --
+            # flip the assertion to assert refusal.
+            self.assertEqual(
+                r.returncode, 0,
+                msg="ADVISORY-FLIP: hardlink bypass is now blocked (realpath guard strengthened). "
+                    "Update assertion to assert refusal (rc != 0, 'REVOKED' in stderr). "
+                    f"stdout: {r.stdout}\nstderr: {r.stderr}"
+            )
+            self.assertNotIn(
+                "REVOKED", r.stderr,
+                msg="ADVISORY-FLIP: guard now catches hardlink-in-foreign-dir. "
+                    "Update assertion direction.\nstderr: " + r.stderr
+            )
+
+
 class CwdIndependenceGuard(unittest.TestCase):
     """Card 9346ee6a REROLL: GUARD 1 must be cwd-INDEPENDENT.
 
