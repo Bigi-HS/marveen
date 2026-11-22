@@ -88,11 +88,13 @@ export async function setBranchProtection(
   // required_status_checks: null means "do not change required CI checks" --
   // the GitHub API requires the field to be present but null is a valid value
   // when no CI policy is being set. required_pull_request_reviews: null likewise.
-  // enforce_admins: false avoids blocking the fleet operator (Boss) from an
-  // emergency direct push while still protecting automated agents.
+  // enforce_admins: TRUE is required -- the fleet shares a single admin PAT
+  // (~/.git-credentials), so enforce_admins=false would exempt ALL agent pushes
+  // from protection, defeating T1 entirely. Boss break-glass = temporarily
+  // disabling protection via GitHub settings, not a standing force-push exception.
   const body = {
     required_status_checks: null,
-    enforce_admins: false,
+    enforce_admins: true,
     required_pull_request_reviews: null,
     restrictions: null,
     allow_force_pushes: false,

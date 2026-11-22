@@ -90,6 +90,9 @@ describe('setBranchProtection', () => {
     // force_pushes=false and allow_deletions=false are the security baseline
     expect(body.allow_force_pushes).toBe(false)
     expect(body.allow_deletions).toBe(false)
+    // enforce_admins=true is REQUIRED: fleet uses a shared admin PAT, so false
+    // would exempt all agent pushes from protection, defeating T1 entirely.
+    expect(body.enforce_admins).toBe(true)
     // required_status_checks required by GitHub branch protection API (can be null)
     expect('required_status_checks' in body).toBe(true)
   })
