@@ -1,0 +1,31 @@
+{
+  "id": "server-restricted",
+  "label": "Szerver / heartbeat (kifelé-tiltott)",
+  "description": "Always-on szerver- és heartbeat-ágensekhez (card 2efcb439 §10). Permissive módban fut, hogy a háttér-monitorozás (helyi olvasás, api-get) ne akadjon el megválaszolhatatlan prompton, DE a kifelé-ható/destruktív tool-osztály (send/share/delete/publish) a permission-rétegben TILTVA van, nem CLAUDE.md-prózában kérve. A deny permissive módban is érvényesül (a --dangerously-skip-permissions az ASK-promptokat hagyja jóvá, nem az explicit deny-t). A default profil visszafordíthatatlan-alapvonalát is hordozza (pkill, access.json, token-olvasás, önmódosítás).",
+  "permissionMode": "permissive",
+  "filesystem": {
+    "allow": [],
+    "deny": [
+      "mcp__telegram__*",
+      "mcp__slack-channel__*",
+      "mcp__discord__*",
+      "WebFetch(*)",
+      "Bash(rm:*)",
+      "Bash(pkill:*)",
+      "Bash(killall:*)",
+      "Bash(dropdb:*)",
+      "Bash(git push:*)",
+      "Bash(npm publish:*)",
+      "Bash(gh:*)",
+      "Write(**/access.json)",
+      "Edit(**/access.json)",
+      "Read(**/.dashboard-token)",
+      "Read(**/.git-credentials)",
+      "Read(**/.claude.json)",
+      "Write(**/.mcp.json)",
+      "Edit(**/.mcp.json)",
+      "Write(**/settings.json)",
+      "Edit(**/settings.json)"
+    ]
+  }
+}

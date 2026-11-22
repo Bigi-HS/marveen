@@ -52,6 +52,34 @@ export const HARDCODED_RESTRICTIVE_PROFILE: ProfileTemplate = {
   },
 }
 
+// Card 2efcb439 §10 -- the outward-acting + destructive tool class. An always-on
+// server / heartbeat agent must have this whole class DENIED at the permission
+// layer (not asked-for in prose). Grouped by axis:
+//   send    -- outbound messaging to a human/channel
+//   share   -- data egress off the box
+//   delete  -- irreversible destruction of processes / data
+//   publish -- releasing code/artifacts outward
+// The committed templates/profiles/server-restricted.json carries this list (plus
+// the default irreversible baseline); this constant is the single source of truth
+// the profile is tested against, so dropping an axis from the JSON fails the suite.
+export const OUTWARD_DESTRUCTIVE_DENY: string[] = [
+  // send -- outbound channel messaging (Telegram / Slack / Discord MCP tools)
+  'mcp__telegram__*',
+  'mcp__slack-channel__*',
+  'mcp__discord__*',
+  // share -- data leaving the box
+  'WebFetch(*)',
+  // delete -- irreversible destruction
+  'Bash(rm:*)',
+  'Bash(pkill:*)',
+  'Bash(killall:*)',
+  'Bash(dropdb:*)',
+  // publish -- releasing code/artifacts outward
+  'Bash(git push:*)',
+  'Bash(npm publish:*)',
+  'Bash(gh:*)',
+]
+
 export function listProfileTemplates(): ProfileTemplate[] {
   if (!existsSync(PROFILES_DIR)) return [HARDCODED_DEFAULT_PROFILE]
   const out: ProfileTemplate[] = []
