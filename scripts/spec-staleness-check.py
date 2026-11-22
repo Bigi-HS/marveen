@@ -31,6 +31,7 @@ be called from shell gate-checklist scripts with a simple `if !` guard.
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +41,12 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 HERE = Path(__file__).resolve().parent          # scripts/
 REPO_ROOT = HERE.parent                         # repo root
+
+# Test-only override: set _SPEC_STALE_REPO_ROOT_OVERRIDE env to redirect the
+# CLI's implicit REPO_ROOT to a tempdir repo without touching __file__.
+_env_override = os.environ.get("_SPEC_STALE_REPO_ROOT_OVERRIDE")
+if _env_override:
+    REPO_ROOT = Path(_env_override).resolve()
 
 
 def _run_git_log(repo_root: Path, spec_path: str, days: int) -> tuple[int, str, str]:
@@ -92,6 +99,17 @@ def spec_staleness_check(
     re-read when the check could not complete.
     """
     root = repo_root if repo_root is not None else REPO_ROOT
+
+    # Fail-closed: a path that does not exist in the repo cannot be verified
+    # as fresh -- treat it as stale so reviewers are never misled.
+    if not (root / spec_path).exists():
+        return {
+            "stale": True,
+            "commits": [],
+            "days": days,
+            "spec": spec_path,
+            "error": f"spec file not found in repo: {spec_path}",
+        }
 
     rc, stdout, stderr = _run_git_log(root, spec_path, days)
 

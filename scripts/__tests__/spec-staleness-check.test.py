@@ -101,17 +101,21 @@ class TestSpecStalenessPure(unittest.TestCase):
             self.assertGreater(len(result["commits"]), 0, "commits list must be non-empty")
             self.assertIsNone(result["error"])
 
-    def test_no_commit_is_not_stale(self):
-        """A path with no commits at all -> stale=False (empty git log output)."""
+    def test_missing_file_is_stale(self):
+        """A path that does not exist in the repo -> stale=True (fail-closed).
+
+        Previously this returned stale=False because git log rc=0 + empty output
+        was trusted as "no fresh commits".  A missing file cannot be verified as
+        fresh, so the correct answer is stale=True + error set.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(tmp)
-            # README.md was committed in _make_repo; we query a path that was
-            # NEVER committed -> git log returns rc=0, empty output -> not stale.
+            # store/never-touched.md was never created on disk -> missing -> stale
             result = ssc.spec_staleness_check("store/never-touched.md", days=3, repo_root=repo)
-            self.assertFalse(result["stale"],
-                "path with no commits must not be stale (empty git log)")
+            self.assertTrue(result["stale"],
+                "missing spec file must be fail-closed (stale=True)")
             self.assertEqual(result["commits"], [])
-            self.assertIsNone(result["error"])
+            self.assertIsNotNone(result["error"], "error field must explain the miss")
 
     def test_missing_path_is_fail_closed(self):
         """A file not in git -> git log exits 0 with empty output -> not-stale.
@@ -184,27 +188,24 @@ class TestCwdIndependence(unittest.TestCase):
     """
 
     def test_cli_from_hostile_cwd_stale(self):
-        """Run CLI from a hostile cwd (not the repo); a fresh spec commit -> exit 1."""
+        """Run CLI from a hostile cwd; override env redirects REPO_ROOT -> exit 1 (stale)."""
         with tempfile.TemporaryDirectory() as repo_tmp:
             with tempfile.TemporaryDirectory() as hostile_cwd:
                 repo = _make_repo(repo_tmp)
                 _touch_spec(repo, "store/specB.md")
-                # CLI subprocess cwd = hostile_cwd (NOT repo_tmp, NOT marveen)
+                # CLI subprocess cwd = hostile_cwd (NOT repo_tmp, NOT marveen).
+                # _SPEC_STALE_REPO_ROOT_OVERRIDE redirects REPO_ROOT to the tempdir
+                # repo so the script finds the fresh commit there, not in marveen.
                 r = subprocess.run(
                     [sys.executable, str(_SCRIPT), "store/specB.md",
                      "--days", "3", "--json"],
                     capture_output=True, text=True,
-                    cwd=hostile_cwd,  # <-- hostile cwd
+                    cwd=hostile_cwd,
                     env={**os.environ, "_SPEC_STALE_REPO_ROOT_OVERRIDE": str(repo)},
                 )
-                # Script should exit 1 (stale) but NOT crash with a path error.
-                # It may exit 2 (error) if the override env is not consumed; either
-                # way it must NOT exit 0 (not-stale = wrong answer) when a commit
-                # was made. We test that the JSON output is valid and that the script
-                # doesn't silently return 0 without reading the spec.
-                # NOTE: the script uses REPO_ROOT from __file__, so from hostile_cwd
-                # it still anchors to the marveen repo. We validate it doesn't crash.
-                self.assertNotEqual(r.returncode, None, "script must exit cleanly")
+                self.assertEqual(r.returncode, 1,
+                    f"expected exit 1 (stale) from hostile cwd with fresh commit, "
+                    f"got {r.returncode}\nstdout: {r.stdout}\nstderr: {r.stderr}")
 
     def test_module_repo_root_is_not_cwd_derived(self):
         """REPO_ROOT in the module must be derived from __file__, not getcwd().
@@ -275,20 +276,15 @@ class TestCLI(unittest.TestCase):
         """No fresh commit within window -> CLI exits 0."""
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(tmp)
-            _touch_spec(repo, "store/specE.md")
-            # Window of 0 days: committed now but window=0 means "nothing in the
-            # last 0 days" -- git --since=0.days covers current second, so use -1
-            # (not valid, but git treats negative as 0 and returns empty):
-            # Instead, verify via module with a 0-day window for a file committed
-            # slightly before -- use `days=0` which git interprets as "now - 0"
-            # giving an empty window for a just-made commit... actually git
-            # --since=0.days CAN include just-made commits. Use a different approach:
-            # check a path that was never committed.
+            # Create the file on disk (untracked) -- exists() passes, git log
+            # returns rc=0 + empty output (no commits touching it) -> not stale.
+            (repo / "store").mkdir(parents=True, exist_ok=True)
+            (repo / "store" / "untracked-spec.md").write_text("placeholder\n")
             result = ssc.spec_staleness_check(
-                "store/never-committed.md", days=3, repo_root=repo
+                "store/untracked-spec.md", days=3, repo_root=repo
             )
-            # git log on a path with no commits returns rc=0 + empty stdout
-            self.assertFalse(result["stale"], "no-commit path must not be stale")
+            # File exists but no commits -> git log rc=0 + empty -> not stale
+            self.assertFalse(result["stale"], "existing file with no commits must not be stale")
             self.assertEqual(result["commits"], [])
 
     def test_cli_error_path_exits_nonzero(self):
