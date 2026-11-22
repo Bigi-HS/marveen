@@ -197,6 +197,21 @@ def main():
     if nudge_hi > 0:
         reasons.append(f"NUDGE_STALE:{nudge_hi}")
 
+    # 6. Task-level tier verdict (model-tiering, card 6fd1e40c / OPS-336).
+    #    VERDICT-ONLY and advisory: it logs L0/L1/L2 for this tick and flags an
+    #    L0-task-on-costlier-than-Haiku mismatch, but NEVER switches the model
+    #    (Opus-promotion is Boss-gated/manual) and NEVER changes reasons/VERDICT.
+    #    Signal: a non-empty `reasons` means this tick needs real reasoning (L1);
+    #    an otherwise-quiet tick is L0 (Haiku-eligible).
+    agent_id = os.environ.get("MAIN_AGENT_ID", "marveen")
+    tier_cmd = [sys.executable, "scripts/task-level-check.py", agent_id,
+                "--in-progress", "0"]
+    if reasons:
+        tier_cmd.append("--inter-agent-task")
+    _, tier_out = run(tier_cmd)
+    tier_head = tier_out.strip().splitlines()[-1] if tier_out.strip() else ""
+    lines.append(f"[tier]  {tier_head}")
+
     # Verdict
     print("=== HEARTBEAT PREFLIGHT [marveen] " + datetime.datetime.now().astimezone().isoformat(timespec="seconds") + " ===")
     for ln in lines:
