@@ -3,8 +3,8 @@
 
 Injection policy (card 847237f4 F3 -- cut fixed per-fire priming):
 
-  - resume / clear: full hot-cache for every agent (~2000 chars). Resuming an
-    existing session needs immediate situational awareness.
+  - resume / clear / compact: full hot-cache for every agent (~2000 chars).
+    Resuming or continuing after a compaction needs immediate situational awareness.
   - startup (cold start):
       * context-sensitive agents (dave, quill): mini hot-cache (<= 800 chars).
         These agents carry long-lived state and benefit from a brief reminder
@@ -41,8 +41,10 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ledger_lib  # noqa: E402
 
-# resume + clear: full inject for all agents.
-FULL_INJECT_SOURCES = {"resume", "clear"}
+# resume + clear + compact: full inject for all agents.
+# compact is added by card 2c15b48b (compaction-safe continuity): after a
+# context compaction the agent needs the same situational awareness as a resume.
+FULL_INJECT_SOURCES = {"resume", "clear", "compact"}
 
 # Continuity Phase 2b (card 6485f301): regenerate this agent's snapshot from live
 # sources (in_progress kanban + last ledger turn) at SessionStart, so a fresh
