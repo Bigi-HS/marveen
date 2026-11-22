@@ -161,6 +161,62 @@ class ReadConfigModel(unittest.TestCase):
             self.assertIsNone(tlc._read_config_model("nope", root=d))
 
 
+class SizeBoundHelper(unittest.TestCase):
+    """Card d59c8e20 (Chad #1051 LOW): the kanban helper output must be
+    size-bounded BEFORE json.loads, failing closed (count 0) on an oversized /
+    hostile payload -- no parse, no hang, no OOM."""
+
+    def test_normal_payload_counts_assignee_in_progress(self):
+        payload = json.dumps({"cards": [
+            {"assignee": "dave", "status": "in_progress"},
+            {"assignee": "dave", "status": "planned"},
+            {"assignee": "forge", "status": "in_progress"},
+            {"assignee": "dave", "status": "in_progress"},
+        ]})
+        self.assertEqual(tlc._count_in_progress_from_payload(payload, "dave"), 2)
+
+    def test_bare_list_payload(self):
+        payload = json.dumps([
+            {"assignee": "dave", "status": "in_progress"},
+            {"assignee": "dave", "status": "done"},
+        ])
+        self.assertEqual(tlc._count_in_progress_from_payload(payload, "dave"), 1)
+
+    def test_oversized_payload_fails_closed(self):
+        big = "x" * (tlc.MAX_RESPONSE_BYTES + 1)
+        self.assertEqual(tlc._count_in_progress_from_payload(big, "dave"), 0)
+
+    def test_size_check_precedes_json_loads(self):
+        # Oversized AND invalid JSON: must NOT raise -- proves the size guard
+        # runs before (and instead of) the parse.
+        big_invalid = "{" * (tlc.MAX_RESPONSE_BYTES + 10)
+        self.assertEqual(tlc._count_in_progress_from_payload(big_invalid, "dave"), 0)
+
+    def test_oversized_valid_json_still_rejected(self):
+        cards = [{"assignee": "dave", "status": "in_progress"}] * 200000
+        payload = json.dumps({"cards": cards})
+        self.assertGreater(len(payload), tlc.MAX_RESPONSE_BYTES)
+        self.assertEqual(tlc._count_in_progress_from_payload(payload, "dave"), 0)
+
+    def test_custom_cap_boundary(self):
+        payload = json.dumps([{"assignee": "dave", "status": "in_progress"}])
+        self.assertEqual(
+            tlc._count_in_progress_from_payload(payload, "dave", max_bytes=len(payload)), 1)
+        self.assertEqual(
+            tlc._count_in_progress_from_payload(payload, "dave", max_bytes=len(payload) - 1), 0)
+
+    def test_invalid_small_json_fails_closed(self):
+        self.assertEqual(tlc._count_in_progress_from_payload("not json", "dave"), 0)
+
+    def test_empty_or_none_payload_zero(self):
+        self.assertEqual(tlc._count_in_progress_from_payload("", "dave"), 0)
+        self.assertEqual(tlc._count_in_progress_from_payload(None, "dave"), 0)
+
+    def test_non_list_cards_zero(self):
+        self.assertEqual(
+            tlc._count_in_progress_from_payload(json.dumps({"cards": "oops"}), "dave"), 0)
+
+
 class CliSmoke(unittest.TestCase):
     """Hermetic CLI: pass signals via flags so no live kanban/network query runs."""
 
