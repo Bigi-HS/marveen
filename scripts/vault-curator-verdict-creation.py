@@ -23,8 +23,10 @@ import urllib.error
 from pathlib import Path
 
 JACCARD_THRESHOLD = 0.65
-REJECT_BELOW = 0.3
 TTL_DAYS = 90
+# Circuit-breaker: abort further APPROVEs if this many are reached in one run.
+# Guards against upstream vault-lint-l2 generating a mass-dedup batch.
+MAX_APPROVES_PER_RUN = 50
 
 REPO_ROOT = Path(__file__).parent.parent
 DEFAULT_PROPOSALS = REPO_ROOT / "store" / "vault-lint-l2-proposals.json"
@@ -45,6 +47,19 @@ def classify_candidate(candidate: dict) -> dict:
     b_id = entry_b["id"]
 
     proposal_id = f"{agent_id}:{a_id}:{b_id}:{jaccard:.4f}"
+
+    # Bounds guard: jaccard outside [0, 1] is a data error -> REJECT fail-closed.
+    if not (0.0 <= jaccard <= 1.0):
+        return {
+            "proposal_id": proposal_id,
+            "agent_id": agent_id,
+            "entry_a_id": a_id,
+            "entry_b_id": b_id,
+            "jaccard": jaccard,
+            "verdict": "REJECT",
+            "curator_notes": f"invalid jaccard={jaccard} outside [0,1]; data error",
+            "ttl_days": TTL_DAYS,
+        }
 
     if jaccard >= JACCARD_THRESHOLD:
         verdict = "APPROVE"
@@ -111,7 +126,23 @@ def run_pipeline(
     approved = rejected = errors = 0
 
     for candidate in candidates:
-        classified = classify_candidate(candidate)
+        # F-1: classify inside try so a malformed entry errors++ and continues (REJECT-default).
+        try:
+            classified = classify_candidate(candidate)
+        except Exception as exc:
+            errors += 1
+            print(f"ERROR classifying candidate {candidate}: {exc}", file=sys.stderr)
+            continue
+
+        # F-2: circuit-breaker -- stop approving once cap is reached.
+        if classified["verdict"] == "APPROVE" and approved >= MAX_APPROVES_PER_RUN:
+            classified = dict(classified)
+            classified["verdict"] = "REJECT"
+            classified["curator_notes"] = (
+                f"cap reached (MAX_APPROVES_PER_RUN={MAX_APPROVES_PER_RUN}); "
+                f"original jaccard={classified['jaccard']:.4f}"
+            )
+
         try:
             post_verdict(classified, base_url=base_url, token=token, dry_run=dry_run)
             if classified["verdict"] == "APPROVE":

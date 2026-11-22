@@ -5,6 +5,7 @@ Option C (Hybrid): jaccard >= JACCARD_THRESHOLD -> APPROVE, else -> REJECT.
 REJECT-default: any unexpected error yields REJECT.
 
 Fixtures: 10 pairs (5 clear APPROVE, 3 clear REJECT, 2 edge-case boundary).
+Adversarial fixtures (Chad F-1, F-2): malformed entry resilience + approve-cap circuit-breaker.
 """
 import importlib.util
 import json
@@ -183,6 +184,31 @@ class TestPostVerdict(unittest.TestCase):
             self.assertEqual(result.get("dry_run"), True)
 
 
+class TestClassifyCandidateBoundsAndEdge(unittest.TestCase):
+    def setUp(self):
+        self.mod = load_module()
+
+    def test_jaccard_above_1_is_reject_bounds_guard(self):
+        # jaccard > 1.0 is a data error -> REJECT fail-closed (Chad LOW advisory)
+        c = {
+            "agent_id": "marveen", "entry_a": {"id": 90, "keywords": "k", "content_preview": "p"},
+            "entry_b": {"id": 91, "keywords": "k2", "content_preview": "p2"}, "jaccard": 1.1,
+            "suggestion": "malformed"
+        }
+        result = self.mod.classify_candidate(c)
+        self.assertEqual(result["verdict"], "REJECT")
+        self.assertIn("invalid", result["curator_notes"].lower())
+
+    def test_jaccard_negative_is_reject_bounds_guard(self):
+        c = {
+            "agent_id": "marveen", "entry_a": {"id": 92, "keywords": "k", "content_preview": "p"},
+            "entry_b": {"id": 93, "keywords": "k2", "content_preview": "p2"}, "jaccard": -0.1,
+            "suggestion": "malformed"
+        }
+        result = self.mod.classify_candidate(c)
+        self.assertEqual(result["verdict"], "REJECT")
+
+
 class TestRunPipeline(unittest.TestCase):
     def setUp(self):
         self.mod = load_module()
@@ -212,6 +238,54 @@ class TestRunPipeline(unittest.TestCase):
             )
             for c in mock_post.call_args_list:
                 self.assertTrue(c.kwargs.get("dry_run") or c.args[2] if len(c.args) > 2 else True)
+
+    def test_malformed_entry_does_not_halt_pipeline(self):
+        # F-1 adversarial: one entry missing 'jaccard' key; rest must still be processed
+        malformed = {"agent_id": "marveen", "entry_a": {"id": 1}, "entry_b": {"id": 2}}
+        good = FIXTURE_CANDIDATES[0]  # jaccard 0.65 -> APPROVE
+        proposals_data = {"dedup_candidates": [malformed, good]}
+        with patch.object(self.mod, "post_verdict", return_value={"ok": True, "id": 1}):
+            summary = self.mod.run_pipeline(
+                proposals_data,
+                base_url="http://localhost:3420",
+                token="tok",
+                dry_run=False
+            )
+        self.assertEqual(summary["total"], 2)
+        self.assertEqual(summary["errors"], 1)       # malformed counted as error
+        self.assertEqual(summary["approved"], 1)      # good entry still processed
+
+    def test_approve_cap_circuit_breaker(self):
+        # F-2 adversarial: 51 high-jaccard pairs; only MAX_APPROVES_PER_RUN=50 approved,
+        # the 51st is downgraded to REJECT with cap note.
+        cap = self.mod.MAX_APPROVES_PER_RUN
+        pairs = [
+            {
+                "agent_id": "marveen",
+                "entry_a": {"id": i * 2, "keywords": "k", "content_preview": "p"},
+                "entry_b": {"id": i * 2 + 1, "keywords": "k2", "content_preview": "p2"},
+                "jaccard": 0.80,
+                "suggestion": "superseded",
+            }
+            for i in range(cap + 1)
+        ]
+        proposals_data = {"dedup_candidates": pairs}
+        posted_verdicts = []
+        def capture_post(verdict, base_url, token, dry_run=False):
+            posted_verdicts.append(verdict["verdict"])
+            return {"ok": True, "id": len(posted_verdicts)}
+        with patch.object(self.mod, "post_verdict", side_effect=capture_post):
+            summary = self.mod.run_pipeline(
+                proposals_data,
+                base_url="http://localhost:3420",
+                token="tok",
+                dry_run=False
+            )
+        self.assertEqual(summary["approved"], cap)
+        self.assertEqual(summary["rejected"], 1)       # the 51st was capped -> REJECT
+        self.assertEqual(summary["errors"], 0)
+        self.assertEqual(posted_verdicts.count("APPROVE"), cap)
+        self.assertEqual(posted_verdicts.count("REJECT"), 1)
 
 
 if __name__ == "__main__":
