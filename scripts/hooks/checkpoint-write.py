@@ -46,15 +46,28 @@ def _token():
         return ""
 
 
+_MAIN_AGENT_ID = os.environ.get("MAIN_AGENT_ID", "marveen")
+
+
 def _agent_id_from_cwd(cwd):
-    # agents/<name>/... -> <name>; the main agent runs from the project root.
+    # agents/<name>/... -> <name>; orchestrator runs from project root -> MAIN_AGENT_ID.
     if not cwd:
         return None
-    parts = os.path.normpath(cwd).split(os.sep)
+    try:
+        normed = os.path.realpath(cwd)
+    except Exception:
+        normed = os.path.normpath(cwd)
+    parts = normed.split(os.sep)
     if "agents" in parts:
         i = parts.index("agents")
         if i + 1 < len(parts):
             return parts[i + 1]
+    try:
+        root = os.path.realpath(_project_root())
+    except Exception:
+        root = os.path.normpath(_project_root())
+    if normed == root:
+        return _MAIN_AGENT_ID
     return None
 
 
