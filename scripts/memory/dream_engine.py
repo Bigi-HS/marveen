@@ -418,6 +418,70 @@ def has_real_signal(patterns):
 
     return False
 
+def bucket2_migrate_stale_hot(db_path: str = None, threshold_days: int = 7) -> dict:
+    """Bucket-2: migrate stale hot memories to cold tier.
+
+    INV1: Never DELETE -- only UPDATE category='cold'. The row must survive.
+    INV3: Timestamp-verify on each candidate before moving.
+          NULL accessed_at = SKIP (unknown age, not safe to move).
+          accessed_at < threshold = SKIP (fresher than threshold).
+
+    Returns {'moved': N, 'skipped_fresh': N, 'skipped_null': N}.
+    """
+    path = db_path if db_path is not None else VAULT_PATH
+    cutoff_ts = (datetime.now(tz=timezone.utc) - timedelta(days=threshold_days)).timestamp()
+
+    conn = sqlite3.connect(path)
+    c = conn.cursor()
+
+    # Initial sweep: hot rows where accessed_at looks stale
+    c.execute(
+        "SELECT id FROM memories WHERE category='hot' AND accessed_at < ?",
+        (cutoff_ts,)
+    )
+    candidate_ids = [row[0] for row in c.fetchall()]
+
+    moved = 0
+    skipped_fresh = 0
+    skipped_null = 0
+
+    for mem_id in candidate_ids:
+        # Timestamp-verify: re-read accessed_at right before the move (INV3).
+        # Another process may have touched the row between the sweep and now.
+        c.execute(
+            "SELECT accessed_at FROM memories WHERE id=? AND category='hot'",
+            (mem_id,)
+        )
+        row = c.fetchone()
+        if row is None:
+            continue  # Already moved or deleted by another path
+
+        accessed_at = row[0]
+
+        # INV3 NULL-trap: unknown age -> never move
+        if accessed_at is None:
+            skipped_null += 1
+            log(f"INV3 SKIP id={mem_id}: NULL accessed_at")
+            continue
+
+        # INV3 freshness guard: re-verify after fetching
+        if accessed_at >= cutoff_ts:
+            skipped_fresh += 1
+            log(f"INV3 SKIP id={mem_id}: accessed_at {accessed_at} >= cutoff {cutoff_ts:.0f}")
+            continue
+
+        # INV1: UPDATE only, never DELETE
+        c.execute("UPDATE memories SET category='cold' WHERE id=?", (mem_id,))
+        moved += 1
+        log(f"Bucket-2: id={mem_id} hot->cold (accessed_at={accessed_at})")
+
+    conn.commit()
+    conn.close()
+
+    log(f"Bucket-2 done: moved={moved} skipped_fresh={skipped_fresh} skipped_null={skipped_null}")
+    return {"moved": moved, "skipped_fresh": skipped_fresh, "skipped_null": skipped_null}
+
+
 def run_dream_engine():
     """Main dream-engine workflow"""
     log("=== Dream-Engine Nightly Start ===")
