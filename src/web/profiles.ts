@@ -52,6 +52,50 @@ export const HARDCODED_RESTRICTIVE_PROFILE: ProfileTemplate = {
   },
 }
 
+// Card 2efcb439 §10 -- the outward-acting + destructive tool class. An always-on
+// server / heartbeat agent must have this whole class DENIED at the permission
+// layer (not asked-for in prose). Grouped by axis:
+//   send    -- outbound messaging to a human/channel
+//   share   -- data egress off the box
+//   delete  -- irreversible destruction of processes / data
+//   publish -- releasing code/artifacts outward
+// The committed templates/profiles/server-restricted.json carries this list (plus
+// the default irreversible baseline); this constant is the single source of truth
+// the profile is tested against, so dropping an axis from the JSON fails the suite.
+export const OUTWARD_DESTRUCTIVE_DENY: string[] = [
+  // send -- EVERY MCP integration tool (channels, email, external services).
+  // Blanket mcp__* is deliberate and fail-CLOSED: the real installed namespace
+  // is plugin-prefixed (mcp__plugin_telegram_telegram__reply,
+  // mcp__<agent>_google__gmail_send), NOT the short mcp__telegram__ form, so a
+  // per-channel enumerated deny silently fails OPEN when the namespace format
+  // drifts (Chad #1057 HIGH). A server/heartbeat monitor needs no MCP tool at
+  // all (it reads the board/logs via Bash + the local api-get helper), so the
+  // whole class is denied; the confirmed Boss channel is also listed explicitly
+  // as belt-and-suspenders documentation.
+  'mcp__*',
+  'mcp__plugin_telegram_telegram__*',
+  // share -- data leaving the box. WebFetch + wget are pure external fetch/egress
+  // and are denied outright. KNOWN GAP (Chad #1057 F-2, closed in §10 slice-2):
+  // `Bash(curl ...)` external POST can still exfiltrate, but a static glob cannot
+  // separate external curl from the LEGITIMATE localhost api-get monitoring
+  // (http://127.0.0.1:3420) the server agent relies on -- a blind Bash(curl:*)
+  // deny would break monitoring, and `curl *http*` catches localhost too. The
+  // external-vs-localhost egress policy belongs in slice-2's launch-time
+  // enforcement (a wrapper/egress-proxy that can inspect the target host), not in
+  // a pattern that only looks complete. Documented, not silently dropped.
+  'WebFetch(*)',
+  'Bash(wget:*)',
+  // delete -- irreversible destruction
+  'Bash(rm:*)',
+  'Bash(pkill:*)',
+  'Bash(killall:*)',
+  'Bash(dropdb:*)',
+  // publish -- releasing code/artifacts outward
+  'Bash(git push:*)',
+  'Bash(npm publish:*)',
+  'Bash(gh:*)',
+]
+
 export function listProfileTemplates(): ProfileTemplate[] {
   if (!existsSync(PROFILES_DIR)) return [HARDCODED_DEFAULT_PROFILE]
   const out: ProfileTemplate[] = []
