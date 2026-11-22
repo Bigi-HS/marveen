@@ -4,6 +4,7 @@ Tests for scripts/apply-marveen-checkpoint-hooks.py
 
 Coverage:
   - already_patched() detects existing hooks
+  - already_patched() works on real patch() output (regression: json.dumps escape bug)
   - patch() adds PreCompact block
   - patch() adds SessionEnd hook to existing unconditional block
   - patch() creates SessionEnd block when none exists
@@ -53,12 +54,22 @@ class TestAlreadyPatched(unittest.TestCase):
         self.assertFalse(self.mod.already_patched(s))
 
     def test_precompact_present_returns_true(self):
+        # Use the real PRECOMPACT_ENTRY command format (with $CLAUDE_PROJECT_DIR quotes),
+        # not a bare string -- the old json.dumps approach broke on this exact case.
         s = _minimal_settings()
         s["hooks"]["PreCompact"] = [
-            {"matcher": "auto", "hooks": [{"type": "command",
-             "command": "python3 checkpoint-write.py precompact", "timeout": 5}]}
+            {"matcher": "auto", "hooks": [self.mod.PRECOMPACT_ENTRY]}
         ]
         self.assertTrue(self.mod.already_patched(s))
+
+    def test_already_patched_after_real_patch_output(self):
+        # Regression: already_patched(patch(x)) must be True.
+        # The old PATCH_MARKER approach failed here because json.dumps escapes
+        # the embedded quotes in the command string ($CLAUDE_PROJECT_DIR/...).
+        s = _minimal_settings()
+        patched = self.mod.patch(s)
+        self.assertTrue(self.mod.already_patched(patched),
+                        "already_patched must return True on its own patch() output")
 
 
 class TestPatch(unittest.TestCase):
@@ -108,7 +119,6 @@ class TestPatch(unittest.TestCase):
         se1_hooks = result1["hooks"]["SessionEnd"][0]["hooks"]
         result2 = self.mod.patch(result1)
         se2_hooks = result2["hooks"]["SessionEnd"][0]["hooks"]
-        # Should not duplicate the sessionend entry
         sessionend_cmds1 = [h["command"] for h in se1_hooks if "sessionend" in h["command"]]
         sessionend_cmds2 = [h["command"] for h in se2_hooks if "sessionend" in h["command"]]
         self.assertEqual(len(sessionend_cmds1), len(sessionend_cmds2))
@@ -119,12 +129,10 @@ class TestVerifyPreconditions(unittest.TestCase):
         self.mod = _load_patcher()
 
     def test_hook_script_exists(self):
-        # In a real repo, checkpoint-write.py must be present.
         self.assertTrue(os.path.isfile(HOOK_SCRIPT),
                         f"checkpoint-write.py missing at {HOOK_SCRIPT}")
 
     def test_preconditions_pass_in_real_repo(self):
-        # Uses the real PROJECT_ROOT paths -- should pass in worktree.
         result = self.mod.verify_preconditions()
         self.assertTrue(result)
 

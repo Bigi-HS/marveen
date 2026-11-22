@@ -30,9 +30,6 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 SETTINGS_PATH = os.path.join(PROJECT_ROOT, ".claude", "settings.json")
 HOOK_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "hooks", "checkpoint-write.py")
 
-# Sentinel that marks an already-patched settings.json.
-PATCH_MARKER = "checkpoint-write.py precompact"
-
 PRECOMPACT_ENTRY = {
     "type": "command",
     "command": 'python3 "$CLAUDE_PROJECT_DIR/scripts/hooks/checkpoint-write.py" precompact',
@@ -62,8 +59,12 @@ def load_settings():
 
 
 def already_patched(settings: dict) -> bool:
-    raw = json.dumps(settings)
-    return PATCH_MARKER in raw
+    # Reuse _entry_present rather than a string-marker: json.dumps escapes embedded
+    # quotes in commands (e.g. "$CLAUDE_PROJECT_DIR/...") making a bare substring
+    # search unreliable (the serialized form has \" not a space before "precompact").
+    return _entry_present(
+        settings.get("hooks", {}).get("PreCompact", []), "checkpoint-write.py"
+    )
 
 
 def _ensure_hook_list(hooks: dict, event: str) -> list:
