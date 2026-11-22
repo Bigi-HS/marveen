@@ -60,10 +60,32 @@ describe('server-restricted profile -- §10 server-side write-block', () => {
     const deny = loadProfileTemplate('server-restricted').filesystem.deny
     const hasAxis = (needles: string[]) =>
       needles.some(n => deny.some(d => d.includes(n)))
-    expect(hasAxis(['telegram', 'slack', 'discord', 'notify'])).toBe(true) // send
+    expect(hasAxis(['mcp__'])).toBe(true) // send (all MCP integration tools)
     expect(hasAxis(['WebFetch'])).toBe(true) // share / egress
     expect(hasAxis(['rm', 'pkill', 'killall'])).toBe(true) // delete / destructive
     expect(hasAxis(['git push', 'npm publish', 'gh'])).toBe(true) // publish
+  })
+
+  it('actually glob-MATCHES the real outbound MCP tool names (Chad #1057 regression)', () => {
+    // The installed MCP namespace is plugin-prefixed (mcp__plugin_telegram_telegram__*,
+    // mcp__<agent>_google__gmail_send), NOT the short mcp__telegram__ form. A deny
+    // pattern that does not glob-match the REAL tool name fails OPEN. This asserts
+    // EFFECT -- does the deny list, treated as settings.json globs, match the real
+    // send tools -- not a substring, so a namespace-format drift can never silently
+    // reopen the send hole.
+    const deny = loadProfileTemplate('server-restricted').filesystem.deny
+    const globToRe = (g: string) =>
+      new RegExp('^' + g.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$')
+    const denied = (tool: string) => deny.some(d => globToRe(d).test(tool))
+    for (const tool of [
+      'mcp__plugin_telegram_telegram__reply', // Boss channel send (real installed namespace)
+      'mcp__plugin_telegram_telegram__edit_message',
+      'mcp__bigben_google__gmail_send', // email send (real)
+      'mcp__claudia_google__gmail_send',
+      'mcp__telegram__reply', // short form (defensive)
+    ]) {
+      expect(denied(tool), `outbound tool ${tool} must be denied`).toBe(true)
+    }
   })
 
   it('is at least as strict as the default profile on the irreversible baseline', () => {

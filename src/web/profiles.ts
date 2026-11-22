@@ -63,10 +63,17 @@ export const HARDCODED_RESTRICTIVE_PROFILE: ProfileTemplate = {
 // the default irreversible baseline); this constant is the single source of truth
 // the profile is tested against, so dropping an axis from the JSON fails the suite.
 export const OUTWARD_DESTRUCTIVE_DENY: string[] = [
-  // send -- outbound channel messaging (Telegram / Slack / Discord MCP tools)
-  'mcp__telegram__*',
-  'mcp__slack-channel__*',
-  'mcp__discord__*',
+  // send -- EVERY MCP integration tool (channels, email, external services).
+  // Blanket mcp__* is deliberate and fail-CLOSED: the real installed namespace
+  // is plugin-prefixed (mcp__plugin_telegram_telegram__reply,
+  // mcp__<agent>_google__gmail_send), NOT the short mcp__telegram__ form, so a
+  // per-channel enumerated deny silently fails OPEN when the namespace format
+  // drifts (Chad #1057 HIGH). A server/heartbeat monitor needs no MCP tool at
+  // all (it reads the board/logs via Bash + the local api-get helper), so the
+  // whole class is denied; the confirmed Boss channel is also listed explicitly
+  // as belt-and-suspenders documentation.
+  'mcp__*',
+  'mcp__plugin_telegram_telegram__*',
   // share -- data leaving the box
   'WebFetch(*)',
   // delete -- irreversible destruction

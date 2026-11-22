@@ -6,9 +6,8 @@
   "filesystem": {
     "allow": [],
     "deny": [
-      "mcp__telegram__*",
-      "mcp__slack-channel__*",
-      "mcp__discord__*",
+      "mcp__*",
+      "mcp__plugin_telegram_telegram__*",
       "WebFetch(*)",
       "Bash(rm:*)",
       "Bash(pkill:*)",
