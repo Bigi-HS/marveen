@@ -1334,6 +1334,110 @@ def match_review_worktree(cwd: 'str | None') -> bool:
     return any(_REVIEW_WT_SEG_RX.search(seg) for seg in segments)
 
 
+# ── M3: api-anything learn subcommand block ───────────────────────────────────
+# Chad SEC CONDITIONAL ADOPT 0393173c. The `learn` subcommand adds site scrapers
+# to the local index outside any fleet gate review -- blocked unconditionally.
+# Allowed: api-anything fetch/search on approved sites (hackernews, arxiv, github).
+#
+# Match: any top-level piece whose command word is `api-anything` (or the full
+# node path) AND whose first non-flag positional argument is `learn`.
+# Fail-OPEN: unrecognised / unparseable commands pass (permission-rules contract).
+
+_API_ANYTHING_BINS = frozenset({'api-anything', 'api_anything'})
+# Positional subcommand token (not a flag, not a path). `learn` is the only
+# blocked subcommand; `fetch` / `search` / `mcp` are the approved ones.
+_API_ANYTHING_LEARN_SUBCMD = 'learn'
+# The --allow-writes flag in both long and combined-short forms.
+_API_ANYTHING_ALLOW_WRITES_FLAG = '--allow-writes'
+
+
+def _is_api_anything_invocation(tokens) -> bool:
+    """True when the token list appears to invoke api-anything (bare name or via
+    node node_modules/.bin/api-anything path). Defensive: tokens must be a
+    non-empty list (not _PARSE_FAIL), and the command word must resolve to one of
+    the known binary names. The node/.bin/ indirection is unwrapped by
+    _command_word's existing prefix-skip logic."""
+    if not tokens or tokens is _PARSE_FAIL:
+        return False
+    cmd = _command_word(tokens)
+    # Direct invocation: `api-anything ...`
+    if cmd in _API_ANYTHING_BINS:
+        return True
+    # node node_modules/.bin/api-anything: _command_word skips `node` (prefix)
+    # and returns the basename of the next token -- check the full token list for
+    # the .bin path as a fallback for any prefix-skip edge case.
+    for tok in tokens:
+        base = os.path.basename(tok)
+        if base in _API_ANYTHING_BINS:
+            return True
+    return False
+
+
+def _api_anything_first_positional(tokens) -> str:
+    """Return the first non-flag positional argument after the api-anything
+    command word (the subcommand). Returns '' if none found."""
+    if not tokens or tokens is _PARSE_FAIL:
+        return ''
+    # Skip until we pass the command word(s).
+    past_cmd = False
+    for tok in tokens:
+        if not past_cmd:
+            base = os.path.basename(tok)
+            if base in _API_ANYTHING_BINS or tok == 'node':
+                past_cmd = True
+            continue
+        # After the command word: skip flags and node_modules path
+        if tok.startswith('-') or '/' in tok or tok == 'node':
+            continue
+        return tok
+    return ''
+
+
+def match_api_anything_learn(command: str) -> bool:
+    """M3: True when any top-level subcommand of api-anything is `learn`.
+    Fail-OPEN on parse errors (permission-rules fail-open contract)."""
+    try:
+        for piece in _split_subcommands(command):
+            tokens = _tokenize(piece)
+            if tokens is _PARSE_FAIL or not tokens:
+                continue
+            if not _is_api_anything_invocation(tokens):
+                continue
+            subcmd = _api_anything_first_positional(tokens)
+            if subcmd == _API_ANYTHING_LEARN_SUBCMD:
+                return True
+        return False
+    except Exception:
+        return False  # fail-open
+
+
+# ── M5: api-anything --allow-writes flag block ────────────────────────────────
+# Chad SEC CONDITIONAL ADOPT 0393173c. --allow-writes enables write side-effects;
+# scout is a read-only consumer. Block any api-anything invocation that carries
+# this flag, regardless of subcommand.
+
+def match_api_anything_allow_writes(command: str) -> bool:
+    """M5: True when any api-anything invocation carries --allow-writes (any form).
+
+    Matches both '--allow-writes' (bare) and '--allow-writes=<value>' (=value form).
+    The =value form is a distinct token and would bypass a simple `in tokens` check.
+    Prefix-match covers both: any token that starts with '--allow-writes' is blocked.
+    Fail-OPEN on parse errors (permission-rules fail-open contract).
+    """
+    try:
+        for piece in _split_subcommands(command):
+            tokens = _tokenize(piece)
+            if tokens is _PARSE_FAIL or not tokens:
+                continue
+            if not _is_api_anything_invocation(tokens):
+                continue
+            if any(t.startswith(_API_ANYTHING_ALLOW_WRITES_FLAG) for t in tokens):
+                return True
+        return False
+    except Exception:
+        return False  # fail-open
+
+
 # ── rule table & classifier ───────────────────────────────────────────────────
 
 class Rule:
@@ -1409,6 +1513,35 @@ RULES = [
         'audit path; use Write/Edit tool for skill authoring -- content is then '
         'auditable by K-2 PostToolUse static check; card 6c2053b9 K-1a)',
         lambda tool, inp: match_skill_bash_write(inp) if tool == 'Bash' else False,
+    ),
+    # M3: api-anything site allowlist + learn subcommand block (Chad SEC 0393173c).
+    # api-anything is adopted for scout read-only use (HN/arXiv/GitHub sites only).
+    # The `learn` subcommand adds new site scrapers to the local index -- it
+    # effectively expands the tool's capability surface from outside the fleet gate
+    # process, so it is blocked entirely regardless of site argument.
+    # Fail-OPEN (default-allow pattern): only positively-matched `api-anything learn`
+    # invocations are blocked; unrecognised commands pass through. This matches the
+    # permission-rules hook's existing fail-open contract (R1-R3 all fail-open).
+    Rule(
+        'api-anything-learn-block',
+        'Bash api-anything learn subcommand is blocked -- adding new site scrapers '
+        'to the local index expands the tool capability surface outside the fleet '
+        'gate process (Chad SEC CONDITIONAL ADOPT 0393173c, M3). '
+        'Allowed api-anything use: fetch/search on approved sites (hackernews, '
+        'arxiv, github) in read-only mode only.',
+        lambda tool, inp: match_api_anything_learn(inp) if tool == 'Bash' else False,
+    ),
+    # M5: api-anything --allow-writes flag block (Chad SEC 0393173c).
+    # The --allow-writes flag enables write-side-effects (caching, local DB writes,
+    # or future write-capable site adapters). Scout is a read-only consumer; this
+    # flag must never appear in an api-anything invocation from agent context.
+    Rule(
+        'api-anything-allow-writes',
+        'Bash api-anything --allow-writes flag is blocked -- scout is a read-only '
+        'consumer of api-anything (HN/arXiv/GitHub fetch only); --allow-writes '
+        'enables write side-effects that are out of scope for the CONDITIONAL ADOPT '
+        '(Chad SEC 0393173c, M5).',
+        lambda tool, inp: match_api_anything_allow_writes(inp) if tool == 'Bash' else False,
     ),
 ]
 

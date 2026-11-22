@@ -1,5 +1,9 @@
 {
   "model": "claude-sonnet-4-6",
   "securityProfile": "researcher",
-  "displayName": "Dr. Stone"
+  "displayName": "Dr. Stone",
+  "env": {
+    "API_ANYTHING_LOCAL_ONLY": "1",
+    "API_ANYTHING_KEY": "<PLACEHOLDER_SET_AT_DEPLOY>"
+  }
 }
