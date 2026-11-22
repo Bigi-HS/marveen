@@ -32,6 +32,8 @@ import re
 import sys
 import time
 
+from parked import parked_until_active
+
 OPEN = {"planned", "in_progress", "waiting"}
 ORCHESTRATOR = "marveen"  # only the orchestrator tracks delegated/unassigned cards as nudgeable
 
@@ -195,6 +197,20 @@ def classify(cards, agent: str, now: float, orchestrator: str = ORCHESTRATOR,
             continue
         owner = c.get("assignee") or c.get("owner") or ""
         age_h = _age_hours(c, now)
+
+        if parked_until_active(c, now):
+            # Structured park (card da838ff2): an explicit parked_until in the
+            # future suppresses driving on EVERY surface (MINE, NUDGEABLE,
+            # stale-count), regardless of status / age / free-text marker. Unlike
+            # the text marker it does not expire by an age-window, and unlike
+            # boss_waiting it never re-surfaces to the orchestrator -- it is a hard
+            # time-commitment until `now` passes parked_until, at which point the
+            # card falls through to normal classification for re-triage. Scoped to
+            # owner/orchestrator like the other buckets so a non-owner ignores it.
+            if owner != agent and agent != orchestrator:
+                continue
+            parked.append(_row(c, age_h, "parked-until"))
+            continue
 
         if _truthy(c.get("boss_waiting")):
             # Structured override (card 9fb626a2): the Boss owes the next move, so the
