@@ -177,7 +177,7 @@ CHARTER_MAX_LEN = 240
 
 
 def load_vocabulary(vocab_path: pathlib.Path) -> set[str]:
-    """Parse fleet-scope-vocabulary.md and return the set of valid label strings.
+    r"""Parse fleet-scope-vocabulary.md and return the set of valid label strings.
 
     Labels are extracted from table rows of the form `| \`label\` | ... |`.
     Returns an empty set if the file does not exist.
@@ -338,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
     errors = run_slice1_checks(fleet)
 
     if args.slice3:
-        vocab_path = args.root / "store" / "fleet-scope-vocabulary.md"
+        vocab_path = args.root / "docs" / "fleet-scope-vocabulary.md"
         vocab = load_vocabulary(vocab_path)
         errors += run_slice3_checks(fleet, vocab)
 

@@ -28,7 +28,7 @@ def load_validator():
     return mod
 
 
-VOCAB_PATH = pathlib.Path(__file__).parent.parent / "store" / "fleet-scope-vocabulary.md"
+VOCAB_PATH = pathlib.Path(__file__).parent.parent / "docs" / "fleet-scope-vocabulary.md"
 
 # A minimal in-memory vocabulary for unit tests
 SAMPLE_VOCAB = {"core-eng", "qa-testing", "security-audit", "deploy-sre",
