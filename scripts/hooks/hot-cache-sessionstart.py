@@ -176,7 +176,7 @@ def main():
     # Determine inject mode for this source + agent combination.
     if source in FULL_INJECT_SOURCES:
         char_limit = CONTENT_CHAR_LIMIT
-    elif source == "startup" and _agent_id(cwd) in MINI_HOT_CACHE_AGENTS:
+    elif source in ("startup", "compact") and _agent_id(cwd) in MINI_HOT_CACHE_AGENTS:
         char_limit = MINI_CONTENT_CHAR_LIMIT
     else:
         # startup + stateless agent: skip (also skips the refresh below -- no

@@ -35,13 +35,17 @@ SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 PROJECT_ROOT = SCRIPT_DIR.parent  # scripts/ -> repo root
 
 HOOK_SCRIPT_REL = Path("scripts") / "hooks" / "telemetry-emit.py"
+COMPACT_HOOK_SCRIPT_REL = Path("scripts") / "hooks" / "hot-cache-sessionstart.py"
 SETTINGS_REL = Path(".claude") / "settings.json"
 AGENTS_DIR = PROJECT_ROOT / "agents"
 
-# Absolute path of the hook script in this repo. Used in the command string
-# because agents share the same project root (all settings.json commands use
-# absolute paths, as confirmed by the existing hook entries).
+# Absolute paths of hook scripts in this repo (used in settings.json commands).
 HOOK_SCRIPT_ABS = str(PROJECT_ROOT / HOOK_SCRIPT_REL)
+COMPACT_HOOK_SCRIPT_ABS = str(PROJECT_ROOT / COMPACT_HOOK_SCRIPT_REL)
+
+# Agents that benefit from hot-cache rehydration after compaction (mini inject).
+# marveen is handled by apply-marveen-checkpoint-hooks.py, not this patcher.
+MINI_HOT_CACHE_AGENTS = frozenset({"dave", "quill"})
 
 POST_TOOL_USE_ENTRY = {
     "matcher": ".*",
@@ -54,8 +58,20 @@ POST_TOOL_USE_ENTRY = {
     ],
 }
 
-# Fragment that uniquely identifies our hook entry in the JSON struct.
+SESSION_START_COMPACT_ENTRY = {
+    "matcher": "startup|compact",
+    "hooks": [
+        {
+            "type": "command",
+            "command": f'python3 "{COMPACT_HOOK_SCRIPT_ABS}"',
+            "timeout": 15,
+        }
+    ],
+}
+
+# Fragments that uniquely identify each hook entry in the JSON struct.
 _HOOK_FRAGMENT = "telemetry-emit.py"
+_COMPACT_HOOK_FRAGMENT = "hot-cache-sessionstart.py"
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +101,20 @@ def already_patched(settings: dict) -> bool:
     )
 
 
+def presence_verify_compact(agent_dir: str) -> bool:
+    """Return True if hot-cache-sessionstart.py exists in agent_dir's project scripts."""
+    path = Path(agent_dir) / COMPACT_HOOK_SCRIPT_REL
+    return path.is_file()
+
+
+def already_compact_patched(settings: dict) -> bool:
+    """True if the SessionStart section already contains the hot-cache-sessionstart hook."""
+    return _entry_present(
+        settings.get("hooks", {}).get("SessionStart", []),
+        _COMPACT_HOOK_FRAGMENT,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Patch logic
 # ---------------------------------------------------------------------------
@@ -98,6 +128,15 @@ def patch(settings: dict) -> dict:
     return settings
 
 
+def patch_compact_matcher(settings: dict) -> dict:
+    """Add the SessionStart compact-matcher hot-cache-sessionstart entry (idempotent)."""
+    hooks = settings.setdefault("hooks", {})
+    if not _entry_present(hooks.get("SessionStart", []), _COMPACT_HOOK_FRAGMENT):
+        ss_list = hooks.setdefault("SessionStart", [])
+        ss_list.append(SESSION_START_COMPACT_ENTRY)
+    return settings
+
+
 # ---------------------------------------------------------------------------
 # Per-agent patching
 # ---------------------------------------------------------------------------
@@ -105,6 +144,8 @@ def patch(settings: dict) -> dict:
 def patch_agent(agent_dir: str, dry_run: bool = False) -> bool:
     """Patch a single agent's settings.json. Returns True on success/already-patched."""
     agent_path = Path(agent_dir)
+    agent_id = agent_path.name
+
     if not agent_path.is_dir():
         print(f"WARNING: agent dir not found, skipping: {agent_dir}", file=sys.stderr)
         return False
@@ -131,22 +172,38 @@ def patch_agent(agent_dir: str, dry_run: bool = False) -> bool:
         print(f"WARNING: could not parse {settings_path}: {exc}", file=sys.stderr)
         return False
 
-    if already_patched(settings):
-        print(f"ALREADY: {agent_dir} -- telemetry-emit hook already present")
-        return True
+    modified = False
 
-    patched = patch(settings)
+    if not already_patched(settings):
+        settings = patch(settings)
+        modified = True
+
+    # Wire compact-matcher for context-sensitive agents (MINI_HOT_CACHE_AGENTS).
+    if agent_id in MINI_HOT_CACHE_AGENTS:
+        if not presence_verify_compact(agent_dir):
+            print(
+                f"WARNING: hot-cache-sessionstart.py not found in {agent_dir}, "
+                f"skipping compact-matcher",
+                file=sys.stderr,
+            )
+        elif not already_compact_patched(settings):
+            settings = patch_compact_matcher(settings)
+            modified = True
+
+    if not modified:
+        print(f"ALREADY: {agent_dir} -- all hooks already present")
+        return True
 
     if dry_run:
         print(f"DRY RUN: would patch {agent_dir}")
-        print(json.dumps(patched, indent=2, ensure_ascii=False))
+        print(json.dumps(settings, indent=2, ensure_ascii=False))
         return True
 
     try:
         with open(settings_path, "w", encoding="utf-8") as f:
-            json.dump(patched, f, indent=2, ensure_ascii=False)
+            json.dump(settings, f, indent=2, ensure_ascii=False)
             f.write("\n")
-        print(f"PATCHED: {agent_dir} -- PostToolUse telemetry-emit hook added")
+        print(f"PATCHED: {agent_dir} -- hooks updated")
         return True
     except OSError as exc:
         print(f"ERROR: could not write {settings_path}: {exc}", file=sys.stderr)
