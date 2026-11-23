@@ -10,5 +10,14 @@
     "autoDelegation": false,
     "trustFrom": []
   },
-  "displayName": "Buster"
+  "displayName": "Buster",
+  "scope": {
+    "charter": "DRAFT: placeholder -- awaiting Boss charter approval (BD-2).",
+    "owns": [
+      "ci-build",
+      "monitoring"
+    ],
+    "excludes": [],
+    "redirectTo": {}
+  }
 }

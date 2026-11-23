@@ -10,5 +10,13 @@
     "autoDelegation": false,
     "trustFrom": []
   },
-  "displayName": "Rackham"
+  "displayName": "Rackham",
+  "scope": {
+    "charter": "DRAFT: placeholder -- awaiting Boss charter approval (BD-2).",
+    "owns": [
+      "core-eng"
+    ],
+    "excludes": [],
+    "redirectTo": {}
+  }
 }

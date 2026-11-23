@@ -11,5 +11,13 @@
     "autoDelegation": false,
     "trustFrom": []
   },
-  "claudeConfigDir": "/home/domin/marveen/agents/devil-advocate/.claude-config"
+  "claudeConfigDir": "/home/domin/marveen/agents/devil-advocate/.claude-config",
+  "scope": {
+    "charter": "DRAFT: placeholder -- awaiting Boss charter approval (BD-2).",
+    "owns": [
+      "research"
+    ],
+    "excludes": [],
+    "redirectTo": {}
+  }
 }

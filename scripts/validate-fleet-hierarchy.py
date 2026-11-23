@@ -170,6 +170,143 @@ def run_slice1_checks(fleet: dict[str, dict[str, Any]]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Slice 3: scope-block ACs  (card f31b28a6, spec §2.4)
+# ---------------------------------------------------------------------------
+
+CHARTER_MAX_LEN = 240
+
+
+def load_vocabulary(vocab_path: pathlib.Path) -> set[str]:
+    """Parse fleet-scope-vocabulary.md and return the set of valid label strings.
+
+    Labels are extracted from table rows of the form `| \`label\` | ... |`.
+    Returns an empty set if the file does not exist.
+    """
+    if not vocab_path.exists():
+        return set()
+    labels: set[str] = set()
+    for line in vocab_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        # Extract backtick-quoted label from first cell: | `label` | desc |
+        parts = line.split("|")
+        if len(parts) < 2:
+            continue
+        cell = parts[1].strip()
+        if cell.startswith("`") and "`" in cell[1:]:
+            label = cell[1 : cell.index("`", 1)]
+            if label and label != "Label":  # skip header row
+                labels.add(label)
+    return labels
+
+
+def check_ac_s1(fleet: dict[str, dict[str, Any]]) -> list[str]:
+    """AC-S1: every config-agent scope.charter present, non-empty, <= 240 chars."""
+    errors: list[str] = []
+    for agent_id, cfg in fleet.items():
+        scope = cfg.get("scope")
+        if scope is None:
+            errors.append(f"[AC-S1] {agent_id}: missing 'scope' block")
+            continue
+        charter = scope.get("charter")
+        if not charter:
+            errors.append(f"[AC-S1] {agent_id}: scope.charter missing or empty")
+        elif len(charter) > CHARTER_MAX_LEN:
+            errors.append(
+                f"[AC-S1] {agent_id}: scope.charter too long "
+                f"({len(charter)} > {CHARTER_MAX_LEN} chars)"
+            )
+    return errors
+
+
+def check_ac_s2(fleet: dict[str, dict[str, Any]]) -> list[str]:
+    """AC-S2: owns ∩ excludes = ∅ for every agent."""
+    errors: list[str] = []
+    for agent_id, cfg in fleet.items():
+        scope = cfg.get("scope", {})
+        owns = set(scope.get("owns") or [])
+        excludes = set(scope.get("excludes") or [])
+        overlap = owns & excludes
+        if overlap:
+            errors.append(
+                f"[AC-S2] {agent_id}: owns ∩ excludes = {sorted(overlap)} "
+                f"(must be disjoint)"
+            )
+    return errors
+
+
+def check_ac_s3(fleet: dict[str, dict[str, Any]]) -> list[str]:
+    """AC-S3: every excludes label is covered (redirectTo OR escalation path).
+
+    A label is covered when:
+      - redirectTo[label] is set, OR
+      - the agent's escalatesTo is non-null (default marveen escalation)
+    """
+    errors: list[str] = []
+    for agent_id, cfg in fleet.items():
+        scope = cfg.get("scope", {})
+        excludes = scope.get("excludes") or []
+        redirect_to = scope.get("redirectTo") or {}
+        team = cfg.get("team", {})
+        escalates_to = team.get("escalatesTo")
+
+        for label in excludes:
+            if label not in redirect_to and escalates_to is None:
+                errors.append(
+                    f"[AC-S3] {agent_id}: excludes label {label!r} has no redirectTo "
+                    f"entry and escalatesTo is null (uncovered)"
+                )
+    return errors
+
+
+def check_ac_s4(fleet: dict[str, dict[str, Any]]) -> list[str]:
+    """AC-S4: every redirectTo value is a known agent_id."""
+    known = set(fleet.keys())
+    errors: list[str] = []
+    for agent_id, cfg in fleet.items():
+        scope = cfg.get("scope", {})
+        redirect_to = scope.get("redirectTo") or {}
+        for label, target in redirect_to.items():
+            if target not in known:
+                errors.append(
+                    f"[AC-S4] {agent_id}: redirectTo[{label!r}]={target!r} "
+                    f"references unknown agent"
+                )
+    return errors
+
+
+def check_ac_s5(
+    fleet: dict[str, dict[str, Any]], vocab: set[str]
+) -> list[str]:
+    """AC-S5: all owns and excludes labels are in the closed vocabulary."""
+    errors: list[str] = []
+    for agent_id, cfg in fleet.items():
+        scope = cfg.get("scope", {})
+        for field in ("owns", "excludes"):
+            for label in (scope.get(field) or []):
+                if label not in vocab:
+                    errors.append(
+                        f"[AC-S5] {agent_id}: scope.{field} label {label!r} "
+                        f"not in fleet-scope-vocabulary.md"
+                    )
+    return errors
+
+
+def run_slice3_checks(
+    fleet: dict[str, dict[str, Any]], vocab: set[str]
+) -> list[str]:
+    """Run all Slice-3 ACs (S1-S5) and return a combined error list."""
+    return (
+        check_ac_s1(fleet)
+        + check_ac_s2(fleet)
+        + check_ac_s3(fleet)
+        + check_ac_s4(fleet)
+        + check_ac_s5(fleet, vocab)
+    )
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -178,12 +315,18 @@ def _repo_root_default() -> pathlib.Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate fleet hierarchy (Slice 1)")
+    parser = argparse.ArgumentParser(
+        description="Validate fleet hierarchy (Slice 1 + Slice 3)"
+    )
     parser.add_argument(
         "--root",
         type=pathlib.Path,
         default=_repo_root_default(),
         help="Repo root (default: parent of scripts/)",
+    )
+    parser.add_argument(
+        "--slice3", action="store_true",
+        help="Also run Slice-3 scope AC checks (AC-S1..S5).",
     )
     args = parser.parse_args(argv)
 
@@ -193,6 +336,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     errors = run_slice1_checks(fleet)
+
+    if args.slice3:
+        vocab_path = args.root / "store" / "fleet-scope-vocabulary.md"
+        vocab = load_vocabulary(vocab_path)
+        errors += run_slice3_checks(fleet, vocab)
 
     # Summary table: agent | role | reportsTo | escalatesTo | decisionScope
     header = f"{'agent':20s} {'role':14s} {'reportsTo':20s} {'escalatesTo':20s} {'decisionScope':14s}"
@@ -215,7 +363,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {e}", file=sys.stderr)
         return 1
 
-    print(f"OK: {len(fleet)} config-agents, all Slice-1 AC checks passed.")
+    slices = "Slice-1 + Slice-3" if args.slice3 else "Slice-1"
+    print(f"OK: {len(fleet)} config-agents, all {slices} AC checks passed.")
     return 0
 
 
