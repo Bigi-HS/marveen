@@ -83,6 +83,7 @@ import { tryHandleRun } from './web/routes/run.js'
 import { tryHandleGate } from './web/routes/gate.js'
 import { tryHandleGateBoard } from './web/routes/gate-board.js'
 import { tryHandleGithub } from './web/routes/github.js'
+import { tryHandleReleaseFreeze } from './web/routes/release-freeze.js'
 import { tryHandleAck } from './web/routes/ack.js'
 import { tryHandleAgentCategories } from './web/routes/agent-categories.js'
 import { tryHandleAdmin } from './web/routes/admin.js'
@@ -406,6 +407,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleGateBoard(routeCtx)) return
       if (await tryHandleGate(routeCtx)) return
       if (await tryHandleGithub(routeCtx)) return
+      if (await tryHandleReleaseFreeze(routeCtx)) return
       if (await tryHandlePublicDigest(routeCtx)) return
       if (await tryHandleAnalytics(routeCtx)) return
       if (await tryHandleRules(routeCtx)) return
