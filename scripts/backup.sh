@@ -6,10 +6,11 @@
 #
 #   repo/   -> extract under the project root (this repo)
 #     store/claudeclaw.db (+ -shm/-wal; WAL-checkpointed before copy)
-#     store/.dashboard-token   (dashboard bearer)
-#     .env                     (project root secrets)
-#     scheduled-tasks.json     (legacy, if present)
-#     assets/meetings/**       (meeting transcripts/memos)
+#     store/.dashboard-token      (dashboard bearer)
+#     store/.claude-oauth-token   (canonical Claude OAuth token)
+#     .env                        (project root secrets)
+#     scheduled-tasks.json        (legacy, if present)
+#     assets/meetings/**          (meeting transcripts/memos)
 #     agents/*/CLAUDE.md, SOUL.md, .mcp.json
 #     agents/*/.claude/channels/{telegram,slack,discord}/.env, access.json
 #
@@ -18,7 +19,11 @@
 #     .claude/scheduled-tasks/**   (file-based scheduled tasks: SKILL.md + config)
 #     .claude/channels/*/.env      (MAIN orchestrator channel token)
 #     .claude/channels/*/access.json, invites.json, approved/**  (pairing state)
+#     .git-credentials             (git PAT; credential.helper=store)
 #     Library/LaunchAgents/com.gorcsevivan.*.plist (launchd jobs)
+#
+# The MANIFEST carries a secrets checklist (CAPTURED/MISSING per credential) so
+# a migration can confirm every auth/push secret travelled before cutover.
 #
 # Output: backups/claudeclaw-YYYYmmdd-HHMMSS.tar.gz
 # Retention: keeps the most recent 14 archives, prunes the rest.
@@ -29,6 +34,10 @@
 # Full runbook: docs/MIGRATION.md.
 
 set -euo pipefail
+# The archive carries every fleet secret (git PAT, OAuth token, dashboard token,
+# .env + channel .envs). Restrict every file/dir this script creates to the
+# owner so the archive never lands world-readable (card G2, Dave BLOCK #1076).
+umask 077
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKUP_DIR="${REPO_ROOT}/backups"
@@ -37,6 +46,9 @@ ARCHIVE="${BACKUP_DIR}/claudeclaw-${STAMP}.tar.gz"
 KEEP=14
 
 mkdir -p "${BACKUP_DIR}"
+# Harden the backups/ dir to 0700 even if it predates this script (umask only
+# affects newly created dirs) -- the secret-bearing archives live here.
+chmod 0700 "${BACKUP_DIR}"
 cd "${REPO_ROOT}"
 
 # Checkpoint WAL into the main DB file so the snapshot is self-contained.
@@ -75,6 +87,10 @@ add_if "${REPOLIST}" "${REPO_ROOT}" store/claudeclaw.db
 add_if "${REPOLIST}" "${REPO_ROOT}" store/claudeclaw.db-shm
 add_if "${REPOLIST}" "${REPO_ROOT}" store/claudeclaw.db-wal
 add_if "${REPOLIST}" "${REPO_ROOT}" store/.dashboard-token
+# Canonical Claude OAuth token (0600, single-line). fleet-oauth-env.sh exports
+# it as CLAUDE_CODE_OAUTH_TOKEN at agent launch -- without it a migrated agent
+# has no working OAuth and cannot run (card G2, migration-readiness-plan-1123).
+add_if "${REPOLIST}" "${REPO_ROOT}" store/.claude-oauth-token
 add_if "${REPOLIST}" "${REPO_ROOT}" .env
 add_if "${REPOLIST}" "${REPO_ROOT}" scheduled-tasks.json
 add_if "${REPOLIST}" "${REPO_ROOT}" assets/meetings
@@ -98,6 +114,9 @@ fi
 # home/ group (relative to $HOME)
 add_if "${HOMELIST}" "${HOME}" .claude/skills
 add_if "${HOMELIST}" "${HOME}" .claude/scheduled-tasks
+# git PAT (credential.helper=store reads this; 0600). Without it a migrated
+# agent cannot push to origin (card G2, migration-readiness-plan-1123).
+add_if "${HOMELIST}" "${HOME}" .git-credentials
 # MAIN orchestrator channel tokens + pairing state, per provider. bot.pid and
 # inbox/ are runtime/transient and intentionally excluded.
 if [[ -d "${HOME}/.claude/channels" ]]; then
@@ -117,12 +136,28 @@ if [[ ! -s "${REPOLIST}" && ! -s "${HOMELIST}" ]]; then
 fi
 
 # --- Manifest (stored at the archive root for self-description). -----------
+# secret_status <base> <rel>  -- "CAPTURED" if the file exists (and is carried),
+# else "MISSING" so the checklist flags a secret the new box will still lack.
+secret_status() {
+  local base="$1" rel="$2"
+  if [[ -e "${base}/${rel}" ]]; then echo "CAPTURED"; else echo "MISSING "; fi
+}
+
 {
   echo "ClaudeClaw backup ${STAMP}"
   echo "host: $(hostname 2>/dev/null || echo '?')   user: ${USER:-?}   home: ${HOME}"
   echo "repo root: ${REPO_ROOT}"
   echo "Restore: tar -xpzf <archive> -C <tmp>; copy repo/* -> project root, home/* -> \$HOME."
   echo "See docs/MIGRATION.md for the full runbook (TCC, launchd paths, one-bot-one-poller, venv rebuild)."
+  # Secrets-migration checklist (card G2): every credential the fleet needs to
+  # auth + push on a new box. Each line is CAPTURED (in this archive) or MISSING
+  # (absent on this box -- provision manually before cutover). Per-agent channel
+  # .env/access.json are globbed under repo/ and home/ above, not re-listed here.
+  echo "--- secrets checklist ---"
+  echo "$(secret_status "${REPO_ROOT}" store/.dashboard-token)  repo/store/.dashboard-token      (dashboard bearer)"
+  echo "$(secret_status "${REPO_ROOT}" store/.claude-oauth-token)  repo/store/.claude-oauth-token   (canonical Claude OAuth -> CLAUDE_CODE_OAUTH_TOKEN)"
+  echo "$(secret_status "${REPO_ROOT}" .env)  repo/.env                        (project root secrets)"
+  echo "$(secret_status "${HOME}" .git-credentials)  home/.git-credentials            (git PAT; credential.helper=store)"
   echo "--- repo/ ---"; sed 's,^,repo/,' "${REPOLIST}" 2>/dev/null || true
   echo "--- home/ ---"; sed 's,^,home/,' "${HOMELIST}" 2>/dev/null || true
 } > "${MANIFEST}"
@@ -154,8 +189,14 @@ stage_group "${HOMELIST}" "${HOME}" home
 # Archive only the top-level entries that exist (a group dir is absent when
 # its list was empty), so tar never errors on a missing entry and the names
 # stay clean (no leading "./").
-( cd "${STAGE}" && tar -czf "${ARCHIVE}" MANIFEST.txt \
+# Write to a .partial temp path, lock it to 0600, then atomically move it into
+# place -- so the secret-bearing archive is never momentarily world-readable
+# under the build umask (card G2, Dave BLOCK #1076).
+ARCHIVE_PARTIAL="${ARCHIVE}.partial"
+( cd "${STAGE}" && tar -czf "${ARCHIVE_PARTIAL}" MANIFEST.txt \
     $( [[ -d repo ]] && echo repo ) $( [[ -d home ]] && echo home ) )
+chmod 0600 "${ARCHIVE_PARTIAL}"
+mv "${ARCHIVE_PARTIAL}" "${ARCHIVE}"
 echo "backup: wrote ${ARCHIVE} ($(wc -c < "${ARCHIVE}" | awk '{print $1}') bytes)"
 
 # The archive contains sensitive tokens (dashboard bearer, channel bot tokens,
