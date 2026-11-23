@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { STORE_DIR } from '../config.js'
 import { logger } from '../logger.js'
@@ -80,6 +80,25 @@ export function planningFreezeEnabled(): boolean {
     return existsSync(freezeFlagPath())
   } catch {
     return false // fail-safe: uncertain -> treat as no freeze
+  }
+}
+
+/**
+ * Set or clear store/planning-freeze.enabled -- the WRITE side of the freeze
+ * contract, exposed over HTTP by the release freeze-API (card 2efcb439, 4c-3).
+ * Presence of the file is the whole signal (content is irrelevant; the keep-list
+ * lives in a separate file), so enable writes an empty marker and disable removes
+ * it. rmSync({force:true}) is a no-op when already absent, so clearing is
+ * idempotent. Unlike the readers this does NOT fail-safe-swallow: a write error
+ * must surface to the caller (HTTP 500), never a silent no-op that leaves the
+ * operator believing a freeze was set/cleared when it was not.
+ */
+export function setPlanningFreezeEnabled(enabled: boolean): void {
+  const path = freezeFlagPath()
+  if (enabled) {
+    writeFileSync(path, '')
+  } else {
+    rmSync(path, { force: true })
   }
 }
 
