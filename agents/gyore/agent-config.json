@@ -6,6 +6,8 @@
     "role": "member",
     "reportsTo": "scout",
     "delegatesTo": [],
+    "escalatesTo": "scout",
+    "decisionScope": "none",
     "autoDelegation": false,
     "trustFrom": []
   },

@@ -8,8 +8,15 @@
     "role": "leader",
     "reportsTo": null,
     "delegatesTo": [
-      "buster"
+      "buster",
+      "avery",
+      "bellamy",
+      "bonny",
+      "gauge",
+      "vane"
     ],
+    "escalatesTo": "marveen",
+    "decisionScope": "gate",
     "autoDelegation": false,
     "trustFrom": []
   }

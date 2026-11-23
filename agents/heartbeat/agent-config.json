@@ -1,5 +1,14 @@
 {
   "model": "claude-haiku-5-5",
   "authMode": "shared",
-  "securityProfile": "default"
+  "securityProfile": "default",
+  "team": {
+    "role": "member",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "escalatesTo": "marveen",
+    "decisionScope": "none",
+    "autoDelegation": false,
+    "trustFrom": []
+  }
 }
