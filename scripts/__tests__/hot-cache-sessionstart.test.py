@@ -110,10 +110,30 @@ class TestHotCacheF3Policy(unittest.TestCase):
         self.assertGreater(len(ctx), 0)
 
     def test_no_file_is_noop(self):
-        for source in ["startup", "resume", "clear"]:
+        for source in ["startup", "resume", "clear", "compact"]:
             with self.subTest(source=source):
                 result = run_hook(source, "dave", hot_cache_content=None)
                 self.assertEqual(result, {})
+
+    def test_compact_mini_for_dave(self):
+        """Dave gets a mini hot-cache on compact (context-sensitive agent)."""
+        full = run_hook("resume", "dave", hot_cache_content=LONG_CONTENT)
+        compact_result = run_hook("compact", "dave", hot_cache_content=LONG_CONTENT)
+        full_ctx = full.get("hookSpecificOutput", {}).get("additionalContext", "")
+        compact_ctx = compact_result.get("hookSpecificOutput", {}).get("additionalContext", "")
+        self.assertGreater(len(compact_ctx), 0, "Dave should get mini inject on compact")
+        self.assertLess(len(compact_ctx), len(full_ctx), "Compact inject must be smaller than full")
+
+    def test_compact_mini_for_quill(self):
+        """Quill gets a mini hot-cache on compact."""
+        result = run_hook("compact", "quill", hot_cache_content=LONG_CONTENT)
+        ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+        self.assertGreater(len(ctx), 0, "Quill should get mini inject on compact")
+
+    def test_compact_skipped_for_thor(self):
+        """Thor (stateless) gets no inject on compact."""
+        result = run_hook("compact", "thor", hot_cache_content=LONG_CONTENT)
+        self.assertEqual(result, {}, "Thor must not get inject on compact")
 
 
 ROSTER_PATH = INSTALL_DIR / "store" / "fleet-roster-registry.md"
