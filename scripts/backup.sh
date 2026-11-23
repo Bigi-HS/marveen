@@ -34,6 +34,10 @@
 # Full runbook: docs/MIGRATION.md.
 
 set -euo pipefail
+# The archive carries every fleet secret (git PAT, OAuth token, dashboard token,
+# .env + channel .envs). Restrict every file/dir this script creates to the
+# owner so the archive never lands world-readable (card G2, Dave BLOCK #1076).
+umask 077
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKUP_DIR="${REPO_ROOT}/backups"
@@ -42,6 +46,9 @@ ARCHIVE="${BACKUP_DIR}/claudeclaw-${STAMP}.tar.gz"
 KEEP=14
 
 mkdir -p "${BACKUP_DIR}"
+# Harden the backups/ dir to 0700 even if it predates this script (umask only
+# affects newly created dirs) -- the secret-bearing archives live here.
+chmod 0700 "${BACKUP_DIR}"
 cd "${REPO_ROOT}"
 
 # Checkpoint WAL into the main DB file so the snapshot is self-contained.
@@ -182,8 +189,14 @@ stage_group "${HOMELIST}" "${HOME}" home
 # Archive only the top-level entries that exist (a group dir is absent when
 # its list was empty), so tar never errors on a missing entry and the names
 # stay clean (no leading "./").
-( cd "${STAGE}" && tar -czf "${ARCHIVE}" MANIFEST.txt \
+# Write to a .partial temp path, lock it to 0600, then atomically move it into
+# place -- so the secret-bearing archive is never momentarily world-readable
+# under the build umask (card G2, Dave BLOCK #1076).
+ARCHIVE_PARTIAL="${ARCHIVE}.partial"
+( cd "${STAGE}" && tar -czf "${ARCHIVE_PARTIAL}" MANIFEST.txt \
     $( [[ -d repo ]] && echo repo ) $( [[ -d home ]] && echo home ) )
+chmod 0600 "${ARCHIVE_PARTIAL}"
+mv "${ARCHIVE_PARTIAL}" "${ARCHIVE}"
 echo "backup: wrote ${ARCHIVE} ($(wc -c < "${ARCHIVE}" | awk '{print $1}') bytes)"
 
 # The archive contains sensitive tokens (dashboard bearer, channel bot tokens,
