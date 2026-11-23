@@ -305,6 +305,107 @@ else
 fi
 echo
 
+# ---------------------------------------------------------------------------
+# Case G: multi-sentinel -- one inert-activation-gated (flag absent, should WARN +
+# continue) AND one plain hold (no HOLD-TYPE, should block). With both present and
+# at least one plain hold active, the script must hard-abort (hold_hit > 0).
+# This asserts the hold is not accidentally cleared by the inert pass of the other
+# sentinel (card 1f781314, adversarial-fixture-gate).
+# ---------------------------------------------------------------------------
+echo "--- Case G: multi-sentinel (inert+plain) -> hard-abort from plain hold ---"
+REPO_G="$WORK/repo_g"
+read -r held_g target_g <<< "$(make_repo "$REPO_G")"
+
+# Sentinel 1: inert-activation-gated (flag absent -> WARN + continue, hold_hit += 0)
+cat > "$REPO_G/store/.deploy-hold-$held_g" <<EOF
+DEPLOY HOLD (inert-activation-gated)
+HOLD-TYPE: inert-activation-gated FLAG=store/feature-flag.enabled
+Held code is live-but-inert -- the activation flag is absent.
+EOF
+# Flag IS absent (do not create store/feature-flag.enabled)
+
+# Sentinel 2: plain hold (no HOLD-TYPE -> hard-abort, hold_hit += 1)
+# Use a second commit as the held SHA for the plain sentinel.
+echo "extra" > "$REPO_G/extra.txt"
+git -C "$REPO_G" add -A >/dev/null
+git -C "$REPO_G" commit -qm "extra commit"
+plain_held_g=$(git -C "$REPO_G" rev-parse HEAD~1)   # first commit = plain hold
+plain_tip_g=$(git -C "$REPO_G" rev-parse HEAD)       # tip is ahead of both
+
+cat > "$REPO_G/store/.deploy-hold-$plain_held_g" <<EOF
+DEPLOY HOLD (plain sentinel, no HOLD-TYPE header)
+Blocking until all release conditions are manually verified.
+EOF
+
+out_g=$(check_step0 "$REPO_G" "$plain_tip_g")
+rc_g=$?
+
+if [ "$rc_g" -ne 0 ]; then
+  pass "Case G: multi-sentinel (inert+plain) -> non-zero exit (plain hold wins)"
+else
+  fail "Case G: mixed sentinels should abort due to plain hold, got rc=0"
+fi
+if echo "$out_g" | grep -q "ABORT:"; then
+  pass "Case G: ABORT emitted (plain hold triggered)"
+else
+  fail "Case G: ABORT missing. Got: $out_g"
+fi
+if echo "$out_g" | grep -q "WARN:.*inert-activation-gated"; then
+  pass "Case G: inert sentinel WARN also emitted (not silenced by plain abort)"
+else
+  fail "Case G: expected WARN for inert sentinel. Got: $out_g"
+fi
+echo
+
+# ---------------------------------------------------------------------------
+# Case H: FLAG= path-traversal (card 1f781314 advisory).
+#
+# A sentinel with FLAG=../../some/path-outside-repo allows an attacker who can
+# modify the sentinel file to craft a FLAG= that resolves outside the repo root.
+# When the referenced file is ABSENT (the common case), the hold passes as inert.
+#
+# The current implementation resolves: flag_abs="$REPO/$inert_flag_path"
+# A traversal like FLAG=../../etc/passwd (absent on most systems) passes as inert.
+# This is documented as LOW: exploiting requires sentinel-write access (which is
+# equivalent to removing the sentinel entirely). This fixture asserts the CURRENT
+# behavior as a regression marker.
+# ---------------------------------------------------------------------------
+echo "--- Case H: FLAG= path-traversal with absent target -> currently passes as inert (advisory) ---"
+REPO_H="$WORK/repo_h"
+read -r held_h target_h <<< "$(make_repo "$REPO_H")"
+
+# A traversal path that exits the repo root. The file must NOT exist.
+TRAVERSAL_FLAG="../../tmp/marveen-deploy-test-absent-$$"
+cat > "$REPO_H/store/.deploy-hold-$held_h" <<EOF
+DEPLOY HOLD (activation-gated with traversal FLAG)
+HOLD-TYPE: inert-activation-gated FLAG=$TRAVERSAL_FLAG
+Advisory: FLAG= not anchored to repo root (card 1f781314).
+EOF
+# Ensure the traversal target does NOT exist.
+rm -f "$REPO_H/$TRAVERSAL_FLAG" 2>/dev/null || true
+
+out_h=$(check_step0 "$REPO_H" "$target_h")
+rc_h=$?
+
+# CURRENT BEHAVIOR: traversal with absent file = inert -> continue (rc=0).
+# If this assertion flips to rc!=0, FLAG= anchoring was added -- update accordingly.
+if [ "$rc_h" -eq 0 ]; then
+  pass "Case H: traversal FLAG with absent target -> passes as inert (current behavior)"
+else
+  fail "Case H (ADVISORY-FLIP): traversal is now blocked. If FLAG anchoring was added, update assertion direction. Got: $out_h"
+fi
+if echo "$out_h" | grep -q "WARN:.*inert-activation-gated"; then
+  pass "Case H: WARN emitted for traversal-FLAG sentinel (inert path taken)"
+else
+  fail "Case H: expected WARN for inert path; got: $out_h"
+fi
+if ! echo "$out_h" | grep -q "ABORT:"; then
+  pass "Case H: no ABORT (traversal+absent file treated as inert)"
+else
+  fail "Case H: ABORT should not appear for traversal+absent-file. Got: $out_h"
+fi
+echo
+
 echo "=========================="
 if [ "$FAIL" -eq 0 ]; then
   echo "ALL PASSED"
