@@ -367,5 +367,150 @@ class TestPatchStructure(unittest.TestCase):
                         "telemetry-emit hook entry must specify a timeout")
 
 
+# ---------------------------------------------------------------------------
+# 6. compact-matcher wiring for MINI_HOT_CACHE_AGENTS (dave, quill)
+# ---------------------------------------------------------------------------
+
+def _make_full_agent_fixture(tmp_root: Path, agent_id: str) -> Path:
+    """Create a minimal agent dir with both required hook scripts + settings.json."""
+    agent_dir = tmp_root / "agents" / agent_id
+    hook_dir = agent_dir / "scripts" / "hooks"
+    hook_dir.mkdir(parents=True)
+    (hook_dir / "telemetry-emit.py").write_text("# stub")
+    (hook_dir / "hot-cache-sessionstart.py").write_text("# stub")
+    claude_dir = agent_dir / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.json").write_text(json.dumps(_make_minimal_settings()))
+    return agent_dir
+
+
+class TestCompactMatcherWiring(unittest.TestCase):
+    """apply-telemetry-hook.py must wire SessionStart hot-cache-sessionstart.py
+    for MINI_HOT_CACHE_AGENTS (dave, quill) only."""
+
+    def test_compact_matcher_wired_for_dave(self):
+        """patch_agent on 'dave' adds SessionStart hot-cache-sessionstart entry."""
+        if not PATCHER_PATH.exists():
+            self.skipTest("apply-telemetry-hook.py not yet implemented")
+        mod = _load_patcher()
+
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = _make_full_agent_fixture(Path(root), "dave")
+            settings_path = agent_dir / ".claude" / "settings.json"
+
+            result = mod.patch_agent(str(agent_dir))
+            self.assertTrue(result, "patch_agent must succeed for dave")
+
+            settings = json.loads(settings_path.read_text())
+            ss_hooks = settings.get("hooks", {}).get("SessionStart", [])
+            ss_commands = [
+                h.get("command", "")
+                for entry in ss_hooks
+                for h in entry.get("hooks", [])
+            ]
+            self.assertTrue(
+                any("hot-cache-sessionstart.py" in cmd for cmd in ss_commands),
+                "dave must have hot-cache-sessionstart.py wired in SessionStart",
+            )
+
+    def test_compact_matcher_wired_for_quill(self):
+        """patch_agent on 'quill' adds SessionStart hot-cache-sessionstart entry."""
+        if not PATCHER_PATH.exists():
+            self.skipTest("apply-telemetry-hook.py not yet implemented")
+        mod = _load_patcher()
+
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = _make_full_agent_fixture(Path(root), "quill")
+            settings_path = agent_dir / ".claude" / "settings.json"
+
+            mod.patch_agent(str(agent_dir))
+            settings = json.loads(settings_path.read_text())
+            ss_hooks = settings.get("hooks", {}).get("SessionStart", [])
+            ss_commands = [
+                h.get("command", "")
+                for entry in ss_hooks
+                for h in entry.get("hooks", [])
+            ]
+            self.assertTrue(
+                any("hot-cache-sessionstart.py" in cmd for cmd in ss_commands),
+                "quill must have hot-cache-sessionstart.py wired in SessionStart",
+            )
+
+    def test_compact_matcher_NOT_wired_for_forge(self):
+        """patch_agent on 'forge' (not a MINI_HOT_CACHE_AGENT) must NOT add compact entry."""
+        if not PATCHER_PATH.exists():
+            self.skipTest("apply-telemetry-hook.py not yet implemented")
+        mod = _load_patcher()
+
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = _make_full_agent_fixture(Path(root), "forge")
+            settings_path = agent_dir / ".claude" / "settings.json"
+
+            mod.patch_agent(str(agent_dir))
+            settings = json.loads(settings_path.read_text())
+            ss_hooks = settings.get("hooks", {}).get("SessionStart", [])
+            ss_commands = [
+                h.get("command", "")
+                for entry in ss_hooks
+                for h in entry.get("hooks", [])
+            ]
+            self.assertFalse(
+                any("hot-cache-sessionstart.py" in cmd for cmd in ss_commands),
+                "forge must NOT have hot-cache-sessionstart.py in SessionStart",
+            )
+
+    def test_compact_matcher_idempotent(self):
+        """Running patch_agent twice must not duplicate SessionStart entries."""
+        if not PATCHER_PATH.exists():
+            self.skipTest("apply-telemetry-hook.py not yet implemented")
+        mod = _load_patcher()
+
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = _make_full_agent_fixture(Path(root), "dave")
+            settings_path = agent_dir / ".claude" / "settings.json"
+
+            mod.patch_agent(str(agent_dir))
+            mod.patch_agent(str(agent_dir))  # second run
+
+            settings = json.loads(settings_path.read_text())
+            ss_hooks = settings.get("hooks", {}).get("SessionStart", [])
+            compact_entries = [
+                entry for entry in ss_hooks
+                if any("hot-cache-sessionstart.py" in h.get("command", "")
+                       for h in entry.get("hooks", []))
+            ]
+            self.assertEqual(len(compact_entries), 1,
+                "hot-cache-sessionstart.py must appear exactly once in SessionStart")
+
+    def test_compact_matcher_presence_verify_hot_cache_script(self):
+        """If hot-cache-sessionstart.py is absent, compact-matcher is NOT wired."""
+        if not PATCHER_PATH.exists():
+            self.skipTest("apply-telemetry-hook.py not yet implemented")
+        mod = _load_patcher()
+
+        with tempfile.TemporaryDirectory() as root:
+            agent_dir = Path(root) / "agents" / "dave"
+            hook_dir = agent_dir / "scripts" / "hooks"
+            hook_dir.mkdir(parents=True)
+            # Only telemetry-emit.py present, NOT hot-cache-sessionstart.py
+            (hook_dir / "telemetry-emit.py").write_text("# stub")
+            claude_dir = agent_dir / ".claude"
+            claude_dir.mkdir()
+            (claude_dir / "settings.json").write_text(json.dumps(_make_minimal_settings()))
+
+            mod.patch_agent(str(agent_dir))
+            settings = json.loads((claude_dir / "settings.json").read_text())
+            ss_hooks = settings.get("hooks", {}).get("SessionStart", [])
+            ss_commands = [
+                h.get("command", "")
+                for entry in ss_hooks
+                for h in entry.get("hooks", [])
+            ]
+            self.assertFalse(
+                any("hot-cache-sessionstart.py" in cmd for cmd in ss_commands),
+                "compact-matcher must NOT be wired if hot-cache-sessionstart.py is missing",
+            )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
