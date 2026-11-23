@@ -11,7 +11,7 @@
 //
 // See store/specs/merge-gate-enforcement.md (card fa11eb63).
 
-export const GATE_REVIEWERS = ['thor', 'gauge', 'dave', 'chad'] as const
+export const GATE_REVIEWERS = ['thor', 'gauge', 'dave', 'chad', 'design'] as const
 export type Reviewer = (typeof GATE_REVIEWERS)[number]
 
 // QA seat is normally held by thor. Set GATE_QA_SEAT env to substitute
@@ -190,12 +190,32 @@ export function isSecuritySensitivePath(filename: string): boolean {
   return false
 }
 
+// UX/UI design-review leg trigger (card 99d18f95). A PR is UI-touching if its
+// diff includes at least one UI-surface path. Conservative allowlist -- a false
+// positive only adds a design seat; a false negative lets a UI change skip design
+// review. Extend here as new surface areas are added.
+export function isUiSurfacePath(filename: string): boolean {
+  if (typeof filename !== 'string' || filename.length === 0) return false
+  const f = filename.toLowerCase()
+  if (f.startsWith('dashboard-new/')) return true
+  if (f.startsWith('src/web/public/')) return true
+  if (f.startsWith('src/web/') && f.endsWith('.html')) return true
+  if (f.endsWith('.css') || f.endsWith('.scss')) return true
+  return false
+}
+
 // Required reviewers for a PR: QA-seat + Dave always; Chad added for a
 // security-sensitive diff (MG-AC4). The QA seat is normally 'thor' but can be
 // overridden via GATE_QA_SEAT env (see getQaSeat()).
-export function requiredReviewers(securityTouched: boolean): Reviewer[] {
+export function requiredReviewers(
+  securityTouched: boolean,
+  uiTouched?: boolean,
+  hasUxReviewLabel?: boolean,
+): Reviewer[] {
   const qa = getQaSeat()
-  return securityTouched ? [qa, 'dave', 'chad'] : [qa, 'dave']
+  const base: Reviewer[] = securityTouched ? [qa, 'dave', 'chad'] : [qa, 'dave']
+  if (uiTouched || hasUxReviewLabel) base.push('design')
+  return base
 }
 
 // ---------------------------------------------------------------------------
@@ -357,10 +377,17 @@ export function classifyDiffRisk(files: PrFileDiff[]): DiffRisk {
 // (strict default). This is a SUPERSET of requiredReviewers for the same diff
 // (chad fires whenever a path tag is present -- which is exactly when
 // isSecuritySensitivePath was true -- plus the new content/unknown cases).
-export function requiredSeatsForRisk(risk: DiffRisk): Reviewer[] {
+// Strictly additive (card 99d18f95): design seat appended when uiTouched or
+// ux-review label present; never substitutes an existing reviewer.
+export function requiredSeatsForRisk(
+  risk: DiffRisk,
+  uiTouched?: boolean,
+  hasUxReviewLabel?: boolean,
+): Reviewer[] {
   const qa = getQaSeat()
-  if (risk.tags.length > 0 || risk.unknown) return [qa, 'dave', 'chad']
-  return [qa, 'dave']
+  const base: Reviewer[] = (risk.tags.length > 0 || risk.unknown) ? [qa, 'dave', 'chad'] : [qa, 'dave']
+  if (uiTouched || hasUxReviewLabel) base.push('design')
+  return base
 }
 
 // The standing backup seat promoted when a required reviewer recuses (card
@@ -458,6 +485,9 @@ export interface GithubPrInfo {
   // gets the legacy path-only classification (see riskForPrInfo); the real
   // fetchPrInfo populates this so content tags and unknown->chad activate.
   fileDiffs?: PrFileDiff[]
+  // PR labels for ux-review label override (card 99d18f95). Optional for
+  // back-compat: absent or undefined -> no label-based design seat trigger.
+  labels?: string[]
 }
 
 // Derive the risk matrix from PR info. With fileDiffs -> full classifier
@@ -562,6 +592,10 @@ export interface GateCheckResult {
   risk_tags: string[]
   risk_level: string
   risk_unknown: boolean
+  // UX/UI design-review leg (card 99d18f95). True when any changed file matches
+  // the UI-surface allowlist OR the ux-review label is present. The design seat
+  // is in `required` iff ui_touched is true.
+  ui_touched: boolean
 }
 
 // MG-AC3 / MG-AC6 -- the gate check. Always evaluates against the CURRENT
@@ -577,11 +611,13 @@ export async function runGateCheck(pr: number, deps: GateCheckDeps): Promise<Gat
   // advisory/audit only; a stale intake could under-require). This re-derivation
   // is the SOLE enforcement input (same principle as head-sha-bound approvals).
   const risk = riskForPrInfo(info)
+  const uiTouched = info.files.some(isUiSurfacePath)
+  const hasUxReviewLabel = (info.labels ?? []).includes('ux-review')
   // Author recusal (card 46de122b): a reviewer who authored the PR cannot fill
   // their own seat, so drop them from `required` and promote the backup. Author
   // comes from the trusted identity-bound record; null (or no dep) -> no recusal.
   const author = deps.readAuthor ? deps.readAuthor(pr) : null
-  const recusal = applyAuthorRecusal(requiredSeatsForRisk(risk), author)
+  const recusal = applyAuthorRecusal(requiredSeatsForRisk(risk, uiTouched, hasUxReviewLabel), author)
   const required = recusal.required
   const evaluation = evaluateApprovals(deps.readApprovals(pr, headSha), required)
   const overrideActive = deps.hasActiveOverride(pr, headSha)
@@ -613,5 +649,6 @@ export async function runGateCheck(pr: number, deps: GateCheckDeps): Promise<Gat
     risk_tags: risk.tags,
     risk_level: risk.level,
     risk_unknown: risk.unknown,
+    ui_touched: uiTouched || hasUxReviewLabel,
   }
 }

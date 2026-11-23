@@ -5,13 +5,16 @@ import {
   isValidVerdict,
   isPositiveInt,
   isSecuritySensitivePath,
+  isUiSurfacePath,
   requiredReviewers,
+  requiredSeatsForRisk,
   getQaSeat,
   applyAuthorRecusal,
   evaluateApprovals,
   runGateCheck,
   type ApprovalRow,
   type GateCheckDeps,
+  type DiffRisk,
 } from '../web/gate-check.js'
 
 const SHA_A = 'a'.repeat(40)
@@ -27,11 +30,12 @@ describe('input validation (MG-AC1)', () => {
     expect(isValidSha(undefined)).toBe(false)
   })
 
-  it('isValidReviewer accepts thor/gauge/dave/chad', () => {
+  it('isValidReviewer accepts thor/gauge/dave/chad/design', () => {
     expect(isValidReviewer('thor')).toBe(true)
     expect(isValidReviewer('gauge')).toBe(true)
     expect(isValidReviewer('dave')).toBe(true)
     expect(isValidReviewer('chad')).toBe(true)
+    expect(isValidReviewer('design')).toBe(true)
     expect(isValidReviewer('alice')).toBe(false)
     expect(isValidReviewer('')).toBe(false)
   })
@@ -365,9 +369,9 @@ describe('evaluateApprovals (MG-AC3, MG-SEC3, MG-SEC6)', () => {
 })
 
 // Stub GitHub fetch + DB reads so runGateCheck is exercised without network/db.
-function deps(over: Partial<GateCheckDeps> & { headSha?: string; files?: string[]; approvals?: ApprovalRow[]; override?: boolean }): GateCheckDeps {
+function deps(over: Partial<GateCheckDeps> & { headSha?: string; files?: string[]; labels?: string[]; approvals?: ApprovalRow[]; override?: boolean }): GateCheckDeps {
   return {
-    fetchPr: async () => ({ headSha: over.headSha ?? SHA_A, files: over.files ?? [] }),
+    fetchPr: async () => ({ headSha: over.headSha ?? SHA_A, files: over.files ?? [], labels: over.labels }),
     readApprovals: over.readApprovals ?? (() => over.approvals ?? []),
     hasActiveOverride: over.hasActiveOverride ?? (() => over.override ?? false),
     readAuthor: over.readAuthor,
@@ -537,5 +541,161 @@ describe('runGateCheck author recusal integration (card 46de122b)', () => {
     expect(r.recused).toEqual(['dave'])
     expect(r.blocked).toEqual(['dave'])
     expect(r.pass).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// UX/UI design-review leg (card 99d18f95, §8.5 fixtures). The design seat is
+// strictly ADDITIVE: appended to the required set for UI-touching PRs, never
+// substituting an existing seat (thor/dave/chad/content-tags all preserved).
+// ---------------------------------------------------------------------------
+
+function noRisk(): DiffRisk { return { tags: [], level: 'low', unknown: false } }
+function highRisk(): DiffRisk { return { tags: ['security'], level: 'high', unknown: false } }
+
+describe('isUiSurfacePath (card 99d18f95)', () => {
+  it('matches dashboard-new/** (SPA, all extensions)', () => {
+    expect(isUiSurfacePath('dashboard-new/src/panels/Graph.tsx')).toBe(true)
+    expect(isUiSurfacePath('dashboard-new/index.html')).toBe(true)
+    expect(isUiSurfacePath('dashboard-new/src/styles/main.css')).toBe(true)
+  })
+
+  it('matches src/web/public/** static assets', () => {
+    expect(isUiSurfacePath('src/web/public/logo.svg')).toBe(true)
+    expect(isUiSurfacePath('src/web/public/styles.css')).toBe(true)
+  })
+
+  it('matches src/web/**/*.html served templates', () => {
+    expect(isUiSurfacePath('src/web/views/index.html')).toBe(true)
+    expect(isUiSurfacePath('src/web/templates/panel.html')).toBe(true)
+  })
+
+  it('matches **/*.css and **/*.scss anywhere in the tree', () => {
+    expect(isUiSurfacePath('src/web/main.css')).toBe(true)
+    expect(isUiSurfacePath('src/styles/tokens.scss')).toBe(true)
+    expect(isUiSurfacePath('agents/theme.css')).toBe(true)
+  })
+
+  it('does NOT match backend/infra files (false-positive guard)', () => {
+    expect(isUiSurfacePath('src/db.ts')).toBe(false)
+    expect(isUiSurfacePath('src/web/gate-check.ts')).toBe(false)
+    expect(isUiSurfacePath('src/web/routes/kanban.ts')).toBe(false)
+    expect(isUiSurfacePath('scripts/hooks/guardrail.py')).toBe(false)
+    expect(isUiSurfacePath('')).toBe(false)
+  })
+})
+
+describe('requiredSeatsForRisk with uiTouched (card 99d18f95)', () => {
+  afterEach(() => { delete process.env.GATE_QA_SEAT })
+
+  // §8.5 (i) UI diff adds design seat
+  it('adds design for a UI-touching low-risk PR', () => {
+    expect(requiredSeatsForRisk(noRisk(), true)).toEqual(['thor', 'dave', 'design'])
+  })
+
+  // §8.5 (ii) Non-UI diff does NOT add design seat
+  it('does NOT add design for a non-UI PR', () => {
+    expect(requiredSeatsForRisk(noRisk(), false)).toEqual(['thor', 'dave'])
+    expect(requiredSeatsForRisk(noRisk())).toEqual(['thor', 'dave'])
+  })
+
+  // §8.5 (iii) ux-review label override adds design seat
+  it('adds design when hasUxReviewLabel is true, even without UI-touching files', () => {
+    expect(requiredSeatsForRisk(noRisk(), false, true)).toEqual(['thor', 'dave', 'design'])
+  })
+
+  // §8.5 (iv) Additive invariant: design NEVER removes thor/dave/chad
+  it('additive invariant: high-risk UI PR has thor+dave+chad+design', () => {
+    const result = requiredSeatsForRisk(highRisk(), true)
+    expect(result).toContain('thor')
+    expect(result).toContain('dave')
+    expect(result).toContain('chad')
+    expect(result).toContain('design')
+    expect(result.length).toBe(4)
+  })
+
+  it('additive invariant: low-risk UI PR has thor+dave+design, chad is NOT added', () => {
+    const result = requiredSeatsForRisk(noRisk(), true)
+    expect(result).toContain('thor')
+    expect(result).toContain('dave')
+    expect(result).toContain('design')
+    expect(result).not.toContain('chad')
+  })
+})
+
+describe('runGateCheck design-seat integration (card 99d18f95)', () => {
+  // §8.5 (i) UI diff adds design seat
+  it('a UI-touching PR requires the design seat', async () => {
+    const r = await runGateCheck(801, deps({ files: ['dashboard-new/src/panels/Graph.tsx'] }))
+    expect(r.required).toContain('design')
+    expect(r.ui_touched).toBe(true)
+    expect(r.missing).toContain('design')
+    expect(r.pass).toBe(false)
+  })
+
+  // §8.5 (ii) Non-UI PR does NOT add design seat
+  it('a non-UI PR does NOT require the design seat', async () => {
+    const r = await runGateCheck(802, deps({
+      files: ['src/db.ts'],
+      approvals: [approval('thor', 'approved'), approval('dave', 'approved')],
+    }))
+    expect(r.required).not.toContain('design')
+    expect(r.ui_touched).toBe(false)
+    expect(r.pass).toBe(true)
+  })
+
+  // §8.5 (iii) ux-review label override adds design seat
+  it('ux-review label adds design seat even without UI-touching files', async () => {
+    const r = await runGateCheck(803, deps({
+      files: ['src/web/routes/kanban.ts'],
+      labels: ['ux-review'],
+    }))
+    expect(r.required).toContain('design')
+    expect(r.ui_touched).toBe(true)
+    expect(r.missing).toContain('design')
+    expect(r.pass).toBe(false)
+  })
+
+  // §8.5 (iv) Additive invariant: UI security PR has all four seats
+  it('additive invariant: UI-touching security PR requires thor+dave+chad+design', async () => {
+    const r = await runGateCheck(804, deps({
+      files: ['dashboard-new/src/App.tsx', 'scripts/hooks/guardrail-x.py'],
+    }))
+    expect(r.required).toContain('thor')
+    expect(r.required).toContain('dave')
+    expect(r.required).toContain('chad')
+    expect(r.required).toContain('design')
+    expect(r.required.length).toBe(4)
+    expect(r.ui_touched).toBe(true)
+    expect(r.pass).toBe(false)
+  })
+
+  // §8.5 (v-a) design BLOCK holds merge
+  it('design BLOCK holds merge (pass=false)', async () => {
+    const r = await runGateCheck(805, deps({
+      files: ['dashboard-new/src/panels/Graph.tsx'],
+      approvals: [
+        approval('thor', 'approved'),
+        approval('dave', 'approved'),
+        approval('design', 'blocked'),
+      ],
+    }))
+    expect(r.blocked).toContain('design')
+    expect(r.pass).toBe(false)
+  })
+
+  // §8.5 (v-b) design PASS fills seat -- all seats met = pass
+  it('design PASS fills seat; all seats met = pass=true', async () => {
+    const r = await runGateCheck(806, deps({
+      files: ['dashboard-new/src/panels/Graph.tsx'],
+      approvals: [
+        approval('thor', 'approved'),
+        approval('dave', 'approved'),
+        approval('design', 'approved'),
+      ],
+    }))
+    expect(r.approved).toContain('design')
+    expect(r.missing).toEqual([])
+    expect(r.pass).toBe(true)
   })
 })
