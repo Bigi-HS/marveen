@@ -273,7 +273,7 @@ export async function fetchPrInfo(pr: number): Promise<GithubPrInfo> {
 
   const prRes = await fetch(`https://api.github.com/repos/${GATE_REPO}/pulls/${pr}`, { headers })
   if (!prRes.ok) throw new Error(`GitHub PR fetch failed (${prRes.status})`)
-  const prJson = (await prRes.json()) as { head?: { sha?: string } }
+  const prJson = (await prRes.json()) as { head?: { sha?: string }; labels?: Array<{ name: string }> }
   const headSha = prJson.head?.sha
   if (typeof headSha !== 'string' || headSha.length === 0) {
     throw new Error('GitHub PR response missing head.sha')
@@ -301,5 +301,5 @@ export async function fetchPrInfo(pr: number): Promise<GithubPrInfo> {
     if (arr.length < 100) break
   }
 
-  return { headSha, files, fileDiffs }
+  return { headSha, files, fileDiffs, labels: prJson.labels?.map((l) => l.name) ?? [] }
 }
