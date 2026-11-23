@@ -12,5 +12,13 @@
     "trustFrom": []
   },
   "claudeConfigDir": "/home/domin/marveen/agents/gyore/.claude-config",
-  "channelProvider": "telegram"
+  "channelProvider": "telegram",
+  "scope": {
+    "charter": "DRAFT: placeholder -- awaiting Boss charter approval (BD-2).",
+    "owns": [
+      "research"
+    ],
+    "excludes": [],
+    "redirectTo": {}
+  }
 }

@@ -10,5 +10,13 @@
     "autoDelegation": false,
     "trustFrom": []
   },
-  "displayName": "Bonny"
+  "displayName": "Bonny",
+  "scope": {
+    "charter": "DRAFT: placeholder -- awaiting Boss charter approval (BD-2).",
+    "owns": [
+      "qa-testing"
+    ],
+    "excludes": [],
+    "redirectTo": {}
+  }
 }

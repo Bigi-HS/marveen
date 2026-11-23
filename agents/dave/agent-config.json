@@ -19,5 +19,14 @@
     "decisionScope": "gate",
     "autoDelegation": false,
     "trustFrom": []
+  },
+  "scope": {
+    "charter": "DRAFT: placeholder -- awaiting Boss charter approval (BD-2).",
+    "owns": [
+      "core-eng",
+      "gate-review"
+    ],
+    "excludes": [],
+    "redirectTo": {}
   }
 }

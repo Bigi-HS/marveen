@@ -15,5 +15,14 @@
     "decisionScope": "orchestrate",
     "autoDelegation": false,
     "trustFrom": []
+  },
+  "scope": {
+    "charter": "DRAFT: placeholder -- awaiting Boss charter approval (BD-2).",
+    "owns": [
+      "orchestration",
+      "kanban-ops"
+    ],
+    "excludes": [],
+    "redirectTo": {}
   }
 }
