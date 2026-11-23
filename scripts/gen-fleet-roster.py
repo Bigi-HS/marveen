@@ -112,6 +112,13 @@ def load_agents(agents_root: str) -> list[dict]:
             "role": (team.get("role") or ""),
             "reports_to": team.get("reportsTo"),
             "security": cfg.get("securityProfile") or "",
+            # Slice 2 (card 484b550e): new hierarchy fields from spec §1.3
+            "escalates_to": team.get("escalatesTo"),
+            "decision_scope": team.get("decisionScope") or "",
+            # Sentinel flags: distinguishes key-absent from key-present-null
+            # so check_strict() can require the key exists in the team block.
+            "_has_escalates_to": "escalatesTo" in team,
+            "_has_decision_scope": "decisionScope" in team,
         }
 
     root_cfg = _read_config(root / "agent-config.json")
@@ -286,16 +293,19 @@ def render_roster(agents, live_sessions) -> str:
         section_no += 1
         lines.append(f"## {section_no}. {gname}")
         lines.append("")
-        lines.append("| agent_id | Display | Model | Channel | Role | Status |")
-        lines.append("|----------|---------|-------|---------|------|--------|")
+        lines.append("| agent_id | Display | Model | Channel | Role | escalatesTo | decisionScope | Status |")
+        lines.append("|----------|---------|-------|---------|------|-------------|---------------|--------|")
         for a in members:
             channel = a["channel"] or "-"
             role = a["role"] or "-"
             reports = f" -> {a['reports_to']}" if a["reports_to"] else ""
             role_cell = f"{role}{reports}"
+            escalates = a.get("escalates_to") or "-"
+            scope = a.get("decision_scope") or "-"
             lines.append(
                 f"| {a['id']} | {_esc(a['display'])} | {a['model']} | "
-                f"{channel} | {_esc(role_cell)} | {_mark(a['id'], live)} |"
+                f"{channel} | {_esc(role_cell)} | {_esc(str(escalates))} | "
+                f"{_esc(scope)} | {_mark(a['id'], live)} |"
             )
         lines.append("")
 
@@ -355,6 +365,53 @@ def render_roster(agents, live_sessions) -> str:
 
 
 # ---------------------------------------------------------------------------
+# --strict check (AC-H2, card 484b550e)
+# ---------------------------------------------------------------------------
+
+# Valid role values for --strict; mirrors validate-fleet-hierarchy.py.
+_STRICT_VALID_ROLES = {"orchestrator", "leader", "member", "specialist"}
+_STRICT_VALID_SCOPES = {"none", "team", "gate", "orchestrate"}
+
+
+def check_strict(agents: list[dict]) -> list[str]:
+    """Return one error string per violation found in the agent list.
+
+    Checks (spec §1.5 AC-H2):
+      - team.role present and in _STRICT_VALID_ROLES
+      - team.escalatesTo key present in team block (value may be null)
+      - team.decisionScope present and in _STRICT_VALID_SCOPES
+
+    Returns [] when all agents pass (strict mode succeeds; exit 0).
+    """
+    errors: list[str] = []
+    for a in agents:
+        aid = a["id"]
+        role = a.get("role") or ""
+
+        if not role:
+            errors.append(f"[strict] {aid}: team.role missing or empty")
+        elif role not in _STRICT_VALID_ROLES:
+            errors.append(
+                f"[strict] {aid}: team.role={role!r} not in valid enum "
+                f"{sorted(_STRICT_VALID_ROLES)}"
+            )
+
+        if not a.get("_has_escalates_to"):
+            errors.append(f"[strict] {aid}: team.escalatesTo key missing")
+
+        scope = a.get("decision_scope") or ""
+        if not a.get("_has_decision_scope") or not scope:
+            errors.append(f"[strict] {aid}: team.decisionScope missing or empty")
+        elif scope not in _STRICT_VALID_SCOPES:
+            errors.append(
+                f"[strict] {aid}: team.decisionScope={scope!r} not in valid enum "
+                f"{sorted(_STRICT_VALID_SCOPES)}"
+            )
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # main (thin wiring)
 # ---------------------------------------------------------------------------
 
@@ -377,9 +434,26 @@ def main(argv=None) -> int:
         "--stdout", action="store_true",
         help="Print the roster to stdout instead of writing the file.",
     )
+    parser.add_argument(
+        "--strict", action="store_true",
+        help=(
+            "Exit non-zero if any config-agent has an incomplete or invalid team "
+            "block (missing role / invalid role / missing escalatesTo key / "
+            "missing or invalid decisionScope). AC-H2, card 484b550e."
+        ),
+    )
     args = parser.parse_args(argv)
 
     agents = load_agents(args.root)
+
+    if args.strict:
+        violations = check_strict(agents)
+        if violations:
+            print(f"STRICT FAIL: {len(violations)} violation(s):", file=sys.stderr)
+            for v in violations:
+                print(f"  {v}", file=sys.stderr)
+            return 1
+
     live = _live_tmux_sessions()
     content = render_roster(agents, live)
 
