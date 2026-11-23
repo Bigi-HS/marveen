@@ -11,6 +11,8 @@ Event shape:
   object      -- tool_name
   object_type -- 'tool'
   status      -- 'ok' | 'error'
+  model_tier  -- CLAUDE_MODEL_TIER env (or 'unknown')
+  task_level  -- CLAUDE_TASK_LEVEL env (or 'unknown')
   meta        -- {session_id, event_key (Tier-A: omitted)}
 
 Tier-A (best-effort): no outbox, no retry, server-down = event silently lost.
@@ -64,12 +66,16 @@ def build_event(hook_json: dict) -> dict | None:
     meta: dict = {}
     if isinstance(session_id, str) and session_id:
         meta['session_id'] = session_id
+    model_tier = os.environ.get('CLAUDE_MODEL_TIER', 'unknown')
+    task_level = os.environ.get('CLAUDE_TASK_LEVEL', 'unknown')
     return {
         'actor': actor,
         'verb': 'tool-call',
         'object': tool,
         'object_type': 'tool',
         'status': _infer_status(hook_json.get('tool_response')),
+        'model_tier': model_tier,
+        'task_level': task_level,
         'meta': meta if meta else None,
     }
 
