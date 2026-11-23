@@ -5,6 +5,8 @@
     "role": "member",
     "reportsTo": "dave",
     "delegatesTo": [],
+    "escalatesTo": "dave",
+    "decisionScope": "none",
     "autoDelegation": false,
     "trustFrom": []
   },

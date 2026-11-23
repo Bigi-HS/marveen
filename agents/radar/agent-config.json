@@ -8,6 +8,8 @@
     "role": "member",
     "reportsTo": "marveen",
     "delegatesTo": [],
+    "escalatesTo": "marveen",
+    "decisionScope": "none",
     "autoDelegation": false,
     "trustFrom": []
   }

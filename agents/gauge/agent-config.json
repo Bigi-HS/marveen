@@ -6,6 +6,8 @@
     "role": "member",
     "reportsTo": "thor",
     "delegatesTo": [],
+    "escalatesTo": "thor",
+    "decisionScope": "none",
     "autoDelegation": false,
     "trustFrom": []
   }

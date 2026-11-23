@@ -6,7 +6,11 @@
   "team": {
     "role": "leader",
     "reportsTo": "marveen",
-    "delegatesTo": [],
+    "delegatesTo": [
+      "claudia-local"
+    ],
+    "escalatesTo": "marveen",
+    "decisionScope": "gate",
     "autoDelegation": false,
     "trustFrom": []
   }

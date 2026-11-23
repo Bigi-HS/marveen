@@ -1,4 +1,19 @@
 {
   "model": "claude-sonnet-4-6",
-  "displayName": "NoA"
+  "displayName": "NoA",
+  "team": {
+    "role": "orchestrator",
+    "reportsTo": null,
+    "delegatesTo": [
+      "dave",
+      "thor",
+      "chad",
+      "forge",
+      "scout"
+    ],
+    "escalatesTo": null,
+    "decisionScope": "orchestrate",
+    "autoDelegation": false,
+    "trustFrom": []
+  }
 }

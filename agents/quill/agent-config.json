@@ -1,5 +1,14 @@
 {
   "model": "claude-sonnet-4-6",
   "securityProfile": "researcher",
-  "displayName": "Kalapács"
+  "displayName": "Kalapács",
+  "team": {
+    "role": "member",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "escalatesTo": "marveen",
+    "decisionScope": "none",
+    "autoDelegation": false,
+    "trustFrom": []
+  }
 }

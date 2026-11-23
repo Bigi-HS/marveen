@@ -5,5 +5,14 @@
   "env": {
     "API_ANYTHING_LOCAL_ONLY": "1",
     "API_ANYTHING_KEY": "<PLACEHOLDER_SET_AT_DEPLOY>"
+  },
+  "team": {
+    "role": "specialist",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "escalatesTo": "marveen",
+    "decisionScope": "none",
+    "autoDelegation": false,
+    "trustFrom": []
   }
 }

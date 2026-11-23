@@ -3,9 +3,11 @@
   "displayName": "Claudia (local)",
   "securityProfile": "default",
   "team": {
-    "role": "worker",
+    "role": "member",
     "reportsTo": "claudia",
     "delegatesTo": [],
+    "escalatesTo": "claudia",
+    "decisionScope": "none",
     "autoDelegation": false,
     "trustFrom": []
   }

@@ -5,7 +5,10 @@
     "role": "member",
     "reportsTo": "dave",
     "delegatesTo": [],
-    "autoDelegation": false
+    "escalatesTo": "dave",
+    "decisionScope": "none",
+    "autoDelegation": false,
+    "trustFrom": []
   },
   "displayName": "Blackbeard"
 }

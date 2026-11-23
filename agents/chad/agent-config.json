@@ -2,5 +2,14 @@
   "model": "claude-sonnet-4-6",
   "securityProfile": "developer-senior",
   "channelProvider": "telegram",
-  "displayName": "Chad"
+  "displayName": "Chad",
+  "team": {
+    "role": "specialist",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "escalatesTo": "marveen",
+    "decisionScope": "gate",
+    "autoDelegation": false,
+    "trustFrom": []
+  }
 }
