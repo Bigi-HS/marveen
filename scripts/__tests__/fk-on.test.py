@@ -158,6 +158,31 @@ def _make_roster(tmp: Path, names=_SEEDED) -> Path:
     return agents
 
 
+# opener-source fixtures for the P1 §3(g) enforcement-precondition check. Each
+# is a tiny stand-in for the real src/*.ts opener; the check only cares whether
+# an opener `foreign_keys = ON` pragma is textually present.
+_SRC_OPENER_READY = "const db = new Database(p); db.pragma('foreign_keys = ON');\n"
+_SRC_OPENER_NOT_READY = "const db = new Database(p); db.pragma('journal_mode = WAL');\n"
+
+
+def _make_src(tmp: Path, *, noa_db_ready=True, db_ts_ready=True, noa_db_present=True, db_ts_present=True) -> Path:
+    """Write a hermetic repo-root ``src/`` with the two app DB-openers used by the
+    §3(g) enforcement-precondition static check. Each opener either contains the
+    ``foreign_keys = ON`` pragma (ready) or not, and may be omitted entirely
+    (missing-file -> fail-closed). The real repo src/ is NEVER read."""
+    src = tmp / "src"
+    src.mkdir(exist_ok=True)
+    if noa_db_present:
+        (src / "noa-db.ts").write_text(
+            _SRC_OPENER_READY if noa_db_ready else _SRC_OPENER_NOT_READY
+        )
+    if db_ts_present:
+        (src / "db.ts").write_text(
+            _SRC_OPENER_READY if db_ts_ready else _SRC_OPENER_NOT_READY
+        )
+    return tmp
+
+
 def _make_db(tmp: Path, *, name="fixture.db", seed_agents=True, extra_core=None) -> Path:
     """Build a fixture DB with the 4 pre-FK core tables + memories_fts, a seeded
     agents dim-table, and a couple of valid rows per core table. ``extra_core``
@@ -239,6 +264,10 @@ def _make_db(tmp: Path, *, name="fixture.db", seed_agents=True, extra_core=None)
                     )
     con.commit()
     con.close()
+    # default: a ready repo-root (both openers carry the pragma) so the existing
+    # apply-path tests exercise the migration, not the §3(g) enforcement gate.
+    # Tests targeting the gate call _make_src explicitly with not-ready/missing.
+    _make_src(tmp)
     return db
 
 
@@ -730,6 +759,161 @@ class SafetyBounds(unittest.TestCase):
             payload = json.loads(r.stdout)
             for key in ("apply", "rebuilt", "skipped", "snapshot", "fk_clauses", "fk_uncovered"):
                 self.assertIn(key, payload)
+
+
+# ---------------------------------------------------------------------------
+# T-FK10  -- §3(g) enforcement-precondition: --apply refuses to run FK-ON into
+#            INERT runtime enforcement unless BOTH app DB-openers commit the
+#            `foreign_keys = ON` pragma (belt-and-suspenders vs a driver-default
+#            change). Hermetic: temp src/*.ts fixtures, real repo src/ untouched.
+# ---------------------------------------------------------------------------
+class TFK10_EnforcementPrecondition(unittest.TestCase):
+    def test_app_enforcement_ready_both_openers_pass(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            root = _make_src(tmp, noa_db_ready=True, db_ts_ready=True)
+            res = mod.app_enforcement_ready(root)
+            self.assertTrue(res["ready"], res)
+            self.assertTrue(res["openers"]["src/noa-db.ts"]["ready"])
+            self.assertTrue(res["openers"]["src/db.ts"]["ready"])
+
+    def test_regex_matches_varied_pragma_forms(self):
+        # robust-match: '=' / ':' / whitespace separator, ON/on/1/true value.
+        for body in (
+            "db.pragma('foreign_keys = ON')",
+            "foreign_keys=ON",
+            "PRAGMA foreign_keys: on;",
+            "pragma foreign_keys 1",
+            "foreign_keys = true",
+        ):
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                src = tmp / "src"
+                src.mkdir()
+                (src / "noa-db.ts").write_text(body + "\n")
+                (src / "db.ts").write_text(body + "\n")
+                res = mod.app_enforcement_ready(tmp)
+                self.assertTrue(res["ready"], f"form must match: {body!r} -> {res}")
+
+    def test_apply_proceeds_when_enforcement_ready(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(tmp)  # writes ready src/*.ts under tmp
+            res = mod.run_migration(db, agents, apply=True)
+            self.assertTrue(res["apply"])
+            self.assertTrue(res["enforcement"]["ready"])
+            self.assertEqual(
+                sorted(res["rebuilt"]),
+                ["agent_messages", "agent_tokens", "kanban_cards", "memories"],
+            )
+
+    def test_apply_refused_when_db_ts_lacks_pragma(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(tmp)
+            # overwrite db.ts opener to drop the pragma -> enforcement NOT ready
+            _make_src(tmp, noa_db_ready=True, db_ts_ready=False)
+            before_mtime = db.stat().st_mtime_ns
+            before_sql = _schema_sql(db)
+            with self.assertRaises(mod.EnforcementError) as ctx:
+                mod.run_migration(db, agents, apply=True)
+            self.assertIn("src/db.ts", str(ctx.exception))
+            self.assertEqual(before_mtime, db.stat().st_mtime_ns, "refusal must not write")
+            self.assertEqual(before_sql, _schema_sql(db), "refusal must not alter schema")
+
+    def test_apply_refused_when_opener_file_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(tmp)
+            # remove the db.ts opener entirely -> fail-closed
+            (tmp / "src" / "db.ts").unlink()
+            before_mtime = db.stat().st_mtime_ns
+            with self.assertRaises(mod.EnforcementError) as ctx:
+                mod.run_migration(db, agents, apply=True)
+            self.assertIn("src/db.ts", str(ctx.exception))
+            self.assertEqual(before_mtime, db.stat().st_mtime_ns, "refusal must not write")
+
+    def test_skip_flag_bypasses_refusal_with_warn(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(tmp)
+            _make_src(tmp, noa_db_ready=True, db_ts_ready=False)  # not ready
+            res = mod.run_migration(db, agents, apply=True, skip_enforcement_check=True)
+            self.assertTrue(res["apply"])
+            self.assertFalse(res["enforcement"]["ready"])
+            self.assertTrue(res["enforcement"]["skipped"])
+            # it still performed the rebuild despite the not-ready openers
+            self.assertEqual(
+                sorted(res["rebuilt"]),
+                ["agent_messages", "agent_tokens", "kanban_cards", "memories"],
+            )
+
+    def test_cli_skip_flag_emits_warn_to_stderr(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(tmp)
+            _make_src(tmp, noa_db_ready=True, db_ts_ready=False)
+            r = subprocess.run(
+                [sys.executable, str(_SCRIPT), "--db", str(db), "--agents-dir", str(agents),
+                 "--repo-root", str(tmp), "--apply", "--skip-enforcement-check"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("WARN", r.stderr, "skip must emit a loud WARN to stderr")
+
+    def test_cli_apply_refused_nonzero_when_not_ready(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(tmp)
+            _make_src(tmp, noa_db_ready=False, db_ts_ready=True)
+            before = db.stat().st_mtime_ns
+            r = subprocess.run(
+                [sys.executable, str(_SCRIPT), "--db", str(db), "--agents-dir", str(agents),
+                 "--repo-root", str(tmp), "--apply"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(r.returncode, 0, "enforcement refusal must exit non-zero")
+            self.assertIn("src/noa-db.ts", r.stderr)
+            self.assertEqual(before, db.stat().st_mtime_ns, "refusal must not write")
+
+    def test_dryrun_reports_enforcement_without_blocking(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(tmp)
+            _make_src(tmp, noa_db_ready=True, db_ts_ready=False)  # NOT ready
+            before_mtime = db.stat().st_mtime_ns
+            res = mod.run_migration(db, agents, apply=False)
+            # dry-run must REPORT the status but not block / not write
+            self.assertIn("enforcement", res)
+            self.assertFalse(res["enforcement"]["ready"])
+            self.assertEqual(before_mtime, db.stat().st_mtime_ns, "dry-run must not write")
+            # text + json surface the status
+            self.assertIn("enforcement", mod.format_text(res).lower())
+
+    def test_cli_dryrun_json_includes_enforcement(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(tmp)
+            r = subprocess.run(
+                [sys.executable, str(_SCRIPT), "--db", str(db), "--agents-dir", str(agents),
+                 "--repo-root", str(tmp), "--json"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            payload = json.loads(r.stdout)
+            self.assertIn("enforcement", payload)
+            self.assertIn("ready", payload["enforcement"])
 
 
 if __name__ == "__main__":

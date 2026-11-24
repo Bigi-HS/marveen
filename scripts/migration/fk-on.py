@@ -43,6 +43,17 @@ Precondition gate (hard, spec section 3f): ``--apply`` is refused unless the
 would be a legit row the new FK would reject -> data loss. Dry-run does NOT gate
 (it only reports the plan).
 
+Enforcement precondition (hard, spec section 3 bound (g), marveen 2026-11-25):
+``--apply`` is ALSO refused unless BOTH app DB-openers that write the 4 core
+tables -- ``src/noa-db.ts`` (kanban_cards, memories) and ``src/db.ts``
+(agent_messages, agent_tokens) -- commit a ``foreign_keys = ON`` opener pragma.
+A declared SQLite FK is inert at runtime unless the WRITING connection enables
+foreign_keys; FK-ON runs POST-CUTOVER, so without the opener pragma enforcement
+would be inert for those tables. The gate is static (reads the two source files)
+and runs BEFORE the snapshot/mutation. ``--skip-enforcement-check`` is a loud
+explicit escape hatch (prints a WARN, never a silent default). Dry-run REPORTS
+the enforcement status but does not block.
+
 Usage:
     python3 scripts/migration/fk-on.py                 # live DB, DRY-RUN plan
     python3 scripts/migration/fk-on.py --json          # machine-readable plan
@@ -94,6 +105,76 @@ def _load_dim_seed():
 
 class PreconditionError(RuntimeError):
     """Raised when --apply is requested but the FK precondition is not GREEN."""
+
+
+class EnforcementError(RuntimeError):
+    """Raised when --apply is requested but the app DB-openers that write the 4
+    core tables are not committed with ``PRAGMA foreign_keys = ON`` (spec P1
+    section 3 bound (g)). FK-ON runs POST-CUTOVER; a declared SQLite FK is inert
+    at runtime unless the WRITING connection enables foreign_keys, so running
+    FK-ON into an opener that lacks the pragma would leave enforcement inert for
+    those tables. The migration self-gates rather than silently under-enforce."""
+
+
+# The two app DB-openers that write the 4 core tables (spec P2 recon):
+#   src/noa-db.ts -> kanban_cards, memories
+#   src/db.ts     -> agent_messages, agent_tokens
+_OPENER_FILES: Tuple[str, ...] = ("src/noa-db.ts", "src/db.ts")
+
+# Robust match for an opener pragma enabling foreign keys: the token
+# ``foreign_keys`` followed by ``=`` / ``:`` / whitespace, then ON/on/1/true.
+# Accepts e.g. ``pragma('foreign_keys = ON')``, ``foreign_keys=ON``,
+# ``PRAGMA foreign_keys: on``, ``foreign_keys 1``, ``foreign_keys = true``.
+# Intentionally does NOT match ``foreign_keys = OFF`` nor the conditional
+# restore ``foreign_keys = ${prev ? 'ON' : 'OFF'}`` (the value token there is
+# the interpolation, not a bare ON/1/true) -- so src/db.ts's migration-local
+# toggle is correctly read as NOT an opener pragma.
+_ENFORCE_RE = re.compile(
+    r"foreign_keys\s*[=:\s]\s*(?:on|1|true)\b",
+    re.IGNORECASE,
+)
+
+
+def app_enforcement_ready(repo_root: Path) -> Dict:
+    """Statically read the two app DB-openers under ``repo_root`` and report
+    whether EACH commits a ``foreign_keys = ON`` opener pragma.
+
+    Returns a dict::
+
+        {"ready": bool,              # True iff ALL openers ready
+         "openers": {rel_path: {"ready": bool, "present": bool, "reason": str}},
+         "missing": [rel_path, ...]} # openers lacking the pragma or absent
+
+    A missing file is treated as NOT ready (fail-closed), naming the file.
+
+    Empirical nuance (belt-and-suspenders): better-sqlite3 on this host
+    currently defaults ``foreign_keys=ON``, so enforcement is in fact active
+    even without an explicit opener pragma. This static check requires the
+    EXPLICIT pragma anyway -- it is intentionally stricter than the driver
+    default, as defense-in-depth against a driver/compile-flag change that would
+    silently flip the default to OFF and render the FKs inert post-cutover.
+    """
+    repo_root = Path(repo_root)
+    openers: Dict[str, Dict] = {}
+    missing: List[str] = []
+    for rel in _OPENER_FILES:
+        path = repo_root / rel
+        if not path.is_file():
+            openers[rel] = {"ready": False, "present": False,
+                            "reason": "opener file not found"}
+            missing.append(rel)
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        ok = bool(_ENFORCE_RE.search(text))
+        openers[rel] = {
+            "ready": ok,
+            "present": True,
+            "reason": "foreign_keys=ON pragma present" if ok
+            else "no opener foreign_keys=ON pragma found",
+        }
+        if not ok:
+            missing.append(rel)
+    return {"ready": not missing, "openers": openers, "missing": missing}
 
 
 def default_db_path() -> Path:
@@ -307,15 +388,33 @@ def _check_precondition(db_path: Path, agents_dir: Path) -> List[str]:
     return uncovered
 
 
-def run_migration(db_path: Path, agents_dir: Path, *, apply: bool) -> Dict:
-    """Build the per-table rebuild plan; with apply=True, gate the precondition,
+def run_migration(
+    db_path: Path,
+    agents_dir: Path,
+    *,
+    apply: bool,
+    repo_root: Path | None = None,
+    skip_enforcement_check: bool = False,
+) -> Dict:
+    """Build the per-table rebuild plan; with apply=True, gate the preconditions,
     snapshot, then rebuild each not-yet-covered table in its own transaction.
 
+    ``repo_root`` locates the two app DB-openers (src/noa-db.ts, src/db.ts) for
+    the §3(g) enforcement-precondition. It defaults to ``agents_dir.parent``,
+    which is the live repo root for the CLI default (agents_dir=<root>/agents)
+    and the hermetic sandbox for tests (agents_dir=<tmp>/agents).
+
     Returns a result dict: which tables were rebuilt / skipped, the FK clauses,
-    the snapshot path, and the post-rebuild foreign_key_check violation count.
+    the snapshot path, the post-rebuild foreign_key_check violation count, and
+    the enforcement-readiness status of the app openers.
     """
     if not db_path.is_file():
         raise FileNotFoundError(f"database not found: {db_path}")
+
+    if repo_root is None:
+        repo_root = agents_dir.parent
+    enforcement = app_enforcement_ready(repo_root)
+    enforcement["skipped"] = False
 
     # plan (read-only): which tables still need the FK.
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -345,12 +444,38 @@ def run_migration(db_path: Path, agents_dir: Path, *, apply: bool) -> Dict:
         "snapshot": None,
         "fk_uncovered": [],
         "fk_check_violations": None,
+        "enforcement": enforcement,
     }
 
     if not apply:
-        return result  # dry-run: no precondition gate, no write path reached
+        return result  # dry-run: no gate, no write path reached (enforcement reported only)
 
-    # --- apply path: precondition gate FIRST (abort leaves DB untouched) ------
+    # --- apply path: enforcement-precondition gate (§3(g), marveen hard cond) -
+    # Refuse to run FK-ON into INERT runtime enforcement unless BOTH app openers
+    # commit foreign_keys=ON -- checked BEFORE snapshot/mutation so a refusal
+    # leaves the DB untouched. --skip-enforcement-check is a loud escape hatch.
+    if not enforcement["ready"]:
+        if skip_enforcement_check:
+            enforcement["skipped"] = True
+            print(
+                "WARN: --skip-enforcement-check set; proceeding despite app "
+                "opener(s) lacking a foreign_keys=ON pragma: "
+                + ", ".join(enforcement["missing"])
+                + ". FK enforcement may be INERT for the tables those openers "
+                "write until the pragma is deployed.",
+                file=sys.stderr,
+            )
+        else:
+            raise EnforcementError(
+                "enforcement-precondition FAILED: the app DB-opener(s) that write "
+                "the core tables lack a committed `foreign_keys = ON` pragma, so "
+                "FK-ON would be INERT at runtime for those tables: "
+                + ", ".join(enforcement["missing"])
+                + ". Fix the opener pragma (P2) before FK-ON, or re-run with "
+                "--skip-enforcement-check to override (loud WARN)."
+            )
+
+    # --- apply path: FK precondition gate (abort leaves DB untouched) ---------
     result["fk_uncovered"] = _check_precondition(db_path, agents_dir)
 
     if not plan_rebuild:
@@ -398,6 +523,16 @@ def format_text(result: Dict) -> str:
     for table, col in CORE_TABLES:
         lines.append(f"   {table}.{col}  ->  {result['fk_clauses'][table]}")
     lines.append("")
+    enf = result.get("enforcement")
+    if enf is not None:
+        state = "READY" if enf["ready"] else "NOT READY"
+        if enf.get("skipped"):
+            state += " (bypassed via --skip-enforcement-check)"
+        lines.append(f"app enforcement openers: {state}")
+        for rel, info in enf["openers"].items():
+            mark = "ok" if info["ready"] else "MISSING-PRAGMA" if info["present"] else "FILE-ABSENT"
+            lines.append(f"   {rel}: {mark} -- {info['reason']}")
+        lines.append("")
     if result["apply"]:
         lines.append(
             "precondition: GREEN (agents seeded, fk_uncovered=[])"
@@ -428,6 +563,16 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument(
         "--agents-dir", type=Path, default=None, help="path to agents/ roster dir (default: live agents/)"
     )
+    parser.add_argument(
+        "--repo-root", type=Path, default=None,
+        help="repo root holding src/noa-db.ts + src/db.ts for the §3(g) "
+        "enforcement-precondition (default: inferred from the agents dir parent)",
+    )
+    parser.add_argument(
+        "--skip-enforcement-check", action="store_true",
+        help="LOUD escape hatch: proceed with --apply even if an app opener "
+        "lacks a foreign_keys=ON pragma (prints a WARN; FK may be inert).",
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable plan")
     parser.add_argument(
         "--apply",
@@ -440,15 +585,25 @@ def main(argv: List[str] | None = None) -> int:
 
     db_path = (args.db or default_db_path()).resolve()
     agents_dir = (args.agents_dir or default_agents_dir()).resolve()
+    repo_root = args.repo_root.resolve() if args.repo_root else None
 
     try:
-        result = run_migration(db_path, agents_dir, apply=args.apply)
+        result = run_migration(
+            db_path,
+            agents_dir,
+            apply=args.apply,
+            repo_root=repo_root,
+            skip_enforcement_check=args.skip_enforcement_check,
+        )
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except PreconditionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3
+    except EnforcementError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 4
 
     if args.json:
         print(json.dumps(result, indent=2))
