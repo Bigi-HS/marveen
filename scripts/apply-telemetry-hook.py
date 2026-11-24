@@ -26,6 +26,7 @@ Convention: agents share a common project root (repo root). The hook command
   from the script's own location (same repo).
 """
 
+import importlib.util
 import json
 import os
 import sys
@@ -33,6 +34,17 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 PROJECT_ROOT = SCRIPT_DIR.parent  # scripts/ -> repo root
+
+# ---------------------------------------------------------------------------
+# Land-script-first guard (card 828fd3ad, SEC-119). Import the standalone
+# verifier so this patcher REFUSES to write a settings.json that would wire a
+# hook ahead of its script landing on disk (the 2026-11-22 silent-fleet-brick).
+# Loaded by path because the module name contains a hyphen.
+# ---------------------------------------------------------------------------
+_VHW_PATH = SCRIPT_DIR / "hooks" / "verify-hook-wiring.py"
+_vhw_spec = importlib.util.spec_from_file_location("verify_hook_wiring", _VHW_PATH)
+_vhw = importlib.util.module_from_spec(_vhw_spec)
+_vhw_spec.loader.exec_module(_vhw)
 
 HOOK_SCRIPT_REL = Path("scripts") / "hooks" / "telemetry-emit.py"
 COMPACT_HOOK_SCRIPT_REL = Path("scripts") / "hooks" / "hot-cache-sessionstart.py"
@@ -193,6 +205,19 @@ def patch_agent(agent_dir: str, dry_run: bool = False) -> bool:
     if not modified:
         print(f"ALREADY: {agent_dir} -- all hooks already present")
         return True
+
+    # Land-script-first guard: REFUSE to write if the resulting settings would
+    # wire ANY hook whose script is missing on disk (card 828fd3ad). The agent's
+    # own project dir is the repo root (shared-root fleet convention), so we use
+    # PROJECT_ROOT for $CLAUDE_PROJECT_DIR resolution.
+    try:
+        _vhw.assert_scripts_present(settings, str(PROJECT_ROOT))
+    except _vhw.HookWiringError as exc:
+        print(
+            f"ERROR: refusing to patch {agent_dir} -- land-script-first violation:\n{exc}",
+            file=sys.stderr,
+        )
+        return False
 
     if dry_run:
         print(f"DRY RUN: would patch {agent_dir}")
