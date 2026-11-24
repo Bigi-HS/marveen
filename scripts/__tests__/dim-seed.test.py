@@ -136,7 +136,15 @@ class NormalizeClasses(unittest.TestCase):
     def test_every_class_b_agent_gets_added_to_seed_source(self):
         """Class (b): config-less real agents are seeded even though they have no
         agent-config.json."""
-        expected = {"dampier", "hibiki", "gourmet", "kerrigan", "gelim"}
+        expected = {
+            "dampier",
+            "hibiki",
+            "gourmet",
+            "kerrigan",
+            "gelim",
+            "blackbart",
+            "servo-skull",
+        }
         self.assertEqual(set(mod.CONFIGLESS_REAL_AGENTS), expected)
         for a in expected:
             self.assertFalse(mod.is_quarantined(a), f"{a} must not be quarantined")
@@ -148,14 +156,27 @@ class NormalizeClasses(unittest.TestCase):
             "server",
             "gate",
             "fleet-supervisor",
-            "servo-skull",
             "appletype",
-            "blackbart",
             "dominik",
             "fake-admin",
             "dave-expired",
         ):
             self.assertTrue(mod.is_quarantined(ident), f"{ident} must be quarantined")
+
+    def test_blackbart_and_servo_skull_are_real_agents_not_quarantined(self):
+        """Reversed classification (card 5fd6853b): blackbart (248 actor-rows)
+        and servo-skull (56 incl agent_tokens.agent_id) are class-(b) real
+        agents, NOT quarantined. Quarantining them would make M3 FK-ON reject
+        their legit rows."""
+        for ident in ("blackbart", "servo-skull"):
+            self.assertFalse(
+                mod.is_quarantined(ident), f"{ident} must NOT be quarantined"
+            )
+            self.assertEqual(
+                mod.normalize_id(ident), ident, f"{ident} must normalize to itself"
+            )
+            self.assertIn(ident, mod.CONFIGLESS_REAL_AGENTS)
+            self.assertNotIn(ident, mod.QUARANTINE_IDS)
 
     def test_quarantined_ids_never_appear_in_seed_rows(self):
         with tempfile.TemporaryDirectory() as td:
@@ -209,6 +230,33 @@ class SeedRows(unittest.TestCase):
                 set(),
                 f"M3 FK-ON would reject these legit core ids: {sorted(uncovered)}",
             )
+
+    def test_dryrun_covers_blackbart_and_servo_skull_as_seeded(self):
+        """Dry-run (apply=False) with blackbart + servo-skull present as live
+        core-table actor-rows: they must be SEEDED (in seed_rows) and ABSENT
+        from quarantined, and fk_uncovered must be empty. Reversed from the old
+        quarantine classification (card 5fd6853b)."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(
+                tmp,
+                memory_agents=("marveen", "genesis", "scout", "blackbart"),
+                token_agents=("thor", "fake-admin", "dave-expired", "servo-skull"),
+            )
+            res = mod.run_seed(db, agents, apply=False)
+            self.assertFalse(res["apply"])
+            self.assertEqual(
+                res["fk_uncovered"],
+                [],
+                f"fk_uncovered must be empty, got {res['fk_uncovered']}",
+            )
+            seeded = {r["agent_id"] for r in res["seed_rows"]}
+            for ident in ("blackbart", "servo-skull"):
+                self.assertIn(ident, seeded, f"{ident} must be in seed_rows")
+                self.assertNotIn(
+                    ident, res["quarantined"], f"{ident} must not be quarantined"
+                )
 
     def test_fk_precondition_fails_when_a_legit_id_is_unmapped(self):
         """DANGEROUS-direction: inject a legit (non-quarantined, non-class) core
@@ -265,6 +313,19 @@ class ApplyIdempotency(unittest.TestCase):
                 con.close()
             self.assertEqual(count_after_first, count_after_second)
             self.assertEqual(second["inserted"], 0, "second run must insert 0 new rows")
+
+    def test_snapshot_file_is_mode_0600(self):
+        """The pre-apply snapshot of noa.db (which holds tokens) must be written
+        with restrictive 0600 perms, not world/group readable."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents, db = self._seed_table(tmp)
+            snap = mod._snapshot(db)
+            self.assertTrue(snap.is_file(), "snapshot must exist")
+            mode = snap.stat().st_mode & 0o777
+            self.assertEqual(
+                mode, 0o600, f"snapshot perms must be 0600, got {oct(mode)}"
+            )
 
     def test_agent_id_is_primary_key_no_duplicates(self):
         with tempfile.TemporaryDirectory() as td:

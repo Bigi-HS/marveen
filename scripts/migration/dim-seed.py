@@ -27,14 +27,19 @@ fleet-supervisor, gate, gelim, gourmet, hibiki, kerrigan, server, servo-skull)
     canonical live-infra actor id is ``marveen`` (see memory
     shared-fleet-db-canonical-agent-id-marveen-genesis-remap-not-casefold-1124).
     A naive ``.lower()`` would leave a phantom ``genesis`` row and FK-fail.
-(b) config-less real agents -- ``dampier, hibiki, gourmet, kerrigan, gelim``:
-    real fleet members (persona-only / QA) that have an ``agents/<name>/`` dir
-    but ship no ``agent-config.json``, so ``load_roster()`` (which keys on the
-    config file) misses them. They are ADDED to the dim-seed source explicitly.
+(b) config-less real agents -- ``dampier, hibiki, gourmet, kerrigan, gelim,
+    blackbart, servo-skull``: real fleet members that ``load_roster()`` (which
+    keys on the config file) misses, either because they have an
+    ``agents/<name>/`` dir but ship no ``agent-config.json`` (dampier/hibiki/
+    gourmet/kerrigan/gelim), or because they have no ``agents/<name>/`` dir at
+    all yet carry real actor-rows in the FK-target columns (blackbart=248,
+    servo-skull=56 incl ``agent_tokens.agent_id``). Quarantining the latter
+    would make M3 FK-ON reject their legit rows, so all of these are ADDED to
+    the dim-seed source explicitly.
 (c) service / non-agent ids + test fixtures -- ``server, gate, fleet-supervisor,
-    servo-skull, appletype, blackbart, dominik`` (infra/service identifiers or
-    the owner, not routing agents) plus the test fixtures ``fake-admin`` and
-    ``dave-expired``. These are QUARANTINED: listed but NOT seeded. A quarantined
+    appletype, dominik`` (infra/service identifiers or the owner, not routing
+    agents) plus the test fixtures ``fake-admin`` and ``dave-expired``. These
+    are QUARANTINED: listed but NOT seeded. A quarantined
     id is intentionally excluded from the FK-coverage set -- the corresponding
     legacy rows are cleaned up separately before M3, they are not seeded.
 
@@ -66,6 +71,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -97,14 +103,20 @@ REMAP: Dict[str, str] = {
 }
 
 # --- class (b): config-less real agents -------------------------------------
-# Real fleet members with an agents/<name>/ dir but no agent-config.json, so
-# load_roster() (keyed on the config file) misses them. Added explicitly.
+# Real fleet members that load_roster() (keyed on the config file) misses, so
+# they are added explicitly. Two sub-cases: (1) an agents/<name>/ dir but no
+# agent-config.json (dampier/hibiki/gourmet/kerrigan/gelim); (2) no
+# agents/<name>/ dir at all yet real actor-rows in FK-target columns
+# (blackbart=248, servo-skull=56 incl agent_tokens.agent_id) -- quarantining
+# those would make M3 FK-ON reject their legit rows, so they are seeded.
 CONFIGLESS_REAL_AGENTS: Tuple[str, ...] = (
     "dampier",
     "hibiki",
     "gourmet",
     "kerrigan",
     "gelim",
+    "blackbart",
+    "servo-skull",
 )
 
 # --- class (c): service / non-agent ids + test fixtures ---------------------
@@ -115,9 +127,7 @@ QUARANTINE_IDS: Tuple[str, ...] = (
     "server",
     "gate",
     "fleet-supervisor",
-    "servo-skull",
     "appletype",
-    "blackbart",
     "dominik",
     # test fixtures (expired / synthetic)
     "fake-admin",
@@ -311,6 +321,7 @@ def _snapshot(db_path: Path) -> Path:
     stamp = time.strftime("%Y%m%dT%H%M%S")
     dest = db_path.with_name(f"{db_path.name}.{stamp}.bak")
     shutil.copy2(db_path, dest)
+    os.chmod(dest, 0o600)  # noa.db holds tokens -- restrict snapshot perms
     return dest
 
 
