@@ -122,6 +122,17 @@ export function initDatabase(dbPathOverride?: string): void {
   // instead of throwing "database is locked", and relax fsync (safe under WAL).
   db.pragma('busy_timeout = 5000')
   db.pragma('synchronous = NORMAL')
+  // Enforce declared FOREIGN KEYs at runtime. In SQLite this is per-connection
+  // and OFF by default; a declared FK is inert unless the connection opts in
+  // (noa-db.ts does the same at its connection init). Today the only declared
+  // FKs are the kanban_cards self-FKs (parent_id/depends_on -> id) with zero
+  // orphans, so enabling it is a no-op for existing data; it also prepares this
+  // handle -- which writes agent_messages.from_agent and (via
+  // migrateAgentTokenTable) agent_tokens -- for the agents-FK landing (PR #1085,
+  // card 7a0285b3 M3 FK-ON P2). The migrateTodoOwnerBond rebuild below toggles
+  // this OFF inside its transaction and restores it to the previous value, which
+  // is now ON, keeping that path compatible.
+  db.pragma('foreign_keys = ON')
   if (!useOverride) tightenDbPermissions(dbPath)
 
   // scheduled_tasks mirrors the LIVE prod schema byte-for-byte (card b38c3231).
