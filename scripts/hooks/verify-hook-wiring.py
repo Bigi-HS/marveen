@@ -268,6 +268,7 @@ def assert_scripts_present(settings: dict, project_root: str) -> None:
 # Graceful degradation (fallback-no-op instead of a hard brick)
 # ---------------------------------------------------------------------------
 
+# EXPLICIT opt-in only -- never call as a default/fallback path; use assert_scripts_present for enforcement.
 def degrade_to_noop(settings: dict, project_root: str) -> dict:
     """Return a copy of settings where every missing-script hook command is a no-op.
 
