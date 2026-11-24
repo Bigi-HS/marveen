@@ -30,6 +30,18 @@ beforeAll(() => {
   initDatabase(':memory:')
 })
 
+describe('connection pragmas (card 7a0285b3, M3 FK-ON P2)', () => {
+  // FK enforcement is per-connection and OFF by default in SQLite: a declared
+  // FOREIGN KEY stays inert at runtime unless the connection issues
+  // `PRAGMA foreign_keys = ON`. The db.ts handle writes agent_messages.from_agent
+  // and (via migrateAgentTokenTable) agent_tokens, which the incoming agents-FK
+  // (PR #1085) references, so this connection must enforce FKs like noa-db.ts does.
+  it('reports foreign_keys = 1 after init', () => {
+    const fk = (getDb().pragma('foreign_keys') as Array<{ foreign_keys: number }>)[0]?.foreign_keys
+    expect(fk).toBe(1)
+  })
+})
+
 describe('agent_messages ack_expected (card 1a99b7e2)', () => {
   it('defaults ack_expected to 0 for a plain message', () => {
     const msg = createAgentMessage('thor', 'dave', 'plain peer note')
