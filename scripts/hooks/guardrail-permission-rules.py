@@ -1206,7 +1206,23 @@ def match_frida_invocation(command: str) -> bool:
 # The cwd check is the key discriminator; without it every worktree commit would fire.
 
 SHARED_CHECKOUT_PATH = '/home/domin/marveen'
+# Gate-bypassing ops (original ENG-107): committing/merging/rebasing in the live
+# tree sidesteps the PR gate and is wiped by the 08:00 rebuild-pull.
 _SHARED_CHECKOUT_GIT_OPS = frozenset({'commit', 'merge', 'rebase'})
+# Workspace-wiping ops (card e830cef9, 2026-11-23 incident root-cause B): a
+# sub-agent that ran `git stash --include-untracked` / `git checkout <branch>` /
+# `git reset --hard` in the SHARED tree swept the untracked egress-pii-scan.py hook
+# (-> brick) plus all operational scratch. These must be blocked in the shared tree
+# too, but only in the forms that actually touch the untracked/working tree:
+#   - checkout/switch: ALWAYS a branch-switch / tree-mutating op here (blocked flat).
+#   - reset: ONLY with --hard (soft/mixed reset leaves the working tree intact).
+#   - stash: ONLY with an untracked-wiping flag (plain tracked-only stash is safe).
+# `git clean -f` is intentionally NOT here -- R5 in guardrail-destructive-bash.py
+# already hard-blocks it globally (avoid double-coverage).
+_SHARED_CHECKOUT_BRANCH_SWITCH_OPS = frozenset({'checkout', 'switch'})
+# Short flags whose letter set includes 'u' (include-untracked) or 'a' (all) wipe
+# untracked files when combined with stash, e.g. `-u`, `-a`, `-ku`, `-au`.
+_STASH_UNTRACKED_LONG_FLAGS = frozenset({'--include-untracked', '--all'})
 # git global options that consume the FOLLOWING token as their value when given in
 # space-separated form (e.g. `git -c user.name=x commit`, `git -C <path> commit`).
 # The `=`-attached form (`--git-dir=/x`) is a single token and needs no handling.
@@ -1238,6 +1254,27 @@ def _git_subcommand(args: 'list[str]') -> 'str | None':
     return None
 
 
+def _git_subcommand_and_tail(args: 'list[str]') -> "tuple[str | None, list[str]]":
+    """Like _git_subcommand but also return the tokens AFTER the subcommand.
+
+    Mirrors _git_subcommand's global-flag skipping so flag inspection of the
+    subcommand's own args (e.g. `stash -u`, `reset --hard`) sees exactly the
+    subcommand arguments, never a skipped global flag.
+    """
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+        if not tok:
+            i += 1
+            continue
+        if tok.startswith('-'):
+            i += 2 if tok in _GIT_VALUE_FLAGS else 1
+            continue
+        return tok, args[i + 1:]
+    return None, []
+
+
 def _flag_values(args: 'list[str]', flag: str) -> 'list[str]':
     """Return all values for a flag in both space-separated and equals-attached forms.
 
@@ -1259,13 +1296,57 @@ def _flag_values(args: 'list[str]', flag: str) -> 'list[str]':
     return values
 
 
+def _stash_wipes_untracked(sub_args: 'list[str]') -> bool:
+    """True when a `git stash` invocation carries an untracked-wiping flag.
+
+    Covers -u / --include-untracked / -a / --all, the explicit `stash push` form,
+    and combined short flags (e.g. -ku, -au). A plain tracked-only `git stash`
+    (no such flag) returns False -- it does not touch untracked files, so it must
+    stay allowed even in the shared tree (the key false-positive boundary).
+    sub_args are the tokens AFTER the `stash` subcommand.
+    """
+    for tok in sub_args:
+        if not tok:
+            continue
+        if tok in _STASH_UNTRACKED_LONG_FLAGS:
+            return True
+        # Short-flag cluster: a single leading '-' (not '--') followed by letters.
+        # Any 'u' or 'a' in the cluster wipes untracked (-u, -a, -ku, -au, ...).
+        if tok.startswith('-') and not tok.startswith('--') and len(tok) > 1:
+            cluster = tok[1:]
+            if ('u' in cluster or 'a' in cluster):
+                return True
+    return False
+
+
+def _reset_is_hard(sub_args: 'list[str]') -> bool:
+    """True when a `git reset` invocation carries --hard (space- or equals-form).
+
+    `reset --hard` discards the working tree; soft/mixed reset leaves it intact.
+    sub_args are the tokens AFTER the `reset` subcommand.
+    """
+    for tok in sub_args:
+        if tok == '--hard' or tok.startswith('--hard='):
+            return True
+    return False
+
+
 def match_shared_checkout_git_op(command: str, cwd: 'str | None') -> bool:
-    """True when the command is a gate-bypassing git op in the shared live checkout.
+    """True when the command is a gate-bypassing OR workspace-wiping git op in the
+    shared live checkout.
 
     Detects three targeting paths (card 500b5e13):
       A) process cwd is the shared checkout (original check)
       B) a -C flag redirects to the shared checkout from any other cwd
       C) --git-dir points into the shared checkout tree
+
+    Blocked subcommands once a target reaches the shared checkout:
+      - commit/merge/rebase (gate-bypass, ENG-107)
+      - checkout/switch to a branch (tree-mutating, card e830cef9)
+      - reset --hard (hard-reset drift, card e830cef9)
+      - stash with an untracked-wiping flag -u/--include-untracked/-a/--all
+        (card e830cef9); a plain tracked-only `git stash` stays allowed.
+    `git clean -f` is covered globally by R5 in guardrail-destructive-bash.py.
     """
     # Fast path: must mention 'git'.
     if 'git' not in command:
@@ -1295,9 +1376,22 @@ def match_shared_checkout_git_op(command: str, cwd: 'str | None') -> bool:
     if not targets_shared:
         return False
 
-    # Resolve the subcommand past any value-taking global flags (card db0a45c6).
-    sub = _git_subcommand(git_args)
-    return sub in _SHARED_CHECKOUT_GIT_OPS
+    # Resolve the subcommand (and its own args) past any value-taking global
+    # flags (card db0a45c6).
+    sub, sub_args = _git_subcommand_and_tail(git_args)
+    if sub is None:
+        return False
+    # Gate-bypassing ops: flat set membership (commit/merge/rebase).
+    if sub in _SHARED_CHECKOUT_GIT_OPS:
+        return True
+    # Workspace-wiping ops (card e830cef9) -- flag-qualified where needed:
+    if sub in _SHARED_CHECKOUT_BRANCH_SWITCH_OPS:
+        return True
+    if sub == 'reset':
+        return _reset_is_hard(sub_args)
+    if sub == 'stash':
+        return _stash_wipes_untracked(sub_args)
+    return False
 
 
 # ── reviewer read-only review-worktree (Write / Edit) ────────────────────────
@@ -1584,10 +1678,13 @@ def classify(payload):
         if match_shared_checkout_git_op(inp, cwd):
             return (True,
                     'shared-checkout-commit',
-                    'git commit/merge/rebase directly in the shared live checkout '
-                    '(/home/domin/marveen) bypasses the PR gate and is wiped by '
-                    'the 08:00 rebuild-pull. Use a worktree + branch + PR instead '
-                    '(fleet-pr-merge-gate, git-worktree-manager).')
+                    'Gate-bypassing or workspace-wiping git op directly in the '
+                    'shared live checkout (/home/domin/marveen): commit/merge/rebase '
+                    'bypasses the PR gate and is wiped by the 08:00 rebuild-pull; '
+                    'checkout/switch, reset --hard, and stash -u/--include-untracked '
+                    'sweep untracked operational scratch + hooks (1123 brick, card '
+                    'e830cef9). Use an ISOLATED worktree + branch + PR instead '
+                    '(fleet-pr-merge-gate, git-worktree-manager, ephemeral-eng-workflow).')
     # ENG-029: reviewer read-only lock (B-mechanism). A Write/Edit while the agent
     # cwd is inside a review-worktree is denied so a reviewer cannot accidentally
     # edit the code under review. cwd is harness-set (spoof-resistant); see
