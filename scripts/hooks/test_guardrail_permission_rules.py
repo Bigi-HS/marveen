@@ -2205,6 +2205,57 @@ class SharedCheckoutWorkspaceWipeTests(unittest.TestCase):
         self.assertTrue(guard.match_shared_checkout_git_op(
             'git commit -m x', self.SHARED))
 
+    # ── adversarial: ../-traversal path-normalization bypass (Chad SEC MEDIUM) ──
+    # Before the normpath fix, path values were only rstrip('/')-normalized, so a
+    # `../`- or `.`-segment or trailing-slash variant of /home/domin/marveen did
+    # not string-equal SHARED_CHECKOUT_PATH and silently bypassed the guard,
+    # re-opening the exact workspace-wipe hole card e830cef9 was closing.
+
+    def test_stash_u_dash_C_dotdot_traversal_to_shared_is_blocked(self):
+        """`git -C <root>/../marveen stash -u` must collapse to the shared root."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git -C /home/domin/marveen/../marveen stash -u', self.WORKTREE))
+
+    def test_stash_u_dash_C_dot_segment_to_shared_is_blocked(self):
+        """A `/.`-segment variant normalizes to the shared root."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git -C /home/domin/marveen/./ stash --include-untracked', self.WORKTREE))
+
+    def test_stash_u_dash_C_trailing_slash_to_shared_is_blocked(self):
+        """A bare trailing slash normalizes to the shared root."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git -C /home/domin/marveen/ stash -u', self.WORKTREE))
+
+    def test_reset_hard_dash_C_dotdot_traversal_to_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git -C /home/domin/marveen/../marveen reset --hard HEAD', self.WORKTREE))
+
+    def test_checkout_dash_C_dotdot_traversal_to_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git -C /home/domin/marveen/sub/.. checkout develop', self.WORKTREE))
+
+    def test_cwd_dotdot_traversal_to_shared_is_blocked(self):
+        """The cwd targeting path (A) must also normalize before comparison."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git stash -u', '/home/domin/marveen/../marveen'))
+
+    def test_work_tree_dotdot_traversal_to_shared_is_blocked(self):
+        """The --work-tree targeting path must also normalize before comparison."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git --work-tree /home/domin/marveen/../marveen stash -u', '/tmp'))
+
+    def test_git_dir_dotdot_traversal_into_shared_is_blocked(self):
+        """--git-dir uses startswith; traversal into the tree must collapse first."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git --git-dir /home/domin/marveen/../marveen/.git stash -u', '/tmp'))
+
+    # ---- FP boundary: traversal pointing ELSEWHERE must stay ALLOWED ----
+
+    def test_stash_u_dash_C_traversal_to_other_path_is_allowed(self):
+        """A `../`-path that normalizes away from the shared root is not blocked."""
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git -C /home/domin/marveen/../other stash -u', self.WORKTREE))
+
     # ── end-to-end classify() wiring ───────────────────────────────────────────
 
     def test_classify_blocks_stash_u_in_shared(self):

@@ -1360,12 +1360,17 @@ def match_shared_checkout_git_op(command: str, cwd: 'str | None') -> bool:
         return False
 
     git_args = tokens[1:]
-    cwd_norm = cwd.rstrip('/') if cwd else None
+    # Normalize with os.path.normpath so `../`-traversal and `.`-segments collapse
+    # (e.g. `/home/domin/marveen/../marveen` -> `/home/domin/marveen`); otherwise a
+    # traversal path would not string-equal SHARED_CHECKOUT_PATH and silently bypass
+    # the guard (Chad SEC MEDIUM, card e830cef9). rstrip('/') first so a bare
+    # trailing slash on root ('/') is preserved by normpath.
+    cwd_norm = os.path.normpath(cwd) if cwd else None
 
     # Check if any targeting path reaches the shared checkout.
-    c_paths = [v.rstrip('/') for v in _flag_values(git_args, '-C')]
-    git_dirs = _flag_values(git_args, '--git-dir')
-    work_trees = [v.rstrip('/') for v in _flag_values(git_args, '--work-tree')]
+    c_paths = [os.path.normpath(v) for v in _flag_values(git_args, '-C')]
+    git_dirs = [os.path.normpath(v) for v in _flag_values(git_args, '--git-dir')]
+    work_trees = [os.path.normpath(v) for v in _flag_values(git_args, '--work-tree')]
 
     targets_shared = (
         cwd_norm == SHARED_CHECKOUT_PATH
