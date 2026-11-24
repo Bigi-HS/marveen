@@ -2058,6 +2058,250 @@ class WorkTreeFlagBypassTests(unittest.TestCase):
         self.assertFalse(denied)
 
 
+class SharedCheckoutWorkspaceWipeTests(unittest.TestCase):
+    """Adversarial fixtures for card e830cef9 (2026-11-23 incident root-cause B).
+
+    A gate-review sub-agent ran `git fetch`+`checkout`+`git stash --include-untracked`
+    in the SHARED /home/domin/marveen tree and swept the untracked egress-pii-scan.py
+    hook (-> brick) plus all operational scratch into a stash. The shared-checkout guard
+    covered commit/merge/rebase; it must ALSO cover the workspace-wiping ops:
+      - `stash` ONLY when it carries -u/--include-untracked/-a/--all (a plain
+        tracked-only `git stash` must stay ALLOWED -- it does not touch untracked files),
+      - `checkout`/`switch` to a branch (branch-switch drift),
+      - `reset --hard` (hard-reset drift).
+    `git clean -f` is deliberately NOT handled here -- R5 in guardrail-destructive-bash.py
+    already hard-blocks it globally (no double-coverage).
+
+    The KEY false-positive boundary is stash: `git stash -u` in the shared tree BLOCKS,
+    plain `git stash` in the shared tree ALLOWS, and `git stash -u` inside a WORKTREE
+    ALLOWS (that is the correct place for eng work).
+    """
+
+    SHARED = '/home/domin/marveen'
+    WORKTREE = '/home/domin/marveen-wt/eng-x'
+
+    # ── stash: the untracked-wiping flag is the discriminator ──────────────────
+
+    def test_stash_include_untracked_long_in_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git stash --include-untracked', self.SHARED))
+
+    def test_stash_u_short_in_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git stash -u', self.SHARED))
+
+    def test_stash_all_long_in_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git stash --all', self.SHARED))
+
+    def test_stash_a_short_in_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git stash -a', self.SHARED))
+
+    def test_stash_push_u_in_shared_is_blocked(self):
+        """The explicit `git stash push -u` subcommand form is also covered."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git stash push -u -m scratch', self.SHARED))
+
+    def test_stash_combined_short_flag_in_shared_is_blocked(self):
+        """Combined short flags like -ku (keep-index + include-untracked)."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git stash -ku', self.SHARED))
+
+    # ---- FP boundary: plain tracked-only stash must stay ALLOWED ----
+
+    def test_plain_stash_in_shared_is_allowed(self):
+        """A plain `git stash` does NOT touch untracked files -- must not block."""
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git stash', self.SHARED))
+
+    def test_stash_push_without_untracked_in_shared_is_allowed(self):
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git stash push -m scratch', self.SHARED))
+
+    def test_stash_list_in_shared_is_allowed(self):
+        """`git stash list` is a read op even though it mentions stash."""
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git stash list', self.SHARED))
+
+    def test_stash_pop_in_shared_is_allowed(self):
+        """`git stash pop` restores, it does not wipe untracked -- allowed."""
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git stash pop', self.SHARED))
+
+    # ---- FP boundary: stash -u INSIDE a worktree must stay ALLOWED ----
+
+    def test_stash_u_inside_worktree_is_allowed(self):
+        """The whole point: eng work in an isolated worktree is fine."""
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git stash -u', self.WORKTREE))
+
+    def test_stash_include_untracked_inside_worktree_is_allowed(self):
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git stash --include-untracked', self.WORKTREE))
+
+    # ---- stash -u via -C / --git-dir redirect into shared is blocked ----
+
+    def test_stash_u_dash_C_redirect_to_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git -C {self.SHARED} stash -u', self.WORKTREE))
+
+    def test_stash_u_git_dir_equals_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git --git-dir={self.SHARED}/.git stash --include-untracked', '/tmp'))
+
+    # ── checkout / switch to a branch ──────────────────────────────────────────
+
+    def test_checkout_branch_in_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git checkout develop', self.SHARED))
+
+    def test_switch_branch_in_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git switch feat/x', self.SHARED))
+
+    def test_checkout_dash_b_in_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git checkout -b feat/new', self.SHARED))
+
+    def test_checkout_in_worktree_is_allowed(self):
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git checkout develop', self.WORKTREE))
+
+    def test_checkout_dash_C_redirect_to_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git -C {self.SHARED} checkout develop', self.WORKTREE))
+
+    # ── reset --hard ───────────────────────────────────────────────────────────
+
+    def test_reset_hard_in_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git reset --hard origin/develop', self.SHARED))
+
+    def test_reset_hard_equals_form_in_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git reset --hard=HEAD~1', self.SHARED))
+
+    def test_reset_soft_in_shared_is_allowed(self):
+        """`git reset --soft` and the default mixed reset do not wipe the tree."""
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git reset --soft HEAD~1', self.SHARED))
+
+    def test_plain_reset_in_shared_is_allowed(self):
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git reset HEAD -- file.py', self.SHARED))
+
+    def test_reset_hard_in_worktree_is_allowed(self):
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git reset --hard origin/develop', self.WORKTREE))
+
+    def test_reset_hard_dash_C_redirect_to_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            f'git -C {self.SHARED} reset --hard HEAD', self.WORKTREE))
+
+    # ── regression: commit/merge/rebase still covered ──────────────────────────
+
+    def test_commit_in_shared_still_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git commit -m x', self.SHARED))
+
+    # ── adversarial: ../-traversal path-normalization bypass (Chad SEC MEDIUM) ──
+    # Before the normpath fix, path values were only rstrip('/')-normalized, so a
+    # `../`- or `.`-segment or trailing-slash variant of /home/domin/marveen did
+    # not string-equal SHARED_CHECKOUT_PATH and silently bypassed the guard,
+    # re-opening the exact workspace-wipe hole card e830cef9 was closing.
+
+    def test_stash_u_dash_C_dotdot_traversal_to_shared_is_blocked(self):
+        """`git -C <root>/../marveen stash -u` must collapse to the shared root."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git -C /home/domin/marveen/../marveen stash -u', self.WORKTREE))
+
+    def test_stash_u_dash_C_dot_segment_to_shared_is_blocked(self):
+        """A `/.`-segment variant normalizes to the shared root."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git -C /home/domin/marveen/./ stash --include-untracked', self.WORKTREE))
+
+    def test_stash_u_dash_C_trailing_slash_to_shared_is_blocked(self):
+        """A bare trailing slash normalizes to the shared root."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git -C /home/domin/marveen/ stash -u', self.WORKTREE))
+
+    def test_reset_hard_dash_C_dotdot_traversal_to_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git -C /home/domin/marveen/../marveen reset --hard HEAD', self.WORKTREE))
+
+    def test_checkout_dash_C_dotdot_traversal_to_shared_is_blocked(self):
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git -C /home/domin/marveen/sub/.. checkout develop', self.WORKTREE))
+
+    def test_cwd_dotdot_traversal_to_shared_is_blocked(self):
+        """The cwd targeting path (A) must also normalize before comparison."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git stash -u', '/home/domin/marveen/../marveen'))
+
+    def test_work_tree_dotdot_traversal_to_shared_is_blocked(self):
+        """The --work-tree targeting path must also normalize before comparison."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git --work-tree /home/domin/marveen/../marveen stash -u', '/tmp'))
+
+    def test_git_dir_dotdot_traversal_into_shared_is_blocked(self):
+        """--git-dir uses startswith; traversal into the tree must collapse first."""
+        self.assertTrue(guard.match_shared_checkout_git_op(
+            'git --git-dir /home/domin/marveen/../marveen/.git stash -u', '/tmp'))
+
+    # ---- FP boundary: traversal pointing ELSEWHERE must stay ALLOWED ----
+
+    def test_stash_u_dash_C_traversal_to_other_path_is_allowed(self):
+        """A `../`-path that normalizes away from the shared root is not blocked."""
+        self.assertFalse(guard.match_shared_checkout_git_op(
+            'git -C /home/domin/marveen/../other stash -u', self.WORKTREE))
+
+    # ── end-to-end classify() wiring ───────────────────────────────────────────
+
+    def test_classify_blocks_stash_u_in_shared(self):
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'git stash -u'},
+            'cwd': self.SHARED,
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'shared-checkout-commit')
+
+    def test_classify_allows_plain_stash_in_shared(self):
+        denied, _, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'git stash'},
+            'cwd': self.SHARED,
+        })
+        self.assertFalse(denied)
+
+    def test_classify_allows_stash_u_in_worktree(self):
+        denied, _, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'git stash -u'},
+            'cwd': self.WORKTREE,
+        })
+        self.assertFalse(denied)
+
+    def test_classify_blocks_checkout_in_shared(self):
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'git checkout develop'},
+            'cwd': self.SHARED,
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'shared-checkout-commit')
+
+    def test_classify_blocks_reset_hard_in_shared(self):
+        denied, name, _ = guard.classify({
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'git reset --hard origin/develop'},
+            'cwd': self.SHARED,
+        })
+        self.assertTrue(denied)
+        self.assertEqual(name, 'shared-checkout-commit')
+
+
 class CurlUrlEqualsFormBypassTests(unittest.TestCase):
     """curl --url=https://external -d data bypassed R3 because the equals-attached
     --url= token does not start with 'http' so it was never added to urls[].
