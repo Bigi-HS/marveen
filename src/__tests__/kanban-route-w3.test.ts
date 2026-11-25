@@ -6,6 +6,7 @@
  *   - Error types that routes must catch and map to HTTP codes
  */
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest'
+import { seedTestAgents } from './_fk-test-agents.js'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -31,6 +32,7 @@ beforeAll(() => {
   process.env.NODE_ENV = 'test'
   initNoaDb(':memory:')
   getNoaDb().exec(SCHEMA_SQL)
+  seedTestAgents(getNoaDb())
   // Inject isRunning so dispatch resolves a target
   configureKanban({
     isRunning: () => true,

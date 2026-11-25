@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, vi, afterEach } from 'vitest'
+import { seedTestAgents } from './_fk-test-agents.js'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -39,6 +40,7 @@ beforeAll(() => {
   process.env.NODE_ENV = 'test'
   initNoaDb(':memory:')
   getNoaDb().exec(SCHEMA_SQL)
+  seedTestAgents(getNoaDb())
 })
 
 function wipe() {

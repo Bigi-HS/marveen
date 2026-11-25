@@ -3,6 +3,7 @@
 // corpus (marveen pt 1), back-compat, the DB wiring, and the no-auto-build
 // caller note (chad c-LOW).
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
+import { seedTestAgents } from './_fk-test-agents.js'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -217,6 +218,7 @@ describe('createCard / patchTriage wiring', () => {
     process.env.NODE_ENV = 'test'
     initNoaDb(':memory:')
     getNoaDb().exec(SCHEMA_SQL)
+  seedTestAgents(getNoaDb())
     applyKanbanMigrations()
   })
   beforeEach(() => {

@@ -13,6 +13,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import Database from 'better-sqlite3'
+import { seedTestAgents } from './_fk-test-agents.js'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -106,6 +107,9 @@ function makeDb(): Database.Database {
   try { db.exec(cleanedSql) } catch {}
   // Apply our migration (adds source column)
   applyMemoryMigrations(db)
+  // M3 FK-ON (ff80db66): memories.agent_id now REFERENCES agents(agent_id).
+  // Seed the agent_ids this fixture writes under so the enforced FK resolves.
+  seedTestAgents(db)
   return db
 }
 

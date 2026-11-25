@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest'
+import { seedTestAgents } from './_fk-test-agents.js'
 import { buildScheduledTaskPrompt } from '../noa-scheduler.js'
 import { readFileSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -102,6 +103,7 @@ beforeAll(() => {
   process.env.NODE_ENV = 'test'
   initNoaDb(':memory:')
   getNoaDb().exec(SCHEMA_SQL)
+  seedTestAgents(getNoaDb())
   applyBBlockColumns(getNoaDb())
 })
 
