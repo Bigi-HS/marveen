@@ -26,6 +26,7 @@ import {
   resolveCiStatus,
   runGateCheck,
   computeDriftNotifications,
+  isSuspiciousShaPrefixCollision,
   type GithubPrInfo,
 } from '../gate-check.js'
 import {
@@ -302,15 +303,40 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
         const now = nowEpoch()
         for (const { reviewer, old_sha } of drifted) {
           if (!wasDriftNotified(db, pr, old_sha, result.head_sha, reviewer)) {
+            // Card 7659af50: emit the FULL 40-hex SHAs (old_sha is a real approved
+            // seat head_sha, result.head_sha is the live head). The previous
+            // .slice(0, 8) truncation could render two DISTINCT heads with an
+            // identical 8-char prefix as a self-refuting "X -> X" message.
             createAgentMessage(
               'gate',
               reviewer,
-              `PR #${pr}: your approval on ${old_sha.slice(0, 8)} was invalidated by a new commit (${result.head_sha.slice(0, 8)}). Please re-review.`,
+              `PR #${pr}: your approval on ${old_sha} was invalidated by a new commit (${result.head_sha}). Please re-review.`,
               false,
               'high',
               null,
             )
             recordDriftNotified(db, pr, old_sha, result.head_sha, reviewer, now)
+          }
+          // Card 7659af50: grinding-detect. Two DISTINCT full SHAs that share an
+          // 8-hex leading prefix are a SHA-prefix-collision signature. In our
+          // threat model only fleet-PAT agents can push, so this is almost always
+          // a benign generator/data artifact -- but it is self-refuting in any
+          // truncated display, so surface a SECURITY ALERT to marveen for review.
+          // Dedup via the shared drift table keyed on (pr, old_sha, new_sha) with
+          // reviewer='marveen' -> at most one alert per distinct (pr, old, new).
+          if (
+            isSuspiciousShaPrefixCollision(old_sha, result.head_sha) &&
+            !wasDriftNotified(db, pr, old_sha, result.head_sha, 'marveen')
+          ) {
+            createAgentMessage(
+              'gate',
+              'marveen',
+              `SECURITY ALERT (gate drift): PR #${pr} reviewer ${reviewer} approved ${old_sha}, but the live head is ${result.head_sha}. These two DISTINCT head SHAs share an 8-hex prefix (SHA-prefix-grinding signature). Given the fleet-PAT-only threat model this is most likely a generator/data artifact, but surfaced for review.`,
+              false,
+              'high',
+              null,
+            )
+            recordDriftNotified(db, pr, old_sha, result.head_sha, 'marveen', now)
           }
         }
       } catch (driftErr) {

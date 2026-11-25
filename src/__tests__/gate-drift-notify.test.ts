@@ -19,7 +19,7 @@ import type Database from 'better-sqlite3'
 import { initDatabase, getDb, getPendingMessages } from '../db.js'
 import { tryHandleGate, __setGatePrFetcher } from '../web/routes/gate.js'
 import { insertApproval, migrateGateTables, readApprovedSeatsByPr, recordDriftNotified, wasDriftNotified } from '../web/gate-db.js'
-import { computeDriftNotifications, type SeatByOldSha } from '../web/gate-check.js'
+import { computeDriftNotifications, isSuspiciousShaPrefixCollision, type SeatByOldSha } from '../web/gate-check.js'
 import type { GithubPrInfo } from '../web/gate-check.js'
 
 // ---------------------------------------------------------------------------
@@ -30,6 +30,9 @@ const TEST_DB = '/tmp/test-gate-drift-notify.db'
 const SHA_A = 'a'.repeat(40)
 const SHA_B = 'b'.repeat(40)
 const SHA_C = 'c'.repeat(40)
+// Two DISTINCT full SHAs that SHARE an 8-hex leading prefix (grinding-signature).
+const SHA_P1 = '9c469431' + '1'.repeat(32)
+const SHA_P2 = '9c469431' + '2'.repeat(32)
 const PR = 800
 
 function cleanDb() {
@@ -118,6 +121,27 @@ describe('computeDriftNotifications (pure, IO-free)', () => {
     // so it is NOT returned by readApprovedSeatsByPr and hence not in input.
     // Detector receives empty => no drift.
     expect(computeDriftNotifications([], SHA_B)).toHaveLength(0)
+  })
+})
+
+describe('isSuspiciousShaPrefixCollision (pure, IO-free) -- card 7659af50', () => {
+  it('true when two DISTINCT SHAs share an 8-hex prefix', () => {
+    expect(isSuspiciousShaPrefixCollision(SHA_P1, SHA_P2)).toBe(true)
+  })
+
+  it('false when SHAs are equal (not a collision -- same commit)', () => {
+    expect(isSuspiciousShaPrefixCollision(SHA_A, SHA_A)).toBe(false)
+  })
+
+  it('false when SHAs have different prefixes', () => {
+    expect(isSuspiciousShaPrefixCollision(SHA_A, SHA_B)).toBe(false)
+  })
+
+  it('respects a custom prefixLen', () => {
+    const x = '0123456789' + 'a'.repeat(30)
+    const y = '0123456789' + 'b'.repeat(30)
+    expect(isSuspiciousShaPrefixCollision(x, y, 10)).toBe(true)
+    expect(isSuspiciousShaPrefixCollision(x, y, 11)).toBe(false) // char 11 differs (a vs b)
   })
 })
 
@@ -221,9 +245,65 @@ describe('route: /api/gate/check drift-notify (card 1d1a856e)', () => {
     for (const msg of driftMsgs) {
       expect(msg.priority).toMatch(/high|3/) // stored as int or string
       expect(msg.content).toContain(`PR #${PR}`)
-      expect(msg.content).toContain(SHA_A.slice(0, 8)) // AC6 old sha
-      expect(msg.content).toContain(SHA_B.slice(0, 8)) // AC6 new sha
+      // Card 7659af50: emit the FULL 40-hex SHAs, not an 8-char truncation.
+      expect(msg.content).toContain(SHA_A) // AC6 old sha (full 40-hex)
+      expect(msg.content).toContain(SHA_B) // AC6 new sha (full 40-hex)
+      // old_sha must be a reachable/real full SHA == the seat's stored head_sha,
+      // i.e. a 40-hex string, NOT an 8-char prefix or a reconstructed value.
+      expect(SHA_A).toMatch(/^[0-9a-f]{40}$/)
+      const oldMatch = msg.content.match(/[0-9a-f]{40}/g) ?? []
+      expect(oldMatch).toContain(SHA_A)
     }
+  })
+
+  it('card 7659af50: reviewer message embeds the FULL 40-hex old_sha (reachability proxy), not a truncated prefix', async () => {
+    stubPr(SHA_B)
+    const db = getDb()
+    insertApproval(db, { pr_number: PR, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, 1000)
+
+    await call('GET', `/api/gate/check?pr=${PR}`)
+
+    const msgs = getPendingMessages()
+    const thorMsg = msgs.find((m) => m.from_agent === 'gate' && m.to_agent === 'thor')
+    expect(thorMsg).toBeDefined()
+    // The emitted 'old' SHA is the seat's stored full head_sha (40-hex), proving
+    // we stopped truncating. An 8-char-only message would NOT contain this.
+    expect(thorMsg!.content).toContain(SHA_A)
+    expect(SHA_A.length).toBe(40)
+  })
+
+  it('card 7659af50: grinding prefix-collision => SECURITY ALERT to marveen (both full SHAs, deduped)', async () => {
+    // thor approved on SHA_P1; live head moves to SHA_P2 which shares an 8-hex
+    // prefix with SHA_P1 but is a DISTINCT commit -> grinding-signature.
+    stubPr(SHA_P2)
+    const db = getDb()
+    insertApproval(db, { pr_number: PR, head_sha: SHA_P1, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, 1000)
+
+    await call('GET', `/api/gate/check?pr=${PR}`)
+    await call('GET', `/api/gate/check?pr=${PR}`) // second call: must NOT re-alert
+
+    const msgs = getPendingMessages()
+    const alerts = msgs.filter((m) => m.from_agent === 'gate' && m.to_agent === 'marveen')
+    expect(alerts).toHaveLength(1) // deduped once per (pr, old_sha, new_sha)
+    const a = alerts[0]
+    expect(a.content).toContain(`PR #${PR}`)
+    expect(a.content).toContain('thor')
+    expect(a.content).toContain(SHA_P1) // full old sha
+    expect(a.content).toContain(SHA_P2) // full new sha
+    expect(a.priority).toMatch(/high|urgent|3|4/)
+  })
+
+  it('card 7659af50: distinct non-colliding SHAs => NO marveen security alert', async () => {
+    // SHA_A vs SHA_B share NO prefix -> normal drift, no grinding alert.
+    stubPr(SHA_B)
+    const db = getDb()
+    insertApproval(db, { pr_number: PR, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved', recorded_by: 'thor' }, 1000)
+
+    await call('GET', `/api/gate/check?pr=${PR}`)
+
+    const msgs = getPendingMessages()
+    const alerts = msgs.filter((m) => m.from_agent === 'gate' && m.to_agent === 'marveen')
+    expect(alerts).toHaveLength(0)
   })
 
   it('AC3: calling /api/gate/check twice on same live head => exactly one message per reviewer (dedup)', async () => {

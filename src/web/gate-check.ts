@@ -547,6 +547,25 @@ export function computeDriftNotifications(seats: SeatByOldSha[], liveHeadSha: st
   return result
 }
 
+// Pure, IO-free grinding-detect for the drift-notify path (card 7659af50).
+//
+// Returns true when two DISTINCT full SHAs share an N-hex leading prefix. This
+// is the SHA-prefix-collision signature a grinding attacker would produce. In
+// our threat model only fleet-PAT agents can push to our branches, so a true
+// result is almost always a benign generator/data artifact -- but it is still
+// surfaced as a SECURITY ALERT for review because an identical short prefix on
+// two distinct heads is self-refuting in any truncated display.
+//
+// `oldSha`/`newSha` are expected to be full 40-hex SHAs; the function makes no
+// IO calls and does not validate hex-ness (callers pass validated SHAs).
+export function isSuspiciousShaPrefixCollision(
+  oldSha: string,
+  newSha: string,
+  prefixLen = 8,
+): boolean {
+  return oldSha !== newSha && oldSha.slice(0, prefixLen) === newSha.slice(0, prefixLen)
+}
+
 export interface GateCheckDeps {
   // Fetches the LIVE head.sha and changed-file list from GitHub. Injected so the
   // pure check orchestration is testable without network access.
