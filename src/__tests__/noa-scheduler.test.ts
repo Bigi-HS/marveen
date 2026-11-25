@@ -40,6 +40,19 @@ vi.mock('../web/stuck-task-sentinel.js', () => ({
   sweepStuckTasks: vi.fn(),
 }))
 
+// Immediate missed-fire alert (card c7f289d8). Spy on the send/clear so the
+// scheduler's debounce decision (does it CALL on tick 1 vs tick 2?) and the
+// recovery clear are assertable without a real Telegram send. The module's own
+// dedup/transient/permanent/format behaviour is covered in missed-fire-alert.test.ts.
+vi.mock('../web/missed-fire-alert.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../web/missed-fire-alert.js')>()
+  return {
+    ...actual,
+    sendMissedFireAlert: vi.fn(),
+    clearMissedFireAlert: vi.fn(),
+  }
+})
+
 vi.mock('../web/opus-burn-monitor.js', () => ({
   isBudgetPauseMarkerActive: vi.fn().mockReturnValue(false),
   readBudgetPauseMarker: vi.fn().mockReturnValue(null),
@@ -92,6 +105,7 @@ const { isSessionReadyForPrompt, sendPromptToSession, capturePane } = await impo
 const { detectPaneState } = await import('../pane-state.js')
 const { sendPendingRetryAlert } = await import('../web/pending-retry-alert.js')
 const { sweepStuckTasks } = await import('../web/stuck-task-sentinel.js')
+const { sendMissedFireAlert, clearMissedFireAlert } = await import('../web/missed-fire-alert.js')
 const { isBudgetPauseMarkerActive, readBudgetPauseMarker } = await import('../web/opus-burn-monitor.js')
 const { logger } = await import('../logger.js')
 
@@ -112,6 +126,7 @@ function wipe(): void {
   db.prepare('DELETE FROM task_runs').run()
   db.prepare('DELETE FROM pending_task_retries').run()
   db.prepare('DELETE FROM scheduled_tasks').run()
+  try { db.prepare('DELETE FROM missed_fire_alerts').run() } catch { /* table created lazily */ }
 }
 
 beforeEach(wipe)
@@ -794,6 +809,116 @@ describe('runSweepTick: missing session durable trace + recovery (card 8af09fa0)
     expect(db.prepare(
       `SELECT * FROM pending_task_retries WHERE task_name='ok-task'`
     ).all()).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Card c7f289d8: IMMEDIATE operator alert on a wedged/dead-session missed fire.
+// The two backstops (1h pending-retry, 3h stuck-sentinel) are too slow; this
+// fires on the SAME tick a sched-task is skipped because the agent's tmux
+// session is gone, with a consecutive-miss debounce so a transient tmux restart
+// does not spam. Dedup + recovery clear live in missed-fire-alert.ts (unit
+// tested separately); these tests pin the scheduler WIRING and the debounce
+// boundary, plus the critical hung-but-tmux-ALIVE verification marveen asked for.
+// ---------------------------------------------------------------------------
+
+describe('runSweepTick: immediate missed-fire alert (card c7f289d8)', () => {
+  // Same mechanism as the 8af09fa0 block: 'ghost' agent -> 'agent-ghost'
+  // session, absent from the mocked tmux list ('marveen-channels' only) -> the
+  // attemptFireTask verdict is 'missing'.
+  const GHOST = "('ghost-task', 'ghost', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?)"
+
+  beforeEach(() => {
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+    vi.mocked(sendPromptToSession).mockReset()
+    vi.mocked(sendMissedFireAlert).mockReset()
+    vi.mocked(clearMissedFireAlert).mockReset()
+  })
+
+  function insertGhost(nowS: number): void {
+    getNoaDb().prepare(`INSERT INTO scheduled_tasks
+      (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES ${GHOST}`).run(nowS - 10, nowS - 100)
+  }
+
+  it('debounce: does NOT alert on the first missed tick (attempt_count=1 < threshold 2)', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    insertGhost(nowS)
+
+    runSweepTick(60000, db)
+
+    // Row exists (attempt_count=1) but no immediate alert yet.
+    const rows = db.prepare(
+      `SELECT attempt_count FROM pending_task_retries WHERE task_name='ghost-task'`
+    ).all() as Array<{ attempt_count: number }>
+    expect(rows[0]!.attempt_count).toBe(1)
+    expect(vi.mocked(sendMissedFireAlert)).not.toHaveBeenCalled()
+  })
+
+  it('debounce: alerts on the SECOND consecutive missed tick (attempt_count reaches 2)', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    insertGhost(nowS)
+
+    runSweepTick(60000, db)                                 // tick 1: count=1, no alert
+    expect(vi.mocked(sendMissedFireAlert)).not.toHaveBeenCalled()
+
+    // tick 2: backoff elapsed -> Step 1 retries, count -> 2 -> alert.
+    runSweepTick(60000, db, Date.now() + 11 * 60 * 1000)
+    expect(vi.mocked(sendMissedFireAlert)).toHaveBeenCalledTimes(1)
+    const [view] = vi.mocked(sendMissedFireAlert).mock.calls[0]!
+    expect(view).toMatchObject({ taskId: 'ghost-task', agent: 'ghost', missedCount: 2 })
+  })
+
+  it('recovery: a successful fire clears the missed-fire episode stamp', async () => {
+    const db = getNoaDb()
+    const { execFileSync } = await import('node:child_process')
+    const nowS = Math.floor(Date.now() / 1000)
+    insertGhost(nowS)
+
+    runSweepTick(60000, db)                                 // tick 1: missing -> row
+
+    // Session returns.
+    vi.mocked(execFileSync).mockReturnValue('marveen-channels\nagent-ghost\n')
+    vi.mocked(sendPromptToSession).mockReset()
+
+    runSweepTick(60000, db, Date.now() + 11 * 60 * 1000)    // tick 2: fires + clears stamp
+
+    expect(vi.mocked(sendPromptToSession)).toHaveBeenCalledOnce()
+    expect(vi.mocked(clearMissedFireAlert)).toHaveBeenCalledWith(expect.anything(), 'ghost-task')
+
+    vi.mocked(execFileSync).mockReturnValue('marveen-channels\n') // restore default
+  })
+
+  // CRITICAL VERIFICATION (marveen): the hung-but-tmux-ALIVE agent case
+  // (isSessionReadyForPrompt=false, but the session EXISTS in list-sessions)
+  // resolves to 'busy', NOT 'missing'. The immediate missed-fire alert keys off
+  // 'missing' only, so a hung-alive agent does NOT trip it -- it stays on the
+  // existing pending-retry/busy path. This pins that the immediate alert is
+  // scoped to dead-session wedges exactly as the card intends.
+  it('hung-but-tmux-ALIVE (session present, not ready) hits the busy path, NOT the missing alert', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    // 'marveen' -> 'marveen-channels' session, which IS in the mocked list.
+    db.prepare(`INSERT INTO scheduled_tasks
+      (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES ('hung-task', 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?)`
+    ).run(nowS - 10, nowS - 100)
+
+    // Session alive but hung (pane never idle) -> isSessionReadyForPrompt=false.
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(false)
+
+    runSweepTick(60000, db)
+    runSweepTick(60000, db, Date.now() + 11 * 60 * 1000)    // a second still-hung tick
+
+    // The retry row records 'busy' (not 'missing') -> immediate alert never fires.
+    const rows = db.prepare(
+      `SELECT last_reason FROM pending_task_retries WHERE task_name='hung-task'`
+    ).all() as Array<{ last_reason: string }>
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.last_reason).toBe('busy')
+    expect(vi.mocked(sendMissedFireAlert)).not.toHaveBeenCalled()
   })
 })
 
