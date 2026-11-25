@@ -533,9 +533,15 @@ wd_relaunch() {
 # Returns:
 #   0 -- pipe ALIVE: state file exists, is fresh (<6 min by mtime), consecutiveDead==0
 #   1 -- pipe DEAD:  state file exists and is fresh but consecutiveDead>0,
-#                    OR state file is stale (>= 360s by mtime, treat as dead for safety)
-#   2 -- INCONCLUSIVE: state file absent or unreadable (fail-safe: do NOT
+#                    OR state file is stale (>= 360s by mtime -- python rc=3 -> bash rc=1)
+#   2 -- INCONCLUSIVE: state file absent, unreadable, or parse-error (fail-safe: do NOT
 #                      relaunch on inconclusive -- uncertainty must never fire recovery)
+#
+# Python exit codes (internal):
+#   0 = alive (fresh + consecutiveDead==0)
+#   1 = dead (fresh + consecutiveDead>0)
+#   2 = parse-error / unreadable file (inconclusive -> bash return 2)
+#   3 = stale mtime (>= FRESH_SECONDS) -> bash maps to return 1 (dead/stale)
 #
 # Freshness gate: 6 minutes (360s), matching channel-watchdog.sh TRANSPORT_FRESH_SECONDS=360.
 # This avoids false-dead when the per-agent-pipe-watchdog hasn't run yet (new env, missing cli).
@@ -591,10 +597,11 @@ wd_check_telegram_pipe() {
   # Python script checks:
   #   1. File age by mtime (< 360s = fresh)
   #   2. consecutiveDead field (== 0 means alive)
-  # Exit codes from python:
+  # Python exit codes (see function docstring for bash mapping):
   #   0 = alive (fresh + consecutiveDead==0)
   #   1 = dead (fresh + consecutiveDead>0)
-  #   2 = inconclusive (stale mtime OR parse error)
+  #   2 = parse-error / unreadable (inconclusive)
+  #   3 = stale mtime (>= FRESH_SECONDS) -> bash maps to rc=1 dead/stale
   python3 -c "
 import json, sys, time, os
 FRESH_SECONDS = 360
@@ -603,14 +610,14 @@ try:
     mtime = os.path.getmtime(path)
     age = time.time() - mtime
     if age >= FRESH_SECONDS:
-        sys.exit(2)  # stale -> inconclusive (treat as dead for safety: caller maps 2->dead or inconclusive)
+        sys.exit(3)  # stale -> bash case maps to return 1 (dead/stale)
     m = json.load(open(path))
     consecutive_dead = m.get('consecutiveDead', 0)
     if not isinstance(consecutive_dead, (int, float)):
         consecutive_dead = 0
     sys.exit(0 if consecutive_dead == 0 else 1)
 except Exception:
-    sys.exit(2)
+    sys.exit(2)  # parse-error / unreadable -> inconclusive (fail-safe)
 " "$state_file" 2>/dev/null
   local py_rc=$?
 
@@ -623,11 +630,17 @@ except Exception:
       _wd_read_model_warn "WARN wd_check_telegram_pipe: pipe DEAD agent=$agent (fresh state, consecutiveDead>0)"
       return 1
       ;;
-    *)
-      # stale file OR parse error -> stale is treated as dead (rc=1) per spec:
-      # "state file is stale -> rc=1 (dead/stale, treat as dead for safety)"
-      _wd_read_model_warn "WARN wd_check_telegram_pipe: pipe DEAD/stale agent=$agent (stale mtime or unreadable state)"
+    2)
+      _wd_read_model_warn "INFO wd_check_telegram_pipe: state unreadable/corrupt agent=$agent -> inconclusive (fail-safe)"
+      return 2
+      ;;
+    3)
+      _wd_read_model_warn "WARN wd_check_telegram_pipe: state stale (>360s) agent=$agent -> dead/stale"
       return 1
+      ;;
+    *)
+      _wd_read_model_warn "INFO wd_check_telegram_pipe: unexpected py_rc=$py_rc agent=$agent -> inconclusive"
+      return 2
       ;;
   esac
 }

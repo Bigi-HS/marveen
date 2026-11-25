@@ -450,7 +450,7 @@ done
 # Returns:
 #   0 = pipe ALIVE (fresh state file, consecutiveDead==0)
 #   1 = pipe DEAD  (fresh state file, consecutiveDead>0 OR stale file)
-#   2 = INCONCLUSIVE (file absent OR gate CLOSED)
+#   2 = INCONCLUSIVE (file absent, gate CLOSED, or parse-error/unreadable)
 #
 # Helper: write a state JSON with the given consecutiveDead into a temp store dir.
 # The mtime is current (fresh) unless the caller adjusts it afterwards.
@@ -532,6 +532,14 @@ WD_PIPE_CHECK_ENABLED=1 wd_check_telegram_pipe "" "$PIPE_STORE" 2>/dev/null
   [ "$r" -eq 2 ]  # gate CLOSED -> inconclusive
 ) && ok "T8: wd_check_telegram_pipe safe under set -u (gate CLOSED, no env vars)" \
   || bad "T8: set -u regression"
+
+# T_parse_error: corrupt JSON file (parse-error) -> rc=2 (inconclusive, fail-safe)
+# Verifies that an unreadable/corrupt state file does NOT trigger recovery (card 75dfe749).
+printf 'not json {{{' > "${PIPE_STORE}/pipe-watchdog.tparsetest.state.json"
+WD_PIPE_CHECK_ENABLED=1 wd_check_telegram_pipe "tparsetest" "$PIPE_STORE" 2>/dev/null
+[ $? -eq 2 ] \
+  && ok "T_parse_error: corrupt JSON state file -> rc=2 (inconclusive, fail-safe)" \
+  || bad "T_parse_error: corrupt JSON should give rc=2 (inconclusive), not rc=1 (dead)"
 
 rm -rf "$PIPE_STORE"
 
