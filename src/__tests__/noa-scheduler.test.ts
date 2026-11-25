@@ -923,6 +923,146 @@ describe('runSweepTick: immediate missed-fire alert (card c7f289d8)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Card ea4d3d8f (follow-up B to c7f289d8): IMMEDIATE operator alert on a
+// hung-but-tmux-ALIVE ('busy') wedge, with a SEPARATE larger debounce
+// (IMMEDIATE_BUSY_ALERT_THRESHOLD=4) so a legitimately busy agent does not
+// false-positive. Reuses sendMissedFireAlert (busy formatter) + the shared
+// recovery clear. These tests pin the scheduler WIRING and the busy debounce
+// boundary; the module's dedup/format behaviour is unit-tested separately.
+// ---------------------------------------------------------------------------
+
+describe('runSweepTick: immediate busy-wedge alert (card ea4d3d8f)', () => {
+  // 'marveen' -> 'marveen-channels' session, which IS in the mocked tmux list,
+  // so the session is ALIVE. isSessionReadyForPrompt=false makes it hung -> the
+  // attemptFireTask verdict is 'busy' (not 'missing').
+  beforeEach(() => {
+    vi.mocked(sendPromptToSession).mockReset()
+    vi.mocked(sendMissedFireAlert).mockReset()
+    vi.mocked(clearMissedFireAlert).mockReset()
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(false) // hung but alive
+  })
+  afterEach(() => {
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+  })
+
+  function insertHung(id: string, nowS: number): void {
+    getNoaDb().prepare(`INSERT INTO scheduled_tasks
+      (id, agent, type, description, prompt, schedule, next_run, status, created_at)
+      VALUES (?, 'marveen', 'task', '', 'Do it', '0 9 * * *', ?, 'active', ?)`
+    ).run(id, nowS - 10, nowS - 100)
+  }
+
+  // Drive N consecutive still-busy ticks, advancing time generously each tick so
+  // the pending-retry exponential backoff window has always elapsed.
+  function driveBusyTicks(ticks: number): void {
+    const db = getNoaDb()
+    const base = Date.now()
+    for (let i = 0; i < ticks; i++) {
+      runSweepTick(60000, db, base + i * 15 * 60 * 1000)
+    }
+  }
+
+  it('alerts EXACTLY ONCE once busy reaches IMMEDIATE_BUSY_ALERT_THRESHOLD (4), reusing dedup', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    insertHung('hung-task', nowS)
+
+    // 5 still-busy ticks: attempt_count climbs 1,2,3,4,5. Alert fires when the
+    // count reaches 4; the module dedup keeps it to a single send on tick 5 too.
+    driveBusyTicks(5)
+
+    const rows = db.prepare(
+      `SELECT attempt_count, last_reason FROM pending_task_retries WHERE task_name='hung-task'`
+    ).all() as Array<{ attempt_count: number; last_reason: string }>
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.last_reason).toBe('busy')
+    expect(rows[0]!.attempt_count).toBeGreaterThanOrEqual(4)
+
+    // The real missed-fire-alert dedup is mocked out here, so the scheduler calls
+    // the sender on every tick at/after the threshold -> the module (unit-tested)
+    // guarantees a single actual send. Assert the sender was CALLED with the busy
+    // formatter options at least once and never below the threshold.
+    const calls = vi.mocked(sendMissedFireAlert).mock.calls
+    expect(calls.length).toBeGreaterThanOrEqual(1)
+    for (const call of calls) {
+      const view = call[0] as { missedCount: number }
+      const opts = call[4] as { logLabel?: string } | undefined
+      expect(view.missedCount).toBeGreaterThanOrEqual(4) // never below the debounce
+      expect(opts?.logLabel).toBe('hung-but-alive agent') // busy variant, not missing
+    }
+  })
+
+  it('ADVERSARIAL: busy for 2 ticks then fires -> NO busy-wedge alert at all', async () => {
+    const db = getNoaDb()
+    const { execFileSync } = await import('node:child_process')
+    const nowS = Math.floor(Date.now() / 1000)
+    insertHung('recover-task', nowS)
+
+    const base = Date.now()
+    runSweepTick(60000, db, base)                       // tick 1: busy, count=1
+    runSweepTick(60000, db, base + 15 * 60 * 1000)      // tick 2: busy, count=2
+
+    // Below the threshold of 4 -> no alert.
+    expect(vi.mocked(sendMissedFireAlert)).not.toHaveBeenCalled()
+
+    // Agent un-hangs and fires.
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+    runSweepTick(60000, db, base + 30 * 60 * 1000)      // tick 3: fires + clears
+
+    expect(vi.mocked(sendPromptToSession)).toHaveBeenCalled()
+    // Recovery clears the shared episode stamp.
+    expect(vi.mocked(clearMissedFireAlert)).toHaveBeenCalledWith(expect.anything(), 'recover-task')
+    // Never alerted.
+    expect(vi.mocked(sendMissedFireAlert)).not.toHaveBeenCalled()
+
+    void execFileSync
+  })
+
+  it('recovery: after a busy-wedge episode, a successful fire clears the stamp (second episode can alert)', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    insertHung('wedge-task', nowS)
+
+    driveBusyTicks(4)                                   // reach threshold -> alerted
+    expect(vi.mocked(sendMissedFireAlert)).toHaveBeenCalled()
+
+    // Un-hang and fire -> Step 1 recovery clears the shared missed_fire stamp.
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+    runSweepTick(60000, db, Date.now() + 90 * 60 * 1000)
+
+    expect(vi.mocked(clearMissedFireAlert)).toHaveBeenCalledWith(expect.anything(), 'wedge-task')
+  })
+
+  it('parked does NOT trigger a busy-wedge alert regardless of repetition', () => {
+    const db = getNoaDb()
+    const nowS = Math.floor(Date.now() / 1000)
+    insertHung('parked-task', nowS)
+
+    // Session is ALIVE and ready, but every send stays stuck in the composer
+    // ('parked') -- an un-submitted draft, which is NOT a hang. Repeat well past
+    // the busy threshold (4): the retry row accrues reason 'parked', and the
+    // busy-wedge alert (gated on last_reason==='busy') must NEVER fire.
+    vi.mocked(isSessionReadyForPrompt).mockReturnValue(true)
+    vi.mocked(sendPromptToSession).mockReturnValue('parked')
+
+    const base = Date.now()
+    for (let i = 0; i < 6; i++) {
+      runSweepTick(60000, db, base + i * 15 * 60 * 1000)
+    }
+
+    const rows = db.prepare(
+      `SELECT attempt_count, last_reason FROM pending_task_retries WHERE task_name='parked-task'`
+    ).all() as Array<{ attempt_count: number; last_reason: string }>
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.last_reason).toBe('parked')
+    expect(rows[0]!.attempt_count).toBeGreaterThanOrEqual(4) // past the busy threshold
+
+    // No busy-wedge alert for a parked episode, ever.
+    expect(vi.mocked(sendMissedFireAlert)).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // AC-7: File migration
 // ---------------------------------------------------------------------------
 
