@@ -6,9 +6,11 @@ import { tmpdir } from 'node:os'
 import { initNoaDb, getNoaDb } from '../noa-memory.js'
 import {
   IMMEDIATE_MISS_ALERT_THRESHOLD,
+  IMMEDIATE_BUSY_ALERT_THRESHOLD,
   ensureMissedFireAlertTable,
   clearMissedFireAlert,
   formatMissedFireAlert,
+  formatBusyWedgeAlert,
   sendMissedFireAlert,
   type MissedFireView,
 } from '../web/missed-fire-alert.js'
@@ -46,6 +48,14 @@ describe('missed-fire-alert: debounce constant', () => {
   it('default threshold is 2 (one transient restart absorbed, second tick alerts)', () => {
     expect(IMMEDIATE_MISS_ALERT_THRESHOLD).toBe(2)
   })
+
+  it('busy-wedge threshold is 4 and strictly larger than the dead-session one', () => {
+    // A legit-busy agent produces several consecutive 'busy' ticks without any
+    // fault; the busy threshold must be bigger than the missing one so that does
+    // not false-positive (card ea4d3d8f).
+    expect(IMMEDIATE_BUSY_ALERT_THRESHOLD).toBe(4)
+    expect(IMMEDIATE_BUSY_ALERT_THRESHOLD).toBeGreaterThan(IMMEDIATE_MISS_ALERT_THRESHOLD)
+  })
 })
 
 describe('missed-fire-alert: message', () => {
@@ -55,6 +65,52 @@ describe('missed-fire-alert: message', () => {
     expect(msg).toContain('ghost')
     expect(msg).toContain('tmux')
     expect(msg).toContain('2')
+  })
+
+  it('busy-wedge message differs semantically: session FUT (alive) but agent hung', () => {
+    const msg = formatBusyWedgeAlert({ ...VIEW, missedCount: 4 })
+    expect(msg).toContain('wedged-task')
+    expect(msg).toContain('ghost')
+    expect(msg).toContain('4')
+    // Says the session is alive/running and the agent is hung -- NOT dead.
+    expect(msg).toContain('FUT')
+    expect(msg.toLowerCase()).toContain('hung')
+    // It must NOT claim the session is not running (that is the 'missing' wording).
+    expect(msg).not.toContain('nem fut')
+    // And it must read differently from the dead-session message.
+    expect(msg).not.toBe(formatMissedFireAlert({ ...VIEW, missedCount: 4 }))
+  })
+})
+
+describe('missed-fire-alert: busy-wedge variant reuses the send machinery', () => {
+  it('dedups within an episode and uses the busy formatter when passed', async () => {
+    const db = getNoaDb()
+    const deliver = vi.fn().mockResolvedValue(undefined)
+    const nowS = 2_000_000
+    const opts = { format: formatBusyWedgeAlert, logLabel: 'hung-but-alive agent' }
+
+    sendMissedFireAlert({ ...VIEW, missedCount: 4 }, nowS, db, deliver, opts)
+    await flush()
+    sendMissedFireAlert({ ...VIEW, missedCount: 5 }, nowS + 60, db, deliver, opts)
+    await flush()
+
+    expect(deliver).toHaveBeenCalledTimes(1)
+    expect(deliver.mock.calls[0]![0]).toContain('FUT') // busy wording, not dead-session
+  })
+
+  it('recovery clear lets a second busy episode alert again', async () => {
+    const db = getNoaDb()
+    const deliver = vi.fn().mockResolvedValue(undefined)
+    const opts = { format: formatBusyWedgeAlert }
+
+    sendMissedFireAlert({ ...VIEW, missedCount: 4 }, 3000, db, deliver, opts)
+    await flush()
+    expect(deliver).toHaveBeenCalledTimes(1)
+
+    clearMissedFireAlert(db, 'wedged-task')
+    sendMissedFireAlert({ ...VIEW, missedCount: 4 }, 7000, db, deliver, opts)
+    await flush()
+    expect(deliver).toHaveBeenCalledTimes(2)
   })
 })
 

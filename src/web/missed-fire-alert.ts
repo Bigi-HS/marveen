@@ -41,6 +41,23 @@ import { defaultDeliver, type AlertDeliver } from './operator-alert.js'
  */
 export const IMMEDIATE_MISS_ALERT_THRESHOLD = 2
 
+/**
+ * Consecutive 'busy' (hung-but-tmux-ALIVE) ticks required before the immediate
+ * busy-wedge alert fires (card ea4d3d8f, follow-up B to c7f289d8).
+ *
+ * Deliberately LARGER than IMMEDIATE_MISS_ALERT_THRESHOLD (2). A dead session is
+ * an unambiguous outage after a single transient tick is absorbed, so 2 is safe
+ * there. A 'busy' verdict, by contrast, is the NORMAL state of an agent that is
+ * legitimately mid-work: it means the pane was not idle-ready at the fire
+ * moment, which a healthy busy agent produces for several consecutive 60s ticks
+ * without anything being wrong. Alerting at 2 would false-positive on every
+ * agent that happens to be working when a task is due. 4 consecutive still-busy
+ * ticks (roughly 4+ minutes of unbroken non-readiness, given the exponential
+ * backoff on the retry row) is the point where "busy" stops looking like work
+ * and starts looking like a hang. Named so the FP boundary is one obvious knob.
+ */
+export const IMMEDIATE_BUSY_ALERT_THRESHOLD = 4
+
 type AlertDb = {
   prepare(sql: string): {
     run(...params: unknown[]): { changes: number }
@@ -108,6 +125,22 @@ export function formatMissedFireAlert(view: MissedFireView): string {
 }
 
 /**
+ * Busy-wedge variant (card ea4d3d8f). Distinct from the dead-session message:
+ * here the tmux session EXISTS, but the agent is hung / not ready for a prompt
+ * (hung-but-alive wedge) across IMMEDIATE_BUSY_ALERT_THRESHOLD consecutive
+ * ticks, so the fire was repeatedly skipped. The debounce is explicitly called
+ * out so the operator understands this is NOT a one-off "agent was briefly
+ * busy" blip but a sustained non-readiness.
+ */
+export function formatBusyWedgeAlert(view: MissedFireView): string {
+  return [
+    `[Marveen scheduler] A(z) "${view.taskId}" (${view.agent}) utemezett feladat NEM tuzelt: az agens tmux session-je FUT, de az agens beragadt (hung, nem fogad promptot).`,
+    `Ez ${view.missedCount} egymast koveto tick ota tart -- tehat nem egy pillanatnyi "eppen dolgozik" allapot, hanem tartos beragadas. A fire AZONNAL elmaradt -- nem varunk az 1 oras / 3 oras backstopra.`,
+    'Feloldas: dashboard /Utemezesek -> ellenorizd es ebreszd fel az agens session-jet (pl. ujrainditas). A feladat magatol lefut, amint az agens ujra promptot fogad (a scheduler ujraprobalkozik).',
+  ].join('\n')
+}
+
+/**
  * Fire the immediate missed-fire alert for ONE task, at most once per episode.
  *
  * Preconditions the caller enforces: the task hit the 'missing' verdict this
@@ -118,12 +151,28 @@ export function formatMissedFireAlert(view: MissedFireView): string {
  * stamp on a TRANSIENT failure so the next tick retries, keep it on a PERMANENT
  * one so a bad token does not spin every 60s.
  */
+export interface ImmediateAlertOptions {
+  /**
+   * Message formatter for this alert variant. Defaults to the dead-session
+   * ('missing') wording. Pass formatBusyWedgeAlert for the hung-but-alive case.
+   */
+  format?: (view: MissedFireView) => string
+  /**
+   * Short label for the structured log line, so the two variants (missing vs
+   * busy-wedge) are distinguishable in the logs. Defaults to 'wedged agent'.
+   */
+  logLabel?: string
+}
+
 export function sendMissedFireAlert(
   view: MissedFireView,
   nowS: number,
   db: AlertDb,
   deliver: AlertDeliver = defaultDeliver,
+  options: ImmediateAlertOptions = {},
 ): void {
+  const format = options.format ?? formatMissedFireAlert
+  const logLabel = options.logLabel ?? 'wedged agent'
   ensureMissedFireAlertTable(db)
 
   // INSERT OR IGNORE: first_seen belongs to the first observation of THIS
@@ -133,11 +182,11 @@ export function sendMissedFireAlert(
 
   if (!claimAlert(db, view.taskId, nowS)) return
 
-  void deliver(formatMissedFireAlert(view)).then(
+  void deliver(format(view)).then(
     () => {
       logger.info(
         { task: view.taskId, agent: view.agent, missedCount: view.missedCount },
-        'scheduler: immediate missed-fire alert sent (wedged agent)',
+        `scheduler: immediate missed-fire alert sent (${logLabel})`,
       )
     },
     (err: unknown) => {
