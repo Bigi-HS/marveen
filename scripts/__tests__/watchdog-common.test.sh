@@ -444,6 +444,106 @@ for w in agent bigben blackbart bond buster chad claudia dave devil-advocate \
     || bad "${w}-watchdog.sh: call-site migration incomplete (missing wd_relaunch or raw tmux relaunch remains)"
 done
 
+# ---- wd_check_telegram_pipe: MCP-pipe liveness probe (card 1c024355) --------
+# State JSON schema: { "consecutiveDead": N, "lastHealthyTs": N|null,
+#                      "alerted": bool, "lastCheckedTs": N|null }
+# Returns:
+#   0 = pipe ALIVE (fresh state file, consecutiveDead==0)
+#   1 = pipe DEAD  (fresh state file, consecutiveDead>0 OR stale file)
+#   2 = INCONCLUSIVE (file absent OR gate CLOSED)
+#
+# Helper: write a state JSON with the given consecutiveDead into a temp store dir.
+# The mtime is current (fresh) unless the caller adjusts it afterwards.
+PIPE_STORE="$(mktemp -d)"
+write_pipe_state() {
+  local agent="$1" consecutive_dead="$2"
+  printf '{"consecutiveDead":%s,"alerted":false,"lastHealthyTs":null,"lastCheckedTs":null}' \
+    "$consecutive_dead" > "${PIPE_STORE}/pipe-watchdog.${agent}.state.json"
+}
+
+# T1: state file absent -> rc=2 (inconclusive)
+rm -f "${PIPE_STORE}/pipe-watchdog.t1test.state.json"
+WD_PIPE_CHECK_ENABLED=1 wd_check_telegram_pipe "t1test" "$PIPE_STORE" 2>/dev/null
+[ $? -eq 2 ] \
+  && ok "T1: absent state file -> rc=2 (inconclusive)" \
+  || bad "T1: absent state file should give rc=2 (inconclusive)"
+
+# T2: state file exists, fresh, consecutiveDead=0 -> rc=0 (alive)
+write_pipe_state "t2test" 0
+WD_PIPE_CHECK_ENABLED=1 wd_check_telegram_pipe "t2test" "$PIPE_STORE" 2>/dev/null
+[ $? -eq 0 ] \
+  && ok "T2: fresh state, consecutiveDead=0 -> rc=0 (alive)" \
+  || bad "T2: expected rc=0 (alive)"
+
+# T3: state file exists, fresh, consecutiveDead=2 -> rc=1 (dead)
+write_pipe_state "t3test" 2
+WD_PIPE_CHECK_ENABLED=1 wd_check_telegram_pipe "t3test" "$PIPE_STORE" 2>/dev/null
+[ $? -eq 1 ] \
+  && ok "T3: fresh state, consecutiveDead=2 -> rc=1 (dead)" \
+  || bad "T3: expected rc=1 (dead)"
+
+# T4: state file stale (mtime > 6 min ago) -> rc=1 (dead/stale)
+write_pipe_state "t4test" 0
+# Set mtime to 10 minutes ago (600s ago)
+OLD_TS="$(date -d '10 minutes ago' '+%Y%m%d%H%M.%S' 2>/dev/null || date -v-10M '+%Y%m%d%H%M.%S' 2>/dev/null || true)"
+if [ -n "$OLD_TS" ]; then
+  touch -t "$OLD_TS" "${PIPE_STORE}/pipe-watchdog.t4test.state.json"
+  WD_PIPE_CHECK_ENABLED=1 wd_check_telegram_pipe "t4test" "$PIPE_STORE" 2>/dev/null
+  [ $? -eq 1 ] \
+    && ok "T4: stale state file (mtime > 6min) -> rc=1 (dead/stale)" \
+    || bad "T4: expected rc=1 for stale state"
+else
+  ok "T4: SKIPPED (date -d unavailable on this platform)"
+fi
+
+# T5: WD_PIPE_CHECK_ENABLED=0 (gate CLOSED) -> rc=2 always, even with alive state
+write_pipe_state "t5test" 0
+WD_PIPE_CHECK_ENABLED=0 wd_check_telegram_pipe "t5test" "$PIPE_STORE" 2>/dev/null
+[ $? -eq 2 ] \
+  && ok "T5: gate CLOSED (WD_PIPE_CHECK_ENABLED=0) -> rc=2 (inconclusive) always" \
+  || bad "T5: gate CLOSED should return rc=2"
+
+# T5b: gate UNSET (default) -> rc=2 (gate CLOSED by default)
+( unset WD_PIPE_CHECK_ENABLED 2>/dev/null
+  wd_check_telegram_pipe "t5test" "$PIPE_STORE" 2>/dev/null )
+[ $? -eq 2 ] \
+  && ok "T5b: gate UNSET -> defaults to CLOSED (rc=2)" \
+  || bad "T5b: gate UNSET should default to CLOSED (rc=2)"
+
+# T6: WD_PIPE_CHECK_ENABLED=1 (gate OPEN) + alive file -> rc=0
+write_pipe_state "t6test" 0
+WD_PIPE_CHECK_ENABLED=1 wd_check_telegram_pipe "t6test" "$PIPE_STORE" 2>/dev/null
+[ $? -eq 0 ] \
+  && ok "T6: gate OPEN (WD_PIPE_CHECK_ENABLED=1) + alive state -> rc=0 (alive)" \
+  || bad "T6: gate OPEN + alive should return rc=0"
+
+# T7: empty agent arg -> rc=2 (inconclusive, no-op)
+WD_PIPE_CHECK_ENABLED=1 wd_check_telegram_pipe "" "$PIPE_STORE" 2>/dev/null
+[ $? -eq 2 ] \
+  && ok "T7: empty agent arg -> rc=2 (inconclusive)" \
+  || bad "T7: empty agent should return rc=2"
+
+# T8: set -u safe -- wd_check_telegram_pipe with no WD_STORE_DIR, no WD_LOG_FILE
+( set -u
+  unset WD_PIPE_CHECK_ENABLED 2>/dev/null || true
+  unset WD_STORE_DIR 2>/dev/null || true
+  unset WD_LOG_FILE 2>/dev/null || true
+  wd_check_telegram_pipe "t8test" "$PIPE_STORE" 2>/dev/null; r=$?
+  [ "$r" -eq 2 ]  # gate CLOSED -> inconclusive
+) && ok "T8: wd_check_telegram_pipe safe under set -u (gate CLOSED, no env vars)" \
+  || bad "T8: set -u regression"
+
+rm -rf "$PIPE_STORE"
+
+# ---- hibiki-watchdog.sh: pipe-check integration (card 1c024355) ------------
+# Structural checks: the patched watchdog must carry the pipe-check block.
+HIBIKI_WD="$ROOT/scripts/hibiki-watchdog.sh"
+{ grep -q 'WD_PIPE_CHECK_ENABLED' "$HIBIKI_WD" \
+    && grep -q 'wd_check_telegram_pipe' "$HIBIKI_WD" \
+    && grep -q 'pipe DEAD' "$HIBIKI_WD"; } \
+  && ok "hibiki-watchdog.sh: pipe-check integration present (WD_PIPE_CHECK_ENABLED + wd_check_telegram_pipe + dead-log)" \
+  || bad "hibiki-watchdog.sh: pipe-check integration missing"
+
 echo "----"
 echo "watchdog-common: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
