@@ -587,6 +587,168 @@ class QuarantineViolations(unittest.TestCase):
             self.assertEqual(res2["quarantine_violations"], {})
 
 
+# --- misclassification fail-closed guard (card 5dd2d982) -------------------
+class MisclassificationGuard(unittest.TestCase):
+    """A quarantined id that OWNS live FK-target rows but is NOT a synthetic
+    fixture (SYNTHETIC_FIXTURES) is a REAL actor wrongly quarantined
+    (the blackbart/servo-skull class bug). The seed must catch this at seed-time
+    and fail CLOSED -- never silently purge a real actor's historical rows."""
+
+    def _patch_quarantine(self, extra):
+        """Temporarily add `extra` ids to QUARANTINE_IDS WITHOUT touching the
+        production membership, so the misclassification path can be exercised
+        against a real-actor id that is NOT a synthetic fixture."""
+        saved = mod.QUARANTINE_IDS
+        mod.QUARANTINE_IDS = tuple(saved) + tuple(extra)
+        return saved
+
+    def test_synthetic_fixtures_allowlist_is_the_two_fixtures(self):
+        """SYNTHETIC_FIXTURES is the explicit purge-safe allowlist = exactly the
+        two synthetic fixtures (today equal to QUARANTINE_IDS)."""
+        self.assertEqual(
+            set(mod.SYNTHETIC_FIXTURES), {"fake-admin", "dave-expired"}
+        )
+
+    def test_misclassified_real_actor_is_flagged_and_fails_closed(self):
+        """RED-on-pre-fix: a quarantined id that is NOT a synthetic fixture but
+        owns a live core row is MISCLASSIFIED. run_seed must surface it under
+        'misclassified' and main() must exit NON-ZERO, and the row must NOT be
+        deleted."""
+        saved = self._patch_quarantine(("blackbart",))
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                agents = _make_roster(tmp)
+                db = _make_db(
+                    tmp,
+                    kanban_assignees=("dave", "blackbart"),
+                    memory_agents=("scout",),
+                    message_from=("dave",),
+                    token_agents=("thor",),
+                )
+                res = mod.run_seed(db, agents, apply=True)
+                # misclassified surfaced with the live-row census
+                self.assertIn("blackbart", res.get("misclassified", {}))
+                self.assertIn(
+                    "kanban_cards.assignee", res["misclassified"]["blackbart"]
+                )
+                # the real actor's row is NOT deleted (fail-closed before purge)
+                con = sqlite3.connect(db)
+                try:
+                    n = con.execute(
+                        "SELECT COUNT(*) FROM kanban_cards WHERE assignee=?",
+                        ("blackbart",),
+                    ).fetchone()[0]
+                finally:
+                    con.close()
+                self.assertEqual(n, 1, "misclassified actor row must NOT be purged")
+                # main() must exit non-zero (3)
+                rc = mod.main(
+                    ["--db", str(db), "--agents-dir", str(agents), "--apply"]
+                )
+                self.assertEqual(rc, 3, "misclassification must fail closed with rc=3")
+        finally:
+            mod.QUARANTINE_IDS = saved
+
+    def test_misclassified_fails_closed_in_dry_run_too(self):
+        """Fail-closed happens BEFORE any write, so dry-run also returns non-zero
+        when a misclassified real actor is present."""
+        saved = self._patch_quarantine(("servo-skull",))
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                agents = _make_roster(tmp)
+                db = _make_db(
+                    tmp,
+                    kanban_assignees=("dave",),
+                    memory_agents=("scout", "servo-skull"),
+                    message_from=("dave",),
+                    token_agents=("thor",),
+                )
+                res = mod.run_seed(db, agents, apply=False)
+                self.assertIn("servo-skull", res.get("misclassified", {}))
+                rc = mod.main(
+                    ["--db", str(db), "--agents-dir", str(agents)]
+                )
+                self.assertEqual(rc, 3)
+                # dry-run wrote nothing
+                self.assertEqual(mod.quarantine_ids_with_live_rows(db), res.get("quarantine_violations", {}))
+        finally:
+            mod.QUARANTINE_IDS = saved
+
+    def test_no_misclassification_when_all_quarantined_are_fixtures(self):
+        """Preservation: with the real QUARANTINE_IDS == SYNTHETIC_FIXTURES,
+        a DB whose only quarantined rows are the fixtures has an EMPTY
+        misclassified set and main() returns 0."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(
+                tmp,
+                kanban_assignees=("dave", "fake-admin"),
+                memory_agents=("scout", "dave-expired"),
+                message_from=("dave",),
+                token_agents=("thor",),
+            )
+            res = mod.run_seed(db, agents, apply=False)
+            self.assertEqual(res.get("misclassified", {}), {})
+            rc = mod.main(["--db", str(db), "--agents-dir", str(agents)])
+            self.assertEqual(rc, 0)
+
+    def test_purge_scoped_to_synthetic_fixtures_only(self):
+        """Even if a non-fixture id were quarantined (and happened to own no
+        rows, so not misclassified), the purge loop only deletes
+        SYNTHETIC_FIXTURES rows -- never a blanket QUARANTINE_IDS delete."""
+        saved = self._patch_quarantine(("harmless-extra",))
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                agents = _make_roster(tmp)
+                # harmless-extra owns NO rows -> not misclassified -> run proceeds
+                db = _make_db(
+                    tmp,
+                    kanban_assignees=("dave", "fake-admin"),
+                    memory_agents=("scout",),
+                    message_from=("dave",),
+                    token_agents=("thor", "dave-expired"),
+                )
+                res = mod.run_seed(db, agents, apply=True)
+                self.assertEqual(res.get("misclassified", {}), {})
+                # fixtures purged, post-apply clean
+                self.assertEqual(res["quarantine_violations"], {})
+        finally:
+            mod.QUARANTINE_IDS = saved
+
+    def test_post_apply_assert_nonempty_violations_returns_nonzero(self):
+        """Post-apply ASSERT: if after the fixture purge
+        quarantine_ids_with_live_rows is STILL non-empty, main() returns
+        non-zero (hard signal the purge did not clear)."""
+        saved_purge = mod._purge_fixtures
+
+        def _noop_purge(con):  # simulate a purge that fails to clear rows
+            return 0
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(
+                tmp,
+                kanban_assignees=("dave", "fake-admin"),
+                memory_agents=("scout",),
+                message_from=("dave",),
+                token_agents=("thor",),
+            )
+            mod._purge_fixtures = _noop_purge
+            try:
+                res = mod.run_seed(db, agents, apply=True)
+                # purge was neutered -> fixture row still present
+                self.assertNotEqual(res["quarantine_violations"], {})
+                rc = mod.main(["--db", str(db), "--agents-dir", str(agents), "--apply"])
+                self.assertEqual(rc, 3)
+            finally:
+                mod._purge_fixtures = saved_purge
+
+
 # --- kind column DDL (card cfeb868b) ---------------------------------------
 class KindColumn(unittest.TestCase):
     def test_create_agents_sql_has_kind_column(self):
