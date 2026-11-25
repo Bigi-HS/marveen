@@ -516,3 +516,118 @@ wd_relaunch() {
 
   return "$launch_rc"
 }
+
+# ---------------------------------------------------------------------------
+# MCP-pipe liveness probe (card 1c024355).
+#
+# Reads the per-agent-pipe-watchdog state file written by the TypeScript
+# per-agent-pipe-watchdog-cli. State file location:
+#   <store_dir>/pipe-watchdog.<agent>.state.json
+#
+# State JSON schema (from per-agent-pipe-watchdog.ts / telegram-pipe-watchdog.ts):
+#   { "consecutiveDead": N, "alerted": bool, "lastHealthyTs": N|null,
+#     "lastCheckedTs": N|null }
+# NOTE: there is NO "verdict" field in the JSON -- the verdict is computed
+# dynamically by the TypeScript layer. We derive liveness from consecutiveDead.
+#
+# Returns:
+#   0 -- pipe ALIVE: state file exists, is fresh (<6 min by mtime), consecutiveDead==0
+#   1 -- pipe DEAD:  state file exists and is fresh but consecutiveDead>0,
+#                    OR state file is stale (>= 360s by mtime, treat as dead for safety)
+#   2 -- INCONCLUSIVE: state file absent or unreadable (fail-safe: do NOT
+#                      relaunch on inconclusive -- uncertainty must never fire recovery)
+#
+# Freshness gate: 6 minutes (360s), matching channel-watchdog.sh TRANSPORT_FRESH_SECONDS=360.
+# This avoids false-dead when the per-agent-pipe-watchdog hasn't run yet (new env, missing cli).
+#
+# ROLLOUT GATE: WD_PIPE_CHECK_ENABLED (default "0"). When CLOSED, returns 2
+# (inconclusive) so the caller's existing session-down recovery is unchanged --
+# zero blast radius on the first deploy. Boss-gated canary flip sets
+# WD_PIPE_CHECK_ENABLED=1 per watchdog.
+#
+# set -u safe (F4): all locals initialised before use.
+# F7: state file path is passed to python via argv, never string-interpolated.
+# ---------------------------------------------------------------------------
+
+# wd_check_telegram_pipe <agent_name> [store_dir]
+#
+# store_dir defaults to $WD_STORE_DIR when set, otherwise the canonical
+# store/ directory two levels above the lib file (scripts/lib/ -> store/).
+#
+# Example usage in a watchdog loop (gate OPEN):
+#   if [ "${WD_PIPE_CHECK_ENABLED:-0}" = "1" ]; then
+#     pipe_rc=2
+#     wd_check_telegram_pipe "${SESSION#agent-}" && pipe_rc=0 || pipe_rc=$?
+#     if [ "$pipe_rc" -eq 1 ]; then
+#       log "$SESSION UP but pipe DEAD -- relaunch"
+#     fi
+#   fi
+wd_check_telegram_pipe() {
+  local agent="${1:-}"
+  local store_dir="${2:-${WD_STORE_DIR:-}}"
+
+  if [ -z "$agent" ]; then return 2; fi  # inconclusive: no agent name
+
+  # ROLLOUT GATE: when CLOSED, return 2 (inconclusive) immediately.
+  # Logs which path ran so post-restart audits can confirm activation.
+  if [ "${WD_PIPE_CHECK_ENABLED:-0}" != "1" ]; then
+    _wd_read_model_warn "INFO wd_check_telegram_pipe: gate CLOSED (WD_PIPE_CHECK_ENABLED!=1) agent=$agent -> inconclusive (no-op)"
+    return 2
+  fi
+
+  _wd_read_model_warn "INFO wd_check_telegram_pipe: gate OPEN (WD_PIPE_CHECK_ENABLED=1) agent=$agent -> checking"
+
+  # Derive store_dir from the lib file's own location when not provided.
+  if [ -z "$store_dir" ]; then
+    store_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)/store"
+  fi
+
+  local state_file="${store_dir}/pipe-watchdog.${agent}.state.json"
+
+  # Missing or unreadable -> inconclusive (fail-safe: never relaunch from uncertainty).
+  [ -f "$state_file" ] || { _wd_read_model_warn "INFO wd_check_telegram_pipe: state file absent agent=$agent -> inconclusive"; return 2; }
+
+  # F7: path is argv, never interpolated into source.
+  # Python script checks:
+  #   1. File age by mtime (< 360s = fresh)
+  #   2. consecutiveDead field (== 0 means alive)
+  # Exit codes from python:
+  #   0 = alive (fresh + consecutiveDead==0)
+  #   1 = dead (fresh + consecutiveDead>0)
+  #   2 = inconclusive (stale mtime OR parse error)
+  python3 -c "
+import json, sys, time, os
+FRESH_SECONDS = 360
+try:
+    path = sys.argv[1]
+    mtime = os.path.getmtime(path)
+    age = time.time() - mtime
+    if age >= FRESH_SECONDS:
+        sys.exit(2)  # stale -> inconclusive (treat as dead for safety: caller maps 2->dead or inconclusive)
+    m = json.load(open(path))
+    consecutive_dead = m.get('consecutiveDead', 0)
+    if not isinstance(consecutive_dead, (int, float)):
+        consecutive_dead = 0
+    sys.exit(0 if consecutive_dead == 0 else 1)
+except Exception:
+    sys.exit(2)
+" "$state_file" 2>/dev/null
+  local py_rc=$?
+
+  case "$py_rc" in
+    0)
+      _wd_read_model_warn "INFO wd_check_telegram_pipe: pipe ALIVE agent=$agent (fresh state, consecutiveDead=0)"
+      return 0
+      ;;
+    1)
+      _wd_read_model_warn "WARN wd_check_telegram_pipe: pipe DEAD agent=$agent (fresh state, consecutiveDead>0)"
+      return 1
+      ;;
+    *)
+      # stale file OR parse error -> stale is treated as dead (rc=1) per spec:
+      # "state file is stale -> rc=1 (dead/stale, treat as dead for safety)"
+      _wd_read_model_warn "WARN wd_check_telegram_pipe: pipe DEAD/stale agent=$agent (stale mtime or unreadable state)"
+      return 1
+      ;;
+  esac
+}

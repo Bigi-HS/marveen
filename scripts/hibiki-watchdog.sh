@@ -72,6 +72,25 @@ while true; do
       log "$SESSION DOWN but relaunch cap (${MAX_PER_HOUR}/h) reached -- backing off 600s"
       sleep 600
     fi
+  else
+    # Session is UP -- check MCP-pipe liveness (card 1c024355).
+    # Only acts when gate OPEN (WD_PIPE_CHECK_ENABLED=1) so a crash-restart
+    # outside the Boss-gated canary window is behaviour-neutral (gate default=0).
+    # Inconclusive (rc=2): do NOT relaunch -- uncertainty must never fire recovery.
+    if [ "${WD_PIPE_CHECK_ENABLED:-0}" = "1" ]; then
+      pipe_rc=2
+      wd_check_telegram_pipe "${SESSION#agent-}" && pipe_rc=0 || pipe_rc=$?
+      if [ "$pipe_rc" -eq 1 ]; then
+        log "$SESSION UP but pipe DEAD (wd_check_telegram_pipe=dead) -- relaunch (fresh --channels)"
+        if wd_under_cap_file "$STAMP_FILE" "$MAX_PER_HOUR"; then
+          wd_under_cap_stamp "$STAMP_FILE"
+          launch
+        else
+          log "$SESSION pipe-dead relaunch blocked by cap (${MAX_PER_HOUR}/h) -- backing off 600s"
+          sleep 600
+        fi
+      fi
+    fi
   fi
   sleep 15
 done
