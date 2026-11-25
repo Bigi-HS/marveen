@@ -84,8 +84,34 @@ if [ "${#hold_files[@]}" -gt 0 ]; then
   hold_hit=0
   for hf in "${hold_files[@]}"; do
     held_sha="${hf##*/.deploy-hold-}"
-    if git cat-file -e "${held_sha}^{commit}" 2>/dev/null \
-       && git merge-base --is-ancestor "$held_sha" "$target_sha" 2>/dev/null; then
+
+    # Resolve the suffix to a commit with an EXPLICIT result. Do NOT lean on
+    # `&&` short-circuit for the decision: a cat-file *error* (unresolvable
+    # suffix -- PR#-named, typo, truncated, non-existent SHA) must not be
+    # conflated with the ancestry condition being *false*. Conflating them is
+    # the fail-OPEN bug: the sentinel would be silently skipped and the deploy
+    # would proceed past an unparseable hold (card 9fa9f4dc).
+    if git cat-file -e "${held_sha}^{commit}" 2>/dev/null; then
+      resolve_ok=1
+    else
+      resolve_ok=0
+    fi
+
+    if [ "$resolve_ok" -ne 1 ]; then
+      # UNRESOLVABLE suffix -> fail CLOSED (an unparseable hold is still a hold).
+      echo ""
+      warn "DEPLOY-HOLD sentinel suffix does not resolve to a commit: ${held_sha}"
+      warn "  file: $hf"
+      cat "$hf" | sed 's/^/    /'
+      warn "An unresolvable hold is treated as BLOCKING (fail-closed deploy safety)."
+      warn "To clear: rename the marker to .deploy-hold-<full-sha>, or remove it if confirmed stale."
+      echo ""
+      hold_hit=$((hold_hit + 1))
+      continue
+    fi
+
+    if git merge-base --is-ancestor "$held_sha" "$target_sha" 2>/dev/null; then
+      # RESOLVABLE + ANCESTOR (happy path) -- existing inert-flag logic, byte-identical.
       echo ""
       echo "  HOLD ACTIVE -- held commit ${held_sha:0:8} is in target $TARGET:"
       cat "$hf" | sed 's/^/    /'
@@ -113,6 +139,17 @@ if [ "${#hold_files[@]}" -gt 0 ]; then
       else
         hold_hit=$((hold_hit + 1))
       fi
+    else
+      # RESOLVABLE but NON-ANCESTOR -> fail CLOSED (may be squash-landed).
+      echo ""
+      warn "DEPLOY-HOLD held SHA ${held_sha:0:8} resolves but is NOT an ancestor of target $TARGET"
+      warn "  file: $hf"
+      cat "$hf" | sed 's/^/    /'
+      warn "May be squash-landed (ancestry cannot prove it is absent from the deploy) -- treating as blocking."
+      warn "If confirmed NOT deployed, remove the marker file to clear."
+      echo ""
+      hold_hit=$((hold_hit + 1))
+      continue
     fi
   done
   if [ "$hold_hit" -gt 0 ]; then
