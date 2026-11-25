@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS agents (
   model      TEXT,
   domain_db  INTEGER NOT NULL DEFAULT 0,
   status     TEXT,
+  kind       TEXT    NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent','owner','service')),
   created_at INTEGER NOT NULL,
   retired_at INTEGER
 );

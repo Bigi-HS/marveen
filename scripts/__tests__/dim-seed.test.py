@@ -149,19 +149,87 @@ class NormalizeClasses(unittest.TestCase):
         for a in expected:
             self.assertFalse(mod.is_quarantined(a), f"{a} must not be quarantined")
 
-    def test_every_class_c_id_is_quarantined(self):
-        """Class (c): service/non-agent ids + test fixtures are quarantined, NOT
-        seeded."""
-        for ident in (
-            "server",
-            "gate",
-            "fleet-supervisor",
-            "appletype",
-            "dominik",
-            "fake-admin",
-            "dave-expired",
-        ):
+    def test_only_synthetic_fixtures_are_quarantined(self):
+        """Reclassification (card cfeb868b): quarantine now holds ONLY the two
+        synthetic test fixtures. service/owner ids are SEEDED, not quarantined."""
+        self.assertEqual(set(mod.QUARANTINE_IDS), {"fake-admin", "dave-expired"})
+        for ident in ("fake-admin", "dave-expired"):
             self.assertTrue(mod.is_quarantined(ident), f"{ident} must be quarantined")
+        for ident in ("server", "gate", "fleet-supervisor", "appletype", "dominik"):
+            self.assertFalse(
+                mod.is_quarantined(ident), f"{ident} must NOT be quarantined anymore"
+            )
+
+    def test_kind_for_classification(self):
+        """kind_for: owner for dominik, service for the 4 service ids, else agent."""
+        self.assertEqual(mod.kind_for("dominik"), "owner")
+        for ident in ("gate", "server", "fleet-supervisor", "appletype"):
+            self.assertEqual(mod.kind_for(ident), "service", f"{ident} must be service")
+        for ident in ("dave", "scout", "marveen", "blackbart", "servo-skull"):
+            self.assertEqual(mod.kind_for(ident), "agent", f"{ident} must be agent")
+
+    def test_dominik_seeded_as_owner_not_quarantined(self):
+        """(b) dominik is seeded with kind='owner' and is NOT in QUARANTINE_IDS."""
+        self.assertNotIn("dominik", mod.QUARANTINE_IDS)
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(tmp)
+            rows = {r["agent_id"]: r for r in mod.build_seed_rows(agents, db)}
+            self.assertIn("dominik", rows, "dominik must be seeded")
+            self.assertEqual(rows["dominik"]["kind"], "owner")
+
+    def test_service_ids_seeded_with_kind_service(self):
+        """(c) gate/server/fleet-supervisor/appletype are seeded with
+        kind='service'; a DB carrying their historical rows yields fk_uncovered=[]
+        because they are now genuinely seeded (not quarantine-skipped)."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(
+                tmp,
+                kanban_assignees=("dave", "gate", "appletype"),
+                message_from=("dave", "server", "fleet-supervisor"),
+                token_agents=("thor",),
+            )
+            rows = {r["agent_id"]: r for r in mod.build_seed_rows(agents, db)}
+            for ident in ("gate", "server", "fleet-supervisor", "appletype"):
+                self.assertIn(ident, rows, f"{ident} must be seeded")
+                self.assertEqual(rows[ident]["kind"], "service")
+            uncovered = mod.fk_uncovered_core_ids(agents, db)
+            self.assertEqual(uncovered, set(), f"uncovered: {sorted(uncovered)}")
+
+    def test_fk_uncovered_honesty_not_via_quarantine_skip(self):
+        """(e) a DB whose only orphans are dominik/gate/etc yields fk_uncovered=[]
+        GENUINELY (because seeded), NOT because quarantine skips them."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp, names=("dave",))
+            db = _make_db(
+                tmp,
+                kanban_assignees=("dominik", "gate"),
+                memory_agents=("server", "appletype"),
+                message_from=("fleet-supervisor",),
+                token_agents=("dave",),
+            )
+            for ident in ("dominik", "gate", "server", "appletype", "fleet-supervisor"):
+                self.assertFalse(mod.is_quarantined(ident))
+            uncovered = mod.fk_uncovered_core_ids(agents, db)
+            self.assertEqual(uncovered, set(), f"uncovered: {sorted(uncovered)}")
+
+    def test_routable_agent_ids_excludes_service_and_owner(self):
+        """(g) routable_agent_ids returns kind='agent' rows only -- gate/server/
+        fleet-supervisor/appletype/dominik are EXCLUDED (security invariant)."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(tmp)
+            mod.run_seed(db, agents, apply=True)
+            routable = mod.routable_agent_ids(db)
+            for ident in ("gate", "server", "fleet-supervisor", "appletype", "dominik"):
+                self.assertNotIn(ident, routable, f"{ident} must NOT be routable")
+            for ident in ("dave", "scout", "marveen"):
+                self.assertIn(ident, routable, f"{ident} must be routable")
 
     def test_blackbart_and_servo_skull_are_real_agents_not_quarantined(self):
         """Reversed classification (card 5fd6853b): blackbart (248 actor-rows)
@@ -429,6 +497,158 @@ class CliSmoke(unittest.TestCase):
                 text=True,
             )
             self.assertNotEqual(r.returncode, 0)
+
+
+# --- quarantine honesty + purge (card cfeb868b) ----------------------------
+class QuarantineViolations(unittest.TestCase):
+    def test_live_rows_detected_for_fixtures(self):
+        """(a) quarantine_ids_with_live_rows reports the synthetic fixtures with
+        correct per-(table,col) counts when they own live rows."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            db = _make_db(
+                tmp,
+                kanban_assignees=("dave", "fake-admin"),
+                memory_agents=("scout", "fake-admin"),
+                message_from=("dave",),
+                token_agents=("thor", "fake-admin", "dave-expired"),
+            )
+            viol = mod.quarantine_ids_with_live_rows(db)
+            self.assertIn("fake-admin", viol)
+            self.assertIn("dave-expired", viol)
+            self.assertEqual(viol["fake-admin"]["kanban_cards.assignee"], 1)
+            self.assertEqual(viol["fake-admin"]["memories.agent_id"], 1)
+            self.assertEqual(viol["fake-admin"]["agent_tokens.agent_id"], 1)
+            self.assertEqual(viol["dave-expired"]["agent_tokens.agent_id"], 1)
+            # only >0 entries present
+            self.assertNotIn("agent_messages.from_agent", viol["fake-admin"])
+
+    def test_clean_db_has_no_violations(self):
+        """(a) a DB with no fixture rows -> empty."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            db = _make_db(
+                tmp,
+                kanban_assignees=("dave",),
+                memory_agents=("scout",),
+                message_from=("dave",),
+                token_agents=("thor",),
+            )
+            self.assertEqual(mod.quarantine_ids_with_live_rows(db), {})
+
+    def test_dryrun_reports_purge_plan_but_does_not_delete(self):
+        """(d-dry) dry-run includes purge_plan + quarantine_violations, deletes
+        nothing."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(tmp)  # token_agents default has fake-admin + dave-expired
+            res = mod.run_seed(db, agents, apply=False)
+            self.assertIn("quarantine_violations", res)
+            self.assertIn("purge_plan", res)
+            self.assertIn("fake-admin", res["purge_plan"])
+            self.assertEqual(res.get("purged", 0), 0)
+            # nothing deleted in dry-run
+            self.assertNotEqual(mod.quarantine_ids_with_live_rows(db), {})
+
+    def test_apply_purges_fixtures_and_is_idempotent(self):
+        """(d) apply deletes the fixture rows across the 4 core tables; purged
+        count matches; re-run purges 0 (idempotent); post-apply violations empty."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(
+                tmp,
+                kanban_assignees=("dave", "fake-admin"),
+                memory_agents=("scout", "dave-expired"),
+                message_from=("dave", "fake-admin"),
+                token_agents=("thor", "fake-admin", "dave-expired"),
+            )
+            before = mod.quarantine_ids_with_live_rows(db)
+            expected = sum(sum(v.values()) for v in before.values())
+            self.assertEqual(expected, 5)
+            res = mod.run_seed(db, agents, apply=True)
+            self.assertEqual(res["purged"], expected)
+            # fixture rows gone from every core table
+            con = sqlite3.connect(db)
+            try:
+                for ident in ("fake-admin", "dave-expired"):
+                    for tbl, col in mod.CORE_TABLES:
+                        n = con.execute(
+                            f"SELECT COUNT(*) FROM {tbl} WHERE {col}=?", (ident,)
+                        ).fetchone()[0]
+                        self.assertEqual(n, 0, f"{ident} still in {tbl}.{col}")
+            finally:
+                con.close()
+            self.assertEqual(mod.quarantine_ids_with_live_rows(db), {})
+            # idempotent: second apply purges 0
+            res2 = mod.run_seed(db, agents, apply=True)
+            self.assertEqual(res2["purged"], 0)
+            self.assertEqual(res2["quarantine_violations"], {})
+
+
+# --- kind column DDL (card cfeb868b) ---------------------------------------
+class KindColumn(unittest.TestCase):
+    def test_create_agents_sql_has_kind_column(self):
+        """(f) CREATE_AGENTS_SQL creates a table with a 'kind' column."""
+        self.assertIn("kind", mod.CREATE_AGENTS_SQL)
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "k.db"
+            con = sqlite3.connect(db)
+            try:
+                con.execute(mod.CREATE_AGENTS_SQL)
+                cols = {r[1] for r in con.execute("PRAGMA table_info(agents)").fetchall()}
+                self.assertIn("kind", cols)
+            finally:
+                con.close()
+
+    def test_kind_default_is_agent(self):
+        """(f) inserting without kind defaults to 'agent'."""
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "k.db"
+            con = sqlite3.connect(db)
+            try:
+                con.execute(mod.CREATE_AGENTS_SQL)
+                con.execute(
+                    "INSERT INTO agents (agent_id, display, created_at) VALUES (?,?,?)",
+                    ("x", "X", 1),
+                )
+                kind = con.execute("SELECT kind FROM agents WHERE agent_id='x'").fetchone()[0]
+                self.assertEqual(kind, "agent")
+            finally:
+                con.close()
+
+    def test_bogus_kind_raises_check(self):
+        """(f) kind='bogus' violates the CHECK constraint."""
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "k.db"
+            con = sqlite3.connect(db)
+            try:
+                con.execute(mod.CREATE_AGENTS_SQL)
+                with self.assertRaises(sqlite3.IntegrityError):
+                    con.execute(
+                        "INSERT INTO agents (agent_id, display, created_at, kind) VALUES (?,?,?,?)",
+                        ("y", "Y", 1, "bogus"),
+                    )
+            finally:
+                con.close()
+
+    def test_seeded_rows_carry_correct_kind(self):
+        """(c/b) after apply, the dim-table rows carry the right kind per id."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(tmp)
+            mod.run_seed(db, agents, apply=True)
+            con = sqlite3.connect(db)
+            try:
+                kinds = dict(con.execute("SELECT agent_id, kind FROM agents").fetchall())
+            finally:
+                con.close()
+            self.assertEqual(kinds.get("dominik"), "owner")
+            for ident in ("gate", "server", "fleet-supervisor", "appletype"):
+                self.assertEqual(kinds.get(ident), "service", f"{ident}")
+            self.assertEqual(kinds.get("dave"), "agent")
 
 
 if __name__ == "__main__":
