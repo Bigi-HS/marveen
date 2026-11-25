@@ -33,6 +33,7 @@ describe('migrateGateTables (MG-AC1 additive)', () => {
     expect(tables.map((t) => t.name)).toEqual([
       'gate_approvals',
       'gate_ci_runs',
+      'gate_drift_notifications',
       'gate_invalidations',
       'gate_overrides',
       'gate_pr_authors',
