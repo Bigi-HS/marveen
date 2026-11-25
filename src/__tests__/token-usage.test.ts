@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest'
+import { seedTestAgents } from './_fk-test-agents.js'
 import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -306,6 +307,7 @@ describe('correlateWithKanban', () => {
     // correlateWithKanban reads kanban_cards from getNoaDb(); use in-memory noa.db for test isolation
     initNoaDb(':memory:')
     getNoaDb().exec(SCHEMA_SQL)
+  seedTestAgents(getNoaDb())
   })
 
   it('links token_usage rows to kanban cards by agent and time range', async () => {

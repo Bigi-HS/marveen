@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest'
+import { seedTestAgents } from './_fk-test-agents.js'
 import { readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
@@ -39,6 +40,7 @@ beforeAll(() => {
   // noa-kanban in-memory for kanban ops
   initNoaDb(':memory:')
   getNoaDb().exec(SCHEMA_SQL)
+  seedTestAgents(getNoaDb())
   // suppress kanban dispatch (no agents running in test) to avoid extra message/created events
   configureKanban({ isRunning: () => false })
 })

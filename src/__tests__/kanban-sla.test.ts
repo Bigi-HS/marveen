@@ -2,6 +2,7 @@
  * Tests for GET /api/kanban/sla -- SLA staleness alerts (DASH-033, abb2f275).
  */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
+import { seedTestAgents } from './_fk-test-agents.js'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -17,6 +18,7 @@ beforeAll(() => {
   process.env.NODE_ENV = 'test'
   initNoaDb(':memory:')
   getNoaDb().exec(SCHEMA_SQL)
+  seedTestAgents(getNoaDb())
 })
 
 beforeEach(() => {

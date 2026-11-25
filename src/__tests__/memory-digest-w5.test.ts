@@ -4,6 +4,7 @@
 // read path (recallByDateRange == /api/daily-log). marveen AC 2026-06-28:
 // "daily-summary behavior MUST be preserved, no silent function loss."
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
+import { seedTestAgents } from './_fk-test-agents.js'
 import { readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
@@ -42,6 +43,7 @@ beforeAll(() => {
   process.env.NODE_ENV = 'test'
   initNoaDb(':memory:')
   getNoaDb().exec(SCHEMA_SQL)
+  seedTestAgents(getNoaDb())
 })
 
 beforeEach(() => {

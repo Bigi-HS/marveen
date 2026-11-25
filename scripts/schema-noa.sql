@@ -16,6 +16,30 @@
 --     Boss wording); runtime applyKanbanMigrations() migrates live someday rows.
 
 -- ============================================================================
+-- Agents dimension table (M3 FK-ON, card 26ba217a / ff80db66)
+-- ============================================================================
+-- The FK target for the 4 core actor columns (memories.agent_id,
+-- agent_messages.from_agent, agent_tokens.agent_id, kanban_cards.assignee).
+-- Declared FIRST so every referencing table below can point at it: with
+-- foreign_keys=ON a FK to a non-existent table errors on first insert, so the
+-- ordering is load-bearing on a fresh DB. DDL is byte-identical to the M1
+-- dim-seed (scripts/migration/dim-seed.py AGENTS_DDL) so a from-scratch DB is
+-- structurally identical to a migrated one. Seeded post-cutover by dim-seed.py
+-- --apply (agents are retired via retired_at, never hard-deleted -> bare
+-- REFERENCES with NO ACTION, matching the kanban_cards.parent_id precedent).
+CREATE TABLE IF NOT EXISTS agents (
+  agent_id   TEXT PRIMARY KEY,
+  display    TEXT NOT NULL,
+  team       TEXT,
+  leader     TEXT,
+  model      TEXT,
+  domain_db  INTEGER NOT NULL DEFAULT 0,
+  status     TEXT,
+  created_at INTEGER NOT NULL,
+  retired_at INTEGER
+);
+
+-- ============================================================================
 -- Redesigned core tables
 -- ============================================================================
 
@@ -24,7 +48,7 @@
 -- embedding: TEXT(JSON) -> BLOB (sqlite-vec little-endian float32).
 CREATE TABLE memories (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  agent_id    TEXT    NOT NULL,
+  agent_id    TEXT    NOT NULL REFERENCES agents(agent_id),  -- M3 FK-ON
   category    TEXT    NOT NULL,          -- hot | warm | cold | shared
   content     TEXT    NOT NULL,
   keywords    TEXT,
@@ -40,7 +64,7 @@ CREATE TABLE memories (
 -- Changed: priority TEXT -> INTEGER (100=urgent, 75=high, 50=normal, 25=low).
 CREATE TABLE agent_messages (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
-  from_agent        TEXT    NOT NULL,
+  from_agent        TEXT    NOT NULL REFERENCES agents(agent_id),  -- M3 FK-ON (to_agent NOT FK'd: inbound may target a not-yet-seeded id)
   to_agent          TEXT    NOT NULL,
   content           TEXT    NOT NULL,
   status            TEXT    NOT NULL,    -- pending | delivered | failed | completed
@@ -109,7 +133,8 @@ CREATE TABLE embedding_cache (
 CREATE TABLE kanban_cards (
   id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT,
   status TEXT NOT NULL DEFAULT 'planned',
-  assignee TEXT, priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
+  assignee TEXT REFERENCES agents(agent_id), -- M3 FK-ON; NULLABLE (unassigned cards keep assignee NULL)
+  priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
   project TEXT, parent_id TEXT REFERENCES kanban_cards(id), due_date INTEGER,
   sort_order REAL NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
   archived_at INTEGER, dispatched_at INTEGER,
@@ -199,7 +224,7 @@ CREATE TABLE daily_logs (
 
 CREATE TABLE agent_tokens (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  agent_id     TEXT NOT NULL,
+  agent_id     TEXT NOT NULL REFERENCES agents(agent_id),  -- M3 FK-ON
   token_sha256 TEXT NOT NULL UNIQUE,
   scopes_json  TEXT NOT NULL,
   created_at   INTEGER NOT NULL,
