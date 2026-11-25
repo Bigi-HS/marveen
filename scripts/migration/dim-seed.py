@@ -141,6 +141,22 @@ QUARANTINE_IDS: Tuple[str, ...] = (
     "dave-expired",
 )
 
+# --- purge-safe allowlist (card 5dd2d982) -----------------------------------
+# The ONLY quarantined ids whose core-table rows may be PURGED on --apply: the
+# synthetic test fixtures with no legitimate identity. Today this equals
+# QUARANTINE_IDS, but keeping it an explicit, SEPARATE allowlist makes the
+# purge-safety invariant load-bearing and forward-safe: if a REAL actor were ever
+# (mis)classified into QUARANTINE_IDS (the blackbart/servo-skull class bug), the
+# blanket purge would SILENTLY DELETE its legit historical rows. The seed instead
+# treats a quarantined id that owns live FK-target rows but is NOT in this
+# allowlist as MISCLASSIFIED and fails closed BEFORE any write (see
+# ``misclassified_quarantine_ids`` and ``run_seed``). The purge is scoped to
+# this allowlist, never to the whole QUARANTINE_IDS set.
+SYNTHETIC_FIXTURES: Tuple[str, ...] = (
+    "fake-admin",
+    "dave-expired",
+)
+
 
 def kind_for(agent_id: str) -> str:
     """Classify a seeded agent_id: 'owner' for the Boss, 'service' for infra/
@@ -308,6 +324,24 @@ def quarantine_ids_with_live_rows(db_path: Path) -> Dict[str, Dict[str, int]]:
         con.close()
 
 
+def misclassified_quarantine_ids(db_path: Path) -> Dict[str, Dict[str, int]]:
+    """MISCLASSIFICATION guard (card 5dd2d982): quarantined ids that OWN live
+    FK-target rows but are NOT in the purge-safe ``SYNTHETIC_FIXTURES`` allowlist.
+
+    Such an id is a REAL actor wrongly quarantined (the blackbart/servo-skull
+    class bug): blindly purging QUARANTINE_IDS would SILENTLY DELETE its legit
+    historical rows (data loss). This is the honest filter over
+    ``quarantine_ids_with_live_rows`` -- it keeps only the entries whose id is NOT
+    a sanctioned synthetic fixture. A non-empty result means the seed MUST fail
+    closed before any write/purge. Read-only."""
+    allow = set(SYNTHETIC_FIXTURES)
+    return {
+        ident: per_col
+        for ident, per_col in quarantine_ids_with_live_rows(db_path).items()
+        if ident not in allow
+    }
+
+
 # ---------------------------------------------------------------------------
 # seed-row construction + FK-coverage check
 # ---------------------------------------------------------------------------
@@ -420,8 +454,33 @@ def _snapshot(db_path: Path) -> Path:
     return dest
 
 
+def _purge_fixtures(con: sqlite3.Connection) -> int:
+    """Remediation purge, SCOPED to the ``SYNTHETIC_FIXTURES`` allowlist only
+    (card 5dd2d982): delete the synthetic fixture rows across the 4 core tables so
+    post-apply ``quarantine_violations`` is empty and M3 FK-ON has nothing to
+    reject. NEVER a blanket ``QUARANTINE_IDS`` delete -- a non-fixture quarantined
+    id's rows must never be silently deleted (that path fails closed earlier via
+    ``misclassified_quarantine_ids``). Idempotent: re-running deletes 0. Returns
+    the number of rows deleted."""
+    purged = 0
+    for ident in SYNTHETIC_FIXTURES:
+        for table, col in CORE_TABLES:
+            if not _table_exists(con, table):
+                continue
+            cur = con.execute(f"DELETE FROM {table} WHERE {col}=?", (ident,))
+            purged += cur.rowcount
+    return purged
+
+
 def run_seed(db_path: Path, agents_dir: Path, *, apply: bool) -> Dict:
     """Build the seed plan; with apply=True, snapshot then CREATE+upsert.
+
+    FAIL-CLOSED (card 5dd2d982): if any quarantined id owns live FK-target rows
+    but is NOT a sanctioned synthetic fixture, it is MISCLASSIFIED (a real actor
+    wrongly quarantined). The result surfaces it under ``misclassified``, no write
+    or purge happens, and ``main`` turns the non-empty set into a non-zero exit.
+    This check runs for BOTH dry-run and --apply, BEFORE any mutation, so a
+    misclassified actor's legit rows are never silently deleted.
 
     Returns a dict with the plan + (on apply) the number of rows actually
     inserted-new (0 on a repeat run => idempotent)."""
@@ -431,18 +490,28 @@ def run_seed(db_path: Path, agents_dir: Path, *, apply: bool) -> Dict:
     rows = build_seed_rows(agents_dir, db_path)
     uncovered = fk_uncovered_core_ids(agents_dir, db_path)
     violations = quarantine_ids_with_live_rows(db_path)
+    misclassified = misclassified_quarantine_ids(db_path)
     result: Dict = {
         "apply": apply,
         "seed_rows": rows,
         "quarantined": sorted(QUARANTINE_IDS),
+        "synthetic_fixtures": sorted(SYNTHETIC_FIXTURES),
         "fk_uncovered": sorted(uncovered),
         # honest counter-signal: quarantined fixture ids that still carry rows.
         # Must be empty AFTER the --apply purge below.
         "quarantine_violations": violations,
+        # fail-closed signal: quarantined REAL actors (not synthetic fixtures)
+        # that own live rows. Non-empty => main() returns non-zero, no purge.
+        "misclassified": misclassified,
         "snapshot": None,
         "inserted": 0,
         "purged": 0,
     }
+
+    # Fail-closed BEFORE any write/purge (both dry-run AND --apply). A
+    # misclassified real actor's rows are NEVER deleted.
+    if misclassified:
+        return result
 
     if not apply:
         # Dry-run: delete nothing, but surface WHAT the --apply purge would remove
@@ -458,17 +527,7 @@ def run_seed(db_path: Path, agents_dir: Path, *, apply: bool) -> Dict:
         con.execute(CREATE_AGENTS_SQL)
         before = con.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
         con.executemany(UPSERT_SQL, rows)
-        # Remediation purge: delete the synthetic fixture rows (fake-admin,
-        # dave-expired) across the 4 core tables so post-apply
-        # quarantine_violations is empty and M3 FK-ON has nothing to reject.
-        # Idempotent: re-running after the purge deletes 0.
-        purged = 0
-        for ident in QUARANTINE_IDS:
-            for table, col in CORE_TABLES:
-                if not _table_exists(con, table):
-                    continue
-                cur = con.execute(f"DELETE FROM {table} WHERE {col}=?", (ident,))
-                purged += cur.rowcount
+        purged = _purge_fixtures(con)
         con.commit()
         after = con.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
     finally:
@@ -521,6 +580,17 @@ def format_text(result: Dict) -> str:
     else:
         lines.append("QUARANTINE-VIOLATIONS: none -- no fixture id carries a live core row.")
     lines.append("")
+    misc = result.get("misclassified") or {}
+    if misc:
+        lines.append(
+            "MISCLASSIFICATION: FAIL-CLOSED -- these quarantined ids own live "
+            "FK-target rows but are NOT synthetic fixtures (real actors wrongly "
+            "quarantined). NOTHING was purged; resolve the classification first:"
+        )
+        for ident in sorted(misc):
+            per = ", ".join(f"{k}={v}" for k, v in sorted(misc[ident].items()))
+            lines.append(f"   {ident}: {per}")
+        lines.append("")
     if result["apply"]:
         lines.append(f"snapshot: {result['snapshot']}")
         lines.append(f"rows inserted-new: {result['inserted']} (0 on a repeat run)")
@@ -560,6 +630,15 @@ def main(argv: List[str] | None = None) -> int:
         print(json.dumps(result, indent=2))
     else:
         print(format_text(result))
+
+    # Fail-closed exit gating (card 5dd2d982), gate-style non-zero=3:
+    #  * a misclassified real actor was quarantined (pre-write guard), OR
+    #  * after an --apply purge a fixture still carries live rows (post-apply
+    #    assert: the purge failed to clear).
+    if result.get("misclassified"):
+        return 3
+    if result["apply"] and result.get("quarantine_violations"):
+        return 3
     return 0
 
 
