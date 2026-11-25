@@ -748,6 +748,43 @@ class MisclassificationGuard(unittest.TestCase):
             finally:
                 mod._purge_fixtures = saved_purge
 
+    def test_synthetic_fixtures_allowlist_is_exact(self):
+        """Trust-anchor pin: SYNTHETIC_FIXTURES is the purge-safe allowlist --
+        _purge_fixtures deletes rows ONLY for ids in it. Its membership is PINNED
+        to exactly ("fake-admin", "dave-expired"), no more and no fewer. Any future
+        change to this allowlist MUST be a conscious, reviewed edit, because adding
+        a real actor id here would silently purge that actor's historical rows --
+        exactly the data-loss this guard exists to prevent."""
+        # Order-insensitive but EXACT membership (no extra, no missing).
+        self.assertEqual(
+            set(mod.SYNTHETIC_FIXTURES),
+            {"fake-admin", "dave-expired"},
+            "SYNTHETIC_FIXTURES membership drifted -- this is the purge trust-anchor",
+        )
+        self.assertEqual(
+            len(mod.SYNTHETIC_FIXTURES),
+            2,
+            "SYNTHETIC_FIXTURES must contain exactly two ids (no duplicates/extras)",
+        )
+
+    def test_no_real_actor_can_enter_purge_allowlist(self):
+        """Load-bearing invariant: SYNTHETIC_FIXTURES must be DISJOINT from the
+        seeded real-agent roster. A real seeded actor can never fall into the purge
+        bag -- if any seeded agent_id appeared in SYNTHETIC_FIXTURES it would be
+        silently purged on the next --apply run."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(tmp)
+            seed_rows = mod.build_seed_rows(agents, db)
+            seeded_ids = {r["agent_id"] for r in seed_rows}
+            self.assertEqual(
+                set(mod.SYNTHETIC_FIXTURES) & seeded_ids,
+                set(),
+                "a seeded real actor must never be in the purge allowlist: "
+                f"overlap={sorted(set(mod.SYNTHETIC_FIXTURES) & seeded_ids)}",
+            )
+
 
 # --- kind column DDL (card cfeb868b) ---------------------------------------
 class KindColumn(unittest.TestCase):
