@@ -163,6 +163,7 @@ export function computeGateBoard(db: Database.Database, nowS: number): GateBoard
       gauge: seatFor(approvals, 'gauge'),
       dave: seatFor(approvals, 'dave'),
       chad: seatFor(approvals, 'chad'),
+      design: seatFor(approvals, 'design'),
     }
     const chadReviewed = seats.chad !== 'none'
     const overrideActive = hasActiveOverride(db, prNumber, sha)
