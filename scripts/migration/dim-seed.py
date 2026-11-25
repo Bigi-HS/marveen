@@ -119,20 +119,38 @@ CONFIGLESS_REAL_AGENTS: Tuple[str, ...] = (
     "servo-skull",
 )
 
-# --- class (c): service / non-agent ids + test fixtures ---------------------
-# Infra/service identifiers (not routing agents) + the owner + known test
-# fixtures. Quarantined: listed, NOT seeded, and excluded from FK coverage.
+# --- class (c): owner + service ids ARE seeded (reclassified, card cfeb868b) -
+# The owner (``dominik``) and the service/non-agent identifiers (``gate``,
+# ``server``, ``fleet-supervisor``, ``appletype``) carry live FK-target rows in
+# the core tables (74 rows total), so quarantining them was a FALSE-GREEN: M3
+# FK-ON would reject those legit rows while dry-run reported fk_uncovered=[].
+# They are now SEEDED with an explicit ``kind`` (owner / service) instead of
+# ``agent``; the ``kind`` column keeps them out of the routable-agent set
+# (see ``routable_agent_ids``) so a service/owner id is never messaged or issued
+# a token even though it is a valid FK target.
+OWNER_IDS: Tuple[str, ...] = ("dominik",)
+SERVICE_IDS: Tuple[str, ...] = ("gate", "server", "fleet-supervisor", "appletype")
+
+# --- quarantine: ONLY the synthetic test fixtures ---------------------------
+# Expired / synthetic fixtures with no legitimate identity. These are NOT
+# seeded; their stray rows across the core tables are PURGED in the --apply
+# remediation (see ``run_seed``) so that post-apply ``quarantine_violations`` is
+# empty and M3 FK-ON has nothing to reject.
 QUARANTINE_IDS: Tuple[str, ...] = (
-    # service / non-agent
-    "server",
-    "gate",
-    "fleet-supervisor",
-    "appletype",
-    "dominik",
-    # test fixtures (expired / synthetic)
     "fake-admin",
     "dave-expired",
 )
+
+
+def kind_for(agent_id: str) -> str:
+    """Classify a seeded agent_id: 'owner' for the Boss, 'service' for infra/
+    non-routing identifiers, else 'agent'. Drives the dim-table ``kind`` column
+    and, through it, ``routable_agent_ids``."""
+    if agent_id in OWNER_IDS:
+        return "owner"
+    if agent_id in SERVICE_IDS:
+        return "service"
+    return "agent"
 
 _HERE = Path(__file__).resolve().parent
 _PROJECT_ROOT = _HERE.parent.parent  # scripts/migration/ -> scripts/ -> root
@@ -150,21 +168,23 @@ CREATE TABLE IF NOT EXISTS agents (
   model      TEXT,
   domain_db  INTEGER NOT NULL DEFAULT 0,
   status     TEXT,
+  kind       TEXT    NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent','owner','service')),
   created_at INTEGER NOT NULL,
   retired_at INTEGER
 )"""
 
 # Idempotent upsert (AC6): ON CONFLICT(agent_id) DO UPDATE -> 0 new rows on rerun.
 UPSERT_SQL = """\
-INSERT INTO agents (agent_id, display, team, leader, model, domain_db, status, created_at, retired_at)
-VALUES (:agent_id, :display, :team, :leader, :model, :domain_db, :status, :created_at, :retired_at)
+INSERT INTO agents (agent_id, display, team, leader, model, domain_db, status, kind, created_at, retired_at)
+VALUES (:agent_id, :display, :team, :leader, :model, :domain_db, :status, :kind, :created_at, :retired_at)
 ON CONFLICT(agent_id) DO UPDATE SET
   display   = excluded.display,
   team      = excluded.team,
   leader    = excluded.leader,
   model     = excluded.model,
   domain_db = excluded.domain_db,
-  status    = excluded.status"""
+  status    = excluded.status,
+  kind      = excluded.kind"""
 
 
 def default_db_path() -> Path:
@@ -217,12 +237,16 @@ def normalize_id(ident: str) -> str | None:
 
 def seed_source_ids(agents_dir: Path) -> Set[str]:
     """The canonical set of agent_ids that WILL be seeded into the dim-table:
-    config-derived roster + class-(b) config-less real agents + the remap targets.
-    Quarantined ids are never here."""
+    config-derived roster + class-(b) config-less real agents + the remap targets
+    + the reclassified owner/service ids (they carry live FK-target rows, so they
+    MUST be seeded, with a non-'agent' ``kind``). Only the synthetic quarantine
+    fixtures are excluded."""
     ids: Set[str] = set(load_roster(agents_dir))
     ids.update(CONFIGLESS_REAL_AGENTS)
     ids.update(REMAP.values())
-    # a remap target must itself be non-quarantined
+    ids.update(OWNER_IDS)
+    ids.update(SERVICE_IDS)
+    # the synthetic fixtures are never seeded
     ids = {i for i in ids if not is_quarantined(i)}
     return ids
 
@@ -249,6 +273,36 @@ def live_core_ids(db_path: Path) -> Set[str]:
                 f"SELECT DISTINCT {col} FROM {table} WHERE {col} IS NOT NULL"
             ).fetchall()
             out.update(str(r[0]) for r in rows)
+        return out
+    finally:
+        con.close()
+
+
+def quarantine_ids_with_live_rows(db_path: Path) -> Dict[str, Dict[str, int]]:
+    """HONEST quarantine check: for each QUARANTINE_ID, the per-(table,col) count
+    of live CORE_TABLES rows it still owns (only entries with count>0 included).
+
+    A quarantine bucket is only safe if every member owns ZERO core rows. The old
+    code trusted the quarantine classification and SKIPPED these ids before the
+    coverage test (the false-green): fk_uncovered=[] while 74 live FK-target rows
+    sat on the quarantined ids. This function measures the rows directly, so a
+    non-empty result is a hard signal that the --apply purge has not run (or that
+    a new stray fixture row appeared). Read-only."""
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        out: Dict[str, Dict[str, int]] = {}
+        for ident in sorted(QUARANTINE_IDS):
+            per_col: Dict[str, int] = {}
+            for table, col in CORE_TABLES:
+                if not _table_exists(con, table):
+                    continue
+                n = con.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE {col}=?", (ident,)
+                ).fetchone()[0]
+                if n > 0:
+                    per_col[f"{table}.{col}"] = n
+            if per_col:
+                out[ident] = per_col
         return out
     finally:
         con.close()
@@ -288,6 +342,7 @@ def build_seed_rows(agents_dir: Path, db_path: Path) -> List[Dict]:
                 "model": None,
                 "domain_db": 0,
                 "status": None,
+                "kind": kind_for(agent_id),
                 "created_at": now,
                 "retired_at": None,
             }
@@ -298,7 +353,17 @@ def build_seed_rows(agents_dir: Path, db_path: Path) -> List[Dict]:
 def fk_uncovered_core_ids(agents_dir: Path, db_path: Path) -> Set[str]:
     """Return the NON-quarantined live core-table ids whose normalized form is
     NOT in the seed. For M3 FK-ON to be safe this MUST be empty: any member is a
-    legit row a foreign-key constraint would reject."""
+    legit row a foreign-key constraint would reject.
+
+    Two distinct FK-safety signals, do not conflate them:
+      * ``fk_uncovered`` (this function) = REAL actors missing from the seed
+        (must be empty). Quarantined ids are skipped here, but quarantine now
+        holds ONLY the 2 synthetic fixtures, so the skip is honest: dominik /
+        gate / server / fleet-supervisor / appletype are genuinely SEEDED (with a
+        non-'agent' kind) and therefore truly covered, not quarantine-hidden.
+      * ``quarantine_ids_with_live_rows`` = quarantined fixture ids that still
+        carry rows (must be empty AFTER the --apply purge). This is the honest
+        counter-check that the quarantine bucket owns zero core rows."""
     seeded = {r["agent_id"] for r in build_seed_rows(agents_dir, db_path)}
     uncovered: Set[str] = set()
     for raw in live_core_ids(db_path):
@@ -310,6 +375,36 @@ def fk_uncovered_core_ids(agents_dir: Path, db_path: Path) -> Set[str]:
         if norm not in seeded:
             uncovered.add(raw)
     return uncovered
+
+
+def routable_agent_ids(db_path: Path) -> Set[str]:
+    """Canonical ROUTABLE-agent filter: the seeded dim-table ids whose
+    ``kind = 'agent'`` (read-only).
+
+    SECURITY INVARIANT (spec AC g). This is the single filter every future
+    consumer -- inter-agent routing, token issuance, roster generation -- MUST
+    use when it starts reading the ``agents`` dim-table, so that seeded
+    ``service`` / ``owner`` rows are NEVER treated as routable/messageable
+    agents. Concretely: nobody can message ``gate`` / ``fleet-supervisor`` /
+    ``server`` / ``appletype`` and no token is ever issued to the owner
+    ``dominik``, even though all of them are valid FK targets for historical
+    core-table rows.
+
+    NOTE: no live consumer reads the ``agents`` dim-table yet -- routing, token
+    issuance and roster generation currently derive from the filesystem agent
+    config. This establishes the FORWARD contract so that when a consumer does
+    migrate to the dim-table it has the correct, already-tested filter to use
+    instead of ``SELECT agent_id FROM agents`` unfiltered."""
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        if not _table_exists(con, "agents"):
+            return set()
+        rows = con.execute(
+            "SELECT agent_id FROM agents WHERE kind = 'agent'"
+        ).fetchall()
+        return {str(r[0]) for r in rows}
+    finally:
+        con.close()
 
 
 # ---------------------------------------------------------------------------
@@ -335,16 +430,24 @@ def run_seed(db_path: Path, agents_dir: Path, *, apply: bool) -> Dict:
 
     rows = build_seed_rows(agents_dir, db_path)
     uncovered = fk_uncovered_core_ids(agents_dir, db_path)
+    violations = quarantine_ids_with_live_rows(db_path)
     result: Dict = {
         "apply": apply,
         "seed_rows": rows,
         "quarantined": sorted(QUARANTINE_IDS),
         "fk_uncovered": sorted(uncovered),
+        # honest counter-signal: quarantined fixture ids that still carry rows.
+        # Must be empty AFTER the --apply purge below.
+        "quarantine_violations": violations,
         "snapshot": None,
         "inserted": 0,
+        "purged": 0,
     }
 
     if not apply:
+        # Dry-run: delete nothing, but surface WHAT the --apply purge would remove
+        # (same shape as quarantine_violations, restricted to the fixture ids).
+        result["purge_plan"] = violations
         return result  # dry-run: no write path reached
 
     snap = _snapshot(db_path)
@@ -355,11 +458,25 @@ def run_seed(db_path: Path, agents_dir: Path, *, apply: bool) -> Dict:
         con.execute(CREATE_AGENTS_SQL)
         before = con.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
         con.executemany(UPSERT_SQL, rows)
+        # Remediation purge: delete the synthetic fixture rows (fake-admin,
+        # dave-expired) across the 4 core tables so post-apply
+        # quarantine_violations is empty and M3 FK-ON has nothing to reject.
+        # Idempotent: re-running after the purge deletes 0.
+        purged = 0
+        for ident in QUARANTINE_IDS:
+            for table, col in CORE_TABLES:
+                if not _table_exists(con, table):
+                    continue
+                cur = con.execute(f"DELETE FROM {table} WHERE {col}=?", (ident,))
+                purged += cur.rowcount
         con.commit()
         after = con.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
     finally:
         con.close()
     result["inserted"] = after - before
+    result["purged"] = purged
+    # Re-measure AFTER the purge so the reported signal reflects the mutated DB.
+    result["quarantine_violations"] = quarantine_ids_with_live_rows(db_path)
     return result
 
 
@@ -377,7 +494,7 @@ def format_text(result: Dict) -> str:
     lines.append(f"seed rows: {len(result['seed_rows'])}")
     lines.append(f"   {', '.join(r['agent_id'] for r in result['seed_rows'])}")
     lines.append("")
-    lines.append(f"quarantined (NOT seeded, class c): {len(result['quarantined'])}")
+    lines.append(f"quarantined (synthetic fixtures, NOT seeded): {len(result['quarantined'])}")
     lines.append(f"   {', '.join(result['quarantined'])}")
     lines.append("")
     if result["fk_uncovered"]:
@@ -392,9 +509,22 @@ def format_text(result: Dict) -> str:
             "seeded agent_id; M3 FK-ON would not reject a legit row."
         )
     lines.append("")
+    viol = result.get("quarantine_violations") or {}
+    if viol:
+        label = (
+            "post-apply (must be empty)" if result["apply"] else "PURGE-PLAN (what --apply removes)"
+        )
+        lines.append(f"QUARANTINE-VIOLATIONS {label}: fixture ids still carrying live rows:")
+        for ident in sorted(viol):
+            per = ", ".join(f"{k}={v}" for k, v in sorted(viol[ident].items()))
+            lines.append(f"   {ident}: {per}")
+    else:
+        lines.append("QUARANTINE-VIOLATIONS: none -- no fixture id carries a live core row.")
+    lines.append("")
     if result["apply"]:
         lines.append(f"snapshot: {result['snapshot']}")
         lines.append(f"rows inserted-new: {result['inserted']} (0 on a repeat run)")
+        lines.append(f"fixture rows purged: {result['purged']} (0 on a repeat run)")
     else:
         lines.append("dry-run: nothing written. Re-run with --apply (Boss-GO) to seed.")
     return "\n".join(lines)

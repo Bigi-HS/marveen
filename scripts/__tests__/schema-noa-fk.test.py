@@ -200,5 +200,62 @@ class SchemaNoaFkTest(unittest.TestCase):
         self.con.rollback()
 
 
+class KindColumnParityTest(unittest.TestCase):
+    """The fresh-DB agents DDL must carry the identical kind column as the
+    dim-seed CREATE_AGENTS_SQL (card cfeb868b), else fresh != migrated."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        self.path = self._tmp.name
+        self.con = _fresh_db(self.path)
+
+    def tearDown(self) -> None:
+        try:
+            self.con.close()
+        finally:
+            os.unlink(self.path)
+
+    def _schema_sql(self) -> str:
+        with open(SCHEMA_PATH, "r", encoding="utf-8") as fh:
+            return fh.read()
+
+    def _dim_seed_sql(self) -> str:
+        import importlib.util
+
+        script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "migration", "dim-seed.py"
+        )
+        spec = importlib.util.spec_from_file_location("dim_seed", script)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m.CREATE_AGENTS_SQL
+
+    def test_schema_has_kind_clause(self):
+        sql = self._schema_sql()
+        self.assertIn("kind", sql)
+        self.assertIn("NOT NULL DEFAULT 'agent'", sql)
+        self.assertIn("kind IN ('agent','owner','service')", sql)
+
+    def test_dim_seed_and_schema_kind_clause_match(self):
+        """Both DDLs must contain the same kind clause (NOT NULL DEFAULT + CHECK
+        value set)."""
+        clause = "kind       TEXT    NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent','owner','service')),"
+        self.assertIn(clause, self._schema_sql())
+        self.assertIn(clause, self._dim_seed_sql())
+
+    def test_fresh_db_agents_has_kind_column(self):
+        cols = {r[1] for r in self.con.execute("PRAGMA table_info(agents)").fetchall()}
+        self.assertIn("kind", cols)
+
+    def test_fresh_db_kind_defaults_to_agent(self):
+        _seed_agent(self.con, "kindcheck")
+        self.con.commit()
+        kind = self.con.execute(
+            "SELECT kind FROM agents WHERE agent_id='kindcheck'"
+        ).fetchone()[0]
+        self.assertEqual(kind, "agent")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
