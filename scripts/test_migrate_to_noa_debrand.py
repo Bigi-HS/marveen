@@ -324,5 +324,40 @@ class ReportModeTests(unittest.TestCase):
             self.assertRegex(r.stdout, r"(?i)blocklist")
 
 
+class DeferredFkContractTests(unittest.TestCase):
+    """Contract for the migrate-time foreign_key_check partition (card 55e877e4).
+
+    schema-noa.sql carries M3 FK-ON (four core columns REFERENCE agents(agent_id)),
+    but migrate has NO agents dim-table seed step -- that is intentionally POST-cutover
+    (scripts/migration/dim-seed.py) with FK enforcement flipped later by fk-on.py.
+    So every migrated actor row is an orphan against the empty agents table. Those
+    'agents'-parent violations MUST be DEFERRED (exit 0 + notice), not FATAL."""
+
+    def test_agents_orphans_are_deferred_exit_zero_with_notice(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "src.db")
+            tgt = os.path.join(d, "noa.db")
+            # agent_id 'ghost' is absent from the (unseeded) agents dim-table ->
+            # an agents-parent FK orphan under M3 FK-ON.
+            _make_source(src, [{"id": 1, "agent_id": "ghost", "content": "a note"}])
+            r = _run_cli(["--source", src, "--target", tgt])
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertTrue(os.path.exists(tgt))
+            self.assertIn("DEFERRED FK", r.stdout)
+            # Per-child-table orphan count is surfaced.
+            self.assertRegex(r.stdout, r"memories=\d+")
+            # The old fatal path must NOT have fired for an agents-only orphan.
+            self.assertNotIn("ERROR: foreign key violations", r.stderr)
+
+    def test_non_agents_fk_violation_stays_fatal(self):
+        # SKIPPED by design: schema-noa.sql defines FKs ONLY against the agents
+        # dim-table, so a non-agents FK violation cannot be synthesized through the
+        # real migrate path without fabricating a divergent schema (which would test
+        # the fixture, not the code). The fatal branch is preserved verbatim in
+        # migrate-to-noa.py (real = [v for v in fk_violations if v[2] != "agents"] ->
+        # ERROR + sys.exit(1)); faking it would weaken the contract. See card 55e877e4.
+        self.skipTest("no non-agents FK target in schema-noa.sql; fatal branch unchanged")
+
+
 if __name__ == "__main__":
     unittest.main()
