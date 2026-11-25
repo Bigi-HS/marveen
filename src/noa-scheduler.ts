@@ -20,8 +20,10 @@ import { sendPendingRetryAlert } from './web/pending-retry-alert.js'
 import { sweepStuckTasks } from './web/stuck-task-sentinel.js'
 import {
   IMMEDIATE_MISS_ALERT_THRESHOLD,
+  IMMEDIATE_BUSY_ALERT_THRESHOLD,
   sendMissedFireAlert,
   clearMissedFireAlert,
+  formatBusyWedgeAlert,
 } from './web/missed-fire-alert.js'
 import { resolveFromPath } from './platform.js'
 import { isBudgetPauseMarkerActive, readBudgetPauseMarker } from './web/opus-burn-monitor.js'
@@ -261,6 +263,31 @@ function maybeSendImmediateMissedFireAlert(
     { taskId, agent: agentName, missedCount: fresh.attempt_count },
     nowS,
     db,
+  )
+}
+
+// Immediate busy-wedge alert (card ea4d3d8f, follow-up B): fire the same-tick
+// operator alert when a task is skipped because its agent is hung-but-tmux-ALIVE
+// ('busy'), once the consecutive-busy count reaches the (larger) busy debounce
+// threshold. SEPARATE, larger threshold than 'missing' because a 'busy' verdict
+// is the normal state of an agent legitimately mid-work -- only a sustained run
+// of still-busy ticks is a hang worth escalating. Reuses the same dedup/recovery
+// machinery as the missing alert (same missed_fire_alerts stamp table, cleared
+// on recovery), differing only in the message wording and log label. Strictly
+// scoped to 'busy': 'parked' (an un-submitted composer send) is NOT a hang and
+// must keep its retry-only behaviour.
+function maybeSendImmediateBusyWedgeAlert(
+  taskId: string, agentName: string, nowS: number, db = getNoaDb()
+): void {
+  const fresh = getPendingRetry(taskId, agentName, db)
+  if (!fresh || fresh.last_reason !== 'busy') return
+  if (fresh.attempt_count < IMMEDIATE_BUSY_ALERT_THRESHOLD) return
+  sendMissedFireAlert(
+    { taskId, agent: agentName, missedCount: fresh.attempt_count },
+    nowS,
+    db,
+    undefined,
+    { format: formatBusyWedgeAlert, logLabel: 'hung-but-alive agent' },
   )
 }
 
@@ -840,6 +867,11 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb(), nowMsOverride?:
       // long before the 1h pending-retry / 3h stuck backstops above.
       if (result === 'missing') {
         maybeSendImmediateMissedFireAlert(row.task_name, row.agent_name, nowS, db)
+      } else if (result === 'busy') {
+        // Immediate same-tick alert for a hung-but-tmux-ALIVE agent (card
+        // ea4d3d8f). SEPARATE larger debounce than 'missing' so a legitimately
+        // busy agent is not flagged. 'parked' is intentionally excluded here.
+        maybeSendImmediateBusyWedgeAlert(row.task_name, row.agent_name, nowS, db)
       }
     }
   }
@@ -895,6 +927,14 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb(), nowMsOverride?:
       // written but never submitted, so the retry queue records WHY the
       // slot was missed instead of blaming a busy peer.
       insertPendingRetryIfNew(task.id, agentName, nowS, result, db)
+      // Immediate same-tick busy-wedge alert (card ea4d3d8f). ONLY for a genuine
+      // 'busy' (hung-but-tmux-ALIVE) verdict, never for 'parked' (an un-submitted
+      // composer send is not a hang). With the default busy threshold of 4 this
+      // first insert (attempt_count=1) does NOT alert; escalation happens from
+      // Step 1 once the consecutive-busy count reaches the threshold.
+      if (result === 'busy') {
+        maybeSendImmediateBusyWedgeAlert(task.id, agentName, nowS, db)
+      }
     } else if (result === 'unknown') {
       // Pane was unreadable after re-probe and the task is effect-bearing (not
       // heartbeat -- those return 'parked'). We cannot safely retry (double-send
