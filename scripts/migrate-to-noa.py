@@ -549,12 +549,30 @@ def main():
     dst.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
     dst.execute("COMMIT")
 
-    # FK integrity (loaded with FK off; verify now)
+    # FK integrity (loaded with FK off; verify now).
+    # Partition violations by the PARENT table (3rd field of each foreign_key_check
+    # row). Violations against the 'agents' dim-table are EXPECTED/DEFERRED: that
+    # table is intentionally seeded POST-cutover (scripts/migration/dim-seed.py) and
+    # FK enforcement is the post-cutover Boss-GO step (scripts/migration/fk-on.py).
+    # Any violation against another parent table is a REAL integrity error -> FATAL.
     fk_violations = dst.execute("PRAGMA foreign_key_check").fetchall()
     if fk_violations:
-        print(f"ERROR: foreign key violations: {fk_violations}", file=sys.stderr)
-        dst.close(); src.close(); os.remove(tmp)
-        sys.exit(1)
+        deferred = [v for v in fk_violations if v[2] == "agents"]
+        real = [v for v in fk_violations if v[2] != "agents"]
+        if real:
+            print(f"ERROR: foreign key violations: {real}", file=sys.stderr)
+            dst.close(); src.close(); os.remove(tmp)
+            sys.exit(1)
+        if deferred:
+            # Per-child-table orphan counts (1st field of each row = child table).
+            per_child = {}
+            for v in deferred:
+                per_child[v[0]] = per_child.get(v[0], 0) + 1
+            counts = ", ".join(f"{t}={n}" for t, n in sorted(per_child.items()))
+            print(
+                "DEFERRED FK (agents dim-table seeded post-cutover by dim-seed.py): "
+                + counts
+            )
 
     # Row-count parity (AC-3b): every migrated table that exists in source.
     print("Row-count parity (source -> target):")
