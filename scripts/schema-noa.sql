@@ -351,6 +351,17 @@ CREATE TABLE IF NOT EXISTS stuck_task_alerts (
   alert_sent_at INTEGER
 );
 
+-- Immediate missed-fire alert (card c7f289d8). One row per missing EPISODE: the
+-- row is deleted the moment the task fires again, so a second wedge alerts
+-- again. Fired on the same tick a sched-task is skipped because the agent's tmux
+-- session is gone, once the consecutive-miss debounce threshold is reached.
+-- alert_sent_at is the per-episode cap.
+CREATE TABLE IF NOT EXISTS missed_fire_alerts (
+  task_id       TEXT PRIMARY KEY,
+  first_seen    INTEGER NOT NULL,
+  alert_sent_at INTEGER
+);
+
 CREATE TABLE task_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,

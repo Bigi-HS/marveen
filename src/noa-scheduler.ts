@@ -18,6 +18,11 @@ import { MAIN_CHANNELS_SESSION } from './web/main-agent.js'
 import { toPendingRetryView, shouldRetryNow } from './pending-retries.js'
 import { sendPendingRetryAlert } from './web/pending-retry-alert.js'
 import { sweepStuckTasks } from './web/stuck-task-sentinel.js'
+import {
+  IMMEDIATE_MISS_ALERT_THRESHOLD,
+  sendMissedFireAlert,
+  clearMissedFireAlert,
+} from './web/missed-fire-alert.js'
 import { resolveFromPath } from './platform.js'
 import { isBudgetPauseMarkerActive, readBudgetPauseMarker } from './web/opus-burn-monitor.js'
 
@@ -238,6 +243,25 @@ function getPendingRetry(
   return db.prepare(
     'SELECT * FROM pending_task_retries WHERE task_name=? AND agent_name=?'
   ).get(taskName, agentName) as PendingRetryRow | undefined
+}
+
+// Immediate missed-fire alert (card c7f289d8): fire the same-tick operator alert
+// when a task is skipped because its agent's tmux session is gone ('missing'),
+// but only once the consecutive-miss count (the pending_task_retries row's
+// attempt_count) has reached the debounce threshold. Keyed off the pending row
+// so a transient tmux restart (one missed tick) is absorbed. Dedup + recovery
+// live in the missed-fire-alert module; this just decides WHEN to call it.
+function maybeSendImmediateMissedFireAlert(
+  taskId: string, agentName: string, nowS: number, db = getNoaDb()
+): void {
+  const fresh = getPendingRetry(taskId, agentName, db)
+  if (!fresh || fresh.last_reason !== 'missing') return
+  if (fresh.attempt_count < IMMEDIATE_MISS_ALERT_THRESHOLD) return
+  sendMissedFireAlert(
+    { taskId, agent: agentName, missedCount: fresh.attempt_count },
+    nowS,
+    db,
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -789,6 +813,9 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb(), nowMsOverride?:
         rollForwardFired(taskDef, nowMs, nowS, db)
       }
       deletePendingRetry(row.task_name, row.agent_name, db)
+      // Recovery: the task fired again, so close any open immediate missed-fire
+      // episode -- a later wedge should alert afresh (card c7f289d8).
+      clearMissedFireAlert(db, row.task_name)
     } else {
       // 'missing' falls through here too (card 8af09fa0). It used to DELETE the
       // row -- which is exactly how a task for a wedged/absent agent went silent:
@@ -807,6 +834,12 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb(), nowMsOverride?:
       if (fresh) {
         const view = toPendingRetryView(fresh, nowS)
         if (view.alertDue) sendPendingRetryAlert(view, nowS, db)
+      }
+      // Immediate same-tick alert for a wedged/dead-session agent (card
+      // c7f289d8). Fires once the consecutive-miss debounce threshold is met,
+      // long before the 1h pending-retry / 3h stuck backstops above.
+      if (result === 'missing') {
+        maybeSendImmediateMissedFireAlert(row.task_name, row.agent_name, nowS, db)
       }
     }
   }
@@ -883,6 +916,11 @@ export function runSweepTick(catchUpMs: number, db = getNoaDb(), nowMsOverride?:
       // escalates via the 1h pending-retry alert instead of staying silent.
       insertPendingRetryIfNew(task.id, agentName, nowS, 'missing', db)
       logger.warn({ task: task.id, agent: agentName }, 'scheduler: session missing, enqueued missing-retry (card 8af09fa0)')
+      // Immediate same-tick alert (card c7f289d8). With the default debounce
+      // threshold of 2 this first-miss insert (attempt_count=1) does NOT alert;
+      // the escalation happens from Step 1 on the next still-missing tick. A
+      // threshold of 1 would alert here.
+      maybeSendImmediateMissedFireAlert(task.id, agentName, nowS, db)
     } else if (result === 'error') {
       logger.warn({ task: task.id, agent: agentName }, 'scheduler: fire error, will retry on next cron match')
     }
