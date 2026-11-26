@@ -156,6 +156,128 @@ class PrescanGateTests(unittest.TestCase):
             self.assertNotIn("com.noa.channels", content)
 
 
+class ReviewManifestValidationTests(unittest.TestCase):
+    """AM-3 gate hardening (cards 66a1b5c3, 984f7646).
+
+    load_review_manifest fails CLOSED (clean exit 3, no traceback) on a corrupt or
+    non-dict manifest; assert_prescan_reviewed counts a row as reviewed ONLY when its
+    verdict VALUE is in VALID_VERDICTS (a null/garbage value no longer passes the gate).
+    """
+
+    def test_valid_verdicts_constant(self):
+        self.assertEqual(mig.VALID_VERDICTS, frozenset({"keep", "skip", "mixed"}))
+
+    # --- load_review_manifest fail-closed (66a1b5c3) ---
+
+    def test_corrupt_manifest_exits_3_clean(self):
+        with tempfile.TemporaryDirectory() as d:
+            manifest = os.path.join(d, "review.json")
+            with open(manifest, "w") as f:
+                f.write("{ this is not valid json ,,,")
+            with self.assertRaises(SystemExit) as cm:
+                mig.load_review_manifest(manifest)
+            self.assertEqual(cm.exception.code, 3)
+
+    def test_corrupt_manifest_via_cli_exits_3_no_traceback(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "src.db")
+            tgt = os.path.join(d, "noa.db")
+            manifest = os.path.join(d, "review.json")
+            _make_source(src, [{"id": 1, "content": "quoting com.marveen.channels"}])
+            with open(manifest, "w") as f:
+                f.write("{ not json")
+            r = _run_cli(["--source", src, "--target", tgt, "--review-manifest", manifest])
+            self.assertEqual(r.returncode, 3, r.stderr)
+            self.assertRegex(r.stderr, r"(?i)corrupt|unparseable")
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertNotIn("JSONDecodeError", r.stderr)
+            self.assertFalse(os.path.exists(tgt))
+
+    def test_non_dict_manifest_exits_3(self):
+        with tempfile.TemporaryDirectory() as d:
+            manifest = os.path.join(d, "review.json")
+            with open(manifest, "w") as f:
+                json.dump(["1", "2"], f)  # a list, not a dict
+            with self.assertRaises(SystemExit) as cm:
+                mig.load_review_manifest(manifest)
+            self.assertEqual(cm.exception.code, 3)
+
+    def test_non_dict_manifest_via_cli_exits_3_clean(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "src.db")
+            tgt = os.path.join(d, "noa.db")
+            manifest = os.path.join(d, "review.json")
+            _make_source(src, [{"id": 1, "content": "quoting com.marveen.channels"}])
+            with open(manifest, "w") as f:
+                json.dump(["1"], f)
+            r = _run_cli(["--source", src, "--target", tgt, "--review-manifest", manifest])
+            self.assertEqual(r.returncode, 3, r.stderr)
+            self.assertRegex(r.stderr, r"(?i)corrupt")
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertFalse(os.path.exists(tgt))
+
+    def test_missing_manifest_returns_empty_dict(self):
+        with tempfile.TemporaryDirectory() as d:
+            missing = os.path.join(d, "nope.json")
+            self.assertEqual(mig.load_review_manifest(missing), {})
+
+    # --- assert_prescan_reviewed verdict-VALUE check (984f7646) ---
+
+    def test_null_verdict_value_is_unreviewed(self):
+        rows = [{"id": 1, "content": "com.marveen.channels"}]
+        with self.assertRaises(SystemExit) as cm:
+            mig.assert_prescan_reviewed(rows, {"1": None})
+        self.assertEqual(cm.exception.code, 3)
+
+    def test_invalid_verdict_value_is_unreviewed(self):
+        rows = [{"id": 1, "content": "com.marveen.channels"}]
+        with self.assertRaises(SystemExit) as cm:
+            mig.assert_prescan_reviewed(rows, {"1": "garbage"})
+        self.assertEqual(cm.exception.code, 3)
+
+    def test_valid_verdict_value_passes(self):
+        rows = [{"id": 1, "content": "com.marveen.channels"}]
+        # Must not raise for any valid verdict.
+        for v in ("keep", "skip", "mixed"):
+            mig.assert_prescan_reviewed(rows, {"1": v})
+
+    def test_null_verdict_via_cli_exits_3(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "src.db")
+            tgt = os.path.join(d, "noa.db")
+            manifest = os.path.join(d, "review.json")
+            _make_source(src, [{"id": 1, "content": "quoting com.marveen.channels"}])
+            with open(manifest, "w") as f:
+                json.dump({"1": None}, f)
+            r = _run_cli(["--source", src, "--target", tgt, "--review-manifest", manifest])
+            self.assertEqual(r.returncode, 3, r.stderr)
+            self.assertFalse(os.path.exists(tgt))
+
+    def test_invalid_verdict_via_cli_exits_3(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "src.db")
+            tgt = os.path.join(d, "noa.db")
+            manifest = os.path.join(d, "review.json")
+            _make_source(src, [{"id": 1, "content": "quoting com.marveen.channels"}])
+            with open(manifest, "w") as f:
+                json.dump({"1": "garbage"}, f)
+            r = _run_cli(["--source", src, "--target", tgt, "--review-manifest", manifest])
+            self.assertEqual(r.returncode, 3, r.stderr)
+            self.assertFalse(os.path.exists(tgt))
+
+    def test_valid_verdict_via_cli_passes_gate(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "src.db")
+            tgt = os.path.join(d, "noa.db")
+            manifest = os.path.join(d, "review.json")
+            _make_source(src, [{"id": 1, "content": "quoting com.marveen.channels"}])
+            with open(manifest, "w") as f:
+                json.dump({"1": "keep"}, f)
+            r = _run_cli(["--source", src, "--target", tgt, "--review-manifest", manifest])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(os.path.exists(tgt))
+
+
 class ContentTransformTests(unittest.TestCase):
     def test_m2_prose_rewritten(self):
         with tempfile.TemporaryDirectory() as d:
