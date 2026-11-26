@@ -485,5 +485,76 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
 
 
+# ---------------------------------------------------------------------------
+# ReDoS protection (card bb71b112)
+# ---------------------------------------------------------------------------
+
+class TestReDoSProtection(unittest.TestCase):
+    """present_re / absent_re with catastrophic-backtracking patterns must not
+    hang the process.  Uses subprocess with an explicit timeout so the test
+    runner itself does not block if production protection is absent."""
+
+    # Hard ceiling for the subprocess call; production must return well inside this.
+    _PROC_TIMEOUT = 5  # seconds
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.root = Path(self.td.name)
+        (self.root / "src").mkdir()
+        # A line that triggers near-match catastrophic backtracking for (a+)+$:
+        # many 'a's followed by a non-matching char.
+        _make_fixture_file(
+            self.root / "src", "target.py",
+            ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"]
+        )
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _run_via_cli(self, claim_text: str) -> dict:
+        """Run the script as a subprocess with a hard timeout.
+
+        Returns the parsed JSON dict.  Raises AssertionError if the process
+        times out (indicating the ReDoS protection is absent).
+        """
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(_SCRIPT),
+                 "--json", "--repo-root", str(self.root)],
+                input=claim_text,
+                capture_output=True,
+                text=True,
+                timeout=self._PROC_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail(
+                f"review-claim-verify hung for >{self._PROC_TIMEOUT}s on "
+                f"catastrophic regex -- ReDoS protection missing.  "
+                f"claim: {claim_text!r}"
+            )
+        return json.loads(proc.stdout)
+
+    def test_catastrophic_present_re_is_flagged_not_hung(self):
+        """(a+)+$ on a near-match string triggers catastrophic backtracking.
+        The verifier must return FLAGGED within a bounded time, not hang."""
+        claim = '[CLAIM file=src/target.py line=1 present_re="(a+)+$"]'
+        data = self._run_via_cli(claim)
+        self.assertEqual(data["verdict"], "FLAGGED",
+            f"catastrophic present_re must be FLAGGED, got: {data}")
+        reason = data["results"][0]["reason"].lower()
+        self.assertIn("timed out", reason,
+            f"reason should mention timeout, got: {reason}")
+
+    def test_catastrophic_absent_re_is_flagged_not_hung(self):
+        """Same test for absent_re: catastrophic pattern must be FLAGGED, not hung."""
+        claim = '[CLAIM file=src/target.py line=1 absent_re="(a+)+$"]'
+        data = self._run_via_cli(claim)
+        self.assertEqual(data["verdict"], "FLAGGED",
+            f"catastrophic absent_re must be FLAGGED, got: {data}")
+        reason = data["results"][0]["reason"].lower()
+        self.assertIn("timed out", reason,
+            f"reason should mention timeout, got: {reason}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
