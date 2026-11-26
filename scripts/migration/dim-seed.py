@@ -157,6 +157,17 @@ SYNTHETIC_FIXTURES: Tuple[str, ...] = (
     "dave-expired",
 )
 
+# --- stray non-actor ids (card a1151471) ------------------------------------
+# Malformed / stray ids that carry a live FK-target row but have NO legitimate
+# actor identity and are NOT a sanctioned synthetic fixture. The live census
+# surfaced ``.claude`` -- a single agent_tokens row whose agent_id is a leaked
+# config-path fragment, not an agent. It is neither a config-roster member, nor
+# a class-(b) real agent, nor a remap source, so ``normalize_id`` leaves it
+# unchanged and it is the ONE row the coverage predicate already reports AND a
+# row M3 FK-ON would reject. It is PURGED on --apply (no legit history to
+# preserve), kept as an explicit, auditable allowlist rather than an open delete.
+STRAY_NON_ACTOR_IDS: Tuple[str, ...] = (".claude",)
+
 
 def kind_for(agent_id: str) -> str:
     """Classify a seeded agent_id: 'owner' for the Boss, 'service' for infra/
@@ -411,6 +422,51 @@ def fk_uncovered_core_ids(agents_dir: Path, db_path: Path) -> Set[str]:
     return uncovered
 
 
+def rows_needing_rewrite(db_path: Path) -> Dict[str, Dict[str, int]]:
+    """HONEST post-seed FK-readiness check (card a1151471). Per (table, col), the
+    count of live rows whose STORED literal agent-id value is NOT itself a valid
+    FK target after the dim-seed -- i.e. the rows ``PRAGMA foreign_key_check``
+    will reject once FK-ON lands. Two disjoint sub-classes:
+
+      * REMAPPABLE  -- the stored literal normalizes to a DIFFERENT canonical id
+        (``Dave`` -> ``dave``, ``Genesis`` -> ``marveen``). The seed covers the
+        TARGET, but the row still stores the OLD spelling, so the FK rejects it.
+      * STRAY       -- a ``STRAY_NON_ACTOR_IDS`` member (``.claude``): no legit
+        identity, purged by the remediation.
+
+    This is the counterpart to ``fk_uncovered_core_ids``, which normalizes the
+    value BEFORE the seed-membership test and therefore reports a remappable row
+    as "covered" (the false-green this card fixes: it saw only ``.claude`` while
+    FK-ON rejects 14 rows). ``rows_needing_rewrite`` measures the STORED value
+    the FK actually sees, so its total equals the real foreign_key_check orphan
+    count. Must be empty AFTER the --apply remediation. Read-only; only entries
+    with count>0 are included."""
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        out: Dict[str, Dict[str, int]] = {}
+        stray = set(STRAY_NON_ACTOR_IDS)
+        for table, col in CORE_TABLES:
+            if not _table_exists(con, table):
+                continue
+            rows = con.execute(
+                f"SELECT {col}, COUNT(*) FROM {table} WHERE {col} IS NOT NULL "
+                f"GROUP BY {col}"
+            ).fetchall()
+            for raw, n in rows:
+                raw = str(raw)
+                if raw in stray:
+                    out.setdefault(raw, {})[f"{table}.{col}"] = n
+                    continue
+                if is_quarantined(raw):
+                    continue  # handled by the fixture purge, not the remap
+                norm = normalize_id(raw)
+                if norm is not None and norm != raw:
+                    out.setdefault(raw, {})[f"{table}.{col}"] = n
+        return out
+    finally:
+        con.close()
+
+
 def routable_agent_ids(db_path: Path) -> Set[str]:
     """Canonical ROUTABLE-agent filter: the seeded dim-table ids whose
     ``kind = 'agent'`` (read-only).
@@ -472,6 +528,52 @@ def _purge_fixtures(con: sqlite3.Connection) -> int:
     return purged
 
 
+def _remap_rows(con: sqlite3.Connection) -> Dict[str, int]:
+    """FK-readiness remediation (card a1151471): rewrite the STORED literal
+    agent-id values in the 4 core tables to their canonical seeded form, and
+    purge the stray non-actor ids. Without this the dim-seed covers the canonical
+    TARGET ids but the rows still store the old spelling (``Dave`` / ``Genesis``),
+    so M3 FK-ON's ``foreign_key_check`` rejects them.
+
+    Two disjoint passes, both idempotent:
+      * REMAP  -- for every raw value whose ``normalize_id`` differs from itself
+        (``Dave`` -> ``dave``, ``Genesis`` / ``genesis`` -> ``marveen``), UPDATE
+        the column in place. A quarantined fixture value is skipped (the purge
+        owns it); an owner/service literal that already equals its canonical form
+        is a no-op (normalize returns it unchanged).
+      * PURGE  -- delete rows whose value is a ``STRAY_NON_ACTOR_IDS`` member
+        (``.claude``): no legit identity to rewrite TO.
+
+    Returns ``{"remapped": n, "stray_purged": n}``. A second run does 0 of each
+    (the values are already canonical / the stray rows already gone)."""
+    remapped = 0
+    stray_purged = 0
+    for table, col in CORE_TABLES:
+        if not _table_exists(con, table):
+            continue
+        # distinct stored literals that are not NULL
+        raws = [
+            str(r[0])
+            for r in con.execute(
+                f"SELECT DISTINCT {col} FROM {table} WHERE {col} IS NOT NULL"
+            ).fetchall()
+        ]
+        for raw in raws:
+            if raw in STRAY_NON_ACTOR_IDS:
+                cur = con.execute(f"DELETE FROM {table} WHERE {col}=?", (raw,))
+                stray_purged += cur.rowcount
+                continue
+            if is_quarantined(raw):
+                continue  # the fixture purge owns these rows
+            norm = normalize_id(raw)
+            if norm is not None and norm != raw:
+                cur = con.execute(
+                    f"UPDATE {table} SET {col}=? WHERE {col}=?", (norm, raw)
+                )
+                remapped += cur.rowcount
+    return {"remapped": remapped, "stray_purged": stray_purged}
+
+
 def run_seed(db_path: Path, agents_dir: Path, *, apply: bool) -> Dict:
     """Build the seed plan; with apply=True, snapshot then CREATE+upsert.
 
@@ -491,6 +593,7 @@ def run_seed(db_path: Path, agents_dir: Path, *, apply: bool) -> Dict:
     uncovered = fk_uncovered_core_ids(agents_dir, db_path)
     violations = quarantine_ids_with_live_rows(db_path)
     misclassified = misclassified_quarantine_ids(db_path)
+    rewrite = rows_needing_rewrite(db_path)
     result: Dict = {
         "apply": apply,
         "seed_rows": rows,
@@ -500,12 +603,18 @@ def run_seed(db_path: Path, agents_dir: Path, *, apply: bool) -> Dict:
         # honest counter-signal: quarantined fixture ids that still carry rows.
         # Must be empty AFTER the --apply purge below.
         "quarantine_violations": violations,
+        # honest FK-readiness signal (card a1151471): rows whose STORED literal
+        # value M3 FK-ON rejects (remappable old spelling + stray non-actor).
+        # Total = the real foreign_key_check orphan count. Empty AFTER --apply.
+        "rows_needing_rewrite": rewrite,
         # fail-closed signal: quarantined REAL actors (not synthetic fixtures)
         # that own live rows. Non-empty => main() returns non-zero, no purge.
         "misclassified": misclassified,
         "snapshot": None,
         "inserted": 0,
         "purged": 0,
+        "remapped": 0,
+        "stray_purged": 0,
     }
 
     # Fail-closed BEFORE any write/purge (both dry-run AND --apply). A
@@ -528,14 +637,22 @@ def run_seed(db_path: Path, agents_dir: Path, *, apply: bool) -> Dict:
         before = con.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
         con.executemany(UPSERT_SQL, rows)
         purged = _purge_fixtures(con)
+        # FK-readiness remediation (card a1151471): rewrite stored literals to
+        # their canonical seeded form + purge stray non-actor ids, so M3 FK-ON's
+        # foreign_key_check finds zero orphans. Runs AFTER the seed exists (the
+        # remap targets must already be seeded) and inside the same txn.
+        remap = _remap_rows(con)
         con.commit()
         after = con.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
     finally:
         con.close()
     result["inserted"] = after - before
     result["purged"] = purged
-    # Re-measure AFTER the purge so the reported signal reflects the mutated DB.
+    result["remapped"] = remap["remapped"]
+    result["stray_purged"] = remap["stray_purged"]
+    # Re-measure AFTER the purge+remap so the reported signals reflect the DB.
     result["quarantine_violations"] = quarantine_ids_with_live_rows(db_path)
+    result["rows_needing_rewrite"] = rows_needing_rewrite(db_path)
     return result
 
 
@@ -580,6 +697,25 @@ def format_text(result: Dict) -> str:
     else:
         lines.append("QUARANTINE-VIOLATIONS: none -- no fixture id carries a live core row.")
     lines.append("")
+    rew = result.get("rows_needing_rewrite") or {}
+    if rew:
+        label = (
+            "post-apply (must be empty)" if result["apply"]
+            else "REMAP-PLAN (what --apply rewrites/purges)"
+        )
+        total = sum(sum(per.values()) for per in rew.values())
+        lines.append(
+            f"FK-READINESS {label}: stored literals M3 FK-ON rejects ({total} rows):"
+        )
+        for ident in sorted(rew):
+            per = ", ".join(f"{k}={v}" for k, v in sorted(rew[ident].items()))
+            lines.append(f"   {ident!r}: {per}")
+    else:
+        lines.append(
+            "FK-READINESS: GREEN -- every stored core-table literal is a valid FK "
+            "target; foreign_key_check would find 0 orphans."
+        )
+    lines.append("")
     misc = result.get("misclassified") or {}
     if misc:
         lines.append(
@@ -595,6 +731,8 @@ def format_text(result: Dict) -> str:
         lines.append(f"snapshot: {result['snapshot']}")
         lines.append(f"rows inserted-new: {result['inserted']} (0 on a repeat run)")
         lines.append(f"fixture rows purged: {result['purged']} (0 on a repeat run)")
+        lines.append(f"rows remapped to canonical id: {result.get('remapped', 0)} (0 on a repeat run)")
+        lines.append(f"stray non-actor rows purged: {result.get('stray_purged', 0)} (0 on a repeat run)")
     else:
         lines.append("dry-run: nothing written. Re-run with --apply (Boss-GO) to seed.")
     return "\n".join(lines)
@@ -631,13 +769,17 @@ def main(argv: List[str] | None = None) -> int:
     else:
         print(format_text(result))
 
-    # Fail-closed exit gating (card 5dd2d982), gate-style non-zero=3:
+    # Fail-closed exit gating (card 5dd2d982 + a1151471), gate-style non-zero=3:
     #  * a misclassified real actor was quarantined (pre-write guard), OR
     #  * after an --apply purge a fixture still carries live rows (post-apply
-    #    assert: the purge failed to clear).
+    #    assert: the purge failed to clear), OR
+    #  * after an --apply remap a stored literal M3 FK-ON would still reject
+    #    remains (post-apply assert: the remap failed to clear the orphans).
     if result.get("misclassified"):
         return 3
     if result["apply"] and result.get("quarantine_violations"):
+        return 3
+    if result["apply"] and result.get("rows_needing_rewrite"):
         return 3
     return 0
 

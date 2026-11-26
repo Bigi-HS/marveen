@@ -850,5 +850,262 @@ class KindColumn(unittest.TestCase):
             self.assertEqual(kinds.get("dave"), "agent")
 
 
+# --- FK-readiness row rewrite + honest predicate (card a1151471) ------------
+class FkReadinessRewrite(unittest.TestCase):
+    """The post-cutover FK-readiness gap: the dim-seed covers the canonical TARGET
+    ids (``dave``, ``marveen``) but the live rows still STORE the old spelling
+    (``Dave`` / ``Genesis``) and carry a stray non-actor token (``.claude``), so
+    M3 FK-ON's ``foreign_key_check`` rejects those rows. ``fk_uncovered_core_ids``
+    normalizes BEFORE the seed test and therefore reports a remappable row as
+    covered (the FALSE-GREEN). These tests pin: (1) the honest predicate counts
+    the STORED literals FK-ON rejects (14 in the live shape), (2) --apply rewrites
+    them to canonical + purges the stray so the predicate goes to 0, (3) the
+    remediation is idempotent and leaves owner/service/already-canonical rows
+    alone, (4) an end-to-end FK-ON parity: after remediation foreign_key_check=0."""
+
+    def _live_shape_db(self, tmp: Path) -> Path:
+        """A fixture whose core tables mirror the live orphan shape: ``Dave`` x1
+        + ``Genesis`` x12 in kanban_cards.assignee, ``.claude`` x1 in
+        agent_tokens -> exactly 14 foreign_key_check orphans after the seed."""
+        return _make_db(
+            tmp,
+            kanban_assignees=("dave", "Dave") + ("Genesis",) * 12,
+            memory_agents=("marveen", "scout"),
+            message_from=("dave",),
+            token_agents=("thor", ".claude"),
+        )
+
+    def test_false_green_uncovered_reports_only_stray_not_the_remappable_rows(self):
+        """Characterize the bug: fk_uncovered_core_ids reports ONLY the stray
+        ``.claude`` (it normalizes Dave/Genesis away), while the honest
+        rows_needing_rewrite counts ALL 14 stored literals FK-ON rejects."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = self._live_shape_db(tmp)
+            uncovered = mod.fk_uncovered_core_ids(agents, db)
+            self.assertEqual(
+                uncovered, {".claude"},
+                "coverage predicate should (today) see only the stray id",
+            )
+            rew = mod.rows_needing_rewrite(db)
+            total = sum(sum(per.values()) for per in rew.values())
+            self.assertEqual(
+                total, 14,
+                f"honest predicate must count all 14 FK-rejected rows, got {total}: {rew}",
+            )
+            self.assertEqual(rew["Dave"]["kanban_cards.assignee"], 1)
+            self.assertEqual(rew["Genesis"]["kanban_cards.assignee"], 12)
+            self.assertEqual(rew[".claude"]["agent_tokens.agent_id"], 1)
+
+    def test_rows_needing_rewrite_green_on_already_canonical_db(self):
+        """DANGEROUS-direction negative: a DB whose literals are all canonical
+        (no Dave/Genesis/.claude) yields an EMPTY predicate -- it is not
+        vacuously non-empty."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            db = _make_db(
+                tmp,
+                kanban_assignees=("dave", "marveen"),
+                memory_agents=("marveen", "scout"),
+                message_from=("dave",),
+                token_agents=("thor",),
+            )
+            self.assertEqual(mod.rows_needing_rewrite(db), {})
+
+    def test_apply_remaps_rows_and_drives_predicate_to_zero(self):
+        """--apply rewrites Dave->dave, Genesis->marveen, purges .claude; the
+        stored literals become canonical and rows_needing_rewrite goes to 0."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = self._live_shape_db(tmp)
+            res = mod.run_seed(db, agents, apply=True)
+            self.assertEqual(res["remapped"], 13, "1 Dave + 12 Genesis rewritten")
+            self.assertEqual(res["stray_purged"], 1, ".claude token purged")
+            self.assertEqual(
+                res["rows_needing_rewrite"], {},
+                "post-apply the honest predicate must be empty",
+            )
+            con = sqlite3.connect(db)
+            try:
+                vals = [
+                    r[0] for r in con.execute(
+                        "SELECT assignee FROM kanban_cards WHERE assignee IS NOT NULL"
+                    ).fetchall()
+                ]
+                self.assertNotIn("Dave", vals)
+                self.assertNotIn("Genesis", vals)
+                self.assertEqual(vals.count("dave"), 2)      # pre-existing + remapped
+                self.assertEqual(vals.count("marveen"), 12)  # all Genesis -> marveen
+                stray = con.execute(
+                    "SELECT COUNT(*) FROM agent_tokens WHERE agent_id='.claude'"
+                ).fetchone()[0]
+                self.assertEqual(stray, 0)
+            finally:
+                con.close()
+
+    def test_remediation_is_idempotent(self):
+        """A second --apply remaps 0 and purges 0 (values already canonical)."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = self._live_shape_db(tmp)
+            mod.run_seed(db, agents, apply=True)
+            res2 = mod.run_seed(db, agents, apply=True)
+            self.assertEqual(res2["remapped"], 0)
+            self.assertEqual(res2["stray_purged"], 0)
+            self.assertEqual(res2["rows_needing_rewrite"], {})
+
+    def test_remediation_leaves_owner_and_service_literals_untouched(self):
+        """A dominik (owner) / server (service) stored literal is already its own
+        canonical form -> normalize_id returns it unchanged -> NOT rewritten and
+        NOT purged. Proves the remap only touches genuinely non-canonical rows."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = _make_db(
+                tmp,
+                kanban_assignees=("dominik", "Dave"),
+                memory_agents=("marveen",),
+                message_from=("server",),
+                token_agents=("thor",),
+            )
+            res = mod.run_seed(db, agents, apply=True)
+            # only the 'Dave' row is non-canonical
+            self.assertEqual(res["remapped"], 1)
+            self.assertEqual(res["stray_purged"], 0)
+            con = sqlite3.connect(db)
+            try:
+                self.assertEqual(
+                    con.execute(
+                        "SELECT COUNT(*) FROM kanban_cards WHERE assignee='dominik'"
+                    ).fetchone()[0], 1,
+                )
+                self.assertEqual(
+                    con.execute(
+                        "SELECT COUNT(*) FROM agent_messages WHERE from_agent='server'"
+                    ).fetchone()[0], 1,
+                )
+            finally:
+                con.close()
+
+    def test_end_to_end_fk_on_foreign_key_check_zero_after_remediation(self):
+        """FK-ON PARITY (the card's proof-of-done, hermetic): build the 4 core
+        tables WITH the agents FK declared, seed+remediate via run_seed, then
+        PRAGMA foreign_key_check must report 0 violations."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            agents = _make_roster(tmp)
+            db = tmp / "fkon.db"
+            con = sqlite3.connect(db)
+            con.executescript(
+                """
+                CREATE TABLE agents (
+                  agent_id TEXT PRIMARY KEY, display TEXT NOT NULL,
+                  team TEXT, leader TEXT, model TEXT,
+                  domain_db INTEGER NOT NULL DEFAULT 0, status TEXT,
+                  kind TEXT NOT NULL DEFAULT 'agent'
+                    CHECK (kind IN ('agent','owner','service')),
+                  created_at INTEGER NOT NULL, retired_at INTEGER
+                );
+                CREATE TABLE kanban_cards (
+                  id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                  assignee TEXT REFERENCES agents(agent_id),
+                  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE memories (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+                  category TEXT NOT NULL, content TEXT NOT NULL,
+                  created_at INTEGER NOT NULL, accessed_at INTEGER NOT NULL
+                );
+                CREATE TABLE agent_messages (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  from_agent TEXT NOT NULL REFERENCES agents(agent_id),
+                  to_agent TEXT NOT NULL, content TEXT NOT NULL,
+                  status TEXT NOT NULL, created_at INTEGER NOT NULL
+                );
+                CREATE TABLE agent_tokens (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+                  token_sha256 TEXT NOT NULL UNIQUE, scopes_json TEXT NOT NULL,
+                  created_at INTEGER NOT NULL
+                );
+                """
+            )
+            now = 1700000000
+            # Seed the baseline canonical agents so ONLY the 14 genuinely-orphan
+            # rows (Dave/Genesis/.claude) show up pre-remediation. run_seed's
+            # upsert will re-seed these idempotently.
+            for aid in ("dave", "marveen", "thor"):
+                con.execute(
+                    "INSERT INTO agents (agent_id,display,created_at) VALUES (?,?,?)",
+                    (aid, aid, now),
+                )
+            con.execute("INSERT INTO kanban_cards VALUES ('c0','a','Dave',?,?)", (now, now))
+            for i in range(12):
+                con.execute(
+                    "INSERT INTO kanban_cards VALUES (?,?,?,?,?)",
+                    (f"g{i}", "a", "Genesis", now, now),
+                )
+            con.execute("INSERT INTO kanban_cards VALUES ('c1','a','dave',?,?)", (now, now))
+            con.execute(
+                "INSERT INTO memories (agent_id,category,content,created_at,accessed_at)"
+                " VALUES ('marveen','hot','x',?,?)", (now, now),
+            )
+            con.execute(
+                "INSERT INTO agent_messages (from_agent,to_agent,content,status,created_at)"
+                " VALUES ('dave','marveen','x','pending',?)", (now,),
+            )
+            con.execute(
+                "INSERT INTO agent_tokens (agent_id,token_sha256,scopes_json,created_at)"
+                " VALUES ('thor','sha-t','[]',?)", (now,),
+            )
+            con.execute(
+                "INSERT INTO agent_tokens (agent_id,token_sha256,scopes_json,created_at)"
+                " VALUES ('.claude','sha-c','[]',?)", (now,),
+            )
+            con.commit()
+            # BEFORE: FK-ON would reject 14 rows.
+            con.execute("PRAGMA foreign_keys=OFF")  # allow the orphan inserts above
+            before = con.execute("PRAGMA foreign_key_check").fetchall()
+            con.close()
+
+            res = mod.run_seed(db, agents, apply=True)
+            self.assertEqual(res["rows_needing_rewrite"], {})
+
+            con = sqlite3.connect(db)
+            try:
+                after = con.execute("PRAGMA foreign_key_check").fetchall()
+            finally:
+                con.close()
+            self.assertEqual(
+                len(before), 14,
+                f"fixture must reproduce 14 orphans, got {len(before)}",
+            )
+            self.assertEqual(
+                len(after), 0,
+                f"after remediation FK-ON must find 0 orphans, got {len(after)}: {after}",
+            )
+
+    def test_cli_apply_exits_nonzero_if_rewrite_rows_remain(self):
+        """Post-apply gate: if the remap is neutered so a stored literal M3 FK-ON
+        rejects survives, main() must exit non-zero (hard false-green signal)."""
+        saved = mod._remap_rows
+        mod._remap_rows = lambda con: {"remapped": 0, "stray_purged": 0}
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp = Path(td)
+                agents = _make_roster(tmp)
+                db = self._live_shape_db(tmp)
+                code = mod.main(
+                    ["--db", str(db), "--agents-dir", str(agents), "--apply"]
+                )
+                self.assertNotEqual(code, 0, "unremediated orphans must fail the gate")
+        finally:
+            mod._remap_rows = saved
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
