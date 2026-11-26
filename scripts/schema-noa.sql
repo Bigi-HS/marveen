@@ -76,7 +76,9 @@ CREATE TABLE agent_messages (
   created_at        INTEGER NOT NULL,
   delivered_at      INTEGER,
   completed_at      INTEGER,
-  last_escalated_at INTEGER
+  last_escalated_at INTEGER,
+  delegation_depth     INTEGER NOT NULL DEFAULT 0,  -- card 3e80e203: hops from root (0=root), server-derived
+  delegation_parent_id INTEGER                      -- triggering inbound message id (NULL=root); NOT in_reply_to
 );
 
 -- sessions: active agent sessions (decoupled from Telegram).

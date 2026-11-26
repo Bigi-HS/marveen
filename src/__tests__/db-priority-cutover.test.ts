@@ -26,7 +26,9 @@ beforeAll(() => {
     created_at INTEGER NOT NULL,
     delivered_at INTEGER,
     completed_at INTEGER,
-    last_escalated_at INTEGER
+    last_escalated_at INTEGER,
+    delegation_depth INTEGER NOT NULL DEFAULT 0,
+    delegation_parent_id INTEGER
   )`)
 })
 

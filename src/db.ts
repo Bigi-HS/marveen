@@ -214,7 +214,9 @@ export function initDatabase(dbPathOverride?: string): void {
       completed_at INTEGER,
       ack_expected INTEGER NOT NULL DEFAULT 0,
       priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
-      in_reply_to INTEGER
+      in_reply_to INTEGER,
+      delegation_depth INTEGER NOT NULL DEFAULT 0,
+      delegation_parent_id INTEGER
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_messages_status ON agent_messages(status, to_agent)`)
@@ -244,6 +246,25 @@ export function initDatabase(dbPathOverride?: string): void {
   // an explicit mark-done.
   try {
     db.exec('ALTER TABLE agent_messages ADD COLUMN in_reply_to INTEGER')
+  } catch {
+    // column already exists
+  }
+  // Migration: add delegation depth/parent to agent_messages (inter-agent
+  // delegation loop/depth guard, card 3e80e203 / DA G-02). Additive + backward-safe:
+  //   delegation_depth     -- hops from a Boss/user/scheduled root (NOT NULL DEFAULT 0
+  //                           so pre-existing rows read as depth-0 roots).
+  //   delegation_parent_id -- the TRIGGERING inbound message id the server derives the
+  //                           depth from (NULL = root). Dedicated column, NOT in_reply_to:
+  //                           in_reply_to is nullable reply-correlation, not a delegation
+  //                           parent, so reusing it would under-count depth and false-
+  //                           negative the guard on the DANGEROUS (cycle) side (spec §2.1b).
+  try {
+    db.exec('ALTER TABLE agent_messages ADD COLUMN delegation_depth INTEGER NOT NULL DEFAULT 0')
+  } catch {
+    // column already exists
+  }
+  try {
+    db.exec('ALTER TABLE agent_messages ADD COLUMN delegation_parent_id INTEGER')
   } catch {
     // column already exists
   }
@@ -993,6 +1014,13 @@ export interface AgentMessage {
   // an unthreaded message. Lets the router auto-correlate a reply to its ask
   // (ACK auto-correlation enabler, card d4fe794f). Additive + fail-open.
   in_reply_to: number | null
+  // Delegation loop/depth guard (card 3e80e203). delegation_depth = hops from a
+  // Boss/user/scheduled root (0 = root); the server derives it as
+  // parent.delegation_depth + 1 from delegation_parent_id (the triggering inbound
+  // message id, NULL = root). Server-derived, never client-trusted (anti-spoofing,
+  // spec §2.2/AC2). Old rows default to depth 0 / parent NULL (backward-safe, AC7).
+  delegation_depth: number
+  delegation_parent_id: number | null
 }
 
 /**
@@ -1017,6 +1045,11 @@ export function createAgentMessage(
   ackExpected = false,
   priority: PriorityValue = 'normal',
   inReplyTo: number | null = null,
+  // Delegation loop/depth guard (card 3e80e203). Both are server-derived by the
+  // route (never from the client payload); defaulting to the root values keeps
+  // every non-delegation caller (0 = root, NULL = no parent) backward-safe.
+  delegationDepth = 0,
+  delegationParentId: number | null = null,
 ): AgentMessage {
   const now = Math.floor(Date.now() / 1000)
   const ack = ackExpected ? 1 : 0
@@ -1025,8 +1058,8 @@ export function createAgentMessage(
   // (card 88849f24). The returned object reflects what was stored.
   const storedPriority = priorityForColumn(priority, isAgentMessagePriorityInteger())
   const info = db.prepare(
-    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, ack_expected, priority, in_reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(from, to, content, 'pending', now, ack, storedPriority, inReplyTo)
+    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, ack_expected, priority, in_reply_to, delegation_depth, delegation_parent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(from, to, content, 'pending', now, ack, storedPriority, inReplyTo, delegationDepth, delegationParentId)
   const id = Number(info.lastInsertRowid)
   emitOrDefer({ type: 'message', id: String(id), action: 'created' })
   return {
@@ -1034,6 +1067,7 @@ export function createAgentMessage(
     from_agent: from, to_agent: to, content, status: 'pending',
     result: null, created_at: now, delivered_at: null, completed_at: null,
     ack_expected: ack, priority: storedPriority, in_reply_to: inReplyTo,
+    delegation_depth: delegationDepth, delegation_parent_id: delegationParentId,
   }
 }
 
