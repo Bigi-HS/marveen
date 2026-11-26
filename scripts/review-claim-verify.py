@@ -68,9 +68,44 @@ import argparse
 import json
 import os
 import re
+import signal
 import sys
 from pathlib import Path
 from typing import NamedTuple
+
+# ---------------------------------------------------------------------------
+# ReDoS protection (card bb71b112)
+# ---------------------------------------------------------------------------
+
+# Sentinel returned by _re_search_safe when SIGALRM fires.
+class _ReTimeout(Exception):
+    pass
+
+
+def _re_search_safe(pattern: str, text: str, timeout: float = 1.0):
+    """Run re.search(pattern, text) with a SIGALRM-based timeout.
+
+    Returns the match object (or None for no match) on success.
+    Returns the string "TIMEOUT" if SIGALRM fires before the search completes.
+    Falls back to un-timed re.search if SIGALRM is unavailable (e.g. Windows).
+    Callers treat "TIMEOUT" as FLAGGED (fail-closed).
+    """
+    # SIGALRM is POSIX-only; on Windows (or if unavailable) fall back gracefully.
+    if not hasattr(signal, "SIGALRM"):
+        return re.search(pattern, text)
+
+    def _handler(signum, frame):
+        raise _ReTimeout()
+
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, timeout)
+    try:
+        return re.search(pattern, text)
+    except _ReTimeout:
+        return "TIMEOUT"
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 # CWD-INDEPENDENT anchor: always resolve relative to this script's grandparent
 # (scripts/ lives one level under repo root).
@@ -229,27 +264,37 @@ def verify_claim(claim: Claim, repo_root: Path) -> ClaimResult:
 
     if claim.present_re is not None:
         try:
-            if not re.search(claim.present_re, actual_line):
-                return ClaimResult(claim, "FLAGGED",
-                                   f"present_re={claim.present_re!r} did not match "
-                                   f"{claim.file}:{claim.line}; "
-                                   f"actual line: {actual_line!r}")
+            m = _re_search_safe(claim.present_re, actual_line)
         except re.error as exc:
             return ClaimResult(claim, "FLAGGED",
                                f"present_re={claim.present_re!r} is an invalid "
                                f"regex: {exc}")
+        if m == "TIMEOUT":
+            return ClaimResult(claim, "FLAGGED",
+                               f"present_re={claim.present_re!r} timed out "
+                               f"(possible catastrophic backtracking / ReDoS)")
+        if not m:
+            return ClaimResult(claim, "FLAGGED",
+                               f"present_re={claim.present_re!r} did not match "
+                               f"{claim.file}:{claim.line}; "
+                               f"actual line: {actual_line!r}")
 
     if claim.absent_re is not None:
         try:
-            if re.search(claim.absent_re, actual_line):
-                return ClaimResult(claim, "FLAGGED",
-                                   f"absent_re={claim.absent_re!r} unexpectedly "
-                                   f"matched {claim.file}:{claim.line}; "
-                                   f"actual line: {actual_line!r}")
+            m = _re_search_safe(claim.absent_re, actual_line)
         except re.error as exc:
             return ClaimResult(claim, "FLAGGED",
                                f"absent_re={claim.absent_re!r} is an invalid "
                                f"regex: {exc}")
+        if m == "TIMEOUT":
+            return ClaimResult(claim, "FLAGGED",
+                               f"absent_re={claim.absent_re!r} timed out "
+                               f"(possible catastrophic backtracking / ReDoS)")
+        if m:
+            return ClaimResult(claim, "FLAGGED",
+                               f"absent_re={claim.absent_re!r} unexpectedly "
+                               f"matched {claim.file}:{claim.line}; "
+                               f"actual line: {actual_line!r}")
 
     return ClaimResult(claim, "OK",
                        f"Verified {claim.file}:{claim.line}")
