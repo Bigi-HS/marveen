@@ -349,14 +349,37 @@ class DeferredFkContractTests(unittest.TestCase):
             # The old fatal path must NOT have fired for an agents-only orphan.
             self.assertNotIn("ERROR: foreign key violations", r.stderr)
 
-    def test_non_agents_fk_violation_stays_fatal(self):
-        # SKIPPED by design: schema-noa.sql defines FKs ONLY against the agents
-        # dim-table, so a non-agents FK violation cannot be synthesized through the
-        # real migrate path without fabricating a divergent schema (which would test
-        # the fixture, not the code). The fatal branch is preserved verbatim in
-        # migrate-to-noa.py (real = [v for v in fk_violations if v[2] != "agents"] ->
-        # ERROR + sys.exit(1)); faking it would weaken the contract. See card 55e877e4.
-        self.skipTest("no non-agents FK target in schema-noa.sql; fatal branch unchanged")
+    def test_non_agents_fk_violation_is_fatal(self):
+        # Card 83e1e306 MAJOR-4: the prior skip reason ("no non-agents FK target in
+        # schema-noa.sql") was FALSE. schema-noa.sql DOES define non-agents FKs --
+        # kanban_cards.parent_id and depends_on both REFERENCE kanban_cards(id)
+        # (self-referential, NOT the agents dim-table). An orphan parent_id is a real
+        # integrity error with no post-cutover seeding story, so it MUST hit the FATAL
+        # branch (real = [v for v in fk_violations if v[2] != "agents"] -> ERROR +
+        # exit 1), NOT the agents-DEFERRED branch. We synthesize it through the real
+        # migrate path (no divergent schema), so this exercises the code, not a fixture.
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "src.db")
+            tgt = os.path.join(d, "noa.db")
+            conn = sqlite3.connect(src)
+            conn.executescript(open(_SCHEMA).read())
+            # sqlite3 defaults foreign_keys=OFF, so an orphan parent_id can be staged
+            # in the source exactly as a real dirty live row would be.
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, parent_id, assignee, "
+                "created_at, updated_at) VALUES "
+                "('child-1', 'orphan child', 'planned', 'missing-parent', NULL, 0, 0)"
+            )
+            conn.commit()
+            conn.close()
+            r = _run_cli(["--source", src, "--target", tgt])
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("ERROR: foreign key violations", r.stderr)
+            # Proves the NON-agents (kanban_cards self-ref) branch fired, not DEFERRED.
+            self.assertIn("kanban_cards", r.stderr)
+            self.assertNotIn("DEFERRED FK", r.stdout)
+            # Fatal abort leaves no target behind.
+            self.assertFalse(os.path.exists(tgt))
 
 
 if __name__ == "__main__":
