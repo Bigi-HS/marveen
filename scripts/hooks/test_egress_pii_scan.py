@@ -185,6 +185,47 @@ class IsBashEgressTests(unittest.TestCase):
             "curl -X POST http://127.0.0.1:5678//webhook/secret -d user@example.com"
         ))
 
+    def test_dot_segment_localhost_5678_webhook_is_egress(self):
+        """SEPARATOR-NORM (card 0b8c31ed): `:5678/./webhook/` dot-segment is egress.
+        curl CLIENT-normalizes `/./` to `/` BEFORE sending, so the bytes that
+        leave the box hit the real n8n webhook route -- a REAL live exfil path.
+        `/+webhook/` alone (literal slashes only) missed it. MUST be caught.
+        """
+        self.assertTrue(hook._is_bash_egress(
+            "curl -X POST http://localhost:5678/./webhook/abc123 -d user@example.com"
+        ))
+
+    def test_dot_segment_127_5678_webhook_is_egress(self):
+        """SEPARATOR-NORM (card 0b8c31ed): dot-segment on the 127.0.0.1 spelling too."""
+        self.assertTrue(hook._is_bash_egress(
+            "curl -X POST http://127.0.0.1:5678/./webhook/abc123 -d user@example.com"
+        ))
+
+    def test_encoded_slash_lower_5678_webhook_is_egress(self):
+        """SEPARATOR-NORM (card 0b8c31ed): url-encoded slash `%2f` is egress.
+        Defense-in-depth over-match (harmless in current n8n -- falls to the SPA
+        -- but a classic encode-the-separator bypass family, so future-proofed).
+        """
+        self.assertTrue(hook._is_bash_egress(
+            "curl -X POST http://localhost:5678/%2fwebhook/abc123 -d user@example.com"
+        ))
+
+    def test_encoded_slash_upper_5678_webhook_is_egress(self):
+        """SEPARATOR-NORM (card 0b8c31ed): uppercase `%2F` encoded slash too (IGNORECASE)."""
+        self.assertTrue(hook._is_bash_egress(
+            "curl -X POST http://127.0.0.1:5678/%2Fwebhook/abc123 -d user@example.com"
+        ))
+
+    def test_separator_class_does_not_overmatch_5678_api(self):
+        """NEGATIVE guard (card 0b8c31ed): the separator-normalization class must
+        NOT over-match the benign :5678 API surface. `:5678/api/...` is NOT the
+        /webhook/ route (n8n REST/UI), so it stays non-egress even with the
+        widened separator -- proves the class only fires toward `webhook/`.
+        """
+        self.assertFalse(hook._is_bash_egress(
+            "curl http://localhost:5678/api/workflows/active"
+        ))
+
 
 # ---------------------------------------------------------------------------
 # Subprocess integration tests (exit codes via main())
@@ -254,6 +295,28 @@ class PositiveBlockTests(unittest.TestCase):
             "-d 'user@example.com'"
         ))
         self.assertEqual(r.returncode, 2, "double-slash n8n webhook with email must block")
+
+    def test_n8n_webhook_dot_segment_with_email_blocked(self):
+        """SEPARATOR-NORM end-to-end (card 0b8c31ed): the `/./webhook/` dot-segment
+        bypass carrying an email must BLOCK (exit 2). curl client-normalizes
+        `/./` to `/` before sending, so this is a REAL live egress -- before the
+        widened separator class it slipped the n8n RX and the PII-scan never ran.
+        """
+        r = _run(_bash(
+            "curl -X POST http://localhost:5678/./webhook/exfil "
+            "-d 'user@example.com'"
+        ))
+        self.assertEqual(r.returncode, 2, "dot-segment n8n webhook with email must block")
+
+    def test_n8n_webhook_encoded_slash_with_email_blocked(self):
+        """SEPARATOR-NORM end-to-end (card 0b8c31ed): the `%2fwebhook/` encoded-slash
+        bypass carrying an email must BLOCK (exit 2) -- defense-in-depth over-match.
+        """
+        r = _run(_bash(
+            "curl -X POST http://127.0.0.1:5678/%2Fwebhook/exfil "
+            "-d 'user@example.com'"
+        ))
+        self.assertEqual(r.returncode, 2, "encoded-slash n8n webhook with email must block")
 
     def test_nonlocal_https_curl_with_email_blocked(self):
         """Bash curl to a non-local https target carrying an email -> exit 2."""

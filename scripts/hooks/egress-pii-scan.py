@@ -77,8 +77,25 @@ PII_PATTERNS = {
 #     `/+webhook/` matches one OR MORE slashes: `//webhook/` (double-slash) is a
 #     valid URL that n8n normalizes to the same route, so it must not slip the
 #     scan (a single `/webhook/` anchor let `localhost:5678//webhook/` bypass).
+#     SEPARATOR-NORMALIZATION CLASS (card 0b8c31ed): the separator between :5678
+#     and `webhook/` now accepts any mix of the path-normalization bypass family,
+#     not just literal slashes:
+#       - `/`      literal slash (incl. `//`, already covered by `/+`)
+#       - `/./`    dot-segment -- a REAL live egress: curl CLIENT-normalizes
+#                  `:5678/./webhook/` to `:5678/webhook/` BEFORE sending, so the
+#                  bytes that actually leave the box hit the n8n webhook route.
+#                  Missing it = a silent exfil hole. MUST be caught.
+#       - `%2f`/`%2F`  url-encoded slash -- defense-in-depth over-match. Current
+#                  n8n does NOT path-decode this (it falls to the SPA, harmless),
+#                  but encode-the-separator is a classic bypass family, so we
+#                  over-approximate toward the SAFE direction and future-proof it.
+#     This is INTENTIONAL over-approximation toward SAFE: a false-block on n8n
+#     egress is cheap, a missed exfil is not. Anchored to :5678 only (n8n-only);
+#     it does NOT over-match generic traffic because the :5678/.../webhook/ shape
+#     stays required.
 _N8N_WEBHOOK_RX = re.compile(
-    r"https?://(?:127\.0\.0\.1|localhost|\[::1\]):5678/+webhook/",
+    r"https?://(?:127\.0\.0\.1|localhost|\[::1\]):5678"
+    r"(?:/|/\./|%2f)+webhook/",
     re.IGNORECASE,
 )
 # (b) Non-local http(s) target via curl or wget.
