@@ -452,5 +452,46 @@ class TestSortNormalizationVisibility(unittest.TestCase):
             "warn_on_reorder must not fire when input is already sorted")
 
 
+# ---------------------------------------------------------------------------
+# 10. CLI warn_on_reorder wired into main() (card ab3747f8)
+# ---------------------------------------------------------------------------
+
+
+class TestCLIReorderWarning(unittest.TestCase):
+    """main() must pass a warn_on_reorder hook to classify_cadence() so that
+    out-of-order timestamps in production logs produce a visible stderr WARNING
+    rather than being silently sorted.  (card ab3747f8, Dave CHANGE on #1105)"""
+
+    def _run(self, log_content: str, extra_args: list | None = None) -> subprocess.CompletedProcess:
+        with tempfile.TemporaryDirectory() as td:
+            log_path = os.path.join(td, "test.log")
+            Path(log_path).write_text(log_content, encoding="utf-8")
+            args = [sys.executable, _SCRIPT,
+                    "--session-alive", f"--now={NOW}",
+                    "--log-file", log_path] + (extra_args or [])
+            return subprocess.run(args, capture_output=True, text=True, cwd="/tmp")
+
+    def test_unsorted_log_emits_stderr_warning(self):
+        """An unsorted log must produce a WARNING on stderr so the operator
+        is informed that silent sort-normalisation occurred."""
+        s = CADENCE * 60
+        # Build a log that is intentionally in REVERSE order.
+        pts = [NOW - i * s for i in range(6)]          # newest first = reversed
+        log = "\n".join(str(int(p)) for p in pts) + "\n"
+        r = self._run(log)
+        self.assertIn("WARNING", r.stderr.upper(),
+            f"unsorted log must emit a WARNING to stderr; got stderr={r.stderr!r}")
+
+    def test_sorted_log_no_reorder_warning(self):
+        """A correctly sorted log must NOT emit a reorder WARNING."""
+        s = CADENCE * 60
+        pts = [NOW - (5 - i) * s for i in range(6)]   # oldest first = sorted
+        log = "\n".join(str(int(p)) for p in pts) + "\n"
+        r = self._run(log)
+        stderr_upper = r.stderr.upper()
+        self.assertNotIn("REORDER", stderr_upper,
+            f"sorted log must not emit a reorder warning; got stderr={r.stderr!r}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
