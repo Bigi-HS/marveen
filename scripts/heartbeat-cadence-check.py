@@ -268,7 +268,7 @@ def read_timestamps_from_log(log_path: str) -> List[float]:
             # Unrecognised non-blank line -> fail-closed
             raise ValueError(f"Unrecognised timestamp format at line {lineno}: {line!r}")
 
-    return sorted(timestamps)
+    return timestamps
 
 
 # ---------------------------------------------------------------------------
@@ -359,12 +359,21 @@ def main(argv: Optional[list] = None) -> int:
         print("verdict: ERROR (fail-closed)")
         return 2
 
+    def _warn_reorder(original):
+        print(
+            f"WARNING: cadence log timestamps were out of order "
+            f"({len(original)} entries sorted internally); "
+            f"check log source for ordering issues",
+            file=sys.stderr,
+        )
+
     # Classify.
     verdict = classify_cadence(
         timestamps,
         cadence_minutes=args.cadence,
         now=now,
         session_alive=alive,
+        warn_on_reorder=_warn_reorder,
     )
 
     status_line = {
