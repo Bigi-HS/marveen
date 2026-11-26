@@ -50,6 +50,20 @@ from debrand_text import (  # noqa: E402
 REDESIGNED = {"memories", "agent_messages", "sessions", "scheduled_tasks"}
 # Source-only tables that are never migrated as base tables.
 SKIP = {"sqlite_sequence"}
+# Base tables that schema-noa.sql PRE-SEEDS at CREATE time (see the `INSERT OR IGNORE
+# INTO <table>` statements in the schema). migrate_verbatim must use INSERT OR IGNORE
+# for these so the verbatim copy does not collide with the canonical seed (card
+# fec5ec6a BLOCKER-1: board_columns.id UNIQUE collision aborted the cutover). This is
+# the PARITY-SAFE choice -- the M3 fresh==migrated parity test relies on the migrated DB
+# keeping the SAME canonical seed as a fresh schema-only DB, and the source rows are the
+# identical canonical seed (a divergent source row is detected by sanity check, not
+# silently overwritten -- INSERT OR REPLACE is intentionally NOT used).
+SCHEMA_SEEDED_TABLES = {"board_columns"}
+# Tables intentionally NOT migrated: the embedding_cache is a rebuildable cache (deliberately
+# skipped by the verbatim loop). This same set must be exempted from the row-count parity
+# check too, otherwise source-present-but-not-migrated tables report a false MISMATCH that
+# aborts the cutover (card fec5ec6a BLOCKER-2).
+NOT_MIGRATED = {"embedding_cache"}
 
 PRIORITY_MAP = {"urgent": 100, "high": 75, "normal": 50, "low": 25}
 DEFAULT_PRIORITY = 50
@@ -328,7 +342,43 @@ def migrate_verbatim(src, dst, table):
     collist = ", ".join(cols)
     placeholders = ", ".join("?" for _ in cols)
     rows = src.execute(f"SELECT {collist} FROM {table}").fetchall()
-    sql = f"INSERT INTO {table} ({collist}) VALUES ({placeholders})"
+    # Schema-seeded base tables already hold their canonical rows (schema-noa.sql seeds
+    # them at CREATE time). Use INSERT OR IGNORE so the verbatim copy does not collide
+    # with the seed (card fec5ec6a BLOCKER-1). INSERT OR IGNORE is parity-safe: a source
+    # row identical to the seed is a no-op; a divergent source row is detected by the
+    # sanity check below rather than silently overwriting the canonical seed.
+    if table in SCHEMA_SEEDED_TABLES:
+        verb = "INSERT OR IGNORE"
+        # Compare on the canonical IDENTITY columns only, excluding seed-time timestamps:
+        # schema-noa.sql seeds created_at/updated_at via unixepoch(), which evaluates at
+        # CREATE time, so a source DB and a fresh target schema legitimately differ by
+        # wall-clock seconds on those columns. Those are NOT a real divergence.
+        _volatile = {"created_at", "updated_at"}
+        cmp_idx = [i for i, c in enumerate(cols) if c not in _volatile]
+        seeded_ids = {r[0] for r in dst.execute(f"SELECT {cols[0]} FROM {table}")}
+        for row in rows:
+            if row[0] in seeded_ids:
+                seeded = dst.execute(
+                    f"SELECT {collist} FROM {table} WHERE {cols[0]} = ?", (row[0],)
+                ).fetchone()
+                if seeded is not None and any(
+                    seeded[i] != row[i] for i in cmp_idx
+                ):
+                    print(
+                        f"ERROR: source row in schema-seeded table {table!r} (id={row[0]!r}) "
+                        "DIVERGES from the canonical schema seed.\n"
+                        f"       schema seed: {tuple(seeded)}\n"
+                        f"       source row:  {tuple(row)}\n"
+                        "       INSERT OR IGNORE would silently keep the seed and drop the "
+                        "source divergence,\n"
+                        "       breaking fresh==migrated parity. Reconcile the seed vs source "
+                        "before migrating.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+    else:
+        verb = "INSERT"
+    sql = f"{verb} INTO {table} ({collist}) VALUES ({placeholders})"
     for batch in chunked(rows, BATCH):
         dst.executemany(sql, batch)
 
@@ -541,7 +591,7 @@ def main():
     if "scheduled_tasks" in src_tabs:
         migrate_scheduled_tasks(src, dst)
     for t in target_tabs:
-        if t in REDESIGNED or t == "embedding_cache":
+        if t in REDESIGNED or t in NOT_MIGRATED:
             continue
         if t in src_tabs:
             migrate_verbatim(src, dst, t)
@@ -579,6 +629,12 @@ def main():
     mismatches = []
     for t in target_tabs:
         if t not in src_tabs:
+            continue
+        # Tables intentionally not migrated (e.g. the rebuildable embedding_cache) are
+        # exempt from parity: they are deliberately empty in the target even though the
+        # source has rows. Mirrors the verbatim-loop skip so a 2249->0 cache delta does
+        # not abort the cutover (card fec5ec6a BLOCKER-2).
+        if t in NOT_MIGRATED:
             continue
         sc = src.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
         nc = dst.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
