@@ -67,6 +67,9 @@ NOT_MIGRATED = {"embedding_cache"}
 
 PRIORITY_MAP = {"urgent": 100, "high": 75, "normal": 50, "low": 25}
 DEFAULT_PRIORITY = 50
+# AM-3 review-manifest: the only verdict VALUES that count a blocklist-token row as
+# reviewed. A key-present-but-null/garbage-value entry is NOT a review (card 984f7646).
+VALID_VERDICTS = frozenset({"keep", "skip", "mixed"})
 DEFAULT_AGENT = "noa"  # DA-5 flip (was "marveen"): fallback agent_id for defaulted rows
 BATCH = 1000  # rows per insert transaction (OQ-3)
 
@@ -198,21 +201,45 @@ def load_review_manifest(path):
     """Load the review-manifest sidecar: {"<row-id>": "keep"|"skip"|"mixed"}.
 
     Missing file => empty manifest (every row unreviewed). Keys are stringified ids.
+    Only VALID_VERDICTS values count as a review downstream (assert_prescan_reviewed).
+
+    Fail-CLOSED: a corrupt/unparseable manifest, an I/O error, or a non-dict top-level
+    JSON means the AM-3 gate cannot be evaluated, so refuse to migrate (clean exit 3)
+    instead of leaking an uncaught traceback (card 66a1b5c3).
     """
     if not path or not os.path.exists(path):
         return {}
-    with open(path) as f:
-        data = json.load(f)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(
+            f"ERROR: review manifest is corrupt/unparseable ({path}): {e}",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+    if not isinstance(data, dict):
+        print(
+            f"ERROR: review manifest is corrupt ({path}): top-level JSON must be an "
+            f"object, got {type(data).__name__}",
+            file=sys.stderr,
+        )
+        sys.exit(3)
     return {str(k): v for k, v in data.items()}
 
 
 def assert_prescan_reviewed(prescan_rows, manifest):
-    """HARD GATE (AM-3): every blocklist-token row id must be a key in the manifest.
+    """HARD GATE (AM-3): every blocklist-token row id must have a VALID verdict.
 
-    If ANY prescan row is unreviewed, print the list to stderr and sys.exit(3) -- zero
-    unreviewed blocklist-token rows may enter the transform.
+    A row is reviewed ONLY when its manifest value is one of VALID_VERDICTS
+    ({keep, skip, mixed}); a missing key OR a key present with a null/invalid value
+    counts as unreviewed (card 984f7646). If ANY prescan row is unreviewed, print the
+    list to stderr and sys.exit(3) -- zero unreviewed blocklist-token rows may enter
+    the transform.
     """
-    unreviewed = [r for r in prescan_rows if str(r["id"]) not in manifest]
+    unreviewed = [
+        r for r in prescan_rows if manifest.get(str(r["id"])) not in VALID_VERDICTS
+    ]
     if unreviewed:
         print(
             "ERROR: blocklist-token rows not reviewed (set them in the review manifest "
