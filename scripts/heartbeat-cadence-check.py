@@ -72,21 +72,27 @@ def classify_cadence(
     cadence_minutes: float = DEFAULT_CADENCE_MINUTES,
     now: Optional[float] = None,
     session_alive: bool = True,
+    warn_on_reorder=None,
 ) -> str:
     """Pure classifier.  Fail-CLOSED: bad input returns 'error'.
 
     Parameters
     ----------
     timestamps:
-        Sorted list of epoch-second timestamps when keepalive fired.
-        May be unsorted -- the function sorts it internally.
+        Epoch-second timestamps when keepalive fired.  May be unsorted --
+        the function sorts internally.  Pass warn_on_reorder to surface
+        silent normalisation (advisory #1, card 013a9ab6).
     cadence_minutes:
         Expected firing interval in minutes (default 15).
     now:
-        Current epoch seconds.  Used to extend the check window to the
-        present (catches a trailing gap where nothing fired recently).
+        Current epoch seconds.  Required when timestamps has a single
+        element (fail-closed: single-ts without now has no gap to measure).
     session_alive:
         Whether the supervisor session is considered alive.
+    warn_on_reorder:
+        Optional callable(original_list) -> None.  Called when the input
+        was not already sorted, so callers can surface silent normalisation
+        of a malformed cadence log (advisory #1, card 013a9ab6).
 
     Returns
     -------
@@ -103,14 +109,24 @@ def classify_cadence(
     if now is not None and not isinstance(now, (int, float)):
         return "error"
 
-    # Coerce to sorted float list; fail-closed on bad element types.
+    # Coerce to float list; fail-closed on bad element types.
     try:
-        pts: List[float] = sorted(float(t) for t in timestamps)
+        raw: List[float] = [float(t) for t in timestamps]
     except (TypeError, ValueError):
         return "error"
 
     # Need at least one timestamp to reason about gaps.
-    if not pts:
+    if not raw:
+        return "error"
+
+    # Sort and optionally surface the reordering (advisory #1, card 013a9ab6).
+    pts: List[float] = sorted(raw)
+    if warn_on_reorder is not None and pts != raw:
+        warn_on_reorder(list(timestamps))
+
+    # Fail-closed: single timestamp without 'now' has no gap to measure.
+    # Returning "ok" here would be FAIL-OPEN (advisory #2, card 013a9ab6).
+    if len(pts) == 1 and now is None:
         return "error"
 
     cadence_sec = cadence_minutes * 60.0
