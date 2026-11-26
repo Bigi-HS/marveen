@@ -119,6 +119,16 @@ if (fableCeilingResult.source === 'process') {
     'Boot knob FABLE_DAILY_TOKEN_CEILING sourced from process environment -- verify this is intentional')
 }
 
+// Inter-agent delegation loop/depth guard (card 3e80e203, DA G-02). A delegation
+// chain NoA->Armorer->NoA could otherwise run silently (token-burn + kanban-spam)
+// with no depth bound. Every inter-agent message carries a server-derived
+// delegation_depth; at `depth >= DELEGATION_DEPTH_LIMIT` the insert is declined and
+// the Boss is escalated ONCE (alert-false-alarm-audit: only a real limit hit, not
+// every deep chain). Default 6: deep enough for legitimate multi-stage delegation
+// (spec/plan/build/gate/verify/report) yet short enough that a runaway cycle stops
+// within a handful of hops before meaningful burn. Config via DELEGATION_DEPTH_LIMIT.
+export const DELEGATION_DEPTH_LIMIT = resolveIntEnv('DELEGATION_DEPTH_LIMIT', env, 6).value
+
 export const CHANNEL_PROVIDER: ChannelProviderType = getProviderType(env['CHANNEL_PROVIDER'])
 export const CHANNEL_TOKEN = getChannelToken(CHANNEL_PROVIDER, env)
 export const CHANNEL_CHAT_ID = getChannelChatId(CHANNEL_PROVIDER, env)

@@ -12,6 +12,11 @@ import { aiDefenceGuard, type Severity } from '../../aidefence-guard.js'
 import { recordGuardEvent } from '../guard-event-recorder.js'
 import { decideMessageFrom, enforceFromBindingEnabled, logFromMismatch } from '../agent-identity-binding.js'
 import { readBody, json } from '../http-helpers.js'
+import { DELEGATION_DEPTH_LIMIT } from '../../config.js'
+import {
+  deriveDelegationDepth, isDelegationDepthExceeded, escalateDelegationDepth,
+  DELEGATION_DEPTH_EXCEEDED,
+} from '../delegation-depth-guard.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
@@ -19,7 +24,11 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/messages' && method === 'POST') {
     const body = await readBody(req)
-    const { from, to, content, ack_expected, priority, in_reply_to } = JSON.parse(body.toString()) as { from: string; to: string; content: string; ack_expected?: boolean; priority?: string; in_reply_to?: number }
+    // NOTE: delegation_depth is intentionally NOT destructured from the payload --
+    // the server DERIVES it from the parent chain (anti-spoofing, card 3e80e203 /
+    // §2.2). Only delegation_parent_id (a reference to the triggering inbound
+    // message) is accepted from the client, and it is validated below.
+    const { from, to, content, ack_expected, priority, in_reply_to, delegation_parent_id } = JSON.parse(body.toString()) as { from: string; to: string; content: string; ack_expected?: boolean; priority?: string; in_reply_to?: number; delegation_parent_id?: number }
     if (!from?.trim() || !to?.trim() || !content?.trim()) {
       json(res, { error: 'from, to, and content are required' }, 400)
       return true
@@ -37,6 +46,14 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     if (in_reply_to !== undefined && in_reply_to !== null &&
         !(Number.isInteger(in_reply_to) && in_reply_to > 0)) {
       json(res, { error: 'in_reply_to must be a positive integer message id' }, 400)
+      return true
+    }
+    // Delegation parent (card 3e80e203). When present it is the id of the TRIGGERING
+    // inbound message; the server derives delegation_depth from it (never the client
+    // value). Must be a positive integer; null/undefined = root (depth 0).
+    if (delegation_parent_id !== undefined && delegation_parent_id !== null &&
+        !(Number.isInteger(delegation_parent_id) && delegation_parent_id > 0)) {
+      json(res, { error: 'delegation_parent_id must be a positive integer message id' }, 400)
       return true
     }
     // Security: the channel-coordinator id grants channel-inbound delivery
@@ -158,8 +175,24 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       json(res, { error: `Unknown recipient: ${to.trim()}` }, 400)
       return true
     }
-    const msg = createAgentMessage(effectiveFrom, recipient, content.trim(), ack_expected === true, (priority as AgentMessage['priority']) ?? 'normal', in_reply_to ?? null)
-    logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ackExpected: msg.ack_expected, priority: msg.priority, inReplyTo: msg.in_reply_to }, 'Agent message created')
+    // Delegation loop/depth guard (card 3e80e203 / DA G-02). Derive the depth
+    // SERVER-SIDE from the parent chain -- the client-supplied delegation_depth is
+    // never read, so a deep chain cannot be masked by claiming depth 0. A root
+    // (no parent) is depth 0; an unresolvable parent fails safe at the limit so a
+    // runaway cycle still halts (assertion-direction, §2.2). On a limit hit the
+    // insert is DECLINED and the Boss is escalated once (AC3/AC4).
+    const { depth: delegationDepth, parentId: delegationParentId } =
+      deriveDelegationDepth(delegation_parent_id ?? null)
+    if (isDelegationDepthExceeded(delegationDepth)) {
+      await escalateDelegationDepth({
+        from: effectiveFrom, to: recipient, depth: delegationDepth,
+        limit: DELEGATION_DEPTH_LIMIT, parentId: delegationParentId,
+      })
+      json(res, { error: DELEGATION_DEPTH_EXCEEDED, depth: delegationDepth, limit: DELEGATION_DEPTH_LIMIT }, 429)
+      return true
+    }
+    const msg = createAgentMessage(effectiveFrom, recipient, content.trim(), ack_expected === true, (priority as AgentMessage['priority']) ?? 'normal', in_reply_to ?? null, delegationDepth, delegationParentId)
+    logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ackExpected: msg.ack_expected, priority: msg.priority, inReplyTo: msg.in_reply_to, delegationDepth: msg.delegation_depth, delegationParentId: msg.delegation_parent_id }, 'Agent message created')
     json(res, msg)
     return true
   }
