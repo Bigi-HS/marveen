@@ -209,30 +209,19 @@ class TestFailClosed(unittest.TestCase):
         self.assertNotEqual(result, "alert")
 
     def test_single_timestamp_no_now_is_error(self):
-        """Single point, no 'now' -> no gap to measure -> error (fail-closed).
+        """Single point, no 'now' -> no gap to measure -> must be 'error' (fail-closed).
 
-        We cannot classify cadence with one timestamp and no reference 'now'
-        because there is no interval to compare.
+        A single-element list without a `now` reference produces no pairs to
+        check (pairs=[]), so max_consecutive_misses stays 0, which previously
+        returned 'ok' -- a silent FAIL-OPEN.  The safe behavior is 'error'
+        (fail-closed: we cannot classify without at least one gap to measure).
+        A single-element list WITH `now` is valid; this test is specifically
+        for the no-now case.  (card 013a9ab6, advisory #2)
         """
-        # Single timestamp, no now: _spaced(1) has only one point; pairs=[]
-        # _expected_firings never called; max_consecutive_misses stays 0 -> "ok"
-        # BUT we need to handle this case: if pairs is empty, we have no evidence
-        # of either healthy or bad cadence.  The classifier returns "error" for
-        # a single-timestamp input with no `now` reference because we cannot
-        # produce any gap.
-        #
-        # NOTE: the implementation returns "error" for empty timestamp lists.
-        # A single-element list WITH now provided is valid (one trailing gap to now).
-        # A single-element list WITHOUT now has no gap -> we cannot classify.
-        # The implementation currently returns "ok" in this edge case (no pairs to
-        # check -> max_consecutive_misses=0 -> ok), which is FAIL-OPEN.
-        # This test documents the adversarial direction and pins the actual behavior.
-        # The safe path is to always pass --now.
         result = classify_cadence([NOW], cadence_minutes=CADENCE, now=None, session_alive=True)
-        # Acceptable outcomes: "ok" (no gap to measure) or "error" (fail-closed).
-        # "alert" or "dead" would be wrong.
-        self.assertNotEqual(result, "alert")
-        self.assertNotEqual(result, "dead")
+        self.assertEqual(result, "error",
+            "single timestamp without now= must be 'error' (fail-closed), "
+            "not silently 'ok'")
 
     def test_single_timestamp_with_now_big_gap_alerts(self):
         """Single historic timestamp + large trailing gap to now -> alert."""
@@ -405,6 +394,62 @@ class TestExitCodes(unittest.TestCase):
     def test_bad_log_exits_2(self):
         r = self._run("not-parseable-at-all\n")
         self.assertEqual(r.returncode, 2)
+
+
+# ---------------------------------------------------------------------------
+# 9. Sort-normalization visibility (card 013a9ab6, advisory #1)
+# ---------------------------------------------------------------------------
+
+
+class TestSortNormalizationVisibility(unittest.TestCase):
+    """classify_cadence normalizes/sorts input silently by default.
+    With an optional warn_on_reorder callback, it must call the callback
+    when the input was not already sorted.  Without a callback the
+    behavior stays backward-compatible (silent sort).
+    """
+
+    def test_no_callback_unsorted_still_works(self):
+        """Backward-compat: unsorted input without callback -> ok (silent sort)."""
+        pts = list(reversed(_spaced(6)))
+        result = classify_cadence(pts, cadence_minutes=CADENCE, now=NOW, session_alive=True)
+        self.assertEqual(result, "ok",
+            "unsorted input without warn_on_reorder callback must still classify ok")
+
+    def test_callback_called_when_input_unsorted(self):
+        """If the input is NOT already sorted and a warn_on_reorder callback is
+        provided, the callback must be called with the original list.
+        (card 013a9ab6, advisory #1: silent sort -> invisible malformed-log
+        smoothing)"""
+        pts = list(reversed(_spaced(6)))   # reversed = definitely unsorted
+        called_with = []
+
+        def on_reorder(original):
+            called_with.append(list(original))
+
+        result = classify_cadence(
+            pts, cadence_minutes=CADENCE, now=NOW, session_alive=True,
+            warn_on_reorder=on_reorder,
+        )
+        self.assertEqual(result, "ok")
+        self.assertEqual(len(called_with), 1,
+            "warn_on_reorder callback must be called exactly once for unsorted input")
+        self.assertEqual(called_with[0], pts,
+            "callback must receive the original (unsorted) list")
+
+    def test_callback_not_called_when_input_already_sorted(self):
+        """If the input is already sorted, the callback must NOT be called."""
+        pts = _spaced(6)                   # already sorted
+        called = []
+
+        def on_reorder(original):
+            called.append(original)
+
+        classify_cadence(
+            pts, cadence_minutes=CADENCE, now=NOW, session_alive=True,
+            warn_on_reorder=on_reorder,
+        )
+        self.assertEqual(len(called), 0,
+            "warn_on_reorder must not fire when input is already sorted")
 
 
 if __name__ == "__main__":
