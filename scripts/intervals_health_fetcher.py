@@ -150,6 +150,9 @@ def run(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
+    if args.days < 1:
+        parser.error(f"--days must be >= 1, got: {args.days}")
+
     today = date.today()
     if args.since:
         try:
