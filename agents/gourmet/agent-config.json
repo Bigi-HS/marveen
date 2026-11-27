@@ -1,0 +1,13 @@
+{
+  "model": "claude-sonnet-4-6",
+  "securityProfile": "default",
+  "displayName": "Gourmet",
+  "claudeConfigDir": "/home/domin/marveen/agents/gourmet/.claude-config",
+  "team": {
+    "role": "member",
+    "reportsTo": "hibiki",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": ["marveen", "hibiki"]
+  }
+}

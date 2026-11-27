@@ -156,7 +156,7 @@ HOT_CACHE_REFRESH_THROTTLE_SECONDS="${HOT_CACHE_REFRESH_THROTTLE_SECONDS:-1800}"
 # Interval env-overridable for tests. Default 120s (check every 2 minutes).
 CHANNELLESS_INBOX_WEDGE_INTERVAL="${CHANNELLESS_INBOX_WEDGE_INTERVAL:-120}"
 # Agent list env-overridable for tests (FLEET_TEST_CHANNELLESS_AGENTS).
-CHANNELLESS_AGENTS_DEFAULT="gauge quill applegate radar blackbeard morgan roberts kidd rackham bonny avery vane bellamy inkwell"
+CHANNELLESS_AGENTS_DEFAULT="radar inkwell"
 
 DRY_RUN=0
 ONCE=0
@@ -571,7 +571,7 @@ ensure_dave_watchdog() {
 # they were given per-agent Telegram bots, so they need the channel-aware watchdog
 # (fresh launch + --channels + TELEGRAM_STATE_DIR), not the channel-less one.
 ensure_agent_watchdogs() {
-  for n in gauge quill applegate radar blackbeard morgan roberts kidd rackham bonny avery vane bellamy inkwell; do
+  for n in radar inkwell; do
     # Sleep-mode owns eligible ids when the flag is set (mutual exclusion): skip
     # them here so they run under sleep-agent-watchdog.sh, not the always-on loop.
     # Flag absent => is-eligible short-circuits false => no-op (current behavior).
@@ -698,7 +698,7 @@ ensure_sleep_agent_watchdogs() {
 # included so its standalone watchdog also becomes reboot-persistent (pgrep-skip keeps
 # an already-running one). 2026-06-05.
 ensure_channel_watchdogs() {
-  for n in forge chad thor claudia bigben hibiki devil-advocate bond scout gyore percy buster blackbart servo-skull; do
+  for n in forge chad thor claudia hibiki devil-advocate bond scout gyore percy buster servo-skull; do
     pgrep -f "scripts/${n}-watchdog.sh" >/dev/null 2>&1 && continue
     if [ -x "$INSTALL_DIR/scripts/${n}-watchdog.sh" ]; then
       if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: start ${n}-watchdog.sh"; continue; fi
@@ -823,7 +823,8 @@ ensure_ollama() {
 # watchdog. Gated by the same deploy flag.
 ensure_local_agent_watchdogs() {
   ollama_hybrid_enabled || return 0
-  for n in marveen-local claudia-local; do
+  local _retired_local="" # marveen-local claudia-local retired 2026-11-27
+  for n in $_retired_local; do
     [ -f "$INSTALL_DIR/agents/$n/agent-config.json" ] || continue
     pgrep -f "scripts/local-agent-watchdog.sh $n\$" >/dev/null 2>&1 && continue
     if [ -x "$INSTALL_DIR/scripts/local-agent-watchdog.sh" ]; then
@@ -1808,7 +1809,7 @@ fleet_wedge_sweep() {
   [ $(( now - last )) -lt "${FLEET_WEDGE_SWEEP_INTERVAL:-300}" ] && return 0
   echo "$now" > "$throttle_key"
 
-  local agents="${FLEET_TEST_SWEEP_AGENTS:-gauge quill applegate radar blackbeard morgan roberts kidd rackham bonny avery vane bellamy inkwell forge chad thor claudia bigben hibiki devil-advocate bond scout gyore percy buster blackbart dave}"
+  local agents="${FLEET_TEST_SWEEP_AGENTS:-radar inkwell forge chad thor claudia hibiki devil-advocate bond scout gyore percy buster dave gelim gourmet servo-skull}"
   local dead_list="" asleep_list="" wedged_list="" dismissed_list="" napping_list="" healthy_count=0 n session
 
   # --- Phase 1: classify liveness; collect pane captures for alive sessions ---

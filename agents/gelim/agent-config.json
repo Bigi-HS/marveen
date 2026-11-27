@@ -1,0 +1,13 @@
+{
+  "model": "claude-sonnet-4-6",
+  "securityProfile": "default",
+  "displayName": "Gelim",
+  "claudeConfigDir": "/home/domin/marveen/agents/gelim/.claude-config",
+  "team": {
+    "role": "member",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": ["marveen"]
+  }
+}
