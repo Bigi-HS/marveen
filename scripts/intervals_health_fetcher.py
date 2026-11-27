@@ -8,7 +8,7 @@ Chad SEC conditions (card 09d0ff28, CONDITIONAL PASS):
   C3. GPS/coordinate fields stripped from activities before storage.
       Hibiki queries use explicit column lists (never SELECT *).
 """
-import configparser, json, os, sqlite3, urllib.error, urllib.request
+import argparse, configparser, json, os, sqlite3, urllib.error, urllib.request
 from base64 import b64encode
 from datetime import date, timedelta
 
@@ -128,7 +128,40 @@ def _upsert(cur: sqlite3.Cursor, d: str, w: dict, acts: list):
     ))
 
 
-def run():
+def _date_range(today: date, since: date | None, days: int) -> list[str]:
+    """Return ISO dates oldest-first from since (or today-days+1) through today."""
+    start = since if since is not None else (today - timedelta(days=days - 1))
+    n = (today - start).days + 1
+    return [(start + timedelta(days=i)).isoformat() for i in range(n)]
+
+
+def run(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Fetch Intervals.icu wellness/activity data into noa.db health_data."
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        '--since', metavar='YYYY-MM-DD',
+        help='fetch from this date through today (backfill mode)',
+    )
+    group.add_argument(
+        '--days', type=int, default=7,
+        help='fetch last N days (default: 7, used by nightly cron)',
+    )
+    args = parser.parse_args(argv)
+
+    today = date.today()
+    if args.since:
+        try:
+            since = date.fromisoformat(args.since)
+        except ValueError:
+            parser.error(f"--since must be YYYY-MM-DD, got: {args.since}")
+        if since > today:
+            parser.error(f"--since {since} is in the future")
+        dates = _date_range(today, since, args.days)
+    else:
+        dates = _date_range(today, None, args.days)
+
     athlete_id, api_key = _load_credentials()
     hdrs = _auth_header(api_key)
 
@@ -137,14 +170,13 @@ def run():
     conn.execute("PRAGMA foreign_keys=ON")
     cur  = conn.cursor()
 
-    today = date.today()
     fetched, skipped, errors = 0, 0, 0
-    for i in range(7):
-        d = (today - timedelta(days=i)).isoformat()
+    for d in dates:
+        is_today = (d == today.isoformat())
         cur.execute("SELECT 1 FROM health_data WHERE date=?", (d,))
-        if cur.fetchone() and i > 0:
+        if cur.fetchone() and not is_today:
             skipped += 1
-            continue  # already stored; always refresh today (i==0)
+            continue  # already stored; always refresh today
         try:
             w    = _fetch_wellness(athlete_id, hdrs, d)
             acts = _fetch_activities(athlete_id, hdrs, d)
@@ -166,7 +198,8 @@ def run():
 
     conn.commit()
     conn.close()
-    print(f"\nSummary: fetched={fetched}, skipped={skipped}, errors={errors}")
+    print(f"\nSummary: fetched={fetched}, skipped={skipped}, errors={errors} "
+          f"(range: {dates[0]} .. {dates[-1]}, {len(dates)} days)")
 
 
 if __name__ == '__main__':
