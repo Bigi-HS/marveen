@@ -19,10 +19,12 @@ BASE    = 'https://intervals.icu/api/v1'
 
 # C3 -- fields stripped from every activity object before any processing or storage.
 # Intervals.icu may include map/polyline/latlng/streams in activity JSON.
+# stream_types is a metadata list of available stream names (e.g. ["latlng","polyline"]);
+# it contains GPS labels as string values, not coords -- drop it entirely (not needed).
 GPS_KEYS = frozenset({
     'latlng', 'lat_lng', 'start_latlng', 'end_latlng',
     'polyline', 'map', 'coordinates', 'coordinate',
-    'gps', 'gps_data', 'streams',
+    'gps', 'gps_data', 'streams', 'stream_types',
     'altitude', 'altitude_smooth',
     'track', 'route',
 })
