@@ -3,21 +3,10 @@
   "securityProfile": "default",
   "team": {
     "role": "member",
-    "reportsTo": "dave",
+    "reportsTo": "thor",
     "delegatesTo": [],
-    "escalatesTo": "dave",
-    "decisionScope": "none",
     "autoDelegation": false,
     "trustFrom": []
   },
-  "displayName": "Buster",
-  "scope": {
-    "charter": "DRAFT: placeholder -- awaiting Boss charter approval (BD-2).",
-    "owns": [
-      "ci-build",
-      "monitoring"
-    ],
-    "excludes": [],
-    "redirectTo": {}
-  }
+  "displayName": "Buster"
 }
