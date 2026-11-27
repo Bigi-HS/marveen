@@ -278,19 +278,16 @@ class HardlinkBypassGuard(unittest.TestCase):
             except OSError as e:
                 self.skipTest(f"os.link failed (cross-device or permissions): {e}")
             r = _run_cli(["--source", link, "--target", tgt])
-            # Assert CURRENT behavior: hardlink-in-foreign-dir bypasses realpath guard.
-            # If this ever starts failing (rc != 0 + REVOKED), inode detection was added --
-            # flip the assertion to assert refusal.
-            self.assertEqual(
+            # ADVISORY-FLIP triggered (2026-11-27): hardlink-in-foreign-dir NOW blocked
+            # (rc=2, 'REVOKED' in stderr). Assertion updated from "rc==0, no REVOKED" to
+            # the new hardened behavior.
+            self.assertNotEqual(
                 r.returncode, 0,
-                msg="ADVISORY-FLIP: hardlink bypass is now blocked (realpath guard strengthened). "
-                    "Update assertion to assert refusal (rc != 0, 'REVOKED' in stderr). "
-                    f"stdout: {r.stdout}\nstderr: {r.stderr}"
+                msg=f"Expected hardlink bypass to be blocked (rc != 0). stdout: {r.stdout}\nstderr: {r.stderr}"
             )
-            self.assertNotIn(
+            self.assertIn(
                 "REVOKED", r.stderr,
-                msg="ADVISORY-FLIP: guard now catches hardlink-in-foreign-dir. "
-                    "Update assertion direction.\nstderr: " + r.stderr
+                msg=f"Expected 'REVOKED' in stderr for blocked hardlink. stderr: {r.stderr}"
             )
 
 

@@ -132,8 +132,12 @@ class PrescanGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             src = os.path.join(d, "src.db")
             tgt = os.path.join(d, "noa.db")
+            # Explicit absent manifest: store/debrand-review.json now EXISTS on disk and
+            # would be loaded as default, covering id=1 and bypassing the AM-3 gate for
+            # this fixture (2026-11-27 cutover side-effect). Pass a known-absent path.
+            absent_manifest = os.path.join(d, "absent-review.json")
             _make_source(src, [{"id": 1, "content": "quoting com.marveen.channels"}])
-            r = _run_cli(["--source", src, "--target", tgt])
+            r = _run_cli(["--source", src, "--target", tgt, "--review-manifest", absent_manifest])
             self.assertEqual(r.returncode, 3, r.stderr)
             self.assertFalse(os.path.exists(tgt))
 
@@ -161,8 +165,11 @@ class ContentTransformTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             src = os.path.join(d, "src.db")
             tgt = os.path.join(d, "noa.db")
+            # Explicit absent manifest: store/debrand-review.json has {"1": "keep"} after
+            # cutover -- that would skip the M2 rewrite for id=1 (2026-11-27 side-effect).
+            absent_manifest = os.path.join(d, "absent-review.json")
             _make_source(src, [{"id": 1, "content": "marveen handles routing"}])
-            r = _run_cli(["--source", src, "--target", tgt])
+            r = _run_cli(["--source", src, "--target", tgt, "--review-manifest", absent_manifest])
             self.assertEqual(r.returncode, 0, r.stderr)
             conn = sqlite3.connect(tgt)
             content = conn.execute("SELECT content FROM memories WHERE id=1").fetchone()[0]
