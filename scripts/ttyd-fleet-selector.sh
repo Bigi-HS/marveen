@@ -35,5 +35,15 @@ if [ -z "$session" ]; then
     exec "$0"
 fi
 
+# Defensive: validate session name against known-safe pattern before passing to tmux.
+# Source is tmux list-sessions output + integer-validated index; this is belt+suspenders.
+# Note: `tmux attach -t -- "$session"` does NOT work -- tmux treats `--` as the target
+# (not end-of-options), causing 'can't find session: --'. Validation is the correct guard.
+if [[ ! "$session" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+    echo "Session name contains unexpected characters. Aborting."
+    sleep 2
+    exec "$0"
+fi
+
 echo "Attaching: $session"
-exec tmux attach -t -- "$session"
+exec tmux attach -t "$session"
