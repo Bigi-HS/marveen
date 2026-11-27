@@ -235,11 +235,11 @@ def main():
         check("AC-3c unconvertible embedding -> NULL", emb4 is None)
         # AC-3c memories agent default for NULL
         ag5 = nconn.execute("SELECT agent_id FROM memories WHERE id=5").fetchone()[0]
-        check("memories NULL agent_id defaulted to marveen", ag5 == "marveen")
+        check("memories NULL agent_id defaulted to noa", ag5 == "noa")  # DA-5 flip: DEFAULT_AGENT='noa'
         # OQ-1 sessions mapping
         sess = dict(nconn.execute("SELECT session_id, agent_id FROM sessions").fetchall())
         check("OQ-1 session mapped via conversation_log (123->claudia)", sess.get("sess-a") == "claudia")
-        check("OQ-1 session unmappable -> marveen default", sess.get("sess-b") == "marveen")
+        check("OQ-1 session unmappable -> noa default", sess.get("sess-b") == "noa")  # DA-5 flip
         # scheduled_tasks defaults
         st = nconn.execute("SELECT agent, type FROM scheduled_tasks WHERE id='daily-x'").fetchone()
         check("scheduled_tasks agent + type populated", st is not None and st[0] and st[1])
@@ -263,8 +263,9 @@ def main():
         check("STRIDE I2 noa.db perms 0600", mode == "0o600")
 
         # AC-3a idempotent: re-run, same counts, no dup
+        # --allow-overwrite required: GUARD 2 (card c80cede3) rejects overwrite without flag.
         before = sqlite3.connect(dst).execute("SELECT COUNT(*) FROM memories").fetchone()[0]
-        r2 = run(["python3", MIGRATE, "--source", src, "--target", dst])
+        r2 = run(["python3", MIGRATE, "--source", src, "--target", dst, "--allow-overwrite"])
         check("AC-3a idempotent re-run exits 0", r2.returncode == 0)
         after = sqlite3.connect(dst).execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         check(f"AC-3a idempotent: memories count stable ({before}=={after})", before == after)

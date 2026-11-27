@@ -19,6 +19,13 @@ vi.mock('../web/main-agent.js', () => ({
   MAIN_CHANNELS_SESSION: 'marveen-channels',
 }))
 
+// Prevent real store/.marveen-budget-pause (or any agent pause marker) from
+// blocking sweep-fire in tests (2026-11-27: live marker is active, blocks tasks).
+vi.mock('../web/opus-burn-monitor.js', () => ({
+  isBudgetPauseMarkerActive: () => false,
+  readBudgetPauseMarker: () => null,
+}))
+
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
   return {

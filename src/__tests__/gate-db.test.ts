@@ -29,7 +29,8 @@ describe('migrateGateTables (MG-AC1 additive)', () => {
       .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'gate_%' ORDER BY name`)
       .all() as Array<{ name: string }>
     // gate_invalidations added by card 2fd80824 (SHA-drift invalidation);
-    // gate_pr_risk added by card 66cf63ed (derived-risk intake snapshot)
+    // gate_pr_risk added by card 66cf63ed (derived-risk intake snapshot);
+    // gate_drift_notifications added by cutover (2026-11-27)
     expect(tables.map((t) => t.name)).toEqual([
       'gate_approvals',
       'gate_ci_runs',

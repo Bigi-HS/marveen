@@ -192,7 +192,7 @@ def session_alive_by_tmux(session_name: str) -> bool:
 
     try:
         r = subprocess.run(
-            ["tmux", "has-session", "-t", session_name],
+            ["tmux", "has-session", "-t", f"={session_name}"],
             capture_output=True,
             timeout=5,
         )
