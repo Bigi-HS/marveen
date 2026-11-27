@@ -36,4 +36,4 @@ if [ -z "$session" ]; then
 fi
 
 echo "Attaching: $session"
-exec tmux attach -t -- "$session"
+exec tmux attach -t "$session"

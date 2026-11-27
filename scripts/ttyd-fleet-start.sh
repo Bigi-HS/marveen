@@ -34,7 +34,11 @@ for arg in "$@"; do
 done
 
 if [ "$WRITABLE" -eq 1 ]; then
-    echo "[ttyd-fleet] WARNING: WRITABLE mode -- separate Chad gate PASS required (slice 3)"
+    if [ "${TTYD_WRITE_AUTHORIZED:-0}" != "1" ]; then
+        echo "ERROR: --writable requires TTYD_WRITE_AUTHORIZED=1 (set after Chad write-gate PASS)." >&2
+        exit 2
+    fi
+    echo "[ttyd-fleet] WRITABLE mode authorized (TTYD_WRITE_AUTHORIZED=1)"
 fi
 
 # Clean up any prior socket and ttyd instance
@@ -68,6 +72,10 @@ if [ ! -S "$SOCK" ]; then
     exit 1
 fi
 echo "[ttyd-fleet] ttyd up (PID $TTYD_PID, socket OK)"
+
+# Explicit socket permissions: 0660 (domin rw, group rw, other none).
+# This is the auth boundary: only the domin OS user can connect locally.
+chmod 0660 "$SOCK"
 
 # Guard: verify no TCP port was opened (ttyd must stay on UNIX socket only)
 if ss -tlnp 2>/dev/null | grep -q "ttyd"; then
