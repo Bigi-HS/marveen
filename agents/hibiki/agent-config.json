@@ -1,0 +1,14 @@
+{
+  "model": "claude-sonnet-4-6",
+  "securityProfile": "default",
+  "displayName": "Hibiki",
+  "channelProvider": "telegram",
+  "claudeConfigDir": "/home/domin/marveen/agents/hibiki/.claude-config",
+  "team": {
+    "role": "member",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": ["marveen"]
+  }
+}

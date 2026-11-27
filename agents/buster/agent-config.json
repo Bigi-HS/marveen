@@ -3,7 +3,7 @@
   "securityProfile": "default",
   "team": {
     "role": "member",
-    "reportsTo": "dave",
+    "reportsTo": "thor",
     "delegatesTo": [],
     "autoDelegation": false,
     "trustFrom": []

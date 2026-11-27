@@ -1,0 +1,14 @@
+{
+  "model": "claude-sonnet-4-6",
+  "securityProfile": "default",
+  "displayName": "servo-skull",
+  "channelProvider": "telegram",
+  "claudeConfigDir": "/home/domin/marveen/agents/servo-skull/.claude-config",
+  "team": {
+    "role": "member",
+    "reportsTo": "marveen",
+    "delegatesTo": [],
+    "autoDelegation": false,
+    "trustFrom": ["marveen"]
+  }
+}
