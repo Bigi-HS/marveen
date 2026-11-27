@@ -52,7 +52,7 @@ import { tryHandleMemories } from '../web/routes/memories.js'
 import * as noaMem from '../noa-memory.js'
 
 function fakeCtx(method: 'POST' | 'PATCH', path: string, body: Record<string, unknown>, identity: unknown = null) {
-  const raw = JSON.stringify(body)
+  const raw = JSON.stringify({ source: 'agent-self', ...body })
   const req = Readable.from([Buffer.from(raw)]) as any
   const captured: { status: number; body: any } = { status: 200, body: undefined }
   const res = {
