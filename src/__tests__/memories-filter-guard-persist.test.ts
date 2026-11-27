@@ -43,7 +43,7 @@ beforeEach(() => {
 afterAll(() => rmSync(TEST_DB, { force: true }))
 
 function fakePostCtx(agent_id: string, content: string, category = 'warm') {
-  const body = JSON.stringify({ agent_id, content, category })
+  const body = JSON.stringify({ agent_id, content, category, source: 'agent-self' })
   const req = Readable.from([Buffer.from(body)]) as any
   const captured: { status: number; body: any } = { status: 200, body: undefined }
   const res = {
