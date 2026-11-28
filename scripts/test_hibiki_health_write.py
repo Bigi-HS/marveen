@@ -78,16 +78,30 @@ class RangeChecksSyncTests(unittest.TestCase):
 
 
 class WeightSubcommandTests(unittest.TestCase):
-    """TDD fixtures for the weight subcommand (card ce19e4d6).
+    """Fixtures for the weight subcommand (card ce19e4d6).
 
-    Red phase: these fail until write_weight() and 'weight' CLI subcommand are
-    implemented. All range-check behaviour is SEC-AC1; source requirement is
-    SEC-AC3; 0600 permissions are SEC-AC4b.
+    Implementation landed in commit 834870b (hibiki-health-write #958):
+    - parameter: kg= (not weight_kg=)
+    - file: hibiki-progress.json (not weight_log.json)
+    - entry key: "kg" (not "weight_kg")
+    - range: 20-350 kg (updated from 30-250)
     """
 
+    _PROGRESS_TEMPLATE = {
+        "weight_log": [],
+        "dexa_results": [],
+        "workout_log": [],
+        "form_feedback": [],
+        "plan_change_log": [],
+    }
+
     def setUp(self):
-        import tempfile
+        import tempfile, json, os
         self._tmpdir = tempfile.mkdtemp()
+        # write_weight calls _read_json which requires the store file to exist
+        path = os.path.join(self._tmpdir, "hibiki-progress.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self._PROGRESS_TEMPLATE, f)
 
     def tearDown(self):
         import shutil
@@ -102,72 +116,72 @@ class WeightSubcommandTests(unittest.TestCase):
 
     def test_write_weight_creates_log(self):
         import os
-        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=82.5, source="manual")
-        path = os.path.join(self._tmpdir, "weight_log.json")
-        self.assertTrue(os.path.exists(path), "weight_log.json not created")
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", kg=82.5, source="manual")
+        path = os.path.join(self._tmpdir, "hibiki-progress.json")
+        self.assertTrue(os.path.exists(path), "hibiki-progress.json not created")
         import json
         data = json.loads(open(path).read())
-        entries = data.get("entries", [])
+        entries = data.get("weight_log", [])
         self.assertEqual(len(entries), 1)
         e = entries[0]
         self.assertEqual(e["date"], "2026-09-22")
-        self.assertEqual(e["weight_kg"], 82.5)
+        self.assertEqual(e["kg"], 82.5)
         self.assertEqual(e["source"], "manual")
 
     def test_write_weight_appends_second_date(self):
-        hw.write_weight(store=self._tmpdir, date_str="2026-09-21", weight_kg=82.0, source="manual")
-        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=82.5, source="manual")
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-21", kg=82.0, source="manual")
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", kg=82.5, source="manual")
         import json, os
-        data = json.loads(open(os.path.join(self._tmpdir, "weight_log.json")).read())
-        self.assertEqual(len(data["entries"]), 2)
+        data = json.loads(open(os.path.join(self._tmpdir, "hibiki-progress.json")).read())
+        self.assertEqual(len(data["weight_log"]), 2)
 
     def test_write_weight_updates_existing_date(self):
-        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=82.5, source="manual")
-        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=83.0, source="manual")
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", kg=82.5, source="manual")
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", kg=83.0, source="manual")
         import json, os
-        data = json.loads(open(os.path.join(self._tmpdir, "weight_log.json")).read())
-        self.assertEqual(len(data["entries"]), 1)
-        self.assertEqual(data["entries"][0]["weight_kg"], 83.0)
+        data = json.loads(open(os.path.join(self._tmpdir, "hibiki-progress.json")).read())
+        self.assertEqual(len(data["weight_log"]), 1)
+        self.assertEqual(data["weight_log"][0]["kg"], 83.0)
 
     def test_write_weight_file_permissions_0600(self):
         import os, stat
-        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=82.5, source="manual")
-        path = os.path.join(self._tmpdir, "weight_log.json")
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", kg=82.5, source="manual")
+        path = os.path.join(self._tmpdir, "hibiki-progress.json")
         mode = os.stat(path).st_mode & 0o777
         self.assertEqual(mode, 0o600, f"expected 0600, got {oct(mode)}")
 
     # --- SEC-AC1 range checks ---
 
-    def test_weight_below_30_rejected(self):
+    def test_weight_below_20_rejected(self):
         with self.assertRaises(SystemExit):
-            hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=29.9, source="manual")
+            hw.write_weight(store=self._tmpdir, date_str="2026-09-22", kg=19.9, source="manual")
 
-    def test_weight_above_250_rejected(self):
+    def test_weight_above_350_rejected(self):
         with self.assertRaises(SystemExit):
-            hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=250.1, source="manual")
+            hw.write_weight(store=self._tmpdir, date_str="2026-09-22", kg=350.1, source="manual")
 
-    def test_weight_boundary_30_passes(self):
-        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=30.0, source="manual")
+    def test_weight_boundary_20_passes(self):
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", kg=20.0, source="manual")
 
-    def test_weight_boundary_250_passes(self):
-        hw.write_weight(store=self._tmpdir, date_str="2026-09-23", weight_kg=250.0, source="manual")
+    def test_weight_boundary_350_passes(self):
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-23", kg=350.0, source="manual")
 
     # --- SEC-AC3 source required ---
 
     def test_invalid_source_rejected(self):
         with self.assertRaises(SystemExit):
-            hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=82.5, source="guess")
+            hw.write_weight(store=self._tmpdir, date_str="2026-09-22", kg=82.5, source="guess")
 
     def test_vision_confirmed_source_accepted(self):
-        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", weight_kg=82.5, source="vision-confirmed")
+        hw.write_weight(store=self._tmpdir, date_str="2026-09-22", kg=82.5, source="vision-confirmed")
 
     # --- WEIGHT_KG range pin (literal guard, value-carrying-assertion) ---
 
     def test_weight_kg_range_pin(self):
-        # GOLDEN: 30-250 kg per card ce19e4d6 spec; if this changes, update the card too.
+        # GOLDEN: 20-350 kg per hibiki_ranges.py (updated from 30-250 in commit 834870b, card ce19e4d6).
         lo, hi = hw.RANGE_CHECKS["weight_kg"]
-        self.assertEqual(lo, 30)
-        self.assertEqual(hi, 250)
+        self.assertEqual(lo, 20)
+        self.assertEqual(hi, 350)
 
 
 if __name__ == "__main__":
