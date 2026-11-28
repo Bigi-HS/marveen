@@ -57,8 +57,8 @@ function hmacContent(content: string): string {
 }
 
 export interface GuardEventInput {
-  mechanism: 'messages-guard' | 'memories-filter' | 'guard-error'
-  route: '/api/messages' | '/api/memories'
+  mechanism: 'messages-guard' | 'memories-filter' | 'guard-error' | 'channel-delivery-guard'
+  route: '/api/messages' | '/api/memories' | 'message-router'
   verdict: 'PASS' | 'FLAG' | 'BLOCK'
   fromAgent: string | null
   toAgent: string | null
