@@ -19,6 +19,7 @@ import { MAIN_AGENT_ID } from '../config.js'
 import { OPERATOR_AGENT_ID } from '../web/agent-token-registry.js'
 import { scopesForAgent } from '../web/agent-token-provision.js'
 import { ADMIN_SCOPE } from '../web/agent-token-registry.js'
+import { resolveRequestIdentity } from '../web/agent-identity-binding.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 function src(...parts: string[]): string {
@@ -127,5 +128,38 @@ describe('de-brand STAGE-2: obsidian-ingest-cli.ts source audit', () => {
   it('the /api/memories query interpolates MAIN_AGENT_ID, not a literal', () => {
     expect(SRC).toMatch(/\/api\/memories\?agent=\$\{MAIN_AGENT_ID\}/)
     expect(SRC).not.toMatch(/\/api\/memories\?agent=marveen/)
+  })
+})
+
+describe('de-brand STAGE-2: agent-identity-binding operator identity', () => {
+  it('a valid browser session resolves to MAIN_AGENT_ID (operator identity)', () => {
+    // hasSession:true returns the operator identity early, without touching db.
+    const r = resolveRequestIdentity({
+      hasSession: true,
+      bearer: '',
+      db: null as unknown as import('better-sqlite3').Database,
+      sharedToken: '',
+      now: 0,
+      isWrite: false,
+    })
+    expect(r.pass).toBe(true)
+    if (!r.pass) throw new Error('expected operator session to pass')
+    expect(r.identity.agentId).toBe(MAIN_AGENT_ID)
+  })
+  const SRC = src('web', 'agent-identity-binding.ts')
+  it('operator identity references OPERATOR_AGENT_ID, not a raw marveen literal', () => {
+    expect(SRC).toMatch(/agentId:\s*OPERATOR_AGENT_ID/)
+    expect(SRC).not.toMatch(/identity:\s*\{\s*agentId:\s*'marveen'/)
+  })
+})
+
+describe('de-brand STAGE-2: deploy-delta-cli.ts source audit', () => {
+  const SRC = src('web', 'deploy-delta-cli.ts')
+  it('imports MAIN_AGENT_ID from config', () => {
+    expect(SRC).toMatch(/import\s*\{[^}]*MAIN_AGENT_ID[^}]*\}\s*from\s*'\.\.\/config\.js'/)
+  })
+  it('the Genesis deploy notice routes to MAIN_AGENT_ID, not a literal', () => {
+    expect(SRC).toMatch(/to:\s*MAIN_AGENT_ID/)
+    expect(SRC).not.toMatch(/to:\s*'marveen'/)
   })
 })
