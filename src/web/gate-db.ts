@@ -31,6 +31,13 @@ export function migrateGateTables(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_gate_pr_sha ON gate_approvals(pr_number, head_sha)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_gate_reviewer ON gate_approvals(pr_number, reviewer)`)
+  // Card 0139ef0b: add reviewed_code to an EXISTING gate_approvals table (live DB).
+  // SQLite has no ADD COLUMN IF NOT EXISTS, so we try/catch the duplicate-column error.
+  try {
+    db.exec(`ALTER TABLE gate_approvals ADD COLUMN reviewed_code INTEGER`)
+  } catch {
+    // column already exists -- no-op
+  }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS gate_overrides (
