@@ -29,10 +29,16 @@ if [ -z "${SRV_PID:-}" ]; then
 fi
 cmd=$(tr '\0' ' ' < "/proc/$SRV_PID/cmdline" 2>/dev/null)
 echo "  dashboard PID $SRV_PID :: $cmd"
-if tr '\0' '\n' < "/proc/$SRV_PID/environ" 2>/dev/null | grep -q '^NOA_DB_PATH=store/noa.db$'; then
-  echo "  PID $SRV_PID : NOA_DB_PATH=store/noa.db  OK"
+# The deploy.sh launch does NOT set NOA_DB_PATH -- the server defaults to store/noa.db.
+# Accept EITHER the explicit env var OR its absence (implicit default = noa.db).
+# A wrong path (e.g. claudeclaw.db) would be caught by the write-probe round-trip below.
+NOA_DB_ENV=$(tr '\0' '\n' < "/proc/$SRV_PID/environ" 2>/dev/null | grep '^NOA_DB_PATH=' | head -1 || true)
+if [ -z "${NOA_DB_ENV:-}" ]; then
+  echo "  PID $SRV_PID : NOA_DB_PATH unset (default noa.db)  OK"
+elif echo "$NOA_DB_ENV" | grep -q '^NOA_DB_PATH=.*noa\.db$'; then
+  echo "  PID $SRV_PID : $NOA_DB_ENV  OK"
 else
-  echo "[verify] FAIL (A): dashboard PID $SRV_PID (the :3420 listener) has no NOA_DB_PATH=store/noa.db in its process env" >&2
+  echo "[verify] FAIL (A): dashboard PID $SRV_PID has unexpected NOA_DB_PATH: $NOA_DB_ENV" >&2
   exit 1
 fi
 
@@ -50,7 +56,7 @@ curl -s -o /dev/null -X DELETE -H "Authorization: Bearer $TOKEN" "$BASE/api/kanb
 
 echo "[verify] (C) a live MEMORY write lands in noa.db (not claudeclaw.db)"
 MID=$(curl -s -X POST "$BASE/api/memories" -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
-  -d '{"agent_id":"dave","content":"__cutover-verify-mem-probe","category":"hot","keywords":"cutover, probe"}' \
+  -d '{"agent_id":"dave","content":"__cutover-verify-mem-probe","category":"hot","keywords":"cutover, probe","source":"agent-self"}' \
   | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{process.stdout.write(String(JSON.parse(s).id))})")
 echo "  probe memory id: $MID"
 m_noa=$(count_in store/noa.db memories id "$MID")

@@ -81,7 +81,7 @@ count_in() { node -e "const D=require('better-sqlite3');const d=new D(process.ar
 
 # (2) memory write
 MID=$(curl -s -X POST "$BASE/api/memories" -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
-  -d '{"agent_id":"dave","content":"__dryrun-mem-probe","category":"hot","keywords":"dryrun"}' | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(String(JSON.parse(s).id))}catch{process.stdout.write('')}})")
+  -d '{"agent_id":"dave","content":"__dryrun-mem-probe","category":"hot","keywords":"dryrun","source":"agent-self"}' | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(String(JSON.parse(s).id))}catch{process.stdout.write('')}})")
 [ -n "$MID" ] && [ "$(count_in "$DRYDB" memories id "$MID")" = "1" ] \
   && echo "[dryrun] (2) memory write OK -> copy noa.db" \
   || { echo "[dryrun] FAIL (2): memory write did not land in copy (id=$MID)" >&2; tail -20 "$DRYDIR/boot.log" >&2; exit 1; }
