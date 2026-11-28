@@ -172,3 +172,68 @@ describe('gate_holds -- insertHold / releaseHold / hasActiveHold (card dea65d8e)
     expect(hasActiveHold(db, 42).reason).toBe('second hold')
   })
 })
+
+describe('gate_approvals reviewed_code field (card 0139ef0b)', () => {
+  it('reviewed_code=true is stored and read back via GateApprovalRow', () => {
+    const row = insertApproval(
+      db,
+      { pr_number: 42, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved',
+        recorded_by: 'dave', reviewed_code: true },
+      1000,
+    )
+    expect(row.reviewed_code).toBe(true)
+  })
+
+  it('reviewed_code=false is stored and read back', () => {
+    const row = insertApproval(
+      db,
+      { pr_number: 42, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved',
+        recorded_by: 'dave', reviewed_code: false },
+      1000,
+    )
+    expect(row.reviewed_code).toBe(false)
+  })
+
+  it('reviewed_code absent (undefined) stores NULL and row.reviewed_code is null', () => {
+    const row = insertApproval(
+      db,
+      { pr_number: 42, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved', recorded_by: 'dave' },
+      1000,
+    )
+    expect(row.reviewed_code).toBeNull()
+  })
+
+  it('migrateGateTables includes reviewed_code column in gate_approvals (idempotent)', () => {
+    migrateGateTables(db) // second run
+    const cols = db.prepare("PRAGMA table_info(gate_approvals)").all() as Array<{ name: string }>
+    expect(cols.some((c) => c.name === 'reviewed_code')).toBe(true)
+  })
+
+  it('adds reviewed_code to a pre-existing gate_approvals table that lacks the column (live-DB migration path)', () => {
+    // Simulate the LIVE DB: create gate_approvals WITHOUT reviewed_code, then migrate.
+    const liveDb = new Database(':memory:')
+    liveDb.exec(`
+      CREATE TABLE gate_approvals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pr_number INTEGER NOT NULL, head_sha TEXT NOT NULL,
+        reviewer TEXT NOT NULL, verdict TEXT NOT NULL,
+        recorded_by TEXT NOT NULL, recorded_at INTEGER NOT NULL, note TEXT
+      )
+    `)
+    // Seed a row to confirm the table survives the migration intact.
+    liveDb.exec(`INSERT INTO gate_approvals (pr_number, head_sha, reviewer, verdict, recorded_by, recorded_at)
+                 VALUES (1, '${'a'.repeat(40)}', 'dave', 'approved', 'dave', 1000)`)
+    // The column must not exist yet.
+    const before = liveDb.prepare("PRAGMA table_info(gate_approvals)").all() as Array<{ name: string }>
+    expect(before.some((c) => c.name === 'reviewed_code')).toBe(false)
+
+    migrateGateTables(liveDb)
+
+    const after = liveDb.prepare("PRAGMA table_info(gate_approvals)").all() as Array<{ name: string }>
+    expect(after.some((c) => c.name === 'reviewed_code')).toBe(true)
+    // Existing row survived and reviewed_code is NULL (default for existing rows).
+    const row = liveDb.prepare("SELECT reviewed_code FROM gate_approvals WHERE pr_number = 1").get() as { reviewed_code: number | null }
+    expect(row.reviewed_code).toBeNull()
+    liveDb.close()
+  })
+})

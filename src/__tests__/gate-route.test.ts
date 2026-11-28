@@ -464,3 +464,37 @@ describe('POST /api/gate/hold + POST /api/gate/release-hold (card dea65d8e)', ()
     expect(r.status).toBe(403)
   })
 })
+
+describe('POST /api/gate/approve -- reviewed_code flag (card 0139ef0b)', () => {
+  it('reviewed_code:true is accepted and stored (201)', async () => {
+    const r = await call('POST', '/api/gate/approve', {
+      pr_number: 42, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved', reviewed_code: true,
+    })
+    expect(r.status).toBe(201)
+    expect(r.body.reviewed_code).toBe(true)
+  })
+
+  it('reviewed_code:false is accepted and stored (201)', async () => {
+    const r = await call('POST', '/api/gate/approve', {
+      pr_number: 42, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved', reviewed_code: false,
+    })
+    expect(r.status).toBe(201)
+    expect(r.body.reviewed_code).toBe(false)
+  })
+
+  it('reviewed_code absent -> 201 (soft warning, not blocking)', async () => {
+    const r = await call('POST', '/api/gate/approve', {
+      pr_number: 42, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved',
+    })
+    expect(r.status).toBe(201)
+    expect(r.body.reviewed_code).toBeNull()
+  })
+
+  it('reviewed_code:null -> 201 (treated as not supplied)', async () => {
+    const r = await call('POST', '/api/gate/approve', {
+      pr_number: 42, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved', reviewed_code: null,
+    })
+    expect(r.status).toBe(201)
+    expect(r.body.reviewed_code).toBeNull()
+  })
+})
