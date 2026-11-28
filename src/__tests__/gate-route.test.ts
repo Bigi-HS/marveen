@@ -422,3 +422,45 @@ describe('POST /api/gate/approve -- live head_sha validation (card 0be66e13)', (
     expect(r.status).toBe(201)
   })
 })
+
+describe('POST /api/gate/hold + POST /api/gate/release-hold (card dea65d8e)', () => {
+  it('operator can place a hold on a PR', async () => {
+    const r = await call('POST', '/api/gate/hold', { pr_number: 42, reason: 'pending sec review' }, operatorId)
+    expect(r.status).toBe(201)
+    expect(r.body.pr_number).toBe(42)
+    expect(r.body.reason).toBe('pending sec review')
+  })
+
+  it('per-agent token cannot place a hold (operator scope required)', async () => {
+    const r = await call('POST', '/api/gate/hold', { pr_number: 42, reason: 'hold' }, daveId)
+    expect(r.status).toBe(403)
+  })
+
+  it('missing pr_number returns 400', async () => {
+    const r = await call('POST', '/api/gate/hold', { reason: 'hold' }, operatorId)
+    expect(r.status).toBe(400)
+  })
+
+  it('missing reason returns 400', async () => {
+    const r = await call('POST', '/api/gate/hold', { pr_number: 42 }, operatorId)
+    expect(r.status).toBe(400)
+  })
+
+  it('operator can release a hold', async () => {
+    await call('POST', '/api/gate/hold', { pr_number: 42, reason: 'pending' }, operatorId)
+    const r = await call('POST', '/api/gate/release-hold', { pr_number: 42 }, operatorId)
+    expect(r.status).toBe(200)
+    expect(r.body.released).toBe(true)
+  })
+
+  it('release-hold with no active hold returns released=false', async () => {
+    const r = await call('POST', '/api/gate/release-hold', { pr_number: 999 }, operatorId)
+    expect(r.status).toBe(200)
+    expect(r.body.released).toBe(false)
+  })
+
+  it('per-agent token cannot release a hold (operator scope required)', async () => {
+    const r = await call('POST', '/api/gate/release-hold', { pr_number: 42 }, daveId)
+    expect(r.status).toBe(403)
+  })
+})
