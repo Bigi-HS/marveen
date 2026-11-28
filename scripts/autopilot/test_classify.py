@@ -182,11 +182,14 @@ def main():
     ok &= check("boss_waiting worker-owned >7d -> parked (worker never nudges)",
                 r["idle_ok"] is True and r["counts"]["nudgeable"] == 0)
 
-    # 24. Orchestrator surfaces a stale (>7d) boss_waiting card as NUDGEABLE so it
-    #     reaches the morning brief aging-flag -- the escalation path.
+    # 24. Orchestrator surfaces a stale (>7d) boss_waiting card to the SURFACE bucket
+    #     so it reaches the morning-brief aging-flag -- the escalation path. Card
+    #     f8a97803 part 3: this is a surface-to-Boss item, NOT an owner-poke, so it
+    #     lands in `surface` (not nudgeable) and does NOT force idle_ok False.
     r = classify([card("bw4", assignee="dave", age_h=8 * 24, boss_waiting=1)], "marveen", NOW)
-    ok &= check("orch: boss_waiting >7d -> nudgeable (escalate)",
-                r["counts"]["nudgeable"] == 1 and not r["idle_ok"])
+    ok &= check("orch: boss_waiting >7d -> surface (not nudgeable), idle",
+                r["counts"]["surface"] == 1 and r["counts"]["nudgeable"] == 0
+                and r["idle_ok"] is True)
 
     # 25. Orchestrator does NOT surface a boss_waiting card younger than 7 days ->
     #     parked, idle (no sub-weekly Boss nag).
@@ -215,10 +218,113 @@ def main():
         r = classify([card("bwF", assignee="dave", age_h=2, boss_waiting=val)], "dave", NOW)
         ok &= check(f"boss_waiting falsey {val!r} -> mine", r["counts"]["mine"] == 1)
 
-    # 29. Orchestrator owns its OWN stale boss_waiting card -> it escalates that too.
+    # 29. Orchestrator owns its OWN stale boss_waiting card -> SURFACE, not nudgeable
+    #     (card f8a97803 part 3 -- surface-to-Boss, not an owner-poke -> idle).
     r = classify([card("bw8", assignee="marveen", age_h=10 * 24, boss_waiting=1)], "marveen", NOW)
-    ok &= check("orch owns stale boss_waiting -> nudgeable",
-                r["counts"]["nudgeable"] == 1 and not r["idle_ok"])
+    ok &= check("orch owns stale boss_waiting -> surface, not nudgeable, idle",
+                r["counts"]["surface"] == 1 and r["counts"]["nudgeable"] == 0
+                and r["idle_ok"] is True)
+
+    # --- Card 9b7f7221 (option A): status=waiting is NOT MINE-drivable --------------
+    # An owner's `waiting` card with no boss_waiting / parked_until / fresh marker has
+    # no autonomous next step (done is ask-first) -> it must NOT churn in MINE. It is
+    # PARKED ("waiting-unclosable"), while in_progress/planned still drive.
+
+    # 30. Own waiting card, boss_waiting=0, no marker -> PARKED, idle (THE churn fix).
+    r = classify([card("w1", assignee="dave", status="waiting", age_h=72)], "dave", NOW)
+    ok &= check("own waiting card (bw=0) -> parked, not mine, idle",
+                r["idle_ok"] is True and r["counts"]["mine"] == 0
+                and r["counts"]["parked"] == 1)
+
+    # 31. Own in_progress card still drives -> MINE, busy (waiting-only exclusion).
+    r = classify([card("w2", assignee="dave", status="in_progress", age_h=72)], "dave", NOW)
+    ok &= check("own in_progress -> mine, busy",
+                r["idle_ok"] is False and r["counts"]["mine"] == 1)
+
+    # 32. Own planned card still drives -> MINE, busy.
+    r = classify([card("w3", assignee="dave", status="planned", age_h=72)], "dave", NOW)
+    ok &= check("own planned -> mine, busy",
+                r["idle_ok"] is False and r["counts"]["mine"] == 1)
+
+    # 33. A waiting card WITH boss_waiting=1 still parks via the boss_waiting path
+    #     (unchanged) -- the waiting-exclusion is not the only gate.
+    r = classify([card("w4", assignee="dave", status="waiting", age_h=2,
+                       boss_waiting=1)], "dave", NOW)
+    ok &= check("own waiting + boss_waiting=1 -> parked, idle",
+                r["idle_ok"] is True and r["counts"]["parked"] == 1)
+
+    # 34. A waiting card with a FRESH awaiting-marker still parks via the marker path.
+    r = classify([card("w5", assignee="dave", status="waiting",
+                       desc="awaiting-dominik", age_h=10)], "dave", NOW)
+    ok &= check("own waiting + fresh marker -> parked, idle",
+                r["idle_ok"] is True and r["counts"]["parked"] == 1)
+
+    # --- Card f8a97803: nudge-cooldown ledger + idle when all nudgeable are cooled --
+    # A nudge is a MESSAGE, not a card move, so a freshly-nudged stale card re-enters
+    # NUDGEABLE every 15 min. The cooldown ledger (keyed on LAST NUDGE) parks it for
+    # 24h, so idle_ok becomes TRUE once every nudgeable is cooled. Fail-safe: a
+    # missing entry = never-nudged = stays nudgeable (BUSY side).
+
+    # 35. All nudgeable within 24h cooldown -> idle (the token-waste loop killed).
+    led = {"nd1": NOW - 1 * H, "nd2": NOW - 2 * H}  # both nudged recently
+    cards_cool = [card("nd1", assignee="hibiki", age_h=48),
+                  card("nd2", assignee="gauge", age_h=100)]
+    r = classify(cards_cool, "marveen", NOW, nudge_ledger=led)
+    ok &= check("all nudgeable within cooldown -> idle (parked by cooldown)",
+                r["idle_ok"] is True and r["counts"]["nudgeable"] == 0
+                and r["counts"]["parked"] == 2)
+
+    # 36. One high/urgent delegated-stale card, NEVER nudged (empty ledger) -> still
+    #     nudgeable -> NOT idle. The adversarial gate: never swallow a real drive.
+    r = classify([card("nd3", assignee="hibiki", age_h=48, priority="high")],
+                 "marveen", NOW, nudge_ledger={})
+    ok &= check("high delegated-stale never nudged -> nudgeable, not idle",
+                r["idle_ok"] is False and r["counts"]["nudgeable"] == 1)
+
+    # 37. mine>0 -> NOT idle regardless of cooldown state (own fresh card dominates).
+    r = classify([card("nd4", assignee="marveen", age_h=1),
+                  card("nd5", assignee="hibiki", age_h=48)],
+                 "marveen", NOW, nudge_ledger={"nd5": NOW - 1 * H})
+    ok &= check("mine>0 -> not idle even when nudgeables cooled",
+                r["idle_ok"] is False and r["counts"]["mine"] == 1)
+
+    # 38. Cooldown is keyed on LAST NUDGE, not card age: a card nudged 25h ago
+    #     RE-SURFACES to nudgeable (a genuinely-ignored card cannot hide forever).
+    r = classify([card("nd6", assignee="hibiki", age_h=100)],
+                 "marveen", NOW, nudge_ledger={"nd6": NOW - 25 * H})
+    ok &= check("nudge 25h ago (expired cooldown) -> re-surfaces nudgeable, not idle",
+                r["idle_ok"] is False and r["counts"]["nudgeable"] == 1)
+
+    # 39. Corrupt/empty ledger -> fail-safe BUSY: a stale card we cannot prove we
+    #     nudged stays nudgeable (never cool a card without proof).
+    r = classify([card("nd7", assignee="hibiki", age_h=100)],
+                 "marveen", NOW, nudge_ledger=None)
+    ok &= check("None ledger (fail-safe) -> nudgeable, not idle",
+                r["idle_ok"] is False and r["counts"]["nudgeable"] == 1)
+
+    # 40. Unassigned-stale honours the cooldown too (same orchestrator-adopt path).
+    r = classify([card("nd8", assignee="", age_h=100)],
+                 "marveen", NOW, nudge_ledger={"nd8": NOW - 1 * H})
+    ok &= check("unassigned-stale cooled -> parked, idle",
+                r["idle_ok"] is True and r["counts"]["parked"] == 1)
+
+    # 41. Ledger load/record round-trip + _nudge_cooled predicate (fail-safe paths).
+    from classify import load_nudge_ledger, record_nudge, _nudge_cooled
+    with tempfile.TemporaryDirectory() as d:
+        lpath = os.path.join(d, "ledger.json")
+        ok &= check("load missing ledger -> {}", load_nudge_ledger(lpath) == {})
+        record_nudge("cardX", NOW, lpath)
+        led2 = load_nudge_ledger(lpath)
+        ok &= check("record+load round-trips", led2.get("cardX") == NOW)
+        ok &= check("_nudge_cooled fresh -> True", _nudge_cooled("cardX", NOW + H, led2) is True)
+        ok &= check("_nudge_cooled >24h -> False",
+                    _nudge_cooled("cardX", NOW + 25 * H, led2) is False)
+        ok &= check("_nudge_cooled unknown card -> False",
+                    _nudge_cooled("other", NOW, led2) is False)
+        # corrupt file -> {} (fail-safe, never-nudged)
+        with open(lpath, "w") as fh:
+            fh.write("{not json")
+        ok &= check("corrupt ledger -> {} (fail-safe)", load_nudge_ledger(lpath) == {})
 
     print("\n" + ("ALL PASS" if ok else "SOME FAILED"))
     return 0 if ok else 1

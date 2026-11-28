@@ -149,28 +149,33 @@ def main() -> int:
     if err:
         print(f"(fail-safe BUSY: classify error -> {err}; treat as work pending, INV2)")
     print(f"counts: mine={counts.get('mine', '?')} "
-          f"nudgeable={counts.get('nudgeable', '?')} parked={counts.get('parked', '?')}")
+          f"nudgeable={counts.get('nudgeable', '?')} "
+          f"surface={counts.get('surface', 0)} parked={counts.get('parked', '?')}")
 
     mine = cls.get("mine", [])
     nudge = cls.get("nudgeable", [])
+    # Card f8a97803: boss-waiting-stale now arrives in its OWN `surface` bucket (not
+    # nudgeable), so it never forces idle=false nor reads as an owner-poke. Still
+    # rendered, but only as a surface-to-Boss reminder. Fall back to filtering the
+    # nudgeable list for older classify output that predates the surface bucket.
+    surface = cls.get("surface")
+    if surface is None:
+        surface = [r for r in nudge if r.get("bucket") == "boss-waiting-stale"]
+        nudge = [r for r in nudge if r.get("bucket") != "boss-waiting-stale"]
     if mine:
         print("\nMINE (your lane -- advance the top non-blocked card one concrete step):")
         for r in mine[:8]:
             print(f'  {r["age_d"]:5.1f}d {str(r["priority"]):7} {r["id"]} {r["title"]}')
     if nudge:
-        sliced = nudge[:8]
-        boss_stale = [r for r in sliced if r.get("bucket") == "boss-waiting-stale"]
-        owner_nudge = [r for r in sliced if r.get("bucket") != "boss-waiting-stale"]
-        if owner_nudge:
-            print("\nNUDGEABLE (stale/delegated -- poke responsible, max 1x/24h then escalate):")
-            for r in owner_nudge:
-                print(f'  {r["age_d"]:5.1f}d {str(r["priority"]):7} {r["id"]} '
-                      f'{r["assignee"]:10} {r["title"]}')
-        if boss_stale:
-            print("\nBOSS-WAITING-STALE (-> SURFACE TO BOSS, do NOT owner-nudge):")
-            for r in boss_stale:
-                print(f'  {r["age_d"]:5.1f}d {str(r["priority"]):7} {r["id"]} '
-                      f'{r["assignee"]:10} {r["title"]}')
+        print("\nNUDGEABLE (stale/delegated -- poke responsible, max 1x/24h then escalate):")
+        for r in nudge[:8]:
+            print(f'  {r["age_d"]:5.1f}d {str(r["priority"]):7} {r["id"]} '
+                  f'{r["assignee"]:10} {r["title"]}')
+    if surface:
+        print("\nBOSS-WAITING-STALE (-> SURFACE TO BOSS, do NOT owner-nudge; does not force a tick):")
+        for r in surface[:8]:
+            print(f'  {r["age_d"]:5.1f}d {str(r["priority"]):7} {r["id"]} '
+                  f'{r["assignee"]:10} {r["title"]}')
 
     # --- Rotation directive (section 5 SL-01), persistent counter (FLAG-5) ---
     if mine:

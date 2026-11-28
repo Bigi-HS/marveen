@@ -35,6 +35,16 @@ import time
 from parked import parked_until_active
 
 OPEN = {"planned", "in_progress", "waiting"}
+# Card 9b7f7221 (option A): only these statuses are autonomously DRIVABLE in an
+# owner's MINE lane. `waiting` is deliberately EXCLUDED: the autonomous status
+# ladder is planned->in_progress->waiting (tick.py SAFE list), so once a card
+# reaches `waiting` its only next move is kanban->done, which is ask-first and
+# FORBIDDEN for the autopilot. An owner-owned `waiting` card that never got
+# boss_waiting=1 therefore has NO autonomous next step -- surfacing it as
+# MINE-drivable churns it forever in the lane (tick-count rises, the card never
+# closes). Such cards are PARKED ("waiting-unclosable") instead so they stop
+# forcing a false TICK_DRIVE; the Boss/owner closes them out-of-band.
+DRIVABLE = {"planned", "in_progress"}
 ORCHESTRATOR = "marveen"  # only the orchestrator tracks delegated/unassigned cards as nudgeable
 
 # --- Planning-freeze awareness (card f4921a38, NoA option A) -----------------
@@ -100,6 +110,21 @@ def _read_freeze_state(agent, flag_path=FREEZE_FLAG_PATH, keep_path=FREEZE_KEEP_
 WINDOW_AWAITING_H = 48.0  # FI-01
 WINDOW_DELEGATED_H = 24.0  # FI-02
 WINDOW_BLOCKED_H = 72.0  # BP-02
+# Card f8a97803: a nudge is an inter-agent MESSAGE -- it does NOT move the card, so
+# `last_moved` is unchanged and a freshly-nudged delegated/unassigned-stale card
+# re-enters NUDGEABLE on the very next 15-min tick -> idle_ok stays False forever ->
+# TICK_DRIVE every heartbeat with zero productive action (we already nudged). The
+# nudge-cooldown ledger (store/autopilot-nudge-ledger.json: {card_id: last_nudge_epoch})
+# keyed on the LAST NUDGE (not card age) parks such a card for this window after the
+# last nudge, then re-surfaces it so a genuinely-ignored card cannot hide forever.
+WINDOW_NUDGE_COOLDOWN_H = 24.0
+
+# Durable nudge ledger path. The ORCHESTRATOR records a nudge here (record_nudge)
+# right after poking a card; classify() reads it to suppress re-nudging within the
+# cooldown. FAIL-SAFE DIRECTION: a missing/corrupt/unreadable ledger -> empty dict
+# -> every card reads as never-nudged -> it stays NUDGEABLE (the BUSY/dangerous-safe
+# side). We never cool a card we have no proof we nudged.
+NUDGE_LEDGER_PATH = os.path.join(_STORE, "autopilot-nudge-ledger.json")
 # Card 9fb626a2: the structured boss_waiting=1 DB flag parks a card (Boss owes the
 # next move) regardless of age; the ORCHESTRATOR re-surfaces it only after this
 # window so a forgotten Boss-decision cannot rot silently (NoA threshold, 7 days).
@@ -155,6 +180,50 @@ def _marker(text: str):
     return None, 0.0
 
 
+def load_nudge_ledger(path: str = NUDGE_LEDGER_PATH) -> dict:
+    """Load {card_id: last_nudge_epoch}. FAIL-SAFE: any problem -> {} (never-nudged
+    = BUSY side). A card we cannot prove we nudged must stay nudgeable."""
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for k, v in data.items():
+        try:
+            out[str(k)] = float(v)
+        except (TypeError, ValueError):
+            continue  # skip a corrupt entry; a bad row must not cool a card
+    return out
+
+
+def record_nudge(card_id: str, now: float, path: str = NUDGE_LEDGER_PATH) -> None:
+    """Append-only write: stamp `card_id` with `now` (epoch). The orchestrator calls
+    this right after sending a nudge. A corrupt existing ledger is replaced (we would
+    rather lose stale cooldown stamps -> re-nudge -> BUSY side -- than block a nudge)."""
+    ledger = load_nudge_ledger(path)
+    ledger[str(card_id)] = float(now)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(ledger, fh)
+    os.replace(tmp, path)
+
+
+def _nudge_cooled(card_id: str, now: float, ledger: dict) -> bool:
+    """True iff `card_id` was nudged < WINDOW_NUDGE_COOLDOWN_H ago. Keyed on the LAST
+    NUDGE, not card age, so a genuinely-ignored card re-surfaces after the window.
+    Missing entry -> never-nudged -> False (not cooled -> stays nudgeable, BUSY side)."""
+    last = ledger.get(str(card_id))
+    if last is None:
+        return False
+    try:
+        return (now - float(last)) < WINDOW_NUDGE_COOLDOWN_H * 3600.0
+    except (TypeError, ValueError):
+        return False
+
+
 def _row(card: dict, age_h: float, bucket: str) -> dict:
     return {
         "id": (card.get("id") or "")[:8],
@@ -168,16 +237,22 @@ def _row(card: dict, age_h: float, bucket: str) -> dict:
 
 
 def classify(cards, agent: str, now: float, orchestrator: str = ORCHESTRATOR,
-             frozen: bool = False) -> dict:
+             frozen: bool = False, nudge_ledger: dict | None = None) -> dict:
     """Pure classification. Returns buckets + idle_ok for `agent`.
 
     MINE       = open cards this agent owns and must drive now (not fresh-parked).
-    NUDGEABLE  = stale cards this agent is responsible for poking (orchestrator only).
-    PARKED     = legitimately held RIGHT NOW (fresh marker / fresh delegation).
-    idle_ok    = MINE empty AND NUDGEABLE empty.
+    NUDGEABLE  = stale cards this agent is responsible for poking (orchestrator only),
+                 EXCLUDING any nudged within the 24h cooldown (card f8a97803).
+    SURFACE    = boss-waiting-stale cards -> morning-brief surface-to-Boss, NOT an
+                 owner-poke; does NOT force idle_ok False (card f8a97803, part 3).
+    PARKED     = legitimately held RIGHT NOW (fresh marker / fresh delegation / cooled).
+    idle_ok    = MINE empty AND NUDGEABLE empty. (SURFACE does not block idle.)
     frozen     = planning-freeze active for this agent -> idle_ok True, no driving
                  (card f4921a38). Short-circuits ahead of the card buckets.
+    nudge_ledger = {card_id: last_nudge_epoch}; None -> {} (fail-safe: never-nudged).
     """
+    if nudge_ledger is None:
+        nudge_ledger = {}
     if frozen:
         # Freeze dominates the card buckets: a non-keep agent must not be driven
         # while the fleet is frozen. Buckets stay empty so the tick injects no work.
@@ -186,12 +261,13 @@ def classify(cards, agent: str, now: float, orchestrator: str = ORCHESTRATOR,
             "idle_ok": True,
             "error": None,
             "frozen": True,
-            "counts": {"mine": 0, "nudgeable": 0, "parked": 0},
+            "counts": {"mine": 0, "nudgeable": 0, "parked": 0, "surface": 0},
             "mine": [],
             "nudgeable": [],
             "parked": [],
+            "surface": [],
         }
-    mine, nudgeable, parked = [], [], []
+    mine, nudgeable, parked, surface = [], [], [], []
     for c in cards:
         if c.get("status") not in OPEN:
             continue
@@ -221,7 +297,12 @@ def classify(cards, agent: str, now: float, orchestrator: str = ORCHESTRATOR,
             if owner != agent and agent != orchestrator:
                 continue
             if agent == orchestrator and age_h >= WINDOW_BOSS_WAITING_H:
-                nudgeable.append(_row(c, age_h, "boss-waiting-stale"))
+                # Card f8a97803 (part 3): a stale boss_waiting card waits on the BOSS,
+                # not on an owner-nudge. It belongs on the morning-brief surface-to-Boss
+                # channel, NOT the 15-min owner-poke list -- so it goes to `surface`,
+                # which does NOT force idle_ok False. (Pre-fix it sat in NUDGEABLE and
+                # drove a TICK_DRIVE every heartbeat with no legitimate owner action.)
+                surface.append(_row(c, age_h, "boss-waiting-stale"))
             else:
                 parked.append(_row(c, age_h, "boss-waiting"))
             continue
@@ -233,6 +314,14 @@ def classify(cards, agent: str, now: float, orchestrator: str = ORCHESTRATOR,
         if owner == agent:
             if fresh_marker:
                 parked.append(_row(c, age_h, "marker:" + marker))
+            elif c.get("status") not in DRIVABLE:
+                # Card 9b7f7221 (option A): a `waiting` owner-card has no autonomous
+                # next step (the ladder tops out at `waiting`; done is ask-first). It
+                # reached here only because it is NOT parked_until / boss_waiting /
+                # fresh-marker -- i.e. work is complete-or-Boss-GO-pending but the
+                # close flag was never set. Park it so it stops churning the lane as
+                # false MINE-drivable, rather than re-surfacing every tick.
+                parked.append(_row(c, age_h, "waiting-unclosable"))
             else:
                 mine.append(_row(c, age_h, "mine"))
         elif owner and owner != agent:
@@ -243,6 +332,10 @@ def classify(cards, agent: str, now: float, orchestrator: str = ORCHESTRATOR,
                 parked.append(_row(c, age_h, "marker:" + marker))
             elif age_h < WINDOW_DELEGATED_H:
                 parked.append(_row(c, age_h, "delegated-fresh"))
+            elif _nudge_cooled(c.get("id") or "", now, nudge_ledger):
+                # Card f8a97803: nudged < 24h ago -> park (don't re-nudge). Keyed on
+                # the last nudge, not card age, so it re-surfaces after the cooldown.
+                parked.append(_row(c, age_h, "nudge-cooldown"))
             else:
                 nudgeable.append(_row(c, age_h, "delegated-stale"))
         else:
@@ -251,23 +344,32 @@ def classify(cards, agent: str, now: float, orchestrator: str = ORCHESTRATOR,
                 continue
             if fresh_marker:
                 parked.append(_row(c, age_h, "marker:" + marker))
-            elif age_h >= WINDOW_DELEGATED_H:
-                nudgeable.append(_row(c, age_h, "unassigned-stale"))
-            else:
+            elif age_h < WINDOW_DELEGATED_H:
                 parked.append(_row(c, age_h, "unassigned-fresh"))
+            elif _nudge_cooled(c.get("id") or "", now, nudge_ledger):
+                # Card f8a97803: freshly-nudged unassigned-stale card -> park (cooldown).
+                parked.append(_row(c, age_h, "nudge-cooldown"))
+            else:
+                nudgeable.append(_row(c, age_h, "unassigned-stale"))
 
     mine.sort(key=lambda r: -r["age_d"])
     nudgeable.sort(key=lambda r: -r["age_d"])
+    surface.sort(key=lambda r: -r["age_d"])
+    # idle_ok ignores SURFACE (boss-waiting-stale = surface-to-Boss, not an owner
+    # action) -> a board whose only non-idle items are boss-waiting-stale or cooled
+    # nudges rests QUIET instead of emitting a no-op TICK_DRIVE (card f8a97803).
     idle_ok = not mine and not nudgeable
     return {
         "agent": agent,
         "idle_ok": idle_ok,
         "error": None,
         "frozen": False,
-        "counts": {"mine": len(mine), "nudgeable": len(nudgeable), "parked": len(parked)},
+        "counts": {"mine": len(mine), "nudgeable": len(nudgeable),
+                   "parked": len(parked), "surface": len(surface)},
         "mine": mine,
         "nudgeable": nudgeable,
         "parked": parked,
+        "surface": surface,
     }
 
 
@@ -278,10 +380,11 @@ def _fail_safe(agent: str, reason: str) -> dict:
         "idle_ok": False,
         "error": reason,
         "frozen": False,
-        "counts": {"mine": 0, "nudgeable": 0, "parked": 0},
+        "counts": {"mine": 0, "nudgeable": 0, "parked": 0, "surface": 0},
         "mine": [],
         "nudgeable": [],
         "parked": [],
+        "surface": [],
     }
 
 
@@ -304,10 +407,26 @@ def main() -> int:
     ap.add_argument("--now", type=float, default=None, help="epoch override (testing)")
     ap.add_argument("--frozen", action="store_true",
                     help="force planning-freeze idle (offline/testing override)")
+    ap.add_argument("--nudge-ledger", default=None,
+                    help="path to the nudge-cooldown ledger JSON (testing override)")
+    ap.add_argument("--record-nudge", metavar="CARD_ID", default=None,
+                    help="stamp CARD_ID as nudged NOW in the ledger and exit "
+                         "(call right after sending a nudge; card f8a97803)")
     ap.add_argument("--json", action="store_true", help="emit JSON (default human)")
     args = ap.parse_args()
 
     now = args.now if args.now is not None else time.time()
+    ledger_path = args.nudge_ledger or NUDGE_LEDGER_PATH
+
+    # Orchestrator hook: record a nudge and exit (no classification). Keeps the
+    # cooldown ledger as a single-source helper rather than a second script.
+    if args.record_nudge:
+        record_nudge(args.record_nudge, now, ledger_path)
+        if args.json:
+            print(json.dumps({"recorded": args.record_nudge, "at": now}))
+        else:
+            print(f"recorded nudge {args.record_nudge} @ {int(now)} -> {ledger_path}")
+        return 0
     # Freeze read is live-only: offline fixture runs (--cards-file) stay deterministic
     # and opt into freeze solely via --frozen.
     if args.frozen:
@@ -323,10 +442,14 @@ def main() -> int:
         elif args.cards_file:
             with open(args.cards_file) as fh:
                 cards = json.load(fh)
-            result = classify(cards, args.agent, now)
+            # Fixture runs opt into a ledger only via explicit --nudge-ledger; absent
+            # -> {} (never-nudged) so fixtures stay deterministic.
+            ledger = load_nudge_ledger(args.nudge_ledger) if args.nudge_ledger else {}
+            result = classify(cards, args.agent, now, nudge_ledger=ledger)
         else:
             cards = _fetch_live_cards()
-            result = classify(cards, args.agent, now)
+            result = classify(cards, args.agent, now,
+                              nudge_ledger=load_nudge_ledger(ledger_path))
     except Exception as exc:  # noqa: BLE001 -- fail-safe busy on ANY failure
         result = _fail_safe(args.agent, f"{type(exc).__name__}: {exc}")
 
@@ -339,8 +462,10 @@ def main() -> int:
     err = f"  (error -> fail-safe busy: {result['error']})" if result["error"] else ""
     frz = "  (planning-freeze -> frozen idle)" if result.get("frozen") else ""
     print(f"[{result['agent']}] {verdict}{err}{frz}")
-    print(f"  mine={c['mine']} nudgeable={c['nudgeable']} parked={c['parked']}")
-    for label, rows in (("MINE", result["mine"]), ("NUDGEABLE", result["nudgeable"])):
+    print(f"  mine={c['mine']} nudgeable={c['nudgeable']} "
+          f"surface={c.get('surface', 0)} parked={c['parked']}")
+    for label, rows in (("MINE", result["mine"]), ("NUDGEABLE", result["nudgeable"]),
+                        ("SURFACE", result.get("surface", []))):
         for r in rows:
             print(f'  {label:9} {r["age_d"]:5.1f}d {str(r["priority"]):7} {r["id"]} '
                   f'{r["assignee"]:10} {r["title"]}  [{r["bucket"]}]')
