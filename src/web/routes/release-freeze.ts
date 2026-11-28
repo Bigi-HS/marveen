@@ -21,6 +21,7 @@
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import { planningFreezeEnabled, setPlanningFreezeEnabled } from '../planning-freeze.js'
+import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
 import type { RouteContext } from './types.js'
 
 let freezeReader: () => boolean = planningFreezeEnabled
@@ -63,6 +64,15 @@ export async function tryHandleReleaseFreeze(ctx: RouteContext): Promise<boolean
   // POST -- operator set/clear
   // -------------------------------------------------------------------------
   if (method === 'POST') {
+    // SEC F-03 (card 16c34f11): only operator/admin callers may mutate the
+    // freeze flag. Per-agent tokens cannot trigger a planning-freeze DoS or
+    // silently clear a freeze set during a cutover window.
+    if (identity.source !== 'operator' && !hasScope(identity.scopes, ADMIN_SCOPE)) {
+      logger.warn({ caller: identity.agentId }, 'release freeze: rejected non-operator POST (SEC F-03)')
+      json(res, { error: 'planning-freeze writes require operator scope' }, 403)
+      return true
+    }
+
     let parsed: Record<string, unknown>
     try {
       const raw = (await readBody(req, { maxBytes: 1024 })).toString('utf-8')

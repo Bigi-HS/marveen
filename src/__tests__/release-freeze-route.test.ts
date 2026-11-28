@@ -14,6 +14,10 @@
  * silent state mutation from a bad body) -- mirrors the "merge runner never
  * invoked when the gate is not satisfied" invariant in github-merge-gate-route.
  *
+ * SEC F-03 scope enforcement (card 16c34f11): POST is operator-only. Any
+ * per-agent token (source:'agent') receives 403 and the writer is never called.
+ * The pattern mirrors gate.ts (identity.source !== 'operator' check).
+ *
  * Read/write deps are injected via __setReleaseFreezeDeps so the branches run
  * fully in-process without touching the real store/ flag file.
  */
@@ -25,8 +29,10 @@ import {
   __resetReleaseFreezeDeps,
 } from '../web/routes/release-freeze.js'
 import type { AgentIdentity } from '../web/agent-token-registry.js'
+import { ADMIN_SCOPE } from '../web/agent-token-registry.js'
 
 const daveId: AgentIdentity = { agentId: 'dave', scopes: ['message:send'], source: 'agent' }
+const operatorId: AgentIdentity = { agentId: 'marveen', scopes: [ADMIN_SCOPE], source: 'operator' }
 
 // A writer spy: records every (enabled) call so tests can assert it is NOT
 // invoked on rejected paths, and WITH the right value on accepted ones.
@@ -68,7 +74,9 @@ async function call(
 }
 
 // Raw-body variant for the malformed-JSON case (bypasses JSON.stringify).
-async function callRaw(method: string, rawBody: string) {
+// Uses operatorId by default so the body-parsing path is actually exercised
+// (agent identity is rejected before parsing; scope tests use the call() helper).
+async function callRaw(method: string, rawBody: string, identity: AgentIdentity = operatorId) {
   const path = '/api/release/planning-freeze'
   const req = Readable.from([Buffer.from(rawBody)]) as never
   const captured: { status: number; body: any } = { status: 200, body: undefined }
@@ -88,7 +96,7 @@ async function callRaw(method: string, rawBody: string) {
     method,
     path,
     url: new URL('http://x' + path),
-    identity: daveId,
+    identity,
   } as never)
   return { handled, ...captured }
 }
@@ -136,7 +144,7 @@ describe('POST /api/release/planning-freeze -- operator set/clear', () => {
   it('{ frozen: true } enables the freeze and echoes the state', async () => {
     const writer = writerSpy()
     __setReleaseFreezeDeps({ write: writer.fn })
-    const r = await call('POST', { frozen: true })
+    const r = await call('POST', { frozen: true }, { identity: operatorId })
     expect(r.status).toBe(200)
     expect(r.body).toEqual({ frozen: true })
     expect(writer.calls).toEqual([true])
@@ -145,7 +153,7 @@ describe('POST /api/release/planning-freeze -- operator set/clear', () => {
   it('{ frozen: false } clears the freeze and echoes the state', async () => {
     const writer = writerSpy()
     __setReleaseFreezeDeps({ write: writer.fn })
-    const r = await call('POST', { frozen: false })
+    const r = await call('POST', { frozen: false }, { identity: operatorId })
     expect(r.status).toBe(200)
     expect(r.body).toEqual({ frozen: false })
     expect(writer.calls).toEqual([false])
@@ -163,7 +171,7 @@ describe('POST /api/release/planning-freeze -- operator set/clear', () => {
   it('rejects a missing frozen field with 400 and does NOT mutate state', async () => {
     const writer = writerSpy()
     __setReleaseFreezeDeps({ write: writer.fn })
-    const r = await call('POST', {})
+    const r = await call('POST', {}, { identity: operatorId })
     expect(r.status).toBe(400)
     expect(r.body.error).toMatch(/frozen/)
     expect(writer.calls).toEqual([])
@@ -172,7 +180,7 @@ describe('POST /api/release/planning-freeze -- operator set/clear', () => {
   it('rejects a non-boolean frozen value with 400 and does NOT mutate state', async () => {
     const writer = writerSpy()
     __setReleaseFreezeDeps({ write: writer.fn })
-    const r = await call('POST', { frozen: 'yes' })
+    const r = await call('POST', { frozen: 'yes' }, { identity: operatorId })
     expect(r.status).toBe(400)
     expect(r.body.error).toMatch(/frozen/)
     expect(writer.calls).toEqual([])
@@ -184,9 +192,43 @@ describe('POST /api/release/planning-freeze -- operator set/clear', () => {
         throw new Error('disk full')
       },
     })
-    const r = await call('POST', { frozen: true })
+    const r = await call('POST', { frozen: true }, { identity: operatorId })
     expect(r.status).toBe(500)
     expect(r.body.error).toMatch(/freeze state/)
+  })
+})
+
+describe('POST /api/release/planning-freeze -- scope enforcement (SEC F-03 / card 16c34f11)', () => {
+  it('rejects a per-agent token (source:agent) with 403 and never calls the writer', async () => {
+    const writer = writerSpy()
+    __setReleaseFreezeDeps({ write: writer.fn })
+    const r = await call('POST', { frozen: true }, { identity: daveId })
+    expect(r.status).toBe(403)
+    expect(r.body.error).toMatch(/operator/)
+    expect(writer.calls).toEqual([])
+  })
+
+  it('rejects agent-token freeze-clear (frozen:false) with 403 and never calls the writer', async () => {
+    const writer = writerSpy()
+    __setReleaseFreezeDeps({ write: writer.fn })
+    const r = await call('POST', { frozen: false }, { identity: daveId })
+    expect(r.status).toBe(403)
+    expect(writer.calls).toEqual([])
+  })
+
+  it('allows an operator token (source:operator) to set the freeze', async () => {
+    const writer = writerSpy()
+    __setReleaseFreezeDeps({ write: writer.fn })
+    const r = await call('POST', { frozen: true }, { identity: operatorId })
+    expect(r.status).toBe(200)
+    expect(writer.calls).toEqual([true])
+  })
+
+  it('GET is identity-agnostic: agent tokens can read freeze state', async () => {
+    __setReleaseFreezeDeps({ read: () => true })
+    const r = await call('GET', undefined, { identity: daveId })
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual({ frozen: true })
   })
 })
 
