@@ -122,7 +122,11 @@ def _build_block(content: str, age_seconds: float | None) -> str:
         header = STALE_HEADER_TEMPLATE.format(days=days)
     else:
         header = HEADER
-    return f"{header}\n\n{content}"
+    # Card e8abdd83: wrap content in data-only tags to signal to the agent that
+    # the block is DATA (not instructions). Mitigates multi-hop prompt-injection:
+    # external message -> kanban card -> hot-cache regen -> inject. The tags tell
+    # the agent to treat the enclosed content as a snapshot to read, not to execute.
+    return f"{header}\n\n<hot-cache-data>\n{content}\n</hot-cache-data>"
 
 
 def _agent_id(cwd: str | None) -> str:
