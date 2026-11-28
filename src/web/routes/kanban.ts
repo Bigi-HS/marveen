@@ -18,6 +18,79 @@ const KANBAN_LIMIT_DEFAULT = 200
 const KANBAN_LIMIT_MAX = 500
 
 /**
+ * Raised when parked_until is present but cannot be normalized to an epoch-seconds
+ * integer. The route maps it to HTTP 400 (fail-closed), mirroring the
+ * KNOWN_PUT_FIELDS / assertProjectPresent pattern. See card 0a1c5102.
+ */
+export class InvalidParkedUntilError extends Error {
+  constructor(public readonly value: unknown) {
+    super(`parked_until must be an epoch-seconds integer or an ISO date/datetime string, got: ${JSON.stringify(value)}`)
+    this.name = 'InvalidParkedUntilError'
+  }
+}
+
+// Plausibility window for an epoch-seconds value, used to reject epoch-MILLIS and
+// absurd inputs. Lower bound ~2001 (10^9 s); upper bound ~2286 (10^10 s). An
+// epoch-millis value (e.g. 1.8e12) lands above this and is rejected, so a caller
+// is forced to send seconds -- matching how the tick-driver/SLA compare
+// parked_until against now-in-SECONDS (noa-kanban isStale, kanban-sla.ts).
+const EPOCH_SECONDS_MIN = 1_000_000_000      // 2001-09-09
+const EPOCH_SECONDS_MAX = 10_000_000_000     // 2286-11-20
+
+/**
+ * Validate/normalize an incoming `parked_until` to an epoch-SECONDS integer, so a
+ * date STRING can never be persisted raw (root cause, card 0a1c5102 / 9cf177d4:
+ * parked_until='2027-02-01' failed the tick-driver's parsed-epoch check and the
+ * card was falsely treated as UNPARKED -> false stale-nudges every tick).
+ *
+ * Units are epoch SECONDS, confirmed by the readers: noa-kanban isStale()
+ * (`card.parked_until > nowSec`) and kanban-sla.ts (`row.parked_until > nowSec`).
+ *
+ * Rules:
+ *  - undefined  -> undefined  (field absent; updateCard leaves the column as-is)
+ *  - null       -> null       (explicit unpark)
+ *  - integer in the epoch-seconds window -> unchanged
+ *  - 'YYYY-MM-DD' or a full ISO datetime string -> Math.floor(epoch-seconds)
+ *  - anything else (garbage string, epoch-millis, non-finite, out-of-window int,
+ *    non-integer number) -> throw InvalidParkedUntilError (route -> 400)
+ */
+export function coerceParkedUntil(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null) return null
+
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || value < EPOCH_SECONDS_MIN || value >= EPOCH_SECONDS_MAX) {
+      throw new InvalidParkedUntilError(value)
+    }
+    return value
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    // A bare integer string is treated as an epoch-seconds int (same window check).
+    if (/^-?\d+$/.test(trimmed)) {
+      const n = Number(trimmed)
+      if (!Number.isInteger(n) || n < EPOCH_SECONDS_MIN || n >= EPOCH_SECONDS_MAX) {
+        throw new InvalidParkedUntilError(value)
+      }
+      return n
+    }
+    // ISO date (YYYY-MM-DD) or full ISO datetime. Date.parse treats a bare
+    // YYYY-MM-DD as UTC midnight, which is the correct instant to store as an
+    // absolute epoch (readers compare against an absolute now-epoch).
+    const ms = Date.parse(trimmed)
+    if (Number.isNaN(ms)) throw new InvalidParkedUntilError(value)
+    const secs = Math.floor(ms / 1000)
+    if (secs < EPOCH_SECONDS_MIN || secs >= EPOCH_SECONDS_MAX) {
+      throw new InvalidParkedUntilError(value)
+    }
+    return secs
+  }
+
+  throw new InvalidParkedUntilError(value)
+}
+
+/**
  * Query kanban cards directly from the DB with status filtering and pagination.
  * Used by GET /api/kanban to avoid blocking the event loop with a full table
  * scan of 179+ cards when no status filter is provided.
@@ -156,8 +229,15 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       // A new card must carry a canonical project code (card cf0d1bfe). Presence
       // is a create-time policy; the normalized value flows into the stored card.
       const project = assertProjectPresent(data.project)
-      createCard({ id, ...data, project })
+      // parked_until must be a normalized epoch-seconds int, never a raw date
+      // string (card 0a1c5102). undefined -> createCard applies its own default.
+      const normalized = { ...data, project }
+      const parked = coerceParkedUntil(data.parked_until)
+      if (parked === undefined) delete normalized.parked_until
+      else normalized.parked_until = parked
+      createCard({ id, ...normalized })
     } catch (err) {
+      if (err instanceof InvalidParkedUntilError) { json(res, { error: err.message }, 400); return true }
       if (err instanceof InvalidProjectError) { json(res, { error: err.message }, 400); return true }
       if (err instanceof InvalidStatusError) { json(res, { error: err.message }, 400); return true }
       if (err instanceof ParentNotFoundError) { json(res, { error: err.message }, 404); return true }
@@ -184,6 +264,17 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     if (unknown.length > 0) {
       json(res, { error: `Unknown fields: ${unknown.join(', ')}`, unknown }, 400)
       return true
+    }
+    // Normalize parked_until to an epoch-seconds int before persisting (card
+    // 0a1c5102). Only touch the key when it was actually present in the body, so
+    // an untouched parked_until is left as-is by updateCard. Reject-before-write.
+    if ('parked_until' in data) {
+      try {
+        data.parked_until = coerceParkedUntil(data.parked_until)
+      } catch (err) {
+        if (err instanceof InvalidParkedUntilError) { json(res, { error: err.message }, 400); return true }
+        throw err
+      }
     }
     try {
       if (updateCard(id, data)) { json(res, { ok: true }); return true }
