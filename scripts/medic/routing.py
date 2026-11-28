@@ -41,10 +41,15 @@ from __future__ import annotations
 
 import enum
 import json
+import logging
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from medic.types import Executor, HealthSnapshot
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Named thresholds / constants (no magic numbers in the rules).                 #
@@ -65,6 +70,23 @@ MEDIC_AGENT = "medic"
 
 # Inter-agent message endpoint on the local dashboard server.
 MESSAGES_URL = "http://localhost:3420/api/messages"
+
+# Dashboard token path (guard-safe read-from-file; card 7bd08585 security fix).
+# GENESIS_AGENT_TOKEN env var overrides for test/CI injection.
+_REPO_ROOT = Path(os.environ.get("MARVEEN_ROOT", Path(__file__).parent.parent.parent))
+DASHBOARD_TOKEN_PATH = _REPO_ROOT / "store" / ".dashboard-token"
+
+
+def _read_dashboard_token() -> str:
+    """Read the dashboard Bearer token from the token file or env override."""
+    env_token = os.environ.get("GENESIS_AGENT_TOKEN") or os.environ.get("BUSTER_CI_TOKEN")
+    if env_token:
+        return env_token.strip()
+    try:
+        return DASHBOARD_TOKEN_PATH.read_text(encoding="utf-8").splitlines()[0].strip()
+    except OSError:
+        logger.warning("medic routing: could not read dashboard token from %s", DASHBOARD_TOKEN_PATH)
+        return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -217,21 +239,40 @@ def route(alert: Alert, cls: AlertClass) -> RouteAction:
 # --------------------------------------------------------------------------- #
 # dispatch(): the ONLY IO edge. classify + route, then one send for non-SILENT. #
 # --------------------------------------------------------------------------- #
-def _post_message(ex: Executor, to: str, content: str) -> bool:
+def _post_message(ex: Executor, to: str, content: str, token: str = "") -> bool:
     """Post a single inter-agent message via ex.run(argv) -- an argv LIST, never
     a shell string. Uses curl to the local dashboard /api/messages endpoint.
-    Returns True on a zero-exit send. Does not raise."""
+    Returns True on a zero-exit send. A non-zero exit is logged as a warning
+    (card 7bd08585: failed sends must be LOUD, not silently swallowed).
+
+    token: the dashboard Bearer token. Defaults to _read_dashboard_token().
+    Injectable for tests.
+    """
+    bearer = token or _read_dashboard_token()
     body = json.dumps({"from": MEDIC_AGENT, "to": to, "content": content})
     argv = [
         "curl", "-s", "-X", "POST", MESSAGES_URL,
         "-H", "Content-Type: application/json",
+        "-H", f"Authorization: Bearer {bearer}",
         "-d", body,
     ]
     res = ex.run(argv)
+    if res.code != 0:
+        logger.warning(
+            "medic routing: _post_message failed (exit=%d) sending to '%s' -- "
+            "an ESCALATE_BOSS/NOTIFY_OWNER escalation was silently dropped; "
+            "check dashboard auth and connectivity (card 7bd08585)",
+            res.code, to,
+        )
     return res.code == 0
 
 
-def dispatch(alert: Alert, snapshot: HealthSnapshot, ex: Executor) -> RouteAction:
+def dispatch(
+    alert: Alert,
+    snapshot: HealthSnapshot,
+    ex: Executor,
+    token: str = "",
+) -> RouteAction:
     """Classify + route an alert, then PERFORM the IO at the edge for non-SILENT
     actions. Returns the RouteAction so the outcome is observable/testable.
 
@@ -240,8 +281,10 @@ def dispatch(alert: Alert, snapshot: HealthSnapshot, ex: Executor) -> RouteActio
     ESCALATE_BOSS-> exactly one inter-agent message to the Boss relay (Genesis).
 
     All IO is confined to this function; classify() and route() stay pure. A send
-    failure is swallowed (ex.run never raises per the Executor contract) and the
-    action is still returned.
+    failure is logged as a warning (card 7bd08585: silent failure prevention).
+
+    token: dashboard Bearer token. Defaults to _read_dashboard_token(). Injectable
+    for tests so they don't require a real token file on disk.
     """
     cls = classify(alert, snapshot)
     action = route(alert, cls)
@@ -249,10 +292,11 @@ def dispatch(alert: Alert, snapshot: HealthSnapshot, ex: Executor) -> RouteActio
     if action.kind == "SILENT":
         return action
 
+    bearer = token or _read_dashboard_token()
     if action.kind == "NOTIFY_OWNER":
-        _post_message(ex, action.recipient, action.message)
+        _post_message(ex, action.recipient, action.message, token=bearer)
         return action
 
     # ESCALATE_BOSS -> route to the Boss relay agent, who surfaces it to Boss.
-    _post_message(ex, BOSS_RELAY_AGENT, action.message)
+    _post_message(ex, BOSS_RELAY_AGENT, action.message, token=bearer)
     return action
