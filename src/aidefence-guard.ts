@@ -199,6 +199,18 @@ const INJECTION_PATTERNS: PatternDef[] = [
     rx: /\bDAN\s*\d+\b|Do\s+Anything\s+Now|developer\s+mode\s+enabled|jailbreak\s+mode/gi,
     severity: 'medium',
   },
+  {
+    type: 'PROMPT_INJECTION',
+    name: 'gate-mutating-api',
+    // Detects gate-mutation API call instructions embedded in inter-agent messages
+    // (POST /api/gate/approve|override|invalidate). Severity MEDIUM -> FLAG, not BLOCK:
+    // the Armorer legitimately includes the exact gate-approve snippet in review-request
+    // messages as a convenience. Reviewers must judge independently -- the flag is a
+    // signal to confirm code-review before acting, not an automatic block (card f6439733,
+    // incident ddfaae03: Dave executed forge's approve-snippet without independent review).
+    rx: /POST\s+\/api\/gate\/(?:approve|override|invalidate)\b/gi,
+    severity: 'medium',
+  },
 ]
 
 // ── public API ────────────────────────────────────────────────────────────────
