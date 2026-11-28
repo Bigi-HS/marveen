@@ -19,11 +19,13 @@
 
 import type Database from 'better-sqlite3'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { MAIN_AGENT_ID } from '../config.js'
 
 // The implicit identity of the shared dashboard token / browser session. The
-// operator is `marveen` with the admin sentinel so the existing operator
-// scripts and the NoA-as-another-agent relay keep working unchanged.
-export const OPERATOR_AGENT_ID = 'marveen'
+// operator is the main agent (MAIN_AGENT_ID) with the admin sentinel so the
+// existing operator scripts and the NoA-as-another-agent relay keep working
+// unchanged. De-branded from a hardcoded 'marveen' so the identity flips via env.
+export const OPERATOR_AGENT_ID = MAIN_AGENT_ID
 // The admin sentinel. NOT a runtime wildcard: it is an exact literal scope whose
 // presence in a token's scope set grants every check (see hasScope). The `:*` is
 // a label, expanded to the concrete admin capability at the hasScope boundary,

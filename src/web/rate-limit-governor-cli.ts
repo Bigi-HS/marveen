@@ -14,6 +14,7 @@
 
 import { createAgentMessage } from '../db.js'
 import { logger } from '../logger.js'
+import { MAIN_AGENT_ID } from '../config.js'
 import {
   runGovernorCycle,
   readSnapshotFile,
@@ -26,7 +27,7 @@ import { writeFleetPause, clearFleetPause, type FleetPauseRecord } from './fleet
 // Genesis owns the operator's Telegram channel, so the governor reports to it
 // rather than messaging Dominik directly (the fleet's report-to-Genesis rule).
 const NOTIFY_FROM = 'rate-limit-governor'
-const NOTIFY_TO = 'marveen'
+const NOTIFY_TO = MAIN_AGENT_ID
 
 function main(): void {
   try {

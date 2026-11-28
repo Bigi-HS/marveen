@@ -5,6 +5,7 @@ import { generateBreakdown } from '../llm-breakdown.js'
 import { parseScore } from '../idea-scoring.js'
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
+import { MAIN_AGENT_ID } from '../../config.js'
 import type { RouteContext } from './types.js'
 
 type IdeaRow = import('../../db.js').IdeaBoxRow
@@ -110,7 +111,7 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
       description: idea.description ?? '',
       status,
       priority: 'normal',
-      assignee: 'marveen',
+      assignee: MAIN_AGENT_ID,
       project: 'ENG', // canonical taxonomy (card cf0d1bfe); promoted ideas default to ENG, re-prefix via updateCard if they belong elsewhere
     })
     updateIdea(ideaId, { status: 'kanban', kanban_id: cardId })
@@ -157,7 +158,7 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
       description: idea.description ?? '',
       status: 'planned',
       priority: 'normal',
-      assignee: 'marveen',
+      assignee: MAIN_AGENT_ID,
       project: 'ENG', // canonical taxonomy (card cf0d1bfe); promoted ideas default to ENG, re-prefix via updateCard if they belong elsewhere
     })
     const childIds: string[] = []
@@ -170,7 +171,7 @@ export async function tryHandleIdeas(ctx: RouteContext): Promise<boolean> {
         description: (st.description ?? '').slice(0, 500),
         status: 'planned',
         priority: (st.priority && VALID_PRIORITIES.has(st.priority) ? st.priority : 'normal') as 'low' | 'normal' | 'high' | 'urgent',
-        assignee: st.assignee || 'marveen',
+        assignee: st.assignee || MAIN_AGENT_ID,
         project: 'ENG', // canonical taxonomy (card cf0d1bfe); promoted ideas default to ENG, re-prefix via updateCard if they belong elsewhere
         parent_id: parentId,
       })

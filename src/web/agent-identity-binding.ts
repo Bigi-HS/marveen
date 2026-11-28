@@ -24,6 +24,7 @@ import {
   hasScope,
   safeResolveAgentIdentity,
   ADMIN_SCOPE,
+  OPERATOR_AGENT_ID,
   type AgentIdentity,
 } from './agent-token-registry.js'
 import type Database from 'better-sqlite3'
@@ -169,7 +170,7 @@ export type GateResult = { pass: true; identity: AgentIdentity } | { pass: false
 export function resolveRequestIdentity(input: GateInput): GateResult {
   const { hasSession, bearer, db, sharedToken, now, isWrite } = input
   if (hasSession) {
-    return { pass: true, identity: { agentId: 'marveen', scopes: [ADMIN_SCOPE], source: 'operator' } }
+    return { pass: true, identity: { agentId: OPERATOR_AGENT_ID, scopes: [ADMIN_SCOPE], source: 'operator' } }
   }
   const r = safeResolveAgentIdentity(db, bearer, sharedToken, now)
   if (r.kind === 'ok') return { pass: true, identity: r.identity }

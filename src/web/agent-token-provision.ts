@@ -26,6 +26,7 @@ import { mkdirSync, lstatSync, existsSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { mintAgentToken, revokeAgentTokens, revokeAgentTokensExcept, ADMIN_SCOPE } from './agent-token-registry.js'
+import { MAIN_AGENT_ID } from '../config.js'
 import type Database from 'better-sqlite3'
 
 // 24h default (design §5.6): short enough to bound the blast-radius of a stolen
@@ -69,7 +70,7 @@ export const STANDARD_AGENT_SCOPES: readonly string[] = [
 // (both checks must pass). Recusal is orthogonal -- scope alone does not
 // prevent self-approval. Phase B route enforcement must check both.
 export function scopesForAgent(agentId: string): string[] {
-  if (agentId === 'marveen') return [ADMIN_SCOPE]
+  if (agentId === MAIN_AGENT_ID) return [ADMIN_SCOPE]
   if (agentId === 'applegate') return [...STANDARD_AGENT_SCOPES, 'memory:delete:any']
   if (agentId === 'chad') return [...STANDARD_AGENT_SCOPES, 'gate:approve']
   if (agentId === 'thor') return [...STANDARD_AGENT_SCOPES, 'gate:approve']

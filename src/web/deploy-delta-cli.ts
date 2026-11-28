@@ -16,7 +16,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { request } from 'node:http'
-import { PROJECT_ROOT } from '../config.js'
+import { PROJECT_ROOT, MAIN_AGENT_ID } from '../config.js'
 import { type DeployType, formatDelta, recordDeploy, reportDelta } from './deploy-delta.js'
 
 function argVal(argv: string[], flag: string): string | undefined {
@@ -30,7 +30,7 @@ function notifyGenesis(summary: string): Promise<void> {
       const tokenPath = join(PROJECT_ROOT, 'store', '.dashboard-token')
       if (!existsSync(tokenPath)) return resolve()
       const token = readFileSync(tokenPath, 'utf-8').trim()
-      const body = JSON.stringify({ from: 'dave', to: 'marveen', content: summary })
+      const body = JSON.stringify({ from: 'dave', to: MAIN_AGENT_ID, content: summary })
       const req = request(
         {
           host: '127.0.0.1',
