@@ -18,14 +18,15 @@ import type { ApprovalRow } from './gate-check.js'
 export function migrateGateTables(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS gate_approvals (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      pr_number   INTEGER NOT NULL,
-      head_sha    TEXT NOT NULL,
-      reviewer    TEXT NOT NULL,
-      verdict     TEXT NOT NULL,
-      recorded_by TEXT NOT NULL,
-      recorded_at INTEGER NOT NULL,
-      note        TEXT
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      pr_number     INTEGER NOT NULL,
+      head_sha      TEXT NOT NULL,
+      reviewer      TEXT NOT NULL,
+      verdict       TEXT NOT NULL,
+      recorded_by   TEXT NOT NULL,
+      recorded_at   INTEGER NOT NULL,
+      note          TEXT,
+      reviewed_code INTEGER  -- NULL = not supplied, 0 = false, 1 = true (card 0139ef0b)
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_gate_pr_sha ON gate_approvals(pr_number, head_sha)`)
@@ -170,6 +171,9 @@ export interface ApprovalInput {
   verdict: string
   recorded_by: string
   note?: string | null
+  // Card 0139ef0b: optional proof that the reviewer actually read the diff.
+  // NULL = not supplied (triggers an audit warning but does not block).
+  reviewed_code?: boolean | null
 }
 
 export interface GateApprovalRow {
@@ -181,18 +185,20 @@ export interface GateApprovalRow {
   recorded_by: string
   recorded_at: number
   note: string | null
+  reviewed_code: boolean | null
 }
 
 // Append-only INSERT. `recorded_at` is always server-stamped by the caller
 // (epoch seconds), never caller-supplied (MG-AC1).
 export function insertApproval(db: Database.Database, input: ApprovalInput, now: number): GateApprovalRow {
   const note = input.note ?? null
+  const reviewedCode = input.reviewed_code === true ? 1 : input.reviewed_code === false ? 0 : null
   const info = db
     .prepare(
-      `INSERT INTO gate_approvals (pr_number, head_sha, reviewer, verdict, recorded_by, recorded_at, note)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO gate_approvals (pr_number, head_sha, reviewer, verdict, recorded_by, recorded_at, note, reviewed_code)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(input.pr_number, input.head_sha, input.reviewer, input.verdict, input.recorded_by, now, note)
+    .run(input.pr_number, input.head_sha, input.reviewer, input.verdict, input.recorded_by, now, note, reviewedCode)
   return {
     id: Number(info.lastInsertRowid),
     pr_number: input.pr_number,
@@ -202,6 +208,7 @@ export function insertApproval(db: Database.Database, input: ApprovalInput, now:
     recorded_by: input.recorded_by,
     recorded_at: now,
     note,
+    reviewed_code: input.reviewed_code ?? null,
   }
 }
 

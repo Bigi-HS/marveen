@@ -199,9 +199,21 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
     // pre-auth paths) falls back to 'unknown'.
     const recordedBy = identity?.agentId ?? 'unknown'
     const note = typeof body['note'] === 'string' ? (body['note'] as string) : null
+    // Card 0139ef0b: optional reviewed_code flag. NULL = not supplied; we log a soft
+    // warning (Option A: honour-system with teeth) but do not block the approval.
+    const reviewedCode =
+      body['reviewed_code'] === true ? true
+      : body['reviewed_code'] === false ? false
+      : null
+    if (reviewedCode === null) {
+      logger.warn(
+        { pr: pr_number, reviewer },
+        'gate approve: reviewed_code not supplied -- reviewer did not attest code review (card 0139ef0b)',
+      )
+    }
     const row = insertApproval(
       getDb(),
-      { pr_number, head_sha, reviewer, verdict, recorded_by: recordedBy, note },
+      { pr_number, head_sha, reviewer, verdict, recorded_by: recordedBy, note, reviewed_code: reviewedCode },
       nowEpoch(),
     )
     // F1 realtime (card 513b8fd6): broadcast a thin-notify gate event so the

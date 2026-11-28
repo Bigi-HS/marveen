@@ -172,3 +172,40 @@ describe('gate_holds -- insertHold / releaseHold / hasActiveHold (card dea65d8e)
     expect(hasActiveHold(db, 42).reason).toBe('second hold')
   })
 })
+
+describe('gate_approvals reviewed_code field (card 0139ef0b)', () => {
+  it('reviewed_code=true is stored and read back via GateApprovalRow', () => {
+    const row = insertApproval(
+      db,
+      { pr_number: 42, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved',
+        recorded_by: 'dave', reviewed_code: true },
+      1000,
+    )
+    expect(row.reviewed_code).toBe(true)
+  })
+
+  it('reviewed_code=false is stored and read back', () => {
+    const row = insertApproval(
+      db,
+      { pr_number: 42, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved',
+        recorded_by: 'dave', reviewed_code: false },
+      1000,
+    )
+    expect(row.reviewed_code).toBe(false)
+  })
+
+  it('reviewed_code absent (undefined) stores NULL and row.reviewed_code is null', () => {
+    const row = insertApproval(
+      db,
+      { pr_number: 42, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved', recorded_by: 'dave' },
+      1000,
+    )
+    expect(row.reviewed_code).toBeNull()
+  })
+
+  it('migrateGateTables includes reviewed_code column in gate_approvals (idempotent)', () => {
+    migrateGateTables(db) // second run
+    const cols = db.prepare("PRAGMA table_info(gate_approvals)").all() as Array<{ name: string }>
+    expect(cols.some((c) => c.name === 'reviewed_code')).toBe(true)
+  })
+})
