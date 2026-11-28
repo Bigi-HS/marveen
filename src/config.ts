@@ -81,9 +81,9 @@ export const BOT_NAME = env['BOT_NAME'] ?? 'NoA'
 
 // Canonical identifier for the main agent in the DB, tmux sessions, plist
 // labels, API routing, etc. The installer derives this from BOT_NAME
-// (NFKD + ASCII + lowercase dashes). Older installs without this env var
-// fall back to "marveen" so nothing breaks when upgrading in place.
-export const MAIN_AGENT_ID = env['MAIN_AGENT_ID'] ?? 'marveen'
+// (NFKD + ASCII + lowercase dashes). Installs without this env var fall back
+// to "noa" (the canonical id after the marveen->noa stage-1 identity migration).
+export const MAIN_AGENT_ID = env['MAIN_AGENT_ID'] ?? 'noa'
 
 // ── Boot-network knobs: process.env > .env-file > default (AC-1) ─────────────
 // max=65535: an out-of-range WEB_PORT (e.g. 99999) is rejected here and falls
