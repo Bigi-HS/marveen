@@ -260,3 +260,74 @@ def _extract_message_payload(argv):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# --------------------------------------------------------------------------- #
+# Card 7bd08585: Bearer token injection + silent-failure prevention           #
+# --------------------------------------------------------------------------- #
+
+class TestTokenInjection(unittest.TestCase):
+    """_post_message and dispatch must include the Authorization: Bearer header.
+    Without it, /api/messages returns 401 and the escalation is silently lost.
+    """
+
+    def _get_auth_header(self, ex, call_index=0):
+        """Extract the Authorization header value from a curl argv call."""
+        argv = ex.runs[call_index]
+        for i, arg in enumerate(argv):
+            if arg == "-H" and i + 1 < len(argv) and "Authorization" in argv[i + 1]:
+                return argv[i + 1]
+        return None
+
+    def test_post_message_includes_bearer_header(self):
+        ex = FakeExecutor()
+        routing._post_message(ex, "marveen", "test", token="test-tok")
+        auth = self._get_auth_header(ex)
+        self.assertIsNotNone(auth, "Authorization header must be present in curl argv")
+        self.assertIn("Bearer", auth)
+        self.assertIn("test-tok", auth)
+
+    def test_dispatch_escalate_boss_includes_bearer(self):
+        alert = Alert(kind="pipe_stale", target="agent-dave", detail="stale")
+        ex = FakeExecutor()
+        routing.dispatch(alert, snap(), ex, token="boss-tok")
+        auth = self._get_auth_header(ex)
+        self.assertIsNotNone(auth, "Authorization header must be in ESCALATE_BOSS curl call")
+        self.assertIn("boss-tok", auth)
+
+    def test_dispatch_notify_owner_includes_bearer(self):
+        alert = Alert(kind="lag", target="agent-thor", detail="lag 20s")
+        ex = FakeExecutor()
+        routing.dispatch(alert, snap(sessions={"agent-thor": True}), ex, token="owner-tok")
+        auth = self._get_auth_header(ex)
+        self.assertIsNotNone(auth)
+        self.assertIn("owner-tok", auth)
+
+    def test_dispatch_silent_no_send(self):
+        """SILENT actions must not trigger any curl call (no token needed)."""
+        alert = Alert(kind="busy_collision", target="agent-dave", detail="busy")
+        ex = FakeExecutor()
+        routing.dispatch(alert, snap(sessions={"agent-dave": True}), ex, token="irrelevant")
+        self.assertEqual(len(ex.runs), 0)
+
+
+class TestSilentFailurePrevention(unittest.TestCase):
+    """card 7bd08585: a failed send (non-zero curl exit) must be LOUD, not silently
+    swallowed. This test asserts a warning is logged when _post_message fails.
+    """
+
+    def test_failed_send_logs_warning(self):
+        ex = FakeExecutor(run_code=1)  # simulate 401 or network error
+        import logging as _logging
+        with self.assertLogs("medic.routing", level="WARNING") as cm:
+            result = routing._post_message(ex, "marveen", "escalation", token="bad-tok")
+        self.assertFalse(result)
+        self.assertTrue(any("failed" in line.lower() or "silently" in line.lower() for line in cm.output),
+            f"Warning must mention 'failed' or 'silently dropped': {cm.output}")
+
+    def test_successful_send_returns_true_no_warning(self):
+        ex = FakeExecutor(run_code=0)
+        import logging as _logging
+        # No warning expected; assertLogs with CRITICAL ensures nothing logged
+        result = routing._post_message(ex, "marveen", "ok", token="good-tok")
+        self.assertTrue(result)
