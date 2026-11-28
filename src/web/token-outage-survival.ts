@@ -141,7 +141,8 @@ function defaultGetOverdueTasks(): OverdueTask[] {
     const db = getNoaDb()
     const nowSec = Math.floor(Date.now() / 1000)
     const rows = db.prepare(
-      `SELECT id, name, COALESCE(description,'') AS description, COALESCE(agent,'') AS agent
+      // scheduled_tasks has no `name` column (noa.db cutover drift); slug `id` IS the name.
+      `SELECT id, id AS name, COALESCE(description,'') AS description, COALESCE(agent,'') AS agent
        FROM scheduled_tasks
        WHERE status='active' AND next_run <= ?
        ORDER BY next_run ASC LIMIT 10`,
