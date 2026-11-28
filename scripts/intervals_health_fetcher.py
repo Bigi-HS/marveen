@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Intervals.icu free personal API -> noa.db health_data table.
-Nightly 06:30, backfills last 7 days if missing.
+Nightly 06:30 + intraday, backfills the last LOOKBACK_DAYS days if MISSING or
+INCOMPLETE. A stored day is re-fetched when any core field (resting_hr,
+sleep_hours, hrv, steps) is still NULL -- late-finalizing fields (HRV) land
+hours-to-days after the rest, so a partial day gets filled on a later run
+instead of being skipped forever. Complete past days are skipped (no re-pull).
 
 Chad SEC conditions (card 09d0ff28, CONDITIONAL PASS):
   C1. Credentials from store/.intervals-config (chmod 0600) -- NEVER .env.
@@ -16,6 +20,15 @@ ROOT    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONF    = os.path.join(ROOT, 'store/.intervals-config')
 DB_PATH = os.path.join(ROOT, 'store/noa.db')
 BASE    = 'https://intervals.icu/api/v1'
+
+# Default lookback window (days) for the nightly/intraday run.
+LOOKBACK_DAYS = 7
+
+# Core fields that make a stored day "complete". If ANY of these is NULL the row
+# landed partial (e.g. HRV finalizes hours-to-days AFTER steps/HR/sleep on
+# intervals.icu) and must be re-fetched on a later run to fill the late field.
+# A row with all of these present is skipped (we do NOT re-pull every run).
+CORE_FIELDS = ('resting_hr', 'sleep_hours', 'hrv', 'steps')
 
 # C3 -- fields stripped from every activity object before any processing or storage.
 # Intervals.icu may include map/polyline/latlng/streams in activity JSON.
@@ -130,6 +143,18 @@ def _upsert(cur: sqlite3.Cursor, d: str, w: dict, acts: list):
     ))
 
 
+def _row_is_complete(cur: sqlite3.Cursor, d: str) -> bool | None:
+    """Return True if a row for date d exists and all CORE_FIELDS are non-NULL,
+    False if the row exists but any core field is NULL (partial -> re-fetch),
+    None if no row exists at all (missing -> fetch)."""
+    cols = ', '.join(CORE_FIELDS)
+    cur.execute(f"SELECT {cols} FROM health_data WHERE date=?", (d,))
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return all(v is not None for v in row)
+
+
 def _date_range(today: date, since: date | None, days: int) -> list[str]:
     """Return ISO dates oldest-first from since (or today-days+1) through today."""
     start = since if since is not None else (today - timedelta(days=days - 1))
@@ -147,8 +172,8 @@ def run(argv: list[str] | None = None) -> None:
         help='fetch from this date through today (backfill mode)',
     )
     group.add_argument(
-        '--days', type=int, default=7,
-        help='fetch last N days (default: 7, used by nightly cron)',
+        '--days', type=int, default=LOOKBACK_DAYS,
+        help=f'fetch last N days (default: {LOOKBACK_DAYS}, used by nightly cron)',
     )
     args = parser.parse_args(argv)
 
@@ -178,10 +203,13 @@ def run(argv: list[str] | None = None) -> None:
     fetched, skipped, errors = 0, 0, 0
     for d in dates:
         is_today = (d == today.isoformat())
-        cur.execute("SELECT 1 FROM health_data WHERE date=?", (d,))
-        if cur.fetchone() and not is_today:
+        # Re-fetch if the row is MISSING or INCOMPLETE (a core field is still NULL,
+        # e.g. HRV finalizes late upstream). Skip only COMPLETE past days so we do
+        # not re-pull everything every run. Today is always refreshed (still filling).
+        complete = _row_is_complete(cur, d)
+        if complete is True and not is_today:
             skipped += 1
-            continue  # already stored; always refresh today
+            continue  # already complete; refresh today only
         try:
             w    = _fetch_wellness(athlete_id, hdrs, d)
             acts = _fetch_activities(athlete_id, hdrs, d)

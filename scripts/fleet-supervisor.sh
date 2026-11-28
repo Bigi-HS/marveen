@@ -1067,6 +1067,31 @@ check_zepp_freshness() {
   ( cd "$INSTALL_DIR" && python3 "$poller" ) >> "$STORE/zepp-freshness-check.log" 2>&1 || true
 }
 
+# Intervals.icu health completeness watchdog (card eng/health-autofetch-robustness).
+# The fetcher now re-fetches INCOMPLETE days, so a late-finalizing field (HRV)
+# fills in on a later run automatically. This tick is the other half: it flags a
+# GENUINELY stuck sync -- a past day older than the ~36h finalization window where
+# even the early core fields (resting_hr AND sleep_hours) never arrived -- and the
+# watchdog relays ONE inter-agent alert to marveen. It is fail-silent on today/
+# yesterday still filling in (and on HRV-only gaps), read-only against noa.db, and
+# self-throttled to 6h (health data finalizes slowly; no need to re-check each
+# tick). Only when the dashboard is up so the alert can actually deliver.
+check_intervals_health_completeness() {
+  local watchdog="$INSTALL_DIR/scripts/intervals-health-completeness-watchdog.py"
+  [ -f "$watchdog" ] || return 0
+  dash_alive || return 0
+  local state_file="$STATE_DIR/intervals-health-completeness.ts"
+  if [ -f "$state_file" ]; then
+    local last_run age
+    last_run=$(cat "$state_file" 2>/dev/null || echo 0)
+    age=$(( $(date +%s) - last_run ))
+    [ "$age" -lt 21600 ] && return 0   # throttle: 6h
+  fi
+  date +%s > "$state_file"
+  if [ "$DRY_RUN" -eq 1 ]; then log "DRY-RUN would: intervals-health-completeness-watchdog.py"; return 0; fi
+  ( cd "$INSTALL_DIR" && python3 "$watchdog" ) >> "$STORE/intervals-health-completeness.log" 2>&1 || true
+}
+
 # n8n -> WSL2 dashboard bridge (card e4d64187). Windows-side n8n cannot reach
 # 127.0.0.1:3420 (WSL2 loopback, PR#325 boot-hardening). Forwarder binds 0.0.0.0:3422
 # inside WSL2. Pure Python3 stdlib, no socat needed. URL written to store/n8n-kanban-url.txt.
@@ -2118,6 +2143,8 @@ tick() {
   check_hc_transform_drift
   # 16d) ZEPP FRESHNESS SURFACING (poll /api/health/zepp/freshness, surface alert:true -- WELL-022, card 7e1f6628)
   check_zepp_freshness
+  # 16e) INTERVALS HEALTH COMPLETENESS (flag a genuinely stuck intervals.icu sync -- eng/health-autofetch-robustness)
+  check_intervals_health_completeness
   # 17) N8N KANBAN BRIDGE (Windows-side n8n -> WSL2 dashboard API forwarder -- card e4d64187)
   ensure_n8n_kanban_bridge
   # 18) FLEET WEDGE SWEEP (~5min interval; OPS/96ef336a): classify all agents,
