@@ -363,13 +363,15 @@ describe('POST /api/gate/approve emits a thin-notify gate event (F1, card 513b8f
   })
 
   it('the frame carries NO content (no note/sha/reviewer) -- egress-safe', async () => {
+    // Use SHA_A (matching prFetcher stub) so the approval is recorded; the test
+    // checks the SSE frame does NOT leak the note/sha/reviewer content.
     await call('POST', '/api/gate/approve', {
-      pr_number: 208, head_sha: SHA_B, reviewer: 'chad', verdict: 'blocked', note: 'secret detail',
+      pr_number: 208, head_sha: SHA_A, reviewer: 'chad', verdict: 'blocked', note: 'secret detail',
     })
     const gate = seen.find((e) => e.type === 'gate')!
     const serialized = JSON.stringify(gate)
     expect(serialized).not.toContain('secret detail')
-    expect(serialized).not.toContain(SHA_B)
+    expect(serialized).not.toContain(SHA_A)
     expect(serialized).not.toContain('chad')
     // Only the three thin-notify keys exist.
     expect(Object.keys(gate).sort()).toEqual(['action', 'id', 'type'])
@@ -379,5 +381,44 @@ describe('POST /api/gate/approve emits a thin-notify gate event (F1, card 513b8f
     const r = await call('POST', '/api/gate/approve', { pr_number: 0, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved' })
     expect(r.status).toBe(400)
     expect(seen.filter((e) => e.type === 'gate')).toHaveLength(0)
+  })
+})
+
+describe('POST /api/gate/approve -- live head_sha validation (card 0be66e13)', () => {
+  it('accepts an approval when head_sha matches the live PR head', async () => {
+    // stubPr already sets headSha to SHA_A; call also sends SHA_A -> match
+    const r = await call('POST', '/api/gate/approve', {
+      pr_number: 42, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved',
+    })
+    expect(r.status).toBe(201)
+  })
+
+  it('rejects with 409 when head_sha does not match the live PR head', async () => {
+    // Live PR head is SHA_B; caller supplies SHA_A -> mismatch
+    __setGatePrFetcher(async () => ({ headSha: SHA_B, files: [] }))
+    const r = await call('POST', '/api/gate/approve', {
+      pr_number: 42, head_sha: SHA_A, reviewer: 'thor', verdict: 'approved',
+    })
+    expect(r.status).toBe(409)
+    expect(r.body.error).toMatch(/head SHA mismatch/)
+    expect(r.body.live_head_sha).toBe(SHA_B)
+  })
+
+  it('the 409 body includes the live_head_sha so the caller can retry with the correct SHA', async () => {
+    const LIVE = 'c'.repeat(40)
+    __setGatePrFetcher(async () => ({ headSha: LIVE, files: [] }))
+    const r = await call('POST', '/api/gate/approve', {
+      pr_number: 42, head_sha: SHA_A, reviewer: 'dave', verdict: 'approved',
+    })
+    expect(r.status).toBe(409)
+    expect(r.body.live_head_sha).toBe(LIVE)
+  })
+
+  it('allows the approval (fail-open) when the GitHub fetch throws -- network failure must not block review', async () => {
+    __setGatePrFetcher(async () => { throw new Error('GitHub API unavailable') })
+    const r = await call('POST', '/api/gate/approve', {
+      pr_number: 42, head_sha: SHA_A, reviewer: 'chad', verdict: 'approved',
+    })
+    expect(r.status).toBe(201)
   })
 })

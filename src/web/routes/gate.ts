@@ -169,6 +169,28 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
       json(res, { error: "verdict must be one of 'approved', 'blocked'" }, 400)
       return true
     }
+    // Card 0be66e13: validate head_sha against the live PR head before recording.
+    // Storing a ghost SHA (a sha that was never the live head) produces misleading
+    // audit records and silently corrupts the gate board.
+    // Fail-open on GitHub fetch failure: network unavailability must not block
+    // legitimate reviews (the gate check at merge time validates the live head
+    // independently).
+    try {
+      const prInfo = await prFetcher(pr_number)
+      if (head_sha !== prInfo.headSha) {
+        logger.warn(
+          { pr: pr_number, supplied: head_sha, live: prInfo.headSha },
+          'gate approve: head SHA mismatch -- supplied sha not live head (card 0be66e13)',
+        )
+        json(res, {
+          error: 'head SHA mismatch: PR head has moved since you checked -- re-verify before approving',
+          live_head_sha: prInfo.headSha,
+        }, 409)
+        return true
+      }
+    } catch (err) {
+      logger.warn({ pr: pr_number, err }, 'gate approve: live head fetch failed, allowing approval (fail-open)')
+    }
     // recorded_by is derived from the authenticated token identity (card 413a6b56).
     // Body-supplied values are ignored: the ledger must reflect who actually called
     // the endpoint, not who the caller claims to be. Absent identity (unit tests or
