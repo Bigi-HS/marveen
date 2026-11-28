@@ -48,13 +48,13 @@ rm -f "$C"
 # ---- wd_read_model: missing / unparseable -> WARN + DEFAULT, rc=3 -----------
 # (byte-equivalent to the inline block: prints default, never hard-stops)
 out="$(wd_read_model "/no/such/file.json" 2>/dev/null)"; rc=$?
-{ [ "$rc" -eq 3 ] && [ "$out" = "claude-sonnet-4-6" ]; } \
+{ [ "$rc" -eq 3 ] && [ "$out" = "claude-sonnet-5-5" ]; } \
   && ok "wd_read_model: missing file -> default model, rc=3" \
   || bad "wd_read_model: missing file (got rc=$rc out='$out')"
 
 C="$(tmpcfg 'not json at all {{{')"
 out="$(wd_read_model "$C" 2>/dev/null)"; rc=$?
-{ [ "$rc" -eq 3 ] && [ "$out" = "claude-sonnet-4-6" ]; } \
+{ [ "$rc" -eq 3 ] && [ "$out" = "claude-sonnet-5-5" ]; } \
   && ok "wd_read_model: unparseable json -> default model, rc=3" \
   || bad "wd_read_model: unparseable (got rc=$rc out='$out')"
 rm -f "$C"
@@ -71,14 +71,14 @@ rm -f "$C" "$LOGF"
 # ---- wd_read_model: absent / empty model field -> WARN + DEFAULT, rc=4 ------
 C="$(tmpcfg '{"displayName":"x"}')"
 out="$(wd_read_model "$C" 2>/dev/null)"; rc=$?
-{ [ "$rc" -eq 4 ] && [ "$out" = "claude-sonnet-4-6" ]; } \
+{ [ "$rc" -eq 4 ] && [ "$out" = "claude-sonnet-5-5" ]; } \
   && ok "wd_read_model: no model field -> default model, rc=4" \
   || bad "wd_read_model: no model field (got rc=$rc out='$out')"
 rm -f "$C"
 
 C="$(tmpcfg '{"model":""}')"
 out="$(wd_read_model "$C" 2>/dev/null)"; rc=$?
-{ [ "$rc" -eq 4 ] && [ "$out" = "claude-sonnet-4-6" ]; } \
+{ [ "$rc" -eq 4 ] && [ "$out" = "claude-sonnet-5-5" ]; } \
   && ok "wd_read_model: empty model -> default model, rc=4" \
   || bad "wd_read_model: empty model (got rc=$rc out='$out')"
 rm -f "$C"
@@ -96,7 +96,7 @@ out="$(wd_read_model "/no/such/file.json" "claude-haiku-x" 2>/dev/null)"; rc=$?
 EVIL="/tmp/does not exist')+__import__('os').system('touch /tmp/wd_pwned_$$');#"
 rm -f "/tmp/wd_pwned_$$"
 out="$(wd_read_model "$EVIL" 2>/dev/null)"; rc=$?
-{ [ "$rc" -eq 3 ] && [ "$out" = "claude-sonnet-4-6" ] && [ ! -e "/tmp/wd_pwned_$$" ]; } \
+{ [ "$rc" -eq 3 ] && [ "$out" = "claude-sonnet-5-5" ] && [ ! -e "/tmp/wd_pwned_$$" ]; } \
   && ok "wd_read_model: F7 metachar path is inert argv (no injection)" \
   || bad "wd_read_model: F7 injection surface (rc=$rc out='$out' pwned=$( [ -e /tmp/wd_pwned_$$ ] && echo YES ))"
 rm -f "/tmp/wd_pwned_$$"
@@ -114,7 +114,7 @@ rm -f "/tmp/wd_pwned_$$"
 ( set -u
   unset WD_LOG_FILE 2>/dev/null || true
   o="$(wd_read_model "/no/such" 2>/dev/null)"; r=$?
-  [ "$r" -eq 3 ] && [ "$o" = "claude-sonnet-4-6" ]
+  [ "$r" -eq 3 ] && [ "$o" = "claude-sonnet-5-5" ]
 ) && ok "wd_read_model: F4 set -u safe on WARN branch (no unbound var)" \
   || bad "wd_read_model: F4 set -u regression on WARN branch"
 
@@ -133,8 +133,8 @@ if not m:
 print(m)" 2>/dev/null)"
   case "$?" in
     0) printf '%s\n' "$model" ;;
-    3) echo claude-sonnet-4-6 ;;
-    *) echo claude-sonnet-4-6 ;;
+    3) echo claude-sonnet-5-5 ;;  # card df481439: default updated to 5-5
+    *) echo claude-sonnet-5-5 ;;  # card df481439: default updated to 5-5
   esac
 }
 equiv_ok=1

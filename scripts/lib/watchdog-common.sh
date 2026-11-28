@@ -41,7 +41,7 @@
 # emits a LOUD warning (to $WD_LOG_FILE if set, AND to stderr) and then still
 # prints the default model so the agent is never hard-stopped.
 #
-# The default is claude-sonnet-4-6 unless overridden by the 2nd argument.
+# The default is claude-sonnet-5-5 unless overridden by the 2nd argument (card df481439 prereq).
 #
 # stdout: resolved model on happy path, else the default model.
 # exit:   0 ok | 3 config missing/unparseable (warned) | 4 no/empty model field (warned).
@@ -56,7 +56,10 @@
 # the watchdog launch env for each canary in the Boss-gated window.
 wd_read_model() {
   local cfg="${1:-}"
-  local default_model="${2:-claude-sonnet-4-6}"
+  # Card df481439 prereq: default updated to claude-sonnet-5-5 (fleet 5.X migration).
+  # This only fires when agent-config.json has no 'model' field or is absent.
+  # Agents with an explicit model in their config are unaffected.
+  local default_model="${2:-claude-sonnet-5-5}"
   local model rc
 
   if [ "${WD_READ_MODEL_ENABLED:-0}" != "1" ]; then
