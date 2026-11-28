@@ -192,5 +192,37 @@ class TestFleetRosterAppend(unittest.TestCase):
         self.assertEqual(result, {})
 
 
+class HotCacheDataTagTests(unittest.TestCase):
+    """Card e8abdd83: injected content is wrapped in <hot-cache-data> tags."""
+
+    def test_full_inject_wraps_content_in_data_tag(self):
+        result = run_hook("resume", "dave", hot_cache_content="my task content")
+        ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+        self.assertIn("<hot-cache-data>", ctx)
+        self.assertIn("</hot-cache-data>", ctx)
+        self.assertIn("my task content", ctx)
+
+    def test_mini_inject_wraps_content_in_data_tag(self):
+        result = run_hook("startup", "dave", hot_cache_content="mini content")
+        ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+        self.assertIn("<hot-cache-data>", ctx)
+        self.assertIn("</hot-cache-data>", ctx)
+
+    def test_data_tag_contains_content_between_tags(self):
+        result = run_hook("resume", "thor", hot_cache_content="sentinel_data")
+        ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+        # Content must appear inside the tags, not outside
+        import re
+        inner = re.search(r"<hot-cache-data>(.*?)</hot-cache-data>", ctx, re.DOTALL)
+        self.assertIsNotNone(inner, "Content must be between hot-cache-data tags")
+        self.assertIn("sentinel_data", inner.group(1))
+
+    def test_data_tags_appear_once(self):
+        result = run_hook("resume", "dave", hot_cache_content="data")
+        ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+        self.assertEqual(ctx.count("<hot-cache-data>"), 1)
+        self.assertEqual(ctx.count("</hot-cache-data>"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

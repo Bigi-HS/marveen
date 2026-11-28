@@ -142,7 +142,7 @@
           {
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/hot-cache-sessionstart.py\"",
-            "timeout": 5
+            "timeout": 15
           }
         ]
       },
@@ -167,7 +167,7 @@
           {
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/hot-cache-sessionstart.py\"",
-            "timeout": 5
+            "timeout": 15
           }
         ]
       }
