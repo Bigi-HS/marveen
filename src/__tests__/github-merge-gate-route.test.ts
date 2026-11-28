@@ -22,7 +22,7 @@ import { Readable } from 'node:stream'
 import { rmSync } from 'node:fs'
 import { initDatabase, getDb } from '../db.js'
 import { tryHandleGithub, __setGithubMergeDeps, __resetGithubMergeDeps } from '../web/routes/github.js'
-import { insertApproval, insertOverride, insertCiRun, insertPrAuthor, hasActiveOverride } from '../web/gate-db.js'
+import { insertApproval, insertOverride, insertCiRun, insertPrAuthor, hasActiveOverride, insertHold, releaseHold } from '../web/gate-db.js'
 import type { GithubPrInfo } from '../web/gate-check.js'
 import type { AgentIdentity } from '../web/agent-token-registry.js'
 
@@ -342,5 +342,42 @@ describe('POST /api/github/merge -- independent CI enforcement (card 0c166e48)',
     expect(r.status).toBe(403)
     expect(r.body.gate.ci_status).toBe('fail')
     expect(merge.calls).toHaveLength(0)
+  })
+})
+
+describe('POST /api/github/merge -- hold check (card dea65d8e)', () => {
+  it('merge is blocked (423) when an active hold exists, regardless of gate approval', () => {
+    seed('thor', 'approved', SHA_A)
+    seed('dave', 'approved', SHA_A)
+    insertHold(getDb(), { pr_number: PR, reason: 'pending compliance review', held_by: 'marveen' }, 1000)
+    const merge = mergeSpy()
+    wire({ liveHead: SHA_A, merge })
+    return callMerge({ pr_number: PR, head_sha: SHA_A, merge_method: 'squash' }).then((r) => {
+      expect(r.status).toBe(423)
+      expect(r.body.error).toMatch(/hold/)
+      expect(merge.calls).toHaveLength(0)
+    })
+  })
+
+  it('merge proceeds after the hold is released', async () => {
+    seed('thor', 'approved', SHA_A)
+    seed('dave', 'approved', SHA_A)
+    insertHold(getDb(), { pr_number: PR, reason: 'hold', held_by: 'marveen' }, 1000)
+    releaseHold(getDb(), PR, 2000)
+    const merge = mergeSpy()
+    wire({ liveHead: SHA_A, merge })
+    const r = await callMerge({ pr_number: PR, head_sha: SHA_A, merge_method: 'squash' })
+    expect(r.status).toBe(200)
+    expect(merge.calls).toHaveLength(1)
+  })
+
+  it('no hold -> merge proceeds normally', async () => {
+    seed('thor', 'approved', SHA_A)
+    seed('dave', 'approved', SHA_A)
+    const merge = mergeSpy()
+    wire({ liveHead: SHA_A, merge })
+    const r = await callMerge({ pr_number: PR, head_sha: SHA_A, merge_method: 'squash' })
+    expect(r.status).toBe(200)
+    expect(merge.calls).toHaveLength(1)
   })
 })

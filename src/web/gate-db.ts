@@ -131,6 +131,21 @@ export function migrateGateTables(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_gate_drift_dedup ON gate_drift_notifications(pr_number, old_sha, new_sha, reviewer)`)
+
+  // Card dea65d8e: server-side merge hold. A hold blocks the merge route (423)
+  // regardless of gate approval state. released_at NULL = active hold.
+  // No FK, additive, idempotent.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gate_holds (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      pr_number   INTEGER NOT NULL,
+      reason      TEXT NOT NULL,
+      held_by     TEXT NOT NULL,
+      held_at     INTEGER NOT NULL,
+      released_at INTEGER
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_gate_holds_pr ON gate_holds(pr_number)`)
 }
 
 // Record the opening agent for a PR (card ec818352, MG-SEC5). INSERT OR IGNORE
@@ -571,4 +586,54 @@ export function countChadByContentOnly(db: Database.Database, sinceEpoch: number
     )
     .get(sinceEpoch) as { c: number }
   return row.c
+}
+
+// ---------------------------------------------------------------------------
+// gate_holds -- server-side merge hold (card dea65d8e)
+// ---------------------------------------------------------------------------
+
+export interface HoldRow {
+  id: number
+  pr_number: number
+  reason: string
+  held_by: string
+  held_at: number
+}
+
+export interface ActiveHoldInfo {
+  active: boolean
+  id?: number
+  reason?: string
+  held_by?: string
+}
+
+export function insertHold(
+  db: Database.Database,
+  args: { pr_number: number; reason: string; held_by: string },
+  now: number,
+): HoldRow {
+  const { pr_number, reason, held_by } = args
+  const { lastInsertRowid } = db
+    .prepare(`INSERT INTO gate_holds (pr_number, reason, held_by, held_at) VALUES (?, ?, ?, ?)`)
+    .run(pr_number, reason, held_by, now)
+  return { id: Number(lastInsertRowid), pr_number, reason, held_by, held_at: now }
+}
+
+export function releaseHold(db: Database.Database, prNumber: number, now: number): boolean {
+  const { changes } = db
+    .prepare(`UPDATE gate_holds SET released_at = ? WHERE pr_number = ? AND released_at IS NULL`)
+    .run(now, prNumber)
+  return changes > 0
+}
+
+export function hasActiveHold(db: Database.Database, prNumber: number): ActiveHoldInfo {
+  const row = db
+    .prepare(
+      `SELECT id, reason, held_by FROM gate_holds
+        WHERE pr_number = ? AND released_at IS NULL
+        ORDER BY id DESC LIMIT 1`,
+    )
+    .get(prNumber) as { id: number; reason: string; held_by: string } | undefined
+  if (!row) return { active: false }
+  return { active: true, id: row.id, reason: row.reason, held_by: row.held_by }
 }
