@@ -81,21 +81,33 @@ PII_PATTERNS = {
 #     and `webhook/` now accepts any mix of the path-normalization bypass family,
 #     not just literal slashes:
 #       - `/`      literal slash (incl. `//`, already covered by `/+`)
-#       - `/./`    dot-segment -- a REAL live egress: curl CLIENT-normalizes
+#       - `/./`    single-dot segment -- a REAL live egress: curl CLIENT-normalizes
 #                  `:5678/./webhook/` to `:5678/webhook/` BEFORE sending, so the
 #                  bytes that actually leave the box hit the n8n webhook route.
 #                  Missing it = a silent exfil hole. MUST be caught.
+#       - `/../`   parent dot-segment (card 8e82fb6e) -- the SAME curl-client-
+#                  normalized family as `/./`: Dave empirically verified
+#                  `:5678/../webhook/x` actually sends `POST /webhook/x` (and
+#                  `/..//webhook/` the same), hitting the real n8n route. The
+#                  `\.{1,2}` (one OR two dots) alternation now covers BOTH `/./`
+#                  and `/../`. Strictly reduces the bypass surface vs the old
+#                  single-dot form, no regression. The quantifier stays BOUNDED
+#                  ({1,2}) -- no unbounded nesting -- so no ReDoS is introduced.
 #       - `%2f`/`%2F`  url-encoded slash -- defense-in-depth over-match. Current
 #                  n8n does NOT path-decode this (it falls to the SPA, harmless),
 #                  but encode-the-separator is a classic bypass family, so we
 #                  over-approximate toward the SAFE direction and future-proof it.
+#       - `%2e`/`%2E`  url-encoded dot(s) (card 8e82fb6e) -- the encoded form of
+#                  the `/./` and `/../` dot-segments (`%2e`, `%2e%2e`), same
+#                  defense-in-depth over-match rationale as `%2f`. Bounded
+#                  `(?:%2e){1,2}` (one or two encoded dots) -- no unbounded nesting.
 #     This is INTENTIONAL over-approximation toward SAFE: a false-block on n8n
 #     egress is cheap, a missed exfil is not. Anchored to :5678 only (n8n-only);
 #     it does NOT over-match generic traffic because the :5678/.../webhook/ shape
 #     stays required.
 _N8N_WEBHOOK_RX = re.compile(
     r"https?://(?:127\.0\.0\.1|localhost|\[::1\]):5678"
-    r"(?:/|/\./|%2f)+webhook/",
+    r"(?:/|/\.{1,2}/|%2f|/(?:%2e){1,2}/)+webhook/",
     re.IGNORECASE,
 )
 # (b) Non-local http(s) target via curl or wget.
