@@ -8,6 +8,7 @@
 import { readBody, json } from '../http-helpers.js'
 import { logger } from '../../logger.js'
 import { getNoaDb } from '../../noa-db.js'
+import { MAIN_AGENT_ID } from '../../config.js'
 import type { RouteContext } from './types.js'
 import type { WorkoutPlan } from '../../types/app.js'
 
@@ -106,7 +107,7 @@ export async function tryHandleWorkout(ctx: RouteContext): Promise<boolean> {
     }
     const note = typeof parsed.note === 'string' ? parsed.note.slice(0, 1024) : ''
     const completed = parsed.completed === true
-    const fromAgent = identity?.agentId ?? 'marveen'
+    const fromAgent = identity?.agentId ?? MAIN_AGENT_ID
     try {
       await getCheckinSender()(note, completed, fromAgent)
       json(res, { ok: true })

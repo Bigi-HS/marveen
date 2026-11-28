@@ -49,6 +49,7 @@ import {
   releaseHold,
 } from '../gate-db.js'
 import { createAgentMessage } from '../../db.js'
+import { MAIN_AGENT_ID } from '../../config.js'
 import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
 import { fetchPrInfo, fetchPrAuthorAgentId } from '../github-pr.js'
 import { runDeployVerify } from '../deploy-verify.js'
@@ -357,22 +358,22 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
           // 8-hex leading prefix are a SHA-prefix-collision signature. In our
           // threat model only fleet-PAT agents can push, so this is almost always
           // a benign generator/data artifact -- but it is self-refuting in any
-          // truncated display, so surface a SECURITY ALERT to marveen for review.
-          // Dedup via the shared drift table keyed on (pr, old_sha, new_sha) with
-          // reviewer='marveen' -> at most one alert per distinct (pr, old, new).
+          // truncated display, so surface a SECURITY ALERT to the main agent for
+          // review. Dedup via the shared drift table keyed on (pr, old_sha,
+          // new_sha) with reviewer=MAIN_AGENT_ID -> one alert per distinct (pr, old, new).
           if (
             isSuspiciousShaPrefixCollision(old_sha, result.head_sha) &&
-            !wasDriftNotified(db, pr, old_sha, result.head_sha, 'marveen')
+            !wasDriftNotified(db, pr, old_sha, result.head_sha, MAIN_AGENT_ID)
           ) {
             createAgentMessage(
               'gate',
-              'marveen',
+              MAIN_AGENT_ID,
               `SECURITY ALERT (gate drift): PR #${pr} reviewer ${reviewer} approved ${old_sha}, but the live head is ${result.head_sha}. These two DISTINCT head SHAs share an 8-hex prefix (SHA-prefix-grinding signature). Given the fleet-PAT-only threat model this is most likely a generator/data artifact, but surfaced for review.`,
               false,
               'high',
               null,
             )
-            recordDriftNotified(db, pr, old_sha, result.head_sha, 'marveen', now)
+            recordDriftNotified(db, pr, old_sha, result.head_sha, MAIN_AGENT_ID, now)
           }
         }
       } catch (driftErr) {
@@ -461,8 +462,8 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
 
   // Card 2fd80824 -- SHA-drift invalidation: explicitly mark a (pr_number, head_sha)
   // pair as stale so previously-recorded approval seats are excluded from gate
-  // status checks going forward. Sends an inter-agent notification to 'marveen'
-  // so the orchestrator is aware of the invalidation immediately.
+  // status checks going forward. Sends an inter-agent notification to the main
+  // agent (MAIN_AGENT_ID) so the orchestrator is aware of the invalidation immediately.
   if (path === '/api/gate/invalidate' && method === 'POST') {
     // MG-SEC7 (card 2fd80824): invalidation is a destructive gate operation --
     // any authenticated agent could otherwise DoS the gate by invalidating all
@@ -496,7 +497,7 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
     try {
       createAgentMessage(
         'gate',
-        'marveen',
+        MAIN_AGENT_ID,
         `Gate invalidation: PR #${pr_number} SHA ${head_sha.slice(0, 8)} invalidated. Reason: ${reason.trim()}`,
         false,
         'normal',

@@ -15,6 +15,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { ingest, type IngestConfig, type MemoriaClient, type MemoriaEntry } from './obsidian-ingest.js'
+import { MAIN_AGENT_ID } from './config.js'
 
 // ─── CLI arg parsing ─────────────────────────────────────────────────────────
 
@@ -35,7 +36,7 @@ function parseArgs(argv: string[]): CliArgs {
     include: [],
     exclude: [],
     tier: 'warm',
-    agentId: 'marveen',
+    agentId: MAIN_AGENT_ID,
     dryRun: false,
     apiBase: 'http://localhost:3420',
     tokenFile: 'store/.dashboard-token',
@@ -80,7 +81,7 @@ function makeClient(apiBase: string, token: string): MemoriaClient {
   return {
     async search(sourceMarker: string): Promise<{ id: number; contentHash: string } | null> {
       const q = encodeURIComponent(`obsidian-source: ${sourceMarker}`)
-      const data = await apiFetch(`/api/memories?agent=marveen&q=${q}&limit=5`) as unknown[]
+      const data = await apiFetch(`/api/memories?agent=${MAIN_AGENT_ID}&q=${q}&limit=5`) as unknown[]
       const list = Array.isArray(data) ? data : (data as Record<string, unknown[]>).memories ?? []
       const hit = (list as Array<{ id: number; content: string }>).find(m =>
         m.content?.includes(`[obsidian-source: ${sourceMarker}]`)
@@ -125,7 +126,7 @@ Options:
   --include <pattern>    Folder/glob to include (repeatable; empty = no-op)
   --exclude <pattern>    Extra excludes beyond built-in denylist (repeatable)
   --tier <tier>          Memory tier: warm (default), cold, shared
-  --agent-id <id>        Agent ID for memories (default: marveen)
+  --agent-id <id>        Agent ID for memories (default: the main agent / MAIN_AGENT_ID)
   --dry-run              List files without writing to memoria
   --api-base <url>       Dashboard API base (default: http://localhost:3420)
   --token-file <path>    Path to .dashboard-token (default: store/.dashboard-token)
