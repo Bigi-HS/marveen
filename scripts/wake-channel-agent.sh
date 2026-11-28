@@ -61,7 +61,8 @@ STATE="$AGENT_DIR/.claude/channels/telegram"
 ACONF="$AGENT_DIR/agent-config.json"
 
 # Read model from agent-config.json (mirrors wd_read_model pattern).
-model="claude-sonnet-4-6"
+# Default updated to 5-5 (card df481439 prereq); agents with explicit config are unaffected.
+model="claude-sonnet-5-5"
 if [ -f "$ACONF" ]; then
   _m="$(python3 -c "import json,sys; d=json.load(open('$ACONF')); print(d.get('model',''))" 2>/dev/null || true)"
   [ -n "$_m" ] && model="$_m"
