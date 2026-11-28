@@ -425,6 +425,10 @@ check_channelless_inbox_wedge() {
   # idle at the empty prompt while inter-agent messages are pending (overdue inbox),
   # the agent is inbox-stuck -- alive but not processing. Log WEDGED:inbox-stuck.
   # NO recovery action; LOG-ONLY (same discipline as check_dash_wedge).
+  #
+  # Card 39393929 item 3: state-change dedup. The old code alerted marveen every
+  # 120s for the SAME wedged set, which was alert-spam. Now we track the last alerted
+  # set and only send when the set changes (new agents added or existing ones resolved).
   local now nextf last
   now=$(date +%s)
   nextf="$STATE_DIR/channelless-inbox-wedge.next"
@@ -440,10 +444,30 @@ check_channelless_inbox_wedge() {
     _channelless_agent_wedged "$n" && wedged_list="$wedged_list ${n}:inbox-stuck"
   done
 
-  [ -z "$wedged_list" ] && return 0
+  # State-change dedup: compare current wedged set with last alerted set.
+  local last_state_file="$STATE_DIR/channelless-inbox-wedge.last-alerted"
+  local last_wedged
+  last_wedged=$(cat "$last_state_file" 2>/dev/null || echo "")
 
-  local msg="channelless-inbox-wedge: WEDGED ${wedged_list# } (idle pane + overdue inbox; no auto-recovery)"
-  log "$msg"
+  # Normalize (trim leading space from wedged_list).
+  local current_wedged="${wedged_list# }"
+
+  # Always log the current state at the scan interval.
+  if [ -n "$current_wedged" ]; then
+    log "channelless-inbox-wedge: WEDGED ${current_wedged} (idle pane + overdue inbox; no auto-recovery)"
+  elif [ -n "$last_wedged" ]; then
+    log "channelless-inbox-wedge: all clear (previous wedged: ${last_wedged})"
+  fi
+
+  # Only send marveen alert on state-change.
+  if [ "$current_wedged" = "$last_wedged" ]; then
+    return 0   # same set as last time -- no spam
+  fi
+  echo "$current_wedged" > "$last_state_file"
+
+  [ -z "$current_wedged" ] && return 0  # newly cleared: state updated, no alert needed
+
+  local msg="channelless-inbox-wedge: WEDGED ${current_wedged} (idle pane + overdue inbox; no auto-recovery)"
 
   # Alert marveen (same pattern as fleet_wedge_sweep).
   [ -n "$CURL" ] || return 0
