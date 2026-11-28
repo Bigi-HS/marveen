@@ -2,6 +2,9 @@ import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   test: {
+    // vitest 5.x default is still 5000ms but filesystem-scanning tests (tmux-anchor-lint)
+    // need more headroom when running alongside 400+ parallel workers.
+    testTimeout: 30000,
     coverage: {
       provider: 'v8',
       reporter: ['json'],
