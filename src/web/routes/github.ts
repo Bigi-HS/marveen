@@ -21,7 +21,7 @@ import { readBody, json } from '../http-helpers.js'
 import { openPullRequest, closePullRequest, PrRequestError, fetchPrInfo, type ClosePrResult } from '../github-pr.js'
 import { mergePullRequest, MergeRequestError, validateMergeParams } from '../github-merge.js'
 import { runGateCheck, resolveCiStatus, isGateCiRequired, type GithubPrInfo } from '../gate-check.js'
-import { readApprovals, readValidSeats, hasActiveOverride, consumeOverride, insertPrAuthor, readPrAuthor, readLatestCiRun } from '../gate-db.js'
+import { readApprovals, readValidSeats, hasActiveOverride, consumeOverride, insertPrAuthor, readPrAuthor, readLatestCiRun, hasActiveHold } from '../gate-db.js'
 import { setBranchProtection, BranchProtectionError, validateBranchProtectionParams } from '../github-branch-protection.js'
 import { getDb } from '../../db.js'
 import type { RouteContext } from './types.js'
@@ -100,6 +100,15 @@ export async function tryHandleGithub(ctx: RouteContext): Promise<boolean> {
     })
     if (!v.ok) {
       json(res, { error: v.error }, 400)
+      return true
+    }
+
+    // Card dea65d8e: check for an active server-side hold before the gate check.
+    // A hold (placed via /api/gate/hold) blocks the merge regardless of gate state.
+    const holdStatus = hasActiveHold(getDb(), v.pr)
+    if (holdStatus.active) {
+      logger.warn({ caller: identity.agentId, pr: v.pr, reason: holdStatus.reason }, 'merge blocked by hold')
+      json(res, { error: `merge on hold: ${holdStatus.reason}`, hold: holdStatus }, 423)
       return true
     }
 

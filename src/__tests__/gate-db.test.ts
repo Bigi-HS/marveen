@@ -9,6 +9,9 @@ import {
   consumeOverride,
   insertPrAuthor,
   readPrAuthor,
+  insertHold,
+  releaseHold,
+  hasActiveHold,
 } from '../web/gate-db.js'
 
 const SHA_A = 'a'.repeat(40)
@@ -30,11 +33,13 @@ describe('migrateGateTables (MG-AC1 additive)', () => {
       .all() as Array<{ name: string }>
     // gate_invalidations added by card 2fd80824 (SHA-drift invalidation);
     // gate_pr_risk added by card 66cf63ed (derived-risk intake snapshot);
-    // gate_drift_notifications added by cutover (2026-11-27)
+    // gate_drift_notifications added by cutover (2026-11-27);
+    // gate_holds added by card dea65d8e (server-side hold)
     expect(tables.map((t) => t.name)).toEqual([
       'gate_approvals',
       'gate_ci_runs',
       'gate_drift_notifications',
+      'gate_holds',
       'gate_invalidations',
       'gate_overrides',
       'gate_pr_authors',
@@ -133,5 +138,52 @@ describe('override lifecycle (MG-AC7)', () => {
     insertOverride(db, { pr_number: 207, head_sha: SHA_A, reason: 'hotfix', recorded_by: 'marveen' }, 100)
     expect(hasActiveOverride(db, 207, SHA_A)).toBe(true)
     expect(hasActiveOverride(db, 207, SHA_B)).toBe(false)
+  })
+})
+
+describe('gate_holds -- insertHold / releaseHold / hasActiveHold (card dea65d8e)', () => {
+  it('hasActiveHold returns inactive when no hold exists', () => {
+    expect(hasActiveHold(db, 42)).toEqual({ active: false })
+  })
+
+  it('insertHold records a hold and hasActiveHold returns active', () => {
+    insertHold(db, { pr_number: 42, reason: 'pending sec review', held_by: 'chad' }, 1000)
+    const hold = hasActiveHold(db, 42)
+    expect(hold.active).toBe(true)
+    expect(hold.reason).toBe('pending sec review')
+    expect(hold.held_by).toBe('chad')
+  })
+
+  it('releaseHold clears the hold and hasActiveHold returns inactive', () => {
+    insertHold(db, { pr_number: 42, reason: 'pending sec review', held_by: 'chad' }, 1000)
+    const released = releaseHold(db, 42, 2000)
+    expect(released).toBe(true)
+    expect(hasActiveHold(db, 42)).toEqual({ active: false })
+  })
+
+  it('releaseHold returns false when no active hold exists', () => {
+    expect(releaseHold(db, 999, 1000)).toBe(false)
+  })
+
+  it('a hold on PR X does not affect PR Y', () => {
+    insertHold(db, { pr_number: 42, reason: 'hold', held_by: 'marveen' }, 1000)
+    expect(hasActiveHold(db, 99)).toEqual({ active: false })
+  })
+
+  it('inserting a second hold for the same PR when one is active is idempotent (latest hold wins)', () => {
+    insertHold(db, { pr_number: 42, reason: 'first hold', held_by: 'chad' }, 1000)
+    insertHold(db, { pr_number: 42, reason: 'second hold', held_by: 'marveen' }, 1001)
+    const hold = hasActiveHold(db, 42)
+    expect(hold.active).toBe(true)
+    // Latest hold is returned
+    expect(hold.reason).toBe('second hold')
+  })
+
+  it('migrateGateTables creates the gate_holds table (idempotent)', () => {
+    migrateGateTables(db) // second run
+    const tables = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='gate_holds'`)
+      .all() as Array<{ name: string }>
+    expect(tables).toHaveLength(1)
   })
 })

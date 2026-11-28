@@ -45,6 +45,8 @@ import {
   readApprovedSeatsByPr,
   recordDriftNotified,
   wasDriftNotified,
+  insertHold,
+  releaseHold,
 } from '../gate-db.js'
 import { createAgentMessage } from '../../db.js'
 import { hasScope, ADMIN_SCOPE } from '../agent-token-registry.js'
@@ -510,6 +512,62 @@ export async function tryHandleGate(ctx: RouteContext): Promise<boolean> {
     }
     const result = runDeployVerify()
     json(res, result, result.pass ? 200 : 503)
+    return true
+  }
+
+  // -------------------------------------------------------------------------
+  // POST /api/gate/hold {pr_number, reason} -- place a server-side hold (card dea65d8e)
+  // POST /api/gate/release-hold {pr_number} -- release an active hold
+  //
+  // Operator/admin scope required: a hold blocks the merge route (423) so only
+  // an admin token may set or clear it. Per-agent tokens (even with approval
+  // rights) cannot hold-bypass the peer-review process.
+  // -------------------------------------------------------------------------
+  if (path === '/api/gate/hold' && method === 'POST') {
+    const { identity: holdIdentity } = ctx
+    if (!holdIdentity || (holdIdentity.source !== 'operator' && !hasScope(holdIdentity.scopes, ADMIN_SCOPE))) {
+      json(res, { error: 'operator scope required for /api/gate/hold' }, 403)
+      return true
+    }
+    const body = await parseJsonBody(req)
+    if (!body) {
+      json(res, { error: 'invalid JSON body' }, 400)
+      return true
+    }
+    if (!isPositiveInt(body['pr_number'])) {
+      json(res, { error: 'pr_number must be a positive integer' }, 400)
+      return true
+    }
+    if (typeof body['reason'] !== 'string' || !(body['reason'] as string).trim()) {
+      json(res, { error: 'reason (non-empty string) is required' }, 400)
+      return true
+    }
+    const row = insertHold(
+      getDb(),
+      { pr_number: body['pr_number'] as number, reason: (body['reason'] as string).trim(), held_by: holdIdentity.agentId },
+      nowEpoch(),
+    )
+    logger.info({ pr: row.pr_number, reason: row.reason, held_by: row.held_by }, 'gate hold placed')
+    json(res, row, 201)
+    return true
+  }
+
+  if (path === '/api/gate/release-hold' && method === 'POST') {
+    const { identity: releaseIdentity } = ctx
+    if (!releaseIdentity || (releaseIdentity.source !== 'operator' && !hasScope(releaseIdentity.scopes, ADMIN_SCOPE))) {
+      json(res, { error: 'operator scope required for /api/gate/release-hold' }, 403)
+      return true
+    }
+    const body = await parseJsonBody(req)
+    if (!body || !isPositiveInt(body['pr_number'])) {
+      json(res, { error: 'pr_number must be a positive integer' }, 400)
+      return true
+    }
+    const released = releaseHold(getDb(), body['pr_number'] as number, nowEpoch())
+    if (released) {
+      logger.info({ pr: body['pr_number'] }, 'gate hold released')
+    }
+    json(res, { released }, 200)
     return true
   }
 
