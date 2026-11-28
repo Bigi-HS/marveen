@@ -70,7 +70,7 @@ DEFAULT_PRIORITY = 50
 # AM-3 review-manifest: the only verdict VALUES that count a blocklist-token row as
 # reviewed. A key-present-but-null/garbage-value entry is NOT a review (card 984f7646).
 VALID_VERDICTS = frozenset({"keep", "skip", "mixed"})
-DEFAULT_AGENT = "marveen"  # FK-safe: 'noa' does not exist in agents table (card 6c718902)
+DEFAULT_AGENT = "noa"  # noa registered in agents via remap-marveen-to-noa stage1 (FK-safe)
 BATCH = 1000  # rows per insert transaction (OQ-3)
 
 # SAFETY GUARDS (card c80cede3).
