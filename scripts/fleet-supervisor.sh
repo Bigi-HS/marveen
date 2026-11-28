@@ -345,13 +345,15 @@ dash_alive() {
 session_alive() { [ -n "$TMUX_BIN" ] && "$TMUX_BIN" has-session -t "=$1" 2>/dev/null; }
 
 dash_deep_probe() {
-  # Secondary probe: curl /api/agents with a 3s timeout.
+  # Secondary probe: curl /api/agents with a 2s timeout (card 39393929: -m 3 -> -m 2
+  # saves 1s latency per tick on a healthy dashboard; WEDGED detection latency is
+  # unchanged since the probe succeeds quickly when healthy).
   # /api/health can respond while the event-loop is blocked (e.g. WAL-lock on
   # a better-sqlite3 sync query). /api/agents requires a live DB read, so it
   # stalls when the loop is wedged. Returns 0 if agents responds, 1 if not.
   [ -n "$CURL" ] || return 1
   local code
-  code=$("$CURL" -s -m 3 -o /dev/null -w '%{http_code}' \
+  code=$("$CURL" -s -m 2 -o /dev/null -w '%{http_code}' \
     "http://127.0.0.1:$DASH_PORT/api/agents" 2>/dev/null)
   [ -n "$code" ] && [ "$code" != "000" ]
 }
@@ -362,9 +364,39 @@ check_dash_wedge() {
   # so dash_alive() alone cannot distinguish healthy from WAL-wedged. This adds
   # a secondary probe; if it fails while health passes, the event-loop is stuck.
   # WEDGED != DEAD: do NOT relaunch (the process is up, just blocked).
+  #
+  # Card 39393929: state-change dedup -- alert marveen on first WEDGED detection
+  # only (not on every tick); clear the state when the probe recovers.
   dash_alive || return 0
+  local wedge_state_file="$STATE_DIR/dash-wedge.state"
+  local last_state
+  last_state=$(cat "$wedge_state_file" 2>/dev/null || echo "ok")
+
   if ! dash_deep_probe; then
     log "dashboard: WEDGED -- health OK but /api/agents stalled (event-loop may be blocked)"
+    if [ "$last_state" = "ok" ]; then
+      echo "wedged" > "$wedge_state_file"
+      # Alert marveen on first WEDGED (same send pattern as check_channelless_inbox_wedge).
+      if [ -n "$CURL" ]; then
+        local tok
+        tok=$(cat "$STORE/.dashboard-token" 2>/dev/null) || tok=""
+        if [ -n "$tok" ]; then
+          local payload
+          payload=$(python3 -c \
+            "import json,sys; m=sys.argv[1]; print(json.dumps({'from':'fleet-supervisor','to':'marveen','content':m}))" \
+            "dashboard WEDGED: health OK but /api/agents stalled (event-loop blocked). No auto-recovery; manual restart may be needed (card 39393929)." 2>/dev/null)
+          [ -n "$payload" ] && "$CURL" -sf -X POST "http://127.0.0.1:${DASH_PORT:-3420}/api/messages" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $tok" \
+            -d "$payload" >/dev/null 2>&1
+        fi
+      fi
+    fi
+  else
+    if [ "$last_state" = "wedged" ]; then
+      echo "ok" > "$wedge_state_file"
+      log "dashboard: WEDGED resolved (now responding to /api/agents)"
+    fi
   fi
 }
 
